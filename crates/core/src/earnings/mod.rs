@@ -7,5 +7,6 @@ pub mod detect;
 pub mod extract;
 pub mod facts;
 pub mod watchlist;
+pub mod xbrl;
 
 pub use watchlist::{by_cik, cik10, find, in_window, poll_batch, watchlist, Filer, WatchEntry};
