@@ -236,12 +236,9 @@ pub fn missing_required(f: &EarningsFacts) -> Vec<&'static str> {
 }
 
 fn push_quote(out: &mut Vec<f64>, quote: &str, scale: f64) {
-    for v in quote_numbers(quote) {
-        out.push(v);
-        if scale != 1.0 {
-            out.push(v * scale);
-        }
-    }
+    // A table quote's bare numbers mean `scale` dollars; the unscaled
+    // values would let a draft read "$27,466" as dollars.
+    out.extend(quote_numbers(quote).into_iter().map(|v| v * scale));
 }
 
 /// Every number an earnings post may cite: figure values, numbers inside
