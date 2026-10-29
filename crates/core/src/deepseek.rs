@@ -73,23 +73,6 @@ impl<H: Http> LlmProvider for DeepSeek<H> {
     }
 }
 
-pub fn llm_from_env<H: Http + 'static>(
-    provider: &str,
-    http: H,
-    api_key: String,
-) -> Result<Box<dyn LlmProvider>, ProviderError> {
-    match provider {
-        "deepseek" => Ok(Box::new(DeepSeek::new(
-            http,
-            api_key,
-            "deepseek-chat".into(),
-        ))),
-        other => Err(ProviderError::Parse(format!(
-            "unknown LLM provider: {other}"
-        ))),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -214,16 +197,5 @@ mod tests {
         assert_eq!(body["model"], "deepseek-chat");
         assert_eq!(body["messages"][0]["role"], "system");
         assert_eq!(body["messages"][1]["content"], "usr");
-    }
-
-    #[tokio::test]
-    async fn llm_from_env_dispatch() {
-        let h = fake(200, OK);
-        let llm = llm_from_env("deepseek", h.clone(), "dk".into()).unwrap();
-        assert!(llm.complete_json("s", "u").await.is_ok());
-        assert!(matches!(
-            llm_from_env("nope", h, "k".into()),
-            Err(ProviderError::Parse(_))
-        ));
     }
 }

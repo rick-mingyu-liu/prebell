@@ -92,6 +92,7 @@ docs/plan-5.md              # this plan
 - Produces:
   - `pub fn llm::api_key_var(provider: &str) -> Option<&'static str>` — `"deepseek"` → `Some("DEEPSEEK_API_KEY")`, `"claude"` → `Some("ANTHROPIC_API_KEY")`, else `None`.
   - `pub fn llm::llm_from_env<H: Http + 'static>(provider: &str, http: H, api_key: String, model: Option<String>) -> Result<Box<dyn LlmProvider>, ProviderError>` — `"deepseek"` → `DeepSeek` with `model` or `"deepseek-chat"`; `"claude"` → `Claude` with `model` or `DEFAULT_MODEL`; unknown → `Parse("unknown LLM provider: <name>")`. `Some("")` counts as unset.
+  - `pub fn llm::unknown_provider(provider: &str) -> ProviderError` — the shared error, so the Worker and `llm_from_env` word it the same way.
   - Generator: `provider = LLM_PROVIDER or "deepseek"`; `secret = api_key_var(&provider)` (unknown provider → the queue handler errors with the same message as `llm_from_env`); `model = text(&env, "LLM_MODEL")`.
 
 - [ ] **Step 1: Failing tests** in `llm.rs` (FakeHttp records URL and body):

@@ -28,5 +28,8 @@ queue = "prebell-jobs"
 queue = "prebell-jobs"
 
 [vars]
+# LLM_PROVIDER: "deepseek" (secret DEEPSEEK_API_KEY) or "claude" (secret ANTHROPIC_API_KEY).
+# Optional LLM_MODEL overrides the provider's default model (deepseek-chat / claude-sonnet-5-5).
+# See docs/runbook.md.
 LLM_PROVIDER = "deepseek"
 SEC_CONTACT = "placeholder@example.com"
