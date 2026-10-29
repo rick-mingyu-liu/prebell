@@ -1,5 +1,6 @@
 pub mod anchor;
 pub mod clock;
+pub mod competitor;
 pub mod deepseek;
 pub mod facts;
 pub mod numbers;
