@@ -5,6 +5,8 @@ use async_trait::async_trait;
 pub struct HttpResp {
     pub status: u16,
     pub body: String,
+    /// The response's `Set-Cookie` header, if any. Several are joined by ", ".
+    pub set_cookie: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
