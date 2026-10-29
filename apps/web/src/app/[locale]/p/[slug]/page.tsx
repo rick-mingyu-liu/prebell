@@ -57,7 +57,7 @@ export default async function PostPage({ params }: PageProps<"/[locale]/p/[slug]
         </p>
         {post.hasOtherLang && <LangSwitch locale={locale} path={`/p/${post.slug}`} />}
       </div>
-      <PostBody markdown={post.bodyMd} />
+      <PostBody markdown={post.bodyMd} sources={post.sources.map((s) => s.url)} />
     </article>
   );
 }

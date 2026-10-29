@@ -49,7 +49,7 @@ export default async function Home({ params }: PageProps<"/[locale]">) {
               {" · "}
               <Link href={`/${locale}/p/${latest.slug}`}>{t("post.permalink")}</Link>
             </p>
-            <PostBody markdown={latest.bodyMd} />
+            <PostBody markdown={latest.bodyMd} sources={latest.sources.map((s) => s.url)} />
           </article>
         )}
       </section>
