@@ -4,4 +4,6 @@ interface CloudflareEnv {
   ASSETS: { fetch(request: Request): Promise<Response> };
   SITE_URL?: string;
   CF_BEACON_TOKEN?: string;
+  /** Secret for /admin/competitor; unset means the page always 404s. */
+  ADMIN_TOKEN?: string;
 }

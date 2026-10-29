@@ -27,6 +27,9 @@ pub enum ProviderError {
     /// Not requested, because an earlier request in the run was throttled.
     #[error("not requested after HTTP 429")]
     Skipped,
+    /// The response body passed the caller's byte cap.
+    #[error("response too large: over {0} bytes")]
+    TooLarge(usize),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -45,6 +48,27 @@ pub trait Http {
         headers: &[(&str, &str)],
         body: &serde_json::Value,
     ) -> Result<HttpResp, ProviderError>;
+    /// `get` that fails with `TooLarge` when the body is over `max_bytes`.
+    /// Real clients should stop reading at the cap; this default checks
+    /// only after the whole body is in memory.
+    async fn get_capped(
+        &self,
+        url: &str,
+        headers: &[(&str, &str)],
+        max_bytes: usize,
+    ) -> Result<HttpResp, ProviderError> {
+        let resp = self.get(url, headers).await?;
+        if resp.body.len() > max_bytes {
+            return Err(ProviderError::TooLarge(max_bytes));
+        }
+        Ok(resp)
+    }
+}
+
+/// Waits, so a caller can put a deadline on a request (`worker::Delay` on Workers).
+#[async_trait(?Send)]
+pub trait Timer {
+    async fn sleep(&self, d: std::time::Duration);
 }
 
 #[async_trait(?Send)]

@@ -8,7 +8,11 @@ command = "worker-build --release"
 [triggers]
 # Every 5 min across both DST offsets of the 8:30-9:25 ET window; hourly afterwards for ZH retries.
 # `clock` decides what each firing means.
-crons = ["*/5 12-14 * * MON-FRI", "0 15-23 * * MON-FRI"]  # named days: Cloudflare numbers 1 = Sunday
+# "31 11 * * *" and "31 12 * * *" are the daily competitor watch: 07:31 ET in either offset, and
+# minute 31 so no other cron fires with it. Two crons because the schedule parser can't read
+# comma lists. Must match COMPETITOR_CRONS in src/lib.rs; `core::competitor` picks the firing
+# that counts. Named days: Cloudflare numbers 1 = Sunday.
+crons = ["*/5 12-14 * * MON-FRI", "0 15-23 * * MON-FRI", "31 11 * * *", "31 12 * * *"]
 
 [[d1_databases]]
 binding = "DB"
