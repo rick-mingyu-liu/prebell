@@ -173,16 +173,25 @@ fn draw(bars: &[Option<Bar>], labels: &[(usize, String)]) -> Result<String, Stri
     Ok(svg)
 }
 
-/// The press release's GAAP figure for a series, unless that series'
-/// latest XBRL quarter already is this release's quarter.
+/// A release bar this many times the series' largest quarter is not a
+/// quarter (a full-year or year-to-date total quoted as one).
+const MAX_RELEASE_RATIO: f64 = 2.5;
+
+/// The press release's GAAP figure for a series: only when the release's
+/// fiscal quarter is verified (a full-year-only release has no quarter
+/// bar), the series' latest XBRL quarter is not already this release's,
+/// and the figure is at most `MAX_RELEASE_RATIO` times the series max.
 fn release_value(f: &EarningsFacts, m: Metric, points: &[QuarterPoint]) -> Option<f64> {
-    if release_already_in_trend(points, f.filing_date) {
+    let quarter_verified = matches!(&f.fiscal_period, Field::Value(p) if p.quarter.is_some());
+    if !quarter_verified || release_already_in_trend(points, f.filing_date) {
         return None;
     }
+    let series_max = points.iter().map(|p| p.value.abs()).fold(0.0_f64, f64::max);
     f.metrics
         .value(m)
         .map(|fig| fig.value)
         .filter(|v| v.is_finite())
+        .filter(|v| series_max == 0.0 || v.abs() <= MAX_RELEASE_RATIO * series_max)
 }
 
 /// One chart per series with at least two GAAP points. Value labels go on
@@ -284,6 +293,52 @@ mod tests {
         assert_eq!(c[1].labels, ["$1.80", "$1.85"]);
         assert!(rev.alt_en.contains("this 8-K"));
         assert!(rev.alt_zh.contains("本次8-K"));
+    }
+
+    #[test]
+    fn full_year_release_is_not_a_quarter_bar() {
+        // A full-year-only release (no quarter): its revenue is a year's.
+        let mut f = facts();
+        if let Field::Value(p) = &mut f.fiscal_period {
+            p.quarter = None;
+        }
+        let c = charts(&f);
+        assert!(c.iter().all(|c| !c.svg.contains("8-K")), "no release bar");
+        assert_eq!(c[0].svg.matches("<rect").count(), 2);
+        // An unverified fiscal period: no release bar either.
+        let mut f = facts();
+        f.fiscal_period = Field::Missing { reason: "x".into() };
+        assert!(charts(&f).iter().all(|c| !c.svg.contains("8-K")));
+    }
+
+    #[test]
+    fn release_far_above_the_series_is_dropped() {
+        // A full-year total quoted as the quarter: 4x the quarterly bars.
+        let mut f = facts();
+        if let Field::Value(fig) = &mut f.metrics.revenue {
+            fig.value = 401.6e9;
+        }
+        let rev = charts(&f)
+            .into_iter()
+            .find(|c| c.name == "revenue")
+            .unwrap();
+        assert!(!rev.svg.contains("8-K"));
+        // Up to 2.5x the series max is kept.
+        let mut f = facts();
+        if let Field::Value(fig) = &mut f.metrics.revenue {
+            fig.value = 2.5 * 100.4e9;
+        }
+        assert_eq!(
+            release_value(&f, Metric::Revenue, &trend_of(&f).revenue),
+            Some(2.5 * 100.4e9)
+        );
+    }
+
+    fn trend_of(f: &EarningsFacts) -> Trend {
+        match &f.trend {
+            Field::Value(t) => t.clone(),
+            Field::Missing { .. } => Trend::default(),
+        }
     }
 
     #[test]
