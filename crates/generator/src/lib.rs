@@ -14,7 +14,7 @@ use prebell_core::yahoo::Yahoo;
 use serde::{Deserialize, Serialize};
 use worker::*;
 
-use crate::http::WorkerHttp;
+use crate::http::{WorkerHttp, WorkerTimer};
 use crate::store::D1Store;
 
 /// Daily competitor watch (wrangler.toml); `core::competitor` picks the
@@ -122,7 +122,8 @@ async fn queue(batch: MessageBatch<Job>, env: Env, _ctx: Context) -> Result<()> 
         let job = msg.body().job.as_str();
         if job == "competitor" {
             let contact = text(&env, "SEC_CONTACT").unwrap_or_default();
-            let outcome = run_competitor(now(&env), &WorkerHttp, &store, &contact).await;
+            let outcome =
+                run_competitor(now(&env), &WorkerHttp, &WorkerTimer, &store, &contact).await;
             console_log!("job {job}: {outcome:?}");
         } else {
             premarket(&env, &store, job).await?;

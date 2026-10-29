@@ -65,7 +65,7 @@ impl Diag {
             Err(ProviderError::Http(_)) => &mut self.http_other,
             Err(ProviderError::Empty) => &mut self.empty,
             Err(ProviderError::Parse(_)) => &mut self.parse,
-            Err(ProviderError::Network(_)) => &mut self.net,
+            Err(ProviderError::Network(_) | ProviderError::TooLarge(_)) => &mut self.net,
             Err(ProviderError::Stale) => &mut self.stale,
             Err(ProviderError::Skipped) => &mut self.skipped,
         };

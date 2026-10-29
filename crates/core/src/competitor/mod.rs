@@ -16,14 +16,30 @@ use chrono::{DateTime, Duration, NaiveDate, NaiveTime, SecondsFormat, Utc};
 use chrono_tz::America::New_York;
 
 use crate::clock::{et, trading_day, DayKind};
-use crate::providers::Http;
+use crate::providers::{Http, Timer};
 use feed::parse_feed;
+use futures::future::{select, Either};
 use report::{build_report, digest, OurPost, Report, StoredItem};
 use tickers::tickers_in;
 
 pub const FEED_URL: &str = "https://www.alphalab.site/feed.xml";
 /// Items stored per run; the feed is far smaller, this bounds a bad response.
 const MAX_ITEMS: usize = 200;
+/// The feed fetch, body included, gives up after this.
+pub const FEED_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+/// Bodies over this are rejected; the real feed is a few hundred KB.
+pub const MAX_FEED_BYTES: usize = 5 * 1024 * 1024;
+/// Stored field caps. Titles and categories are display text, so they are
+/// cut. A link is the row's key and an href, and a cut link is a broken one
+/// that could also collide with another item's, so an item with a longer
+/// link is dropped.
+const MAX_TITLE_CHARS: usize = 500;
+const MAX_CATEGORY_CHARS: usize = 100;
+const MAX_LINK_CHARS: usize = 2048;
+
+fn cut(s: &str, max_chars: usize) -> String {
+    s.chars().take(max_chars).collect()
+}
 
 pub fn run_key(report_date: NaiveDate) -> String {
     format!("competitor:{}", report_date.format("%Y-%m-%d"))
@@ -186,6 +202,7 @@ pub enum CompetitorOutcome {
 pub async fn run_competitor(
     now: DateTime<Utc>,
     http: &dyn Http,
+    timer: &dyn Timer,
     store: &dyn CompetitorStore,
     contact: &str,
 ) -> CompetitorOutcome {
@@ -193,7 +210,7 @@ pub async fn run_competitor(
         return CompetitorOutcome::Nothing;
     };
     let key = run_key(report_date);
-    match step(now, report_date, http, store, contact).await {
+    match step(now, report_date, http, timer, store, contact).await {
         Ok(outcome) => outcome,
         Err(e) => {
             let msg = format!("competitor watch failed for {report_date}: {e}");
@@ -208,6 +225,7 @@ async fn step(
     now: DateTime<Utc>,
     report_date: NaiveDate,
     http: &dyn Http,
+    timer: &dyn Timer,
     store: &dyn CompetitorStore,
     contact: &str,
 ) -> Result<CompetitorOutcome, String> {
@@ -217,16 +235,21 @@ async fn step(
     }
 
     let ua = format!("PreBell competitor-watch (+{contact})");
-    let resp = http
-        .get(
-            FEED_URL,
-            &[
-                ("User-Agent", ua.as_str()),
-                ("Accept", "application/rss+xml, application/xml;q=0.9"),
-            ],
-        )
-        .await
-        .map_err(|e| format!("feed fetch: {e}"))?;
+    let headers = [
+        ("User-Agent", ua.as_str()),
+        ("Accept", "application/rss+xml, application/xml;q=0.9"),
+    ];
+    // Losing the race drops the fetch, which aborts it on Workers.
+    let fetch = http.get_capped(FEED_URL, &headers, MAX_FEED_BYTES);
+    let resp = match select(fetch, timer.sleep(FEED_TIMEOUT)).await {
+        Either::Left((r, _)) => r.map_err(|e| format!("feed fetch: {e}"))?,
+        Either::Right(_) => {
+            return Err(format!(
+                "feed fetch: timed out after {}s",
+                FEED_TIMEOUT.as_secs()
+            ))
+        }
+    };
     if !(200..300).contains(&resp.status) {
         return Err(format!("feed fetch: HTTP {}", resp.status));
     }
@@ -234,13 +257,17 @@ async fn step(
 
     let rows: Vec<NewItem> = items
         .into_iter()
+        .filter(|i| i.link.chars().count() <= MAX_LINK_CHARS)
         .take(MAX_ITEMS)
-        .map(|i| NewItem {
-            tickers: tickers_in(&i.title),
-            link: i.link,
-            title: i.title,
-            published_at: i.published.map(iso),
-            category: i.categories.join(", "),
+        .map(|i| {
+            let title = cut(&i.title, MAX_TITLE_CHARS);
+            NewItem {
+                tickers: tickers_in(&title),
+                link: i.link,
+                title,
+                published_at: i.published.map(iso),
+                category: cut(&i.categories.join(", "), MAX_CATEGORY_CHARS),
+            }
         })
         .collect();
     store.upsert_items(&rows, &iso(now)).await?;
@@ -268,7 +295,7 @@ async fn step(
 mod tests {
     use super::report::DIGEST_MAX_CHARS;
     use super::*;
-    use crate::providers::{HttpResp, ProviderError};
+    use crate::providers::{HttpResp, ProviderError, Timer};
 
     const FIXTURE: &str = include_str!("../../tests/fixtures/alphalab_feed.xml");
 
@@ -280,6 +307,8 @@ mod tests {
     struct FakeHttp {
         status: u16,
         body: String,
+        /// Never answers, like a server that accepts and then stalls.
+        hang: bool,
         seen: RefCell<Seen>,
     }
     impl FakeHttp {
@@ -287,8 +316,28 @@ mod tests {
             FakeHttp {
                 status,
                 body: body.into(),
+                hang: false,
                 seen: RefCell::new(vec![]),
             }
+        }
+    }
+
+    /// A timer that never fires, so the fetch always wins the race.
+    struct NoDeadline;
+    #[async_trait(?Send)]
+    impl Timer for NoDeadline {
+        async fn sleep(&self, _: std::time::Duration) {
+            std::future::pending::<()>().await
+        }
+    }
+
+    /// A timer that fires at once and records what it was asked for.
+    #[derive(Default)]
+    struct Expired(RefCell<Vec<std::time::Duration>>);
+    #[async_trait(?Send)]
+    impl Timer for Expired {
+        async fn sleep(&self, d: std::time::Duration) {
+            self.0.borrow_mut().push(d);
         }
     }
     #[async_trait(?Send)]
@@ -305,6 +354,9 @@ mod tests {
                     .map(|(k, v)| (k.to_string(), v.to_string()))
                     .collect(),
             ));
+            if self.hang {
+                std::future::pending::<()>().await;
+            }
             Ok(HttpResp {
                 status: self.status,
                 body: self.body.clone(),
@@ -384,7 +436,7 @@ mod tests {
             },
         ));
         // Mon 2026-11-02 07:31 EST; Friday's post is 72h old.
-        run_competitor(utc("2026-11-02T12:31:00Z"), &http, &store, "x").await;
+        run_competitor(utc("2026-11-02T12:31:00Z"), &http, &NoDeadline, &store, "x").await;
         let r = store.reports.borrow()[0].0.clone();
         assert_eq!(r.our_slugs, ["premarket-2026-10-30"]);
         assert_eq!(r.our_window_start, "2026-10-30T04:00:00Z");
@@ -402,7 +454,7 @@ mod tests {
             },
         ));
 
-        let out = run_competitor(utc(NOW), &http, &store, "ops@prebell.test").await;
+        let out = run_competitor(utc(NOW), &http, &NoDeadline, &store, "ops@prebell.test").await;
         // In the 24h window: MSFT/NVDA (10-29 11:05Z) and KLAC (10-29 02:30Z);
         // the macro item (10-28 23:00Z) has no ticker.
         assert_eq!(
@@ -445,7 +497,8 @@ mod tests {
         assert!(alerts[0].2.chars().count() <= DIGEST_MAX_CHARS);
 
         // A second firing the same ET day does nothing.
-        let again = run_competitor(utc("2026-10-29T11:35:00Z"), &http, &store, "x").await;
+        let again =
+            run_competitor(utc("2026-10-29T11:35:00Z"), &http, &NoDeadline, &store, "x").await;
         assert_eq!(again, CompetitorOutcome::AlreadyDone);
         assert_eq!(http.seen.borrow().len(), 1);
         assert_eq!(store.reports.borrow().len(), 1);
@@ -456,8 +509,8 @@ mod tests {
     async fn refetch_keeps_first_seen() {
         let http = FakeHttp::new(200, FIXTURE);
         let store = MemCompetitorStore::default();
-        run_competitor(utc(NOW), &http, &store, "x").await;
-        run_competitor(utc("2026-10-30T11:30:00Z"), &http, &store, "x").await;
+        run_competitor(utc(NOW), &http, &NoDeadline, &store, "x").await;
+        run_competitor(utc("2026-10-30T11:30:00Z"), &http, &NoDeadline, &store, "x").await;
         let items = store.items.borrow();
         assert_eq!(items.len(), 5);
         let (_, first, last) = &items["https://www.alphalab.site/posts/fixture-klac"];
@@ -469,7 +522,8 @@ mod tests {
     async fn not_due_does_nothing() {
         let http = FakeHttp::new(200, FIXTURE);
         let store = MemCompetitorStore::default();
-        let out = run_competitor(utc("2026-10-29T12:30:00Z"), &http, &store, "x").await;
+        let out =
+            run_competitor(utc("2026-10-29T12:30:00Z"), &http, &NoDeadline, &store, "x").await;
         assert_eq!(out, CompetitorOutcome::Nothing);
         assert!(http.seen.borrow().is_empty());
     }
@@ -478,7 +532,7 @@ mod tests {
     async fn http_error_alerts_without_report() {
         let http = FakeHttp::new(503, "busy");
         let store = MemCompetitorStore::default();
-        let out = run_competitor(utc(NOW), &http, &store, "x").await;
+        let out = run_competitor(utc(NOW), &http, &NoDeadline, &store, "x").await;
         assert!(
             matches!(out, CompetitorOutcome::Failed(ref e) if e.contains("503")),
             "{out:?}"
@@ -491,13 +545,112 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn stalled_fetch_times_out_and_alerts() {
+        let http = FakeHttp {
+            hang: true,
+            ..FakeHttp::new(200, FIXTURE)
+        };
+        let timer = Expired::default();
+        let store = MemCompetitorStore::default();
+        let out = run_competitor(utc(NOW), &http, &timer, &store, "x").await;
+        assert!(
+            matches!(out, CompetitorOutcome::Failed(ref e) if e.contains("timed out")),
+            "{out:?}"
+        );
+        assert_eq!(*timer.0.borrow(), [FEED_TIMEOUT]);
+        assert_eq!(FEED_TIMEOUT, std::time::Duration::from_secs(15));
+        assert!(store.reports.borrow().is_empty());
+        let alerts = store.alerts.borrow();
+        assert_eq!(alerts.len(), 1);
+        assert_eq!(alerts[0].1, "error");
+        assert!(alerts[0].2.contains("timed out"), "{}", alerts[0].2);
+    }
+
+    #[tokio::test]
     async fn html_body_fails() {
         let http = FakeHttp::new(200, "<html><body>Just a moment...</body></html>");
         let store = MemCompetitorStore::default();
-        let out = run_competitor(utc(NOW), &http, &store, "x").await;
+        let out = run_competitor(utc(NOW), &http, &NoDeadline, &store, "x").await;
         assert!(matches!(out, CompetitorOutcome::Failed(_)), "{out:?}");
         assert!(store.reports.borrow().is_empty());
         assert_eq!(store.alerts.borrow()[0].1, "error");
+    }
+
+    fn one_item_feed(title: &str, link: &str, categories: &[&str]) -> String {
+        let cats: String = categories
+            .iter()
+            .map(|c| format!("<category>{c}</category>"))
+            .collect();
+        format!(
+            "<rss><channel><item><title>{title}</title><link>{link}</link>\
+             <pubDate>Thu, 29 Oct 2026 11:05:00 GMT</pubDate>{cats}</item></channel></rss>"
+        )
+    }
+
+    #[tokio::test]
+    async fn long_title_and_category_are_truncated() {
+        let title = format!("MSFT {}", "x".repeat(MAX_TITLE_CHARS * 2));
+        let cat = "é".repeat(MAX_CATEGORY_CHARS);
+        let feed = one_item_feed(
+            &title,
+            "https://www.alphalab.site/posts/long",
+            &[&cat, &cat],
+        );
+        let http = FakeHttp::new(200, &feed);
+        let store = MemCompetitorStore::default();
+        run_competitor(utc(NOW), &http, &NoDeadline, &store, "x").await;
+        let items = store.items.borrow();
+        let row = &items["https://www.alphalab.site/posts/long"].0;
+        assert_eq!(row.title.chars().count(), MAX_TITLE_CHARS);
+        assert!(row.title.starts_with("MSFT x"));
+        assert_eq!(row.tickers, ["MSFT"]);
+        assert_eq!(row.category.chars().count(), MAX_CATEGORY_CHARS);
+        assert!(row.category.starts_with("éé"));
+    }
+
+    #[tokio::test]
+    async fn overlong_link_drops_the_item() {
+        let long = format!("https://www.alphalab.site/{}", "p".repeat(MAX_LINK_CHARS));
+        let feed = one_item_feed("MSFT outlook", &long, &["Tech"]);
+        let http = FakeHttp::new(200, &feed);
+        let store = MemCompetitorStore::default();
+        let out = run_competitor(utc(NOW), &http, &NoDeadline, &store, "x").await;
+        assert!(matches!(out, CompetitorOutcome::Reported { .. }), "{out:?}");
+        assert!(store.items.borrow().is_empty());
+
+        // At the cap exactly, the item is kept.
+        let edge = format!(
+            "https://www.alphalab.site/{}",
+            "p".repeat(MAX_LINK_CHARS - "https://www.alphalab.site/".len())
+        );
+        assert_eq!(edge.chars().count(), MAX_LINK_CHARS);
+        let http = FakeHttp::new(200, &one_item_feed("MSFT outlook", &edge, &["Tech"]));
+        let store = MemCompetitorStore::default();
+        run_competitor(utc(NOW), &http, &NoDeadline, &store, "x").await;
+        assert!(store.items.borrow().contains_key(&edge));
+    }
+
+    #[tokio::test]
+    async fn oversize_body_alerts_without_report() {
+        // A valid feed padded past the cap with an XML comment.
+        let padded = FIXTURE.replacen(
+            "<channel>",
+            &format!("<channel><!-- {} -->", "x".repeat(MAX_FEED_BYTES)),
+            1,
+        );
+        let http = FakeHttp::new(200, &padded);
+        let store = MemCompetitorStore::default();
+        let out = run_competitor(utc(NOW), &http, &NoDeadline, &store, "x").await;
+        assert!(
+            matches!(out, CompetitorOutcome::Failed(ref e) if e.contains("too large")),
+            "{out:?}"
+        );
+        assert!(store.reports.borrow().is_empty());
+        assert!(store.items.borrow().is_empty());
+        let alerts = store.alerts.borrow();
+        assert_eq!(alerts.len(), 1);
+        assert_eq!(alerts[0].1, "error");
+        assert!(alerts[0].2.contains("too large"), "{}", alerts[0].2);
     }
 
     /// Spec §5: competitor data never feeds generation. The generation
