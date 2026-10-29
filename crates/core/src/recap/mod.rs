@@ -1,0 +1,586 @@
+//! The after-close recap: index closes (required), notable movers with
+//! quote-anchored reasons, and after-hours earnings to watch (optional).
+
+use chrono::{DateTime, Datelike, NaiveDate, Utc};
+use serde::{Deserialize, Serialize};
+
+use crate::clock::{trading_day, DayKind};
+use crate::facts::{quote_numbers, Field, Mover, NewsReason, Quote};
+use crate::premarket::{
+    articles_prompt, company_name, extract, system_prompt, universe, yahoo_symbol,
+};
+use crate::providers::{LlmProvider, MarketData, NewsSearch};
+
+/// `(label, Yahoo symbol)`: the indexes themselves, not ETF proxies, so the
+/// levels match what readers see quoted at the close.
+const INDEXES: [(&str, &str); 4] = [
+    ("S&P 500", "^GSPC"),
+    ("Nasdaq 100", "^NDX"),
+    ("Dow Jones", "^DJI"),
+    ("Russell 2000", "^RUT"),
+];
+const MIN_PRICE: f64 = 5.0;
+/// Regular-session shares; every S&P 500 name clears this on a normal day.
+const MIN_VOLUME: u64 = 1_000_000;
+const MOVERS_PER_SIDE: usize = 5;
+const HITS_PER_MOVER: usize = 3;
+const MOVER_REASONS: usize = 2;
+const AFTER_HOURS_HITS: usize = 5;
+const AFTER_HOURS_ITEMS: usize = 5;
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct RecapFacts {
+    pub trading_date: NaiveDate,
+    pub as_of_utc: DateTime<Utc>,
+    /// True on NYSE early-close days (1:00 PM ET close).
+    pub early_close: bool,
+    /// `(label, close)` for the four indexes, in `INDEXES` order.
+    pub indexes: Vec<(String, Field<Quote>)>,
+    pub gainers: Vec<Mover>,
+    pub losers: Vec<Mover>,
+    /// Companies the news says report after today's close.
+    pub after_hours: Field<Vec<NewsReason>>,
+}
+
+/// Names of required sections that are unavailable. Empty means publishable.
+/// Every index close is required: a recap missing one is thin, so the run
+/// retries and then skips instead.
+pub fn missing_required(f: &RecapFacts) -> Vec<&'static str> {
+    if f.indexes.len() == INDEXES.len()
+        && f.indexes.iter().all(|(_, q)| matches!(q, Field::Value(_)))
+    {
+        vec![]
+    } else {
+        vec!["indexes"]
+    }
+}
+
+fn push_quote(out: &mut Vec<f64>, q: &Quote) {
+    out.extend([q.last, q.prev_close, q.change_pct]);
+    if let Some(v) = q.volume {
+        out.push(v as f64);
+    }
+}
+
+/// Every number a draft may cite: quote fields, numbers inside source
+/// quotes, and the trading year and its neighbours.
+pub fn numbers_in_facts(f: &RecapFacts) -> Vec<f64> {
+    let year = f64::from(f.trading_date.year());
+    let mut out = vec![year - 1.0, year, year + 1.0];
+    for (_, fq) in &f.indexes {
+        if let Field::Value(q) = fq {
+            push_quote(&mut out, q);
+        }
+    }
+    for m in f.gainers.iter().chain(&f.losers) {
+        push_quote(&mut out, &m.quote);
+        for r in &m.reasons {
+            out.extend(quote_numbers(&r.quote));
+        }
+    }
+    if let Field::Value(items) = &f.after_hours {
+        for r in items {
+            out.extend(quote_numbers(&r.quote));
+        }
+    }
+    out
+}
+
+/// "October 29, 2026".
+fn long_date(d: NaiveDate) -> String {
+    d.format("%B %-d, %Y").to_string()
+}
+
+async fn mover(ns: &dyn NewsSearch, llm: &dyn LlmProvider, quote: Quote) -> Mover {
+    let name = company_name(&quote.symbol)
+        .unwrap_or(&quote.symbol)
+        .to_string();
+    let ticker = &quote.symbol;
+    let reasons = match ns
+        .search(&format!("{name} ({ticker}) stock"), HITS_PER_MOVER)
+        .await
+    {
+        Ok(hits) => {
+            let system = system_prompt(
+                "explain why a US stock moved in today's regular trading session",
+                MOVER_REASONS,
+            );
+            let header = format!(
+                "Ticker: {ticker}\nCompany: {name}\nChange today: {:+.2}%",
+                quote.change_pct
+            );
+            extract(
+                llm,
+                &system,
+                &articles_prompt(&header, &hits),
+                &hits,
+                MOVER_REASONS,
+            )
+            .await
+            .unwrap_or_default()
+        }
+        Err(_) => vec![],
+    };
+    Mover {
+        quote,
+        name,
+        reasons,
+    }
+}
+
+async fn after_hours(
+    ns: &dyn NewsSearch,
+    llm: &dyn LlmProvider,
+    date: NaiveDate,
+) -> Field<Vec<NewsReason>> {
+    let day = long_date(date);
+    let hits = match ns
+        .search(&format!("earnings after the bell {day}"), AFTER_HOURS_HITS)
+        .await
+    {
+        Ok(h) => h,
+        Err(e) => {
+            return Field::Missing {
+                reason: e.to_string(),
+            }
+        }
+    };
+    let system = system_prompt(
+        &format!(
+            "list the companies that the articles say report earnings after the close on {day}. \
+             Skip any company whose article does not clearly say it reports after the close on that date"
+        ),
+        AFTER_HOURS_ITEMS,
+    );
+    let header = format!("Topic: companies reporting earnings after the US market close on {day}");
+    match extract(
+        llm,
+        &system,
+        &articles_prompt(&header, &hits),
+        &hits,
+        AFTER_HOURS_ITEMS,
+    )
+    .await
+    {
+        Ok(v) => Field::Value(v),
+        Err(e) => Field::Missing {
+            reason: e.to_string(),
+        },
+    }
+}
+
+/// Universe closes passing the price/volume filters, `symbol` set to the universe ticker.
+async fn liquid_closes(md: &dyn MarketData, date: NaiveDate) -> Vec<Quote> {
+    let tickers = universe();
+    let symbols: Vec<String> = tickers.iter().map(|t| yahoo_symbol(t)).collect();
+    md.close_quotes(&symbols, date)
+        .await
+        .into_iter()
+        .zip(tickers)
+        .filter_map(|((_, r), ticker)| {
+            let mut q = r.ok()?;
+            q.symbol = ticker;
+            Some(q)
+        })
+        .filter(|q| q.last >= MIN_PRICE && q.volume.is_some_and(|v| v >= MIN_VOLUME))
+        .collect()
+}
+
+pub async fn build_facts(
+    md: &dyn MarketData,
+    ns: &dyn NewsSearch,
+    llm: &dyn LlmProvider,
+    trading_date: NaiveDate,
+    now: DateTime<Utc>,
+) -> RecapFacts {
+    let symbols: Vec<String> = INDEXES.iter().map(|(_, s)| s.to_string()).collect();
+    let indexes = INDEXES
+        .iter()
+        .zip(md.close_quotes(&symbols, trading_date).await)
+        .map(|((label, _), (_, r))| {
+            let f = match r {
+                Ok(q) => Field::Value(q),
+                Err(e) => Field::Missing {
+                    reason: e.to_string(),
+                },
+            };
+            (label.to_string(), f)
+        })
+        .collect();
+
+    let quotes = liquid_closes(md, trading_date).await;
+    let mut up: Vec<Quote> = quotes
+        .iter()
+        .filter(|q| q.change_pct > 0.0)
+        .cloned()
+        .collect();
+    up.sort_by(|a, b| b.change_pct.total_cmp(&a.change_pct));
+    up.truncate(MOVERS_PER_SIDE);
+    let mut down: Vec<Quote> = quotes.into_iter().filter(|q| q.change_pct < 0.0).collect();
+    down.sort_by(|a, b| a.change_pct.total_cmp(&b.change_pct));
+    down.truncate(MOVERS_PER_SIDE);
+
+    let mut gainers = Vec::with_capacity(up.len());
+    for q in up {
+        gainers.push(mover(ns, llm, q).await);
+    }
+    let mut losers = Vec::with_capacity(down.len());
+    for q in down {
+        losers.push(mover(ns, llm, q).await);
+    }
+
+    RecapFacts {
+        trading_date,
+        as_of_utc: now,
+        early_close: trading_day(trading_date) == DayKind::EarlyClose,
+        indexes,
+        gainers,
+        losers,
+        after_hours: after_hours(ns, llm, trading_date).await,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::facts::{Field, NewsReason, Quote};
+    use crate::providers::{LlmProvider, MarketData, NewsSearch, ProviderError, SearchHit};
+    use async_trait::async_trait;
+    use chrono::{DateTime, NaiveDate, Utc};
+    use serde_json::{json, Value};
+    use std::cell::RefCell;
+    use std::collections::HashMap;
+
+    const ARTICLE: &str = "Nvidia shares rose 3% on Thursday after the chipmaker unveiled a new data center partnership.";
+    const QUOTE: &str = "Nvidia shares rose 3% on Thursday";
+    const URL: &str = "https://news.test/nvda";
+    const NVDA_Q: &str = "Nvidia (NVDA) stock";
+    const AH_Q: &str = "earnings after the bell October 29, 2026";
+
+    fn q(sym: &str, last: f64, pct: f64, vol: Option<u64>) -> Quote {
+        Quote {
+            symbol: sym.into(),
+            last,
+            prev_close: last / (1.0 + pct / 100.0),
+            change_pct: pct,
+            volume: vol,
+        }
+    }
+
+    /// Close quotes by symbol; an index absent from `indexes` answers 429.
+    struct FakeMd {
+        indexes: HashMap<String, Quote>,
+        stocks: HashMap<String, Quote>,
+        sessions: RefCell<Vec<NaiveDate>>,
+    }
+    #[async_trait(?Send)]
+    impl MarketData for FakeMd {
+        async fn quote(&self, _symbol: &str) -> Result<Quote, ProviderError> {
+            panic!("recap must not use premarket quotes")
+        }
+        async fn premarket_quotes(
+            &self,
+            _symbols: &[String],
+        ) -> Vec<(String, Result<Quote, ProviderError>)> {
+            panic!("recap must not use premarket quotes")
+        }
+        async fn close_quote(
+            &self,
+            symbol: &str,
+            session: NaiveDate,
+        ) -> Result<Quote, ProviderError> {
+            self.sessions.borrow_mut().push(session);
+            if symbol.starts_with('^') {
+                self.indexes
+                    .get(symbol)
+                    .cloned()
+                    .ok_or(ProviderError::Http(429))
+            } else {
+                self.stocks
+                    .get(symbol)
+                    .cloned()
+                    .ok_or(ProviderError::Http(404))
+            }
+        }
+    }
+    fn md(stocks: &[Quote]) -> FakeMd {
+        FakeMd {
+            indexes: ["^GSPC", "^NDX", "^DJI", "^RUT"]
+                .iter()
+                .map(|s| (s.to_string(), q(s, 5850.12, 0.51, Some(1))))
+                .collect(),
+            stocks: stocks
+                .iter()
+                .map(|s| (s.symbol.clone(), s.clone()))
+                .collect(),
+            sessions: RefCell::new(vec![]),
+        }
+    }
+
+    struct FakeNs(HashMap<String, Result<Vec<SearchHit>, ProviderError>>);
+    #[async_trait(?Send)]
+    impl NewsSearch for FakeNs {
+        async fn search(&self, query: &str, _max: usize) -> Result<Vec<SearchHit>, ProviderError> {
+            self.0
+                .get(query)
+                .cloned()
+                .unwrap_or(Err(ProviderError::Empty))
+        }
+    }
+    fn hit(url: &str, content: &str) -> SearchHit {
+        SearchHit {
+            url: url.into(),
+            title: "Title".into(),
+            content: content.into(),
+        }
+    }
+    fn ns(items: Vec<(&str, Result<Vec<SearchHit>, ProviderError>)>) -> FakeNs {
+        FakeNs(items.into_iter().map(|(k, v)| (k.to_string(), v)).collect())
+    }
+
+    /// Answers with the first response whose needle occurs in the user prompt.
+    struct FakeLlm {
+        rules: Vec<(String, Result<Value, ProviderError>)>,
+        prompts: RefCell<Vec<(String, String)>>,
+    }
+    #[async_trait(?Send)]
+    impl LlmProvider for FakeLlm {
+        async fn complete_json(&self, system: &str, user: &str) -> Result<Value, ProviderError> {
+            self.prompts.borrow_mut().push((system.into(), user.into()));
+            self.rules
+                .iter()
+                .find(|(n, _)| user.contains(n.as_str()))
+                .map(|(_, r)| r.clone())
+                .unwrap_or(Ok(json!({"reasons": []})))
+        }
+    }
+    fn llm(rules: Vec<(&str, Result<Value, ProviderError>)>) -> FakeLlm {
+        FakeLlm {
+            rules: rules.into_iter().map(|(k, v)| (k.to_string(), v)).collect(),
+            prompts: RefCell::new(vec![]),
+        }
+    }
+    fn reasons(url: &str, quote: &str, summary: &str) -> Result<Value, ProviderError> {
+        Ok(
+            json!({"reasons": [{"url": url, "title": "Title", "quote": quote, "summary_en": summary}]}),
+        )
+    }
+
+    fn date() -> NaiveDate {
+        NaiveDate::from_ymd_opt(2026, 10, 29).unwrap()
+    }
+    fn now() -> DateTime<Utc> {
+        "2026-10-29T20:45:00Z".parse().unwrap()
+    }
+    fn syms(movers: &[crate::facts::Mover]) -> Vec<&str> {
+        movers.iter().map(|m| m.quote.symbol.as_str()).collect()
+    }
+
+    #[tokio::test]
+    async fn all_indexes_present_is_publishable() {
+        let m = md(&[]);
+        let f = build_facts(&m, &ns(vec![]), &llm(vec![]), date(), now()).await;
+        assert_eq!(f.trading_date, date());
+        assert_eq!(f.as_of_utc, now());
+        assert!(!f.early_close);
+        let labels: Vec<&str> = f.indexes.iter().map(|(l, _)| l.as_str()).collect();
+        assert_eq!(
+            labels,
+            ["S&P 500", "Nasdaq 100", "Dow Jones", "Russell 2000"]
+        );
+        let symbols: Vec<String> = f
+            .indexes
+            .iter()
+            .map(|(_, fq)| match fq {
+                Field::Value(q) => q.symbol.clone(),
+                Field::Missing { reason } => panic!("{reason}"),
+            })
+            .collect();
+        assert_eq!(symbols, ["^GSPC", "^NDX", "^DJI", "^RUT"]);
+        assert!(missing_required(&f).is_empty());
+        // Every close quote was asked for this session.
+        assert!(m.sessions.borrow().iter().all(|d| *d == date()));
+    }
+
+    #[tokio::test]
+    async fn one_index_missing_gates_indexes() {
+        let mut m = md(&[]);
+        m.indexes.remove("^RUT");
+        let f = build_facts(&m, &ns(vec![]), &llm(vec![]), date(), now()).await;
+        assert_eq!(
+            f.indexes[3].1,
+            Field::Missing {
+                reason: ProviderError::Http(429).to_string()
+            }
+        );
+        assert_eq!(missing_required(&f), vec!["indexes"]);
+    }
+
+    #[tokio::test]
+    async fn movers_filtered_sorted_and_capped() {
+        let mut stocks: Vec<Quote> = ["AAPL", "MSFT", "NVDA", "AMZN", "META", "TSLA"]
+            .iter()
+            .enumerate()
+            .map(|(i, s)| q(s, 100.0, i as f64 + 1.0, Some(2_000_000)))
+            .collect();
+        stocks.extend([
+            q("GOOGL", 100.0, -2.0, Some(2_000_000)),
+            q("NFLX", 100.0, -9.0, Some(999_999)), // thin volume
+            q("F", 4.99, -12.0, Some(90_000_000)), // under $5
+            q("AMD", 100.0, -1.0, None),           // unknown volume
+            q("BRK-B", 480.0, -0.5, Some(3_000_000)),
+        ]);
+        let f = build_facts(&md(&stocks), &ns(vec![]), &llm(vec![]), date(), now()).await;
+        assert_eq!(syms(&f.gainers), ["TSLA", "META", "AMZN", "NVDA", "MSFT"]);
+        assert_eq!(syms(&f.losers), ["GOOGL", "BRK.B"]);
+        assert_eq!(f.losers[1].name, "Berkshire Hathaway");
+        // Movers are optional.
+        assert!(missing_required(&f).is_empty());
+    }
+
+    #[tokio::test]
+    async fn anchored_reason_kept_unanchored_dropped() {
+        let stocks = [
+            q("NVDA", 182.35, 3.08, Some(210_000_000)),
+            q("AAPL", 230.0, -2.0, Some(50_000_000)),
+        ];
+        let n = ns(vec![
+            (NVDA_Q, Ok(vec![hit(URL, ARTICLE)])),
+            (
+                "Apple (AAPL) stock",
+                Ok(vec![hit("https://news.test/a", ARTICLE)]),
+            ),
+        ]);
+        let l = llm(vec![
+            (
+                "NVDA",
+                reasons(URL, QUOTE, "Nvidia rose 3% on a partnership."),
+            ),
+            (
+                "AAPL",
+                reasons(
+                    "https://news.test/a",
+                    "Apple fell on weak guidance today",
+                    "x",
+                ),
+            ),
+        ]);
+        let f = build_facts(&md(&stocks), &n, &l, date(), now()).await;
+        assert_eq!(f.gainers[0].reasons.len(), 1);
+        assert_eq!(f.gainers[0].reasons[0].quote, QUOTE);
+        assert_eq!(f.losers[0].reasons, vec![]);
+        let (sys, user) = l
+            .prompts
+            .borrow()
+            .iter()
+            .find(|(_, u)| u.contains("NVDA"))
+            .cloned()
+            .unwrap();
+        assert!(sys.contains("regular trading session") && sys.contains("verbatim"));
+        assert!(user.contains("Change today: +3.08%"), "{user}");
+    }
+
+    #[tokio::test]
+    async fn after_hours_items_are_anchored() {
+        let src = "Intel and Amazon are scheduled to report quarterly results after the bell on Thursday, October 29.";
+        let n = ns(vec![(AH_Q, Ok(vec![hit("https://news.test/ah", src)]))]);
+        let l = llm(vec![(
+            "after the US market close",
+            Ok(json!({"reasons": [
+                {"url": "https://news.test/ah", "title": "T", "quote": "Intel and Amazon are scheduled to report quarterly results after the bell", "summary_en": "Intel and Amazon report after the close."},
+                {"url": "https://news.test/ah", "title": "T", "quote": "Apple will report results after the bell tonight", "summary_en": "Apple reports."}
+            ]})),
+        )]);
+        let f = build_facts(&md(&[]), &n, &l, date(), now()).await;
+        match &f.after_hours {
+            Field::Value(v) => {
+                assert_eq!(v.len(), 1);
+                assert!(v[0].quote.starts_with("Intel and Amazon"));
+            }
+            other => panic!("{other:?}"),
+        }
+        let (sys, user) = l.prompts.borrow()[0].clone();
+        assert!(
+            sys.contains("after the close") && sys.contains("October 29, 2026"),
+            "{sys}"
+        );
+        assert!(user.contains("October 29, 2026"), "{user}");
+    }
+
+    #[tokio::test]
+    async fn after_hours_errors_are_missing() {
+        let f = build_facts(&md(&[]), &ns(vec![]), &llm(vec![]), date(), now()).await;
+        assert_eq!(
+            f.after_hours,
+            Field::Missing {
+                reason: ProviderError::Empty.to_string()
+            }
+        );
+        let n = ns(vec![(AH_Q, Ok(vec![hit("https://news.test/ah", ARTICLE)]))]);
+        let l = llm(vec![(
+            "after the US market close",
+            Err(ProviderError::Http(503)),
+        )]);
+        let f = build_facts(&md(&[]), &n, &l, date(), now()).await;
+        assert_eq!(
+            f.after_hours,
+            Field::Missing {
+                reason: ProviderError::Http(503).to_string()
+            }
+        );
+        // Still publishable: after-hours is optional.
+        assert!(missing_required(&f).is_empty());
+    }
+
+    #[tokio::test]
+    async fn early_close_day_is_flagged() {
+        let d = NaiveDate::from_ymd_opt(2026, 11, 27).unwrap();
+        let f = build_facts(&md(&[]), &ns(vec![]), &llm(vec![]), d, now()).await;
+        assert!(f.early_close);
+    }
+
+    fn reason(quote: &str) -> NewsReason {
+        NewsReason {
+            url: URL.into(),
+            title: "T".into(),
+            quote: quote.into(),
+            summary_en: "s".into(),
+        }
+    }
+
+    #[tokio::test]
+    async fn allowed_numbers_and_round_trip() {
+        let mut f = build_facts(
+            &md(&[q("NVDA", 182.35, 3.08, Some(210_000_000))]),
+            &ns(vec![]),
+            &llm(vec![]),
+            date(),
+            now(),
+        )
+        .await;
+        f.gainers[0].reasons = vec![reason("Nvidia shares rose 3% on a $5 billion deal")];
+        f.after_hours = Field::Value(vec![reason("Intel expects revenue of $13.4 billion")]);
+        let n = numbers_in_facts(&f);
+        for v in [
+            2025.0,
+            2026.0,
+            2027.0,
+            5850.12,
+            0.51,
+            182.35,
+            3.08,
+            210_000_000.0,
+            3.0,
+            -3.0,
+            5e9,
+            13.4e9,
+        ] {
+            assert!(
+                n.iter().any(|x| (x - v).abs() < 1e-6),
+                "{v} missing from {n:?}"
+            );
+        }
+        let s = serde_json::to_string(&f).unwrap();
+        assert_eq!(serde_json::from_str::<RecapFacts>(&s).unwrap(), f);
+    }
+}
