@@ -22,10 +22,13 @@ const BOTTOM: i32 = 44;
 const SIDE: i32 = 16;
 /// Bars: a mid-tone blue that reads on light and dark page backgrounds.
 const BAR: RGBColor = RGBColor(0x2f, 0x7d, 0xc4);
+/// plotters' SVG backend writes `font-size = size / 1.24`: 16 -> ~13px.
 /// Text and baseline: neutral grey with >= 3:1 contrast on white and on #141414.
 const INK: RGBColor = RGBColor(0x80, 0x80, 0x80);
 /// Fewer points than this is not a trend.
 const MIN_BARS: usize = 2;
+/// Widest slot per bar (bar plus gap), in px.
+const MAX_SLOT: i32 = 96;
 const RELEASE_LABEL: &str = "8-K";
 /// Period ends further apart than one quarter (plus 52/53-week slack) mean
 /// quarters in between are missing.
@@ -115,7 +118,9 @@ fn draw(bars: &[Option<Bar>], labels: &[(usize, String)]) -> Result<String, Stri
         let plot_h = f64::from(H - TOP - BOTTOM - below);
         let y = |v: f64| TOP + ((max - v) / span * plot_h).round() as i32;
         let zero = y(0.0);
-        let slot = (W - 2 * SIDE) / bars.len() as i32;
+        // Slots at most `MAX_SLOT` wide, centred, so a short series is not a wall of fat bars.
+        let slot = ((W - 2 * SIDE) / bars.len() as i32).min(MAX_SLOT);
+        let left = (W - slot * bars.len() as i32) / 2;
         let gap = (slot / 4).max(2);
         let text = |size: i32, h: HPos, v: VPos| {
             ("sans-serif", size)
@@ -125,7 +130,7 @@ fn draw(bars: &[Option<Bar>], labels: &[(usize, String)]) -> Result<String, Stri
         };
         for (i, b) in bars.iter().enumerate() {
             let Some(b) = b else { continue };
-            let x0 = SIDE + i as i32 * slot + gap / 2;
+            let x0 = left + i as i32 * slot + gap / 2;
             let x1 = x0 + slot - gap;
             let (top, bottom) = if b.value >= 0.0 {
                 (y(b.value), zero)
@@ -141,7 +146,7 @@ fn draw(bars: &[Option<Bar>], labels: &[(usize, String)]) -> Result<String, Stri
             root.draw(&Text::new(
                 b.label.clone(),
                 (cx, H - BOTTOM + 10),
-                text(12, HPos::Center, VPos::Top),
+                text(16, HPos::Center, VPos::Top),
             ))
             .map_err(err)?;
             if let Some((_, l)) = labels.iter().find(|(j, _)| *j == i) {
@@ -153,7 +158,7 @@ fn draw(bars: &[Option<Bar>], labels: &[(usize, String)]) -> Result<String, Stri
                 root.draw(&Text::new(
                     l.clone(),
                     (cx, ly),
-                    text(13, HPos::Center, vpos),
+                    text(17, HPos::Center, vpos),
                 ))
                 .map_err(err)?;
             }
