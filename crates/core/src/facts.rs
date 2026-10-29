@@ -68,15 +68,22 @@ fn push_quote(out: &mut Vec<f64>, q: &Quote) {
     }
 }
 
-fn push_reason(out: &mut Vec<f64>, r: &NewsReason) {
-    // `Num.value` is already scaled to base units. Without an explicit sign
-    // marker the quote carries no direction, so allow both signs.
-    for n in numbers::extract(&r.quote, Lang::En) {
+/// Numbers a source quote allows, in base units. Without an explicit sign
+/// marker the quote carries no direction, so both signs are allowed.
+pub(crate) fn quote_numbers(quote: &str) -> Vec<f64> {
+    let mut out = Vec::new();
+    // `Num.value` is already scaled to base units.
+    for n in numbers::extract(quote, Lang::En) {
         out.push(n.value);
         if !n.signed {
             out.push(-n.value);
         }
     }
+    out
+}
+
+fn push_reason(out: &mut Vec<f64>, r: &NewsReason) {
+    out.extend(quote_numbers(&r.quote));
 }
 
 /// Every number a draft may cite: quote fields plus numbers inside source quotes.
