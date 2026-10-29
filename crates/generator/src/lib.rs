@@ -6,14 +6,14 @@ mod http;
 mod store;
 
 use chrono::{DateTime, Utc};
-use prebell_core::deepseek::llm_from_env;
 use prebell_core::earnings::calendar::refresh_tick;
 use prebell_core::earnings::in_window;
 use prebell_core::earnings::run::{build_tick, poll_tick};
 use prebell_core::earnings::store::EarningsStore;
 use prebell_core::edgar::{Edgar, Pause};
+use prebell_core::llm::{api_key_var, llm_from_env, unknown_provider};
 use prebell_core::providers::{LlmProvider, NewsSearch};
-use prebell_core::run::tick;
+use prebell_core::run::tick_with_log;
 use prebell_core::store::Store;
 use prebell_core::tavily::Tavily;
 use prebell_core::yahoo::Yahoo;
@@ -223,11 +223,16 @@ async fn queue(batch: MessageBatch<Job>, env: Env, _ctx: Context) -> Result<()> 
     };
     let md = Yahoo::new(WorkerHttp);
     let ns = Tavily::new(WorkerHttp, secret_or_empty(&env, "TAVILY_API_KEY"));
-    let provider = text(&env, "LLM_PROVIDER").unwrap_or_else(|| "deepseek".into());
+    let provider = text(&env, "LLM_PROVIDER").unwrap_or_else(|| "claude".into());
+    let key_var = api_key_var(&provider)
+        .ok_or_else(|| Error::RustError(unknown_provider(&provider).to_string()))?;
     let llm = llm_from_env(
         &provider,
         WorkerHttp,
-        secret_or_empty(&env, "DEEPSEEK_API_KEY"),
+        secret_or_empty(&env, key_var),
+        text(&env, "LLM_MODEL"),
+        text(&env, "LLM_EFFORT"),
+        |m| console_warn!("{m}"),
     )
     .map_err(|e| Error::RustError(e.to_string()))?;
 
@@ -241,7 +246,10 @@ async fn queue(batch: MessageBatch<Job>, env: Env, _ctx: Context) -> Result<()> 
                 }
             }
             job => {
-                let outcome = tick(now(&env), &store, &md, &ns, llm.as_ref()).await;
+                let outcome = tick_with_log(now(&env), &store, &md, &ns, llm.as_ref(), &|m| {
+                    console_log!("{m}")
+                })
+                .await;
                 console_log!("job {job}: {:?}", outcome);
             }
         }

@@ -443,7 +443,11 @@ pub(crate) mod tests {
                 .get(url)
                 .cloned()
                 .unwrap_or((404, "Not Found".into()));
-            Ok(HttpResp { status, body })
+            Ok(HttpResp {
+                status,
+                body,
+                set_cookie: None,
+            })
         }
         async fn post_json(
             &self,
