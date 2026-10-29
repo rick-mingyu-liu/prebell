@@ -115,7 +115,7 @@ EDGAR poller (every 2–5 min, market hours) ─┤
 
 ## 10. Constraints
 
-- Cost: free data at launch; Cloudflare Workers paid plan (~$5/month) is expected for Queues/CPU; AI spend on the owner's Anthropic API credit; cost per brief is measured on the first live run.
+- Cost (owner, 2026-10-29): **everything runs on free tiers until the site has real daily active users.** That means Cloudflare Workers Free (5 cron triggers per account, 10 ms CPU and 50 subrequests per invocation), free data sources and free API allowances. Design within those limits; when one is hit, prefer a free-tier workaround (batching, fewer schedules, splitting work into smaller queued steps) and present a paid upgrade only as an option with its cost. AI spend comes from the owner's Anthropic API credit; cost per brief is measured on the first live run.
 - Yahoo Finance's terms don't permit scraping; the owner accepts this for launch. The `MarketData` interface exists so we can leave quickly if it breaks or blocks us.
 - EDGAR fair-access rules (User-Agent, ≤10 req/s).
 - All displayed times in US Eastern; stored in UTC.
