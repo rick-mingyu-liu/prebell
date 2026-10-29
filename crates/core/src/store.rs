@@ -69,6 +69,8 @@ pub trait Store {
     /// Replaces the post's sources with `s` (idempotent per post).
     async fn add_sources(&self, post_id: i64, s: &[NewsReason]) -> Result<(), String>;
     async fn add_alert(&self, run_key: &str, level: &str, msg: &str) -> Result<(), String>;
+    /// Whether any alert, sent or not, has `run_key`.
+    async fn has_alert(&self, run_key: &str) -> Result<bool, String>;
     /// Stores the facts JSON (R2 in production) under `key`.
     async fn put_facts(&self, key: &str, json: &str) -> Result<(), String>;
     async fn get_facts(&self, key: &str) -> Result<Option<String>, String>;
@@ -143,6 +145,9 @@ impl Store for MemStore {
             .borrow_mut()
             .push((run_key.into(), level.into(), msg.into()));
         Ok(())
+    }
+    async fn has_alert(&self, run_key: &str) -> Result<bool, String> {
+        Ok(self.alerts.borrow().iter().any(|a| a.0 == run_key))
     }
     async fn put_facts(&self, key: &str, json: &str) -> Result<(), String> {
         self.facts.borrow_mut().insert(key.into(), json.into());

@@ -33,39 +33,40 @@ const MACRO_HITS: usize = 5;
 const MACRO_ITEMS: usize = 3;
 const MAX_CONTENT_CHARS: usize = 6_000;
 
-/// Counters behind `PremarketFacts::diagnostics`.
+/// Counters behind `PremarketFacts::diagnostics` (and the recap's, which
+/// counts index closes in `futures_*`).
 #[derive(Default)]
-struct Diag {
-    ok: usize,
-    http429: usize,
-    http_other: usize,
-    empty: usize,
-    stale: usize,
-    parse: usize,
-    net: usize,
-    skipped: usize,
+pub(crate) struct Diag {
+    pub(crate) ok: usize,
+    pub(crate) http429: usize,
+    pub(crate) http_other: usize,
+    pub(crate) empty: usize,
+    pub(crate) stale: usize,
+    pub(crate) parse: usize,
+    pub(crate) net: usize,
+    pub(crate) skipped: usize,
     /// `MarketData::diagnostics`, listed right after the quote counts.
-    market: Vec<String>,
-    liquid: usize,
-    gainers: usize,
-    losers: usize,
-    proposed: usize,
-    kept: usize,
-    search_err: usize,
-    llm_err: usize,
-    futures_ok: usize,
-    futures_err: usize,
+    pub(crate) market: Vec<String>,
+    pub(crate) liquid: usize,
+    pub(crate) gainers: usize,
+    pub(crate) losers: usize,
+    pub(crate) proposed: usize,
+    pub(crate) kept: usize,
+    pub(crate) search_err: usize,
+    pub(crate) llm_err: usize,
+    pub(crate) futures_ok: usize,
+    pub(crate) futures_err: usize,
 }
 
 impl Diag {
-    fn quote(&mut self, r: &Result<Quote, ProviderError>) {
+    pub(crate) fn quote(&mut self, r: &Result<Quote, ProviderError>) {
         let n = match r {
             Ok(_) => &mut self.ok,
             Err(ProviderError::Http(429)) => &mut self.http429,
             Err(ProviderError::Http(_)) => &mut self.http_other,
             Err(ProviderError::Empty) => &mut self.empty,
             Err(ProviderError::Parse(_)) => &mut self.parse,
-            Err(ProviderError::Network(_)) => &mut self.net,
+            Err(ProviderError::Network(_) | ProviderError::TooLarge(_)) => &mut self.net,
             Err(ProviderError::Stale) => &mut self.stale,
             Err(ProviderError::Skipped) => &mut self.skipped,
         };
@@ -73,6 +74,11 @@ impl Diag {
     }
 
     fn lines(self) -> Vec<String> {
+        self.lines_as("futures")
+    }
+
+    /// The diagnostics lines, naming the required-quote counts `head`.
+    pub(crate) fn lines_as(self, head: &str) -> Vec<String> {
         let mut out = vec![format!(
             "quotes ok={} http429={} http_other={} empty={} stale={} parse={} net={} skipped={}",
             self.ok,
@@ -92,13 +98,13 @@ impl Diag {
             ),
             format!("reasons proposed={} kept={}", self.proposed, self.kept),
             format!("search_err={} llm_err={}", self.search_err, self.llm_err),
-            format!("futures ok={} err={}", self.futures_ok, self.futures_err),
+            format!("{head} ok={} err={}", self.futures_ok, self.futures_err),
         ]);
         out
     }
 }
 
-fn system_prompt(task: &str, max: usize) -> String {
+pub(crate) fn system_prompt(task: &str, max: usize) -> String {
     format!(
         "You {task}. Use ONLY the provided articles; never use outside knowledge. \
          Return JSON of the form {{\"reasons\":[{{\"url\",\"title\",\"quote\",\"summary_en\"}}]}} \
@@ -112,7 +118,7 @@ fn system_prompt(task: &str, max: usize) -> String {
     )
 }
 
-fn articles_prompt(header: &str, hits: &[SearchHit]) -> String {
+pub(crate) fn articles_prompt(header: &str, hits: &[SearchHit]) -> String {
     let mut out = format!("{header}\n\nArticles:\n");
     for (i, h) in hits.iter().enumerate() {
         let content: String = h.content.chars().take(MAX_CONTENT_CHARS).collect();
@@ -136,7 +142,7 @@ pub(crate) fn unclose(s: &str) -> String {
 }
 
 /// Ask the LLM for reasons and keep only those anchored in a fetched hit.
-async fn extract(
+pub(crate) async fn extract(
     llm: &dyn LlmProvider,
     system: &str,
     user: &str,

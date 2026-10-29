@@ -1,7 +1,7 @@
 {
   "site": {
     "name": "PreBell",
-    "tagline": "Premarket briefs for North American markets",
+    "tagline": "Premarket briefs and after-close recaps for US stocks",
     "home": "Home",
     "archive": "Archive",
     "about": "About",
@@ -11,9 +11,10 @@
   },
   "home": {
     "latest": "Latest premarket brief",
-    "recent": "Recent briefs",
-    "empty": "No briefs have been published yet.",
-    "allBriefs": "All briefs",
+    "recent": "Recent posts",
+    "empty": "Nothing has been published yet.",
+    "allBriefs": "All posts",
+    "latestRecap": "Latest after-close recap",
     "latestEarnings": "Latest earnings checks",
     "calendar": "Earnings calendar",
     "noEarnings": "No earnings checks yet."
@@ -21,29 +22,35 @@
   "post": {
     "permalink": "Permalink",
     "published": "Published {time}",
-    "pendingTitle": "Premarket brief, {date}",
+    "pendingTitle": "{type}, {date}",
     "pending": "The Chinese version is coming soon.",
-    "readEnglish": "Read the English version",
-    "earningsPendingTitle": "Earnings check, {date}"
+    "readEnglish": "Read the English version"
   },
   "archive": {
     "title": "Archive",
     "page": "Page {page}",
     "newer": "Newer",
     "older": "Older",
-    "empty": "Nothing here."
+    "empty": "Nothing here.",
+    "all": "All",
+    "filter": "Filter by type"
   },
   "about": {
     "title": "About",
-    "p1": "PreBell publishes a short premarket brief every US trading day before the open: index futures, the biggest premarket movers and why they moved, and what to watch.",
-    "p2": "Every brief is generated automatically from public market data and news. Numbers are checked against the source data before publishing, and each brief lists its sources. Times are US Eastern.",
+    "p1": "PreBell publishes a short premarket brief every US trading day before the open (index futures, the biggest premarket movers and why they moved, and what to watch) and an after-close recap after the bell (index closes, notable movers and why, and after-hours earnings to watch).",
+    "p2": "Every post is generated automatically from public market data and news. Numbers are checked against the source data before publishing, and each post lists its sources. Times are US Eastern.",
     "p3": "English is published first; the Chinese version follows."
   },
   "notFound": {
     "title": "Page not found",
     "back": "Back to the home page"
   },
-  "disclaimer": "This brief is generated automatically from public data for information only. It is not investment advice.",
+  "disclaimer": "Content on this site is generated automatically from public data for information only. It is not investment advice.",
+  "types": {
+    "premarket": "Premarket brief",
+    "recap": "After-close recap",
+    "earnings": "Earnings check"
+  },
   "earnings": {
     "calendarTitle": "Earnings calendar",
     "weekOf": "Week of {date}",

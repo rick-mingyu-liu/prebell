@@ -27,5 +27,6 @@
     // Origin for canonical and hreflang URLs; https://prebell.ai is a placeholder until the domain is bought.
     "SITE_URL": "https://prebell.ai"
     // CF_BEACON_TOKEN (Cloudflare Web Analytics) is optional; set it as a var to enable the beacon.
+    // ADMIN_TOKEN is a secret (`wrangler secret put ADMIN_TOKEN`) for /admin/competitor; never a var.
   }
 }

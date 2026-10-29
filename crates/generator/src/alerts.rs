@@ -3,7 +3,6 @@
 use prebell_core::providers::Http;
 use worker::{console_error, console_warn};
 
-use crate::http::WorkerHttp;
 use crate::store::D1Store;
 
 /// Discord rejects `content` over 2000 characters; keep a margin.
@@ -17,9 +16,19 @@ fn truncate(s: &str, max: usize) -> String {
     }
 }
 
+/// Webhook body. `allowed_mentions` with an empty `parse` list means no
+/// alert text (feed titles included) can ping @everyone, @here, a user or
+/// a role.
+fn payload(content: &str) -> serde_json::Value {
+    serde_json::json!({
+        "content": truncate(content, MAX_CONTENT_CHARS),
+        "allowed_mentions": { "parse": [] },
+    })
+}
+
 /// Posts each unsent alert; marks it sent only on a 2xx response.
 /// Without a webhook URL alerts stay unsent in D1.
-pub async fn deliver(store: &D1Store, http: &WorkerHttp, webhook: Option<&str>) {
+pub async fn deliver(store: &D1Store, http: &dyn Http, webhook: Option<&str>) {
     let Some(url) = webhook.filter(|u| !u.is_empty()) else {
         return;
     };
@@ -34,7 +43,7 @@ pub async fn deliver(store: &D1Store, http: &WorkerHttp, webhook: Option<&str>) 
             a.run_key.as_deref().unwrap_or(""),
             a.message
         );
-        let body = serde_json::json!({ "content": truncate(&content, MAX_CONTENT_CHARS) });
+        let body = payload(&content);
         match http.post_json(url, &[], &body).await {
             Ok(r) if (200..300).contains(&r.status) => {
                 if let Err(e) = store.mark_alert_sent(a.id).await {
@@ -49,7 +58,16 @@ pub async fn deliver(store: &D1Store, http: &WorkerHttp, webhook: Option<&str>) 
 
 #[cfg(test)]
 mod tests {
-    use super::truncate;
+    use super::{payload, truncate};
+
+    #[test]
+    fn payload_never_pings() {
+        let body = payload("error: x: @everyone @here <@123> <@&456>");
+        assert_eq!(body["allowed_mentions"], serde_json::json!({ "parse": [] }));
+        assert_eq!(body["content"], "error: x: @everyone @here <@123> <@&456>");
+        let long = payload(&"x".repeat(5000));
+        assert_eq!(long["content"].as_str().unwrap().chars().count(), 1900);
+    }
 
     #[test]
     fn truncates_by_chars() {

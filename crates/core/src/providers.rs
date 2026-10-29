@@ -1,6 +1,6 @@
 use crate::facts::Quote;
 use async_trait::async_trait;
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, NaiveDate, Utc};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct HttpResp {
@@ -27,6 +27,9 @@ pub enum ProviderError {
     /// Not requested, because an earlier request in the run was throttled.
     #[error("not requested after HTTP 429")]
     Skipped,
+    /// The response body passed the caller's byte cap.
+    #[error("response too large: over {0} bytes")]
+    TooLarge(usize),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -45,6 +48,80 @@ pub trait Http {
         headers: &[(&str, &str)],
         body: &serde_json::Value,
     ) -> Result<HttpResp, ProviderError>;
+    /// `get` that fails with `TooLarge` when the body is over `max_bytes`.
+    /// Real clients should stop reading at the cap; this default checks
+    /// only after the whole body is in memory.
+    async fn get_capped(
+        &self,
+        url: &str,
+        headers: &[(&str, &str)],
+        max_bytes: usize,
+    ) -> Result<HttpResp, ProviderError> {
+        let resp = self.get(url, headers).await?;
+        if resp.body.len() > max_bytes {
+            return Err(ProviderError::TooLarge(max_bytes));
+        }
+        Ok(resp)
+    }
+}
+
+/// `Http` that counts the requests it sends (failed ones too), shared by
+/// its clones: the Workers Free plan allows 50 fetch subrequests per
+/// invocation, and the generator logs this count per job.
+#[derive(Clone)]
+pub struct CountingHttp<H> {
+    inner: H,
+    n: std::rc::Rc<std::cell::Cell<usize>>,
+}
+
+impl<H> CountingHttp<H> {
+    pub fn new(inner: H) -> Self {
+        Self {
+            inner,
+            n: Default::default(),
+        }
+    }
+    pub fn count(&self) -> usize {
+        self.n.get()
+    }
+    pub fn reset(&self) {
+        self.n.set(0);
+    }
+    fn bump(&self) {
+        self.n.set(self.n.get() + 1);
+    }
+}
+
+#[async_trait(?Send)]
+impl<H: Http> Http for CountingHttp<H> {
+    async fn get(&self, url: &str, headers: &[(&str, &str)]) -> Result<HttpResp, ProviderError> {
+        self.bump();
+        self.inner.get(url, headers).await
+    }
+    async fn post_json(
+        &self,
+        url: &str,
+        headers: &[(&str, &str)],
+        body: &serde_json::Value,
+    ) -> Result<HttpResp, ProviderError> {
+        self.bump();
+        self.inner.post_json(url, headers, body).await
+    }
+    async fn get_capped(
+        &self,
+        url: &str,
+        headers: &[(&str, &str)],
+        max_bytes: usize,
+    ) -> Result<HttpResp, ProviderError> {
+        self.bump();
+        self.inner.get_capped(url, headers, max_bytes).await
+    }
+}
+
+/// Waits, so a caller can put a deadline on a request (`worker::Delay` on Workers).
+#[async_trait(?Send)]
+pub trait Timer {
+    async fn sleep(&self, d: std::time::Duration);
 }
 
 #[async_trait(?Send)]
@@ -56,6 +133,31 @@ pub trait MarketData {
         symbols: &[String],
         now: DateTime<Utc>,
     ) -> Vec<(String, Result<Quote, ProviderError>)>;
+    /// Regular-session close for the ET date `session`: `last` is the close,
+    /// `prev_close` the prior session's close, `volume` the session volume.
+    /// A quote from any other session is an error, never today's close.
+    /// The default reports the method as unsupported (`Empty`), so providers
+    /// without close data compile and their recap fields read as missing.
+    async fn close_quote(
+        &self,
+        _symbol: &str,
+        _session: NaiveDate,
+    ) -> Result<Quote, ProviderError> {
+        Err(ProviderError::Empty)
+    }
+    /// Closes for many symbols, in order. The default calls `close_quote`
+    /// for each; a provider may batch (Yahoo uses v7 quotes).
+    async fn close_quotes(
+        &self,
+        symbols: &[String],
+        session: NaiveDate,
+    ) -> Vec<(String, Result<Quote, ProviderError>)> {
+        let mut out = Vec::with_capacity(symbols.len());
+        for s in symbols {
+            out.push((s.clone(), self.close_quote(s, session).await));
+        }
+        out
+    }
     /// Short provider-specific diagnostic lines about the last calls.
     fn diagnostics(&self) -> Vec<String> {
         Vec::new()
@@ -74,4 +176,86 @@ pub trait LlmProvider {
         system: &str,
         user: &str,
     ) -> Result<serde_json::Value, ProviderError>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A provider with only the Plan 1 methods.
+    struct PremarketOnly;
+    #[async_trait(?Send)]
+    impl MarketData for PremarketOnly {
+        async fn quote(&self, _symbol: &str) -> Result<Quote, ProviderError> {
+            Err(ProviderError::Http(500))
+        }
+        async fn premarket_quotes(
+            &self,
+            _symbols: &[String],
+            _now: DateTime<Utc>,
+        ) -> Vec<(String, Result<Quote, ProviderError>)> {
+            vec![]
+        }
+    }
+
+    #[derive(Clone)]
+    struct Echo;
+    #[async_trait(?Send)]
+    impl Http for Echo {
+        async fn get(&self, url: &str, _: &[(&str, &str)]) -> Result<HttpResp, ProviderError> {
+            Ok(HttpResp {
+                status: 200,
+                body: url.into(),
+                set_cookie: None,
+            })
+        }
+        async fn post_json(
+            &self,
+            _: &str,
+            _: &[(&str, &str)],
+            _: &serde_json::Value,
+        ) -> Result<HttpResp, ProviderError> {
+            Err(ProviderError::Http(500))
+        }
+    }
+
+    #[tokio::test]
+    async fn counting_http_counts_every_request_across_clones() {
+        let h = CountingHttp::new(Echo);
+        let h2 = h.clone();
+        assert_eq!(h.count(), 0);
+        assert_eq!(
+            h.get("https://a.test", &[]).await.unwrap().body,
+            "https://a.test"
+        );
+        // A failed request is still a subrequest.
+        assert!(h2
+            .post_json("https://b.test", &[], &serde_json::json!({}))
+            .await
+            .is_err());
+        // The capped default calls `get` on the inner client once.
+        assert!(h2.get_capped("https://c.test", &[], 2).await.is_err());
+        assert_eq!((h.count(), h2.count()), (3, 3));
+        h.reset();
+        assert_eq!(h2.count(), 0);
+    }
+
+    #[tokio::test]
+    async fn close_quotes_default_to_unsupported_in_order() {
+        let day = NaiveDate::from_ymd_opt(2026, 10, 29).unwrap();
+        assert_eq!(
+            PremarketOnly.close_quote("^GSPC", day).await,
+            Err(ProviderError::Empty)
+        );
+        let r = PremarketOnly
+            .close_quotes(&["A".into(), "B".into()], day)
+            .await;
+        assert_eq!(
+            r,
+            vec![
+                ("A".to_string(), Err(ProviderError::Empty)),
+                ("B".to_string(), Err(ProviderError::Empty))
+            ]
+        );
+    }
 }

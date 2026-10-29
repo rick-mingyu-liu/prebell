@@ -9,7 +9,7 @@ use std::sync::OnceLock;
 use regex::Regex;
 use serde_json::Value;
 
-use crate::facts::{numbers_in_facts, Field, Mover, PremarketFacts};
+use crate::facts::{numbers_in_facts, Field, Mover, NewsReason, PremarketFacts};
 use crate::numbers::{check, Lang};
 use crate::providers::{LlmProvider, ProviderError};
 
@@ -50,7 +50,7 @@ fn prompt(lang: Lang) -> &'static str {
     }
 }
 
-fn na(lang: Lang) -> &'static str {
+pub(crate) fn na(lang: Lang) -> &'static str {
     match lang {
         Lang::En => "n/a",
         Lang::Zh => "暂缺",
@@ -76,12 +76,12 @@ pub(crate) fn fmt_num(v: f64) -> String {
     format!("{sign}{grouped}.{frac}")
 }
 
-fn fmt_pct(p: f64) -> String {
+pub(crate) fn fmt_pct(p: f64) -> String {
     format!("{p:+.2}%")
 }
 
 /// Keeps a table cell on one line and its pipes literal.
-fn cell(s: &str) -> String {
+pub(crate) fn cell(s: &str) -> String {
     s.replace(['\n', '\r'], " ").replace('|', "\\|")
 }
 
@@ -146,13 +146,31 @@ pub fn render_markdown(d: &Draft, f: &PremarketFacts) -> String {
         Field::Value(items) => items.as_slice(),
         Field::Missing { .. } => &[],
     };
+    out.push_str(&render_sources(
+        f.gainers
+            .iter()
+            .chain(&f.losers)
+            .flat_map(|m| &m.reasons)
+            .chain(macro_items),
+        lang,
+    ));
+
+    out.push_str(match lang {
+        Lang::En => DISCLAIMER_EN,
+        Lang::Zh => DISCLAIMER_ZH,
+    });
+    out.push('\n');
+    out
+}
+
+/// The "Sources" section (with its trailing blank line) listing each url
+/// once, or "" when there are none.
+pub(crate) fn render_sources<'a>(
+    reasons: impl Iterator<Item = &'a NewsReason>,
+    lang: Lang,
+) -> String {
     let mut seen = HashSet::new();
-    let sources: Vec<String> = f
-        .gainers
-        .iter()
-        .chain(&f.losers)
-        .flat_map(|m| &m.reasons)
-        .chain(macro_items)
+    let sources: Vec<String> = reasons
         .filter(|r| seen.insert(r.url.as_str()))
         .map(|r| {
             let title = r.title.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -160,19 +178,14 @@ pub fn render_markdown(d: &Draft, f: &PremarketFacts) -> String {
             format!("- [{title}]({})\n", r.url)
         })
         .collect();
-    if !sources.is_empty() {
-        out.push_str(match lang {
-            Lang::En => "## Sources\n\n",
-            Lang::Zh => "## 来源\n\n",
-        });
-        out.extend(sources);
-        out.push('\n');
+    if sources.is_empty() {
+        return String::new();
     }
-
-    out.push_str(match lang {
-        Lang::En => DISCLAIMER_EN,
-        Lang::Zh => DISCLAIMER_ZH,
+    let mut out = String::from(match lang {
+        Lang::En => "## Sources\n\n",
+        Lang::Zh => "## 来源\n\n",
     });
+    out.extend(sources);
     out.push('\n');
     out
 }
@@ -238,13 +251,12 @@ pub(crate) fn one_line(v: &Value, key: &str) -> Result<String, String> {
     Ok(s)
 }
 
-fn parse(v: &Value, lang: Lang) -> Result<Draft, String> {
+fn parse(v: &Value, lang: Lang, want: &[&str]) -> Result<Draft, String> {
     let title = one_line(v, "title")?;
     let summary = one_line(v, "summary")?;
     if summary.starts_with('#') {
         return Err("summary starts with a heading marker".into());
     }
-    let want = headings(lang);
     let items = v
         .get("sections")
         .and_then(Value::as_array)
@@ -288,14 +300,36 @@ fn parse(v: &Value, lang: Lang) -> Result<Draft, String> {
     })
 }
 
-fn attempt(v: Result<Value, ProviderError>, lang: Lang, allowed: &[f64]) -> Result<Draft, Problem> {
+/// `text` with each whole-word occurrence of `names` replaced by a space, so
+/// digits that belong to a known name ("3M", "Phillips 66") are not checked
+/// as figures, without allowing those digits anywhere else.
+pub(crate) fn blank_names(text: &str, names: &[&str]) -> String {
+    let mut out = text.to_string();
+    for name in names.iter().filter(|n| !n.is_empty()) {
+        let re = Regex::new(&format!(r"(^|[^\w.$]){}($|[^\w])", regex::escape(name)))
+            .expect("escaped name is a valid regex");
+        // Twice, since adjacent matches share their boundary character.
+        for _ in 0..2 {
+            out = re.replace_all(&out, "${1} ${2}").into_owned();
+        }
+    }
+    out
+}
+
+fn attempt(
+    v: Result<Value, ProviderError>,
+    lang: Lang,
+    want: &[&str],
+    allowed: &[f64],
+    names: &[&str],
+) -> Result<Draft, Problem> {
     let v = v.map_err(Problem::Llm)?;
-    let d = parse(&v, lang).map_err(Problem::Malformed)?;
+    let d = parse(&v, lang, want).map_err(Problem::Malformed)?;
     let mut text = format!("{}\n{}", d.title, d.summary);
     for (h, m) in &d.sections {
         text.push_str(&format!("\n{h}\n{m}"));
     }
-    check(&text, lang, allowed).map_err(|bad| {
+    check(&blank_names(&text, names), lang, allowed).map_err(|bad| {
         let mut seen = HashSet::new();
         Problem::Numbers(bad.into_iter().filter(|n| seen.insert(n.clone())).collect())
     })?;
@@ -334,13 +368,47 @@ pub async fn write(
     };
     let facts_json = serde_json::to_string_pretty(&for_llm)
         .map_err(|e| vec![format!("draft: facts json: {e}")])?;
-    let allowed = numbers_in_facts(f);
-    let mut user = facts_json.clone();
+    write_with(
+        llm,
+        prompt(lang),
+        &facts_json,
+        &numbers_in_facts(f),
+        &[],
+        &headings(lang),
+        lang,
+        |d| render_markdown(d, f),
+    )
+    .await
+}
+
+/// The drafting loop shared by every content type: ask `llm` with `system`
+/// and the facts JSON, require exactly `headings`, reject markup, check every
+/// number against `allowed` (ignoring the digits of known `names`), and
+/// retry once with the problems appended. On success returns the draft and
+/// `render(draft)`.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn write_with(
+    llm: &dyn LlmProvider,
+    system: &str,
+    facts_json: &str,
+    allowed: &[f64],
+    names: &[&str],
+    headings: &[&str],
+    lang: Lang,
+    render: impl Fn(&Draft) -> String,
+) -> Result<(Draft, String), Vec<String>> {
+    let mut user = facts_json.to_string();
     let mut last = None;
     for _ in 0..ATTEMPTS {
-        match attempt(llm.complete_json(prompt(lang), &user).await, lang, &allowed) {
+        match attempt(
+            llm.complete_json(system, &user).await,
+            lang,
+            headings,
+            allowed,
+            names,
+        ) {
             Ok(d) => {
-                let md = render_markdown(&d, f);
+                let md = render(&d);
                 return Ok((d, md));
             }
             Err(p) => {
@@ -650,7 +718,10 @@ mod tests {
             "Forged heading\n  ----  ",
         ] {
             let v = reply(Lang::En, body).unwrap();
-            assert!(parse(&v, Lang::En).is_err(), "should reject: {body:?}");
+            assert!(
+                parse(&v, Lang::En, &headings(Lang::En)).is_err(),
+                "should reject: {body:?}"
+            );
         }
     }
 
@@ -663,7 +734,10 @@ mod tests {
             "A single dash line\n-",
         ] {
             let v = reply(Lang::En, body).unwrap();
-            assert!(parse(&v, Lang::En).is_ok(), "should accept: {body:?}");
+            assert!(
+                parse(&v, Lang::En, &headings(Lang::En)).is_ok(),
+                "should accept: {body:?}"
+            );
         }
     }
 
@@ -677,7 +751,10 @@ mod tests {
         ] {
             let mut v = clean(Lang::En).unwrap();
             v[key] = json!(val);
-            assert!(parse(&v, Lang::En).is_err(), "should reject {key}: {val:?}");
+            assert!(
+                parse(&v, Lang::En, &headings(Lang::En)).is_err(),
+                "should reject {key}: {val:?}"
+            );
         }
     }
 
@@ -700,6 +777,45 @@ mod tests {
         assert_eq!(fmt_num(1234567.891), "1,234,567.89");
         assert_eq!(fmt_num(-42.0), "-42.00");
         assert_eq!(fmt_num(999.999), "1,000.00");
+    }
+
+    #[tokio::test]
+    async fn write_with_uses_given_headings_and_render() {
+        let two = |heads: &[&str]| -> Result<Value, ProviderError> {
+            Ok(json!({
+                "title": "T",
+                "summary": "S",
+                "sections": heads.iter().map(|h| json!({"heading": h, "markdown": "Up 0.45%."})).collect::<Vec<_>>(),
+            }))
+        };
+        let l = llm(vec![two(&["A"]), two(&["A", "B"])]);
+        let (d, md) = write_with(
+            &l,
+            "SYS",
+            "{}",
+            &[0.45],
+            &[],
+            &["A", "B"],
+            Lang::En,
+            |d: &Draft| format!("rendered {}", d.sections.len()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(md, "rendered 2");
+        assert_eq!(d.sections[1].0, "B");
+        let p = l.prompts.borrow();
+        assert_eq!(p.len(), 2);
+        assert_eq!(p[0], ("SYS".to_string(), "{}".to_string()));
+        assert!(p[1].1.starts_with("{}") && p[1].1.contains("Your reply was invalid"));
+    }
+
+    #[test]
+    fn blank_names_only_whole_names() {
+        let t = "3M fell; 3M's peer rose 33M and $3M; Phillips 66 gained 66%.";
+        assert_eq!(
+            blank_names(t, &["3M", "Phillips 66"]),
+            "  fell;  's peer rose 33M and $3M;   gained 66%."
+        );
     }
 
     #[tokio::test]

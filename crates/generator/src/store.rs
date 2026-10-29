@@ -268,6 +268,20 @@ impl Store for D1Store {
         .await
     }
 
+    async fn has_alert(&self, run_key: &str) -> Result<bool, String> {
+        #[derive(serde::Deserialize)]
+        struct One {
+            n: i64,
+        }
+        let r: Option<One> = self
+            .first(
+                "SELECT COUNT(*) AS n FROM alerts WHERE run_key = ?1",
+                &[s(run_key)],
+            )
+            .await?;
+        Ok(r.is_some_and(|r| r.n > 0))
+    }
+
     async fn put_facts(&self, key: &str, json: &str) -> Result<(), String> {
         self.facts
             .put(key, json.to_string())

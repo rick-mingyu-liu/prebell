@@ -6,11 +6,14 @@ compatibility_date = "2025-01-01"
 command = "worker-build --release"
 
 [triggers]
-# Every 5 min across both DST offsets of the 8:30-9:25 ET window; hourly afterwards for ZH retries.
-# `clock` decides what each firing means.
-# "* * * * *" drives earnings (EDGAR polling, calendar, builds); the Worker
-# queues it only on weekdays 06:00-22:00 ET.
-crons = ["*/5 12-14 * * MON-FRI", "0 15-23 * * MON-FRI", "* * * * *"]  # named days: Cloudflare numbers 1 = Sunday
+# UTC. Each cron maps to its jobs in crates/core/src/schedule.rs (a test keeps
+# the two in sync); `clock` and `core::competitor` decide what each firing means in ET.
+# Three crons: the Free Workers plan allows 5 per account. Day names, not numbers
+# (Cloudflare numbers weekdays 1-7 starting on Sunday), and no comma lists.
+# - "*/5 12-23 * * MON-FRI": premarket and recap (both windows, ZH retries), earnings
+# - "*/5 0-3 * * TUE-SAT": the EST recap tail to 19:00 ET and recap ZH retries to 22:00 ET, earnings
+# - "31 11-12 * * *": competitor at 07:31 ET in either offset
+crons = ["*/5 12-23 * * MON-FRI", "*/5 0-3 * * TUE-SAT", "31 11-12 * * *"]
 
 [[d1_databases]]
 binding = "DB"
@@ -28,10 +31,13 @@ queue = "prebell-jobs"
 
 [[queues.consumers]]
 queue = "prebell-jobs"
+# One job per invocation, so a build never shares an invocation's subrequest
+# budget with another job.
+max_batch_size = 1
 
-# Earnings jobs (every minute in the ET polling window) on their own queue:
-# one consumer and one message per batch, so builds never run in parallel
-# (EDGAR fair access, one build per filing) and never delay the premarket job.
+# Earnings jobs on their own queue: one consumer and one message per batch,
+# so EDGAR is never hit in parallel (fair access, one build per filing) and
+# a build never delays the premarket job.
 [[queues.producers]]
 binding = "EARNINGS"
 queue = "prebell-earnings"

@@ -9,13 +9,10 @@ import PostBody from "@/components/PostBody";
 import type { Locale } from "@/i18n/routing";
 import { getDb } from "@/lib/db";
 import { getPostCharts } from "@/lib/earnings";
+import { pendingTitle } from "@/lib/labels";
 import { getPostBySlug } from "@/lib/posts";
 import { pairedAlternates } from "@/lib/seo";
-import { formatDate, formatEt } from "@/lib/time";
-
-/** The pending page's title names the kind of post. */
-const pendingTitleKey = (contentType: string) =>
-  contentType === "earnings" ? "earningsPendingTitle" : "pendingTitle";
+import { formatEt } from "@/lib/time";
 
 // One D1 read shared by generateMetadata and the page.
 const load = cache((slug: string, locale: Locale) => getPostBySlug(getDb(), slug, locale));
@@ -24,10 +21,10 @@ export async function generateMetadata({ params }: PageProps<"/[locale]/p/[slug]
   const { locale, slug } = await params;
   const post = await load(slug, locale as Locale);
   if (!post) return {};
-  const t = await getTranslations({ locale, namespace: "post" });
+  const t = await getTranslations({ locale });
   if (post.status === "pending") {
     // Not indexed and not paired until the Chinese text is published.
-    return { title: t(pendingTitleKey(post.contentType), { date: formatDate(post.tradingDate, locale as Locale) }), robots: { index: false } };
+    return { title: pendingTitle(t, post, locale as Locale), robots: { index: false } };
   }
   return {
     title: post.title,
@@ -42,12 +39,12 @@ export default async function PostPage({ params }: PageProps<"/[locale]/p/[slug]
   setRequestLocale(locale);
   const post = await load(slug, locale);
   if (!post) notFound();
-  const t = await getTranslations("post");
+  const t = await getTranslations();
 
   if (post.status === "pending") {
     return (
       <article>
-        <h1>{t(pendingTitleKey(post.contentType), { date: formatDate(post.tradingDate, locale as Locale) })}</h1>
+        <h1>{pendingTitle(t, post, locale)}</h1>
         <PendingNotice slug={post.slug} />
       </article>
     );
@@ -58,7 +55,7 @@ export default async function PostPage({ params }: PageProps<"/[locale]/p/[slug]
       <div className="page-tools">
         <p className="meta">
           <time dateTime={post.publishedAt ?? undefined}>
-            {t("published", { time: formatEt(post.publishedAt, locale) })}
+            {t("post.published", { time: formatEt(post.publishedAt, locale) })}
           </time>
         </p>
         {post.hasOtherLang && <LangSwitch locale={locale} path={`/p/${post.slug}`} />}

@@ -17,7 +17,7 @@ use serde::Deserialize;
 
 use crate::anchor::decode_entities;
 use crate::earnings::cik10;
-use crate::providers::{Http, ProviderError};
+use crate::providers::{Http, ProviderError, Timer};
 
 /// Pause before every EDGAR request after the first: at most 8 requests/second.
 pub const GAP_MS: u64 = 125;
@@ -26,12 +26,9 @@ const _: () = assert!(
     "EDGAR fair access: at most 10 requests/second"
 );
 const ARCHIVES: &str = "https://www.sec.gov/Archives/edgar/data/";
-
-/// An async sleep (Workers `Delay` in production, a recorder in tests).
-#[async_trait(?Send)]
-pub trait Pause {
-    async fn pause(&self, ms: u64);
-}
+/// Largest EDGAR response read; a bigger body fails as `TooLarge` without
+/// being read (and parsed) in full.
+pub const MAX_BYTES: usize = 2 * 1024 * 1024;
 
 /// One row of a submissions document's `filings.recent` table.
 #[derive(Debug, Clone, PartialEq)]
@@ -130,23 +127,23 @@ pub trait Filings {
     async fn company_facts(&self, cik: u64) -> Result<CompanyFacts, ProviderError>;
 }
 
-pub struct Edgar<H: Http, P: Pause> {
+pub struct Edgar<H: Http, T: Timer> {
     pub http: H,
-    pub pause: P,
+    pub timer: T,
     user_agent: String,
     used: Cell<bool>,
 }
 
-impl<H: Http, P: Pause> Edgar<H, P> {
+impl<H: Http, T: Timer> Edgar<H, T> {
     /// `contact` is the `SEC_CONTACT` email; SEC blocks anonymous clients.
-    pub fn new(http: H, pause: P, contact: &str) -> Result<Self, ProviderError> {
+    pub fn new(http: H, timer: T, contact: &str) -> Result<Self, ProviderError> {
         let contact = contact.trim();
         if contact.is_empty() {
             return Err(ProviderError::Parse("SEC_CONTACT is empty".into()));
         }
         Ok(Self {
             http,
-            pause,
+            timer,
             user_agent: format!("PreBell/0.1 (+https://prebell.ai; {contact})"),
             used: Cell::new(false),
         })
@@ -154,13 +151,15 @@ impl<H: Http, P: Pause> Edgar<H, P> {
 
     async fn get(&self, url: &str) -> Result<String, ProviderError> {
         if self.used.replace(true) {
-            self.pause.pause(GAP_MS).await;
+            self.timer
+                .sleep(std::time::Duration::from_millis(GAP_MS))
+                .await;
         }
         let headers = [
             ("User-Agent", self.user_agent.as_str()),
             ("Accept-Encoding", "gzip, deflate"),
         ];
-        let r = self.http.get(url, &headers).await?;
+        let r = self.http.get_capped(url, &headers, MAX_BYTES).await?;
         if r.status != 200 {
             return Err(ProviderError::Http(r.status));
         }
@@ -361,7 +360,7 @@ pub fn html_to_text(html: &str) -> String {
 }
 
 #[async_trait(?Send)]
-impl<H: Http, P: Pause> Filings for Edgar<H, P> {
+impl<H: Http, T: Timer> Filings for Edgar<H, T> {
     async fn submissions(&self, cik: u64) -> Result<Submissions, ProviderError> {
         let url = format!("https://data.sec.gov/submissions/CIK{}.json", cik10(cik));
         parse_submissions(&self.get(&url).await?)
@@ -459,12 +458,13 @@ pub(crate) mod tests {
         }
     }
 
+    /// Records each sleep in milliseconds.
     #[derive(Default)]
-    pub(crate) struct RecPause(pub RefCell<Vec<u64>>);
+    pub(crate) struct RecTimer(pub RefCell<Vec<u64>>);
     #[async_trait(?Send)]
-    impl Pause for RecPause {
-        async fn pause(&self, ms: u64) {
-            self.0.borrow_mut().push(ms);
+    impl Timer for RecTimer {
+        async fn sleep(&self, d: std::time::Duration) {
+            self.0.borrow_mut().push(d.as_millis() as u64);
         }
     }
 
@@ -473,7 +473,7 @@ pub(crate) mod tests {
     const EX_URL: &str = "https://www.sec.gov/Archives/edgar/data/320193/000032019326000070/a8-kex991q4202609262026.htm";
     const CF_URL: &str = "https://data.sec.gov/api/xbrl/companyfacts/CIK0000320193.json";
 
-    fn edgar(routes: &[(&str, u16, &str)]) -> Edgar<FakeHttp, RecPause> {
+    fn edgar(routes: &[(&str, u16, &str)]) -> Edgar<FakeHttp, RecTimer> {
         let http = FakeHttp {
             routes: routes
                 .iter()
@@ -481,7 +481,7 @@ pub(crate) mod tests {
                 .collect(),
             ..Default::default()
         };
-        Edgar::new(http, RecPause::default(), "ops@prebell.ai").unwrap()
+        Edgar::new(http, RecTimer::default(), "ops@prebell.ai").unwrap()
     }
 
     #[tokio::test]
@@ -520,7 +520,17 @@ pub(crate) mod tests {
             assert_eq!(ua.1, "PreBell/0.1 (+https://prebell.ai; ops@prebell.ai)");
         }
         // No pause before the first request, one before each later one.
-        assert_eq!(*e.pause.0.borrow(), vec![GAP_MS, GAP_MS]);
+        assert_eq!(*e.timer.0.borrow(), vec![GAP_MS, GAP_MS]);
+    }
+
+    #[tokio::test]
+    async fn oversized_bodies_are_not_read() {
+        let big = "x".repeat(MAX_BYTES + 1);
+        let e = edgar(&[(SUB_URL, 200, &big)]);
+        assert_eq!(
+            e.submissions(320193).await,
+            Err(ProviderError::TooLarge(MAX_BYTES))
+        );
     }
 
     #[tokio::test]
@@ -538,7 +548,7 @@ pub(crate) mod tests {
 
     #[test]
     fn empty_contact_rejected() {
-        assert!(Edgar::new(FakeHttp::default(), RecPause::default(), "  ").is_err());
+        assert!(Edgar::new(FakeHttp::default(), RecTimer::default(), "  ").is_err());
     }
 
     #[tokio::test]

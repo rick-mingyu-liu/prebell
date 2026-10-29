@@ -1,52 +1,44 @@
 //! Generator Worker: cron -> queue -> `tick`, backed by D1 + R2.
 
 mod alerts;
+mod competitor;
 mod earnings_store;
 mod http;
 mod store;
 
+use async_trait::async_trait;
 use chrono::{DateTime, Utc};
+use prebell_core::competitor::run_competitor;
 use prebell_core::earnings::calendar::refresh_tick;
-use prebell_core::earnings::in_window;
 use prebell_core::earnings::run::{build_tick, poll_tick};
-use prebell_core::earnings::store::EarningsStore;
-use prebell_core::edgar::{Edgar, Pause};
+use prebell_core::edgar::Edgar;
+use prebell_core::jobs::{alert_once_today, redact, run_job, JobRunner};
 use prebell_core::llm::{api_key_var, llm_from_env, unknown_provider};
-use prebell_core::providers::{LlmProvider, NewsSearch};
-use prebell_core::run::tick_with_log;
-use prebell_core::store::Store;
+use prebell_core::providers::CountingHttp;
+use prebell_core::providers::LlmProvider;
+use prebell_core::recap;
+use prebell_core::run::{tick_with_hooks, Hooks, TickOutcome};
+use prebell_core::schedule::{jobs_for_cron, queue_for, ContentJob, EarningsStep, JOBS};
 use prebell_core::tavily::Tavily;
 use prebell_core::yahoo::Yahoo;
 use prebell_core::yahoo_calendar::YahooCalendar;
 use serde::{Deserialize, Serialize};
 use worker::*;
 
-use crate::http::WorkerHttp;
+use crate::http::{WorkerHttp, WorkerTimer};
 use crate::store::D1Store;
 
-/// The every-minute cron (wrangler.toml) that drives earnings polling.
-const EARNINGS_CRON: &str = "* * * * *";
 const PLACEHOLDER_CONTACT: &str = "placeholder@example.com";
-/// An earnings message older than this polls the current minute's batch.
+/// An earnings message older than this polls the current batch.
 const MAX_POLL_LAG_MINUTES: i64 = 3;
-
-/// `Pause` on the Workers timer.
-struct WorkerPause;
-
-#[async_trait::async_trait(?Send)]
-impl Pause for WorkerPause {
-    async fn pause(&self, ms: u64) {
-        Delay::from(std::time::Duration::from_millis(ms)).await;
-    }
-}
 
 /// Queue message body. A struct (not `serde_json::Value`) so it crosses the
 /// queue as a plain JS object rather than a JS `Map`.
 #[derive(Serialize, Deserialize, Debug)]
 struct Job {
     job: String,
-    /// When the cron fired (RFC 3339), for earnings jobs: picks the watchlist
-    /// batch, so a late message neither skips nor repeats one.
+    /// When the cron fired (RFC 3339): an earnings poll picks its watchlist
+    /// batch by it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     at: Option<String>,
 }
@@ -95,124 +87,173 @@ async fn fetch(req: Request, _env: Env, _ctx: Context) -> Result<Response> {
 
 #[event(scheduled)]
 async fn scheduled(event: ScheduledEvent, env: Env, _ctx: ScheduleContext) {
-    // Earnings go to their own queue (one consumer, one message at a time) so
-    // a minutes-long earnings build never delays the premarket brief or runs
-    // twice in parallel against EDGAR.
-    let t = now(&env);
-    let (job, binding, at) = if event.cron() == EARNINGS_CRON {
-        // Earnings jobs run only in the polling window (weekdays 06:00-22:00 ET).
-        if !in_window(t) {
-            return;
-        }
-        let at = t.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
-        ("earnings", "EARNINGS", Some(at))
-    } else {
-        ("premarket", "JOBS", None)
-    };
-    let sent = match env.queue(binding) {
-        Ok(q) => {
-            q.send(Job {
-                job: job.into(),
-                at,
+    let cron = event.cron();
+    let jobs = jobs_for_cron(&cron).unwrap_or_else(|| {
+        console_error!("cron {cron}: not in schedule.rs; queueing every job");
+        JOBS
+    });
+    let at = now(&env).to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    for job in jobs {
+        // Earnings go to their own queue (one consumer, one message at a
+        // time) so EDGAR is never hit in parallel and a build never delays
+        // the premarket brief.
+        let binding = queue_for(job);
+        let queue = match env.queue(binding) {
+            Ok(q) => q,
+            Err(e) => {
+                console_error!("cron {cron}: queue binding {binding} failed: {e}");
+                continue;
+            }
+        };
+        match queue
+            .send(Job {
+                job: job.to_string(),
+                at: Some(at.clone()),
             })
             .await
+        {
+            Ok(()) => console_log!("cron {cron}: queued {job} job"),
+            Err(e) => console_error!("cron {cron}: queue send for {job} failed: {e}"),
         }
-        Err(e) => Err(e),
-    };
-    match sent {
-        Ok(()) => console_log!("cron {}: queued {job} job", event.cron()),
-        Err(e) => console_error!("cron {}: queue send failed: {e}", event.cron()),
     }
 }
 
-/// Adds an alert at most once per ET day per `key` (kv `alert:{key}`).
-async fn alert_once(store: &D1Store, now: DateTime<Utc>, key: &str, msg: &str) {
-    let day = prebell_core::clock::et(now).date_naive().to_string();
-    let kv = format!("alert:{key}");
-    match store.kv_get(&kv).await {
-        Ok(Some(d)) if d == day => return,
-        Err(e) => return console_error!("alert {key}: {e}"),
-        _ => {}
-    }
-    let stamp = now.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
-    if let Err(e) = store.kv_set(&kv, &day, &stamp).await {
-        return console_error!("alert {key}: {e}");
-    }
-    if let Err(e) = store.add_alert(key, "error", msg).await {
-        console_error!("alert {key}: {e}");
-    }
+/// The Worker side of `jobs::run_job`, for one queue message.
+struct Runner<'a> {
+    env: &'a Env,
+    store: &'a D1Store,
+    /// Every outgoing fetch goes through this, so `http.count()` is the
+    /// invocation's fetch subrequests (D1 and R2 binding calls not included).
+    http: CountingHttp<WorkerHttp>,
+    /// When the message's cron fired.
+    fired: Option<DateTime<Utc>>,
 }
 
-/// One earnings tick: poll a watchlist batch, refresh the calendar (once a
-/// day), then build at most one queued filing.
-async fn earnings(
-    env: &Env,
-    at: Option<&str>,
-    store: &D1Store,
-    ns: &dyn NewsSearch,
-    llm: &dyn LlmProvider,
-) -> Result<()> {
-    let t = now(env);
-    let contact = text(env, "SEC_CONTACT").unwrap_or_default();
-    // SEC blocks anonymous clients; never poll as the placeholder.
-    if contact == PLACEHOLDER_CONTACT {
-        alert_once(
-            store,
-            t,
-            "sec-contact",
-            "earnings are off: SEC_CONTACT is the placeholder; set a real contact email",
+impl Runner<'_> {
+    /// The LLM, built per message so a bad config fails only the jobs that
+    /// need it. The error names the variable and its value, never a secret.
+    fn llm(&self, other_secrets: &[&str]) -> std::result::Result<Box<dyn LlmProvider>, String> {
+        let env = self.env;
+        let provider = text(env, "LLM_PROVIDER").unwrap_or_else(|| "claude".into());
+        let key_var =
+            api_key_var(&provider).ok_or_else(|| unknown_provider(&provider).to_string())?;
+        let llm_key = secret_or_empty(env, key_var);
+        llm_from_env(
+            &provider,
+            self.http.clone(),
+            llm_key.clone(),
+            text(env, "LLM_MODEL"),
+            text(env, "LLM_EFFORT"),
+            |m| console_warn!("{m}"),
         )
-        .await;
-        return Err(Error::RustError("SEC_CONTACT is the placeholder".into()));
+        .map_err(|e| {
+            let mut secrets = vec![llm_key.as_str()];
+            secrets.extend_from_slice(other_secrets);
+            redact(&e.to_string(), &secrets)
+        })
     }
-    let edgar = Edgar::new(WorkerHttp, WorkerPause, &contact)
-        .map_err(|e| Error::RustError(e.to_string()))?;
-    let fired = at
-        .and_then(|a| DateTime::parse_from_rfc3339(a).ok())
-        .map_or(t, |a| a.with_timezone(&Utc));
-    // A message delayed by a long build polls the current minute's batch
-    // instead of its own; batches rotate every minute either way.
-    let poll_at = if t - fired <= chrono::Duration::minutes(MAX_POLL_LAG_MINUTES) {
-        fired
-    } else {
-        t
-    };
-    match poll_tick(poll_at, store, store, &edgar).await {
-        Ok(o) => {
-            for e in &o.errors {
-                console_warn!("earnings poll: {e}");
+
+    /// EDGAR as `SEC_CONTACT`; SEC blocks anonymous clients, so the
+    /// placeholder is a config error.
+    fn edgar(&self) -> std::result::Result<Edgar<CountingHttp<WorkerHttp>, WorkerTimer>, String> {
+        let contact = text(self.env, "SEC_CONTACT").unwrap_or_default();
+        if contact == PLACEHOLDER_CONTACT {
+            return Err(
+                "SEC_CONTACT is the placeholder; set a real contact email to turn earnings on"
+                    .into(),
+            );
+        }
+        Edgar::new(self.http.clone(), WorkerTimer, &contact).map_err(|e| e.to_string())
+    }
+}
+
+#[async_trait(?Send)]
+impl JobRunner for Runner<'_> {
+    /// A premarket or recap tick.
+    async fn content(&self, job: ContentJob) -> std::result::Result<TickOutcome, String> {
+        let env = self.env;
+        let md = Yahoo::new(self.http.clone());
+        let news_key = secret_or_empty(env, "TAVILY_API_KEY");
+        let ns = Tavily::new(self.http.clone(), news_key.clone());
+        let llm = self.llm(&[&news_key])?;
+        let log = |m: &str| console_log!("{m}");
+        // Read when the facts are built, so a retrying run's last_error says
+        // how close the build came to the Free plan's 50.
+        let extra = || vec![format!("subrequests={}", self.http.count())];
+        let hooks = Hooks {
+            log: &log,
+            extra: &extra,
+        };
+        let at = now(env);
+        let store = self.store;
+        Ok(match job {
+            ContentJob::Premarket => {
+                tick_with_hooks(at, store, &md, &ns, llm.as_ref(), &hooks).await
             }
-            if o.throttled {
-                alert_once(
-                    store,
-                    t,
-                    "sec-throttled",
-                    &format!(
+            ContentJob::Recap => {
+                recap::tick_with_hooks(at, store, &md, &ns, llm.as_ref(), &hooks).await
+            }
+        })
+    }
+
+    async fn competitor(&self) -> String {
+        let outcome = run_competitor(now(self.env), &self.http, &WorkerTimer, self.store).await;
+        format!("{outcome:?}")
+    }
+
+    /// One earnings tick: poll a watchlist batch, refresh the calendar (once
+    /// a day), then build at most one queued filing.
+    async fn earnings(&self, _step: EarningsStep) -> std::result::Result<String, String> {
+        let env = self.env;
+        let store = self.store;
+        let t = now(env);
+        let edgar = self.edgar()?;
+        let news_key = secret_or_empty(env, "TAVILY_API_KEY");
+        let ns = Tavily::new(self.http.clone(), news_key.clone());
+        let llm = self.llm(&[&news_key])?;
+        let fired = self.fired.unwrap_or(t);
+        // A message delayed by a long build polls the current batch instead
+        // of its own.
+        let poll_at = if t - fired <= chrono::Duration::minutes(MAX_POLL_LAG_MINUTES) {
+            fired
+        } else {
+            t
+        };
+        match poll_tick(poll_at, store, store, &edgar).await {
+            Ok(o) => {
+                for e in &o.errors {
+                    console_warn!("earnings poll: {e}");
+                }
+                if o.throttled {
+                    let msg = format!(
                         "SEC EDGAR refused requests (403/429); polling paused this tick: {}",
                         o.errors.last().cloned().unwrap_or_default()
-                    ),
-                )
-                .await;
+                    );
+                    if let Err(e) = alert_once_today(t, "sec-throttled", "error", &msg, store).await
+                    {
+                        console_error!("alert sec-throttled: {e}");
+                    }
+                }
+                console_log!("earnings poll: checked {}, new {:?}", o.checked, o.detected);
             }
-            console_log!("earnings poll: checked {}, new {:?}", o.checked, o.detected);
+            Err(e) => console_error!("earnings poll aborted: {e}"),
         }
-        Err(e) => console_error!("earnings poll aborted: {e}"),
-    }
-    let cal = YahooCalendar::new(WorkerHttp);
-    match refresh_tick(t, store, store, &cal, ns, llm).await {
-        Ok(o) if o.ran => console_log!("calendar refresh: {o:?}"),
-        Ok(_) => {}
-        Err(e) => console_error!("calendar refresh aborted: {e}"),
-    }
-    match build_tick(now(env), store, store, &edgar, llm).await {
-        Ok(o) => {
-            for (key, outcome) in o {
-                console_log!("earnings {key}: {outcome:?}");
+        let cal = YahooCalendar::new(self.http.clone());
+        match refresh_tick(t, store, store, &cal, &ns, llm.as_ref()).await {
+            Ok(o) if o.ran => console_log!("calendar refresh: {o:?}"),
+            Ok(_) => {}
+            Err(e) => console_error!("calendar refresh aborted: {e}"),
+        }
+        match build_tick(now(env), store, store, &edgar, llm.as_ref()).await {
+            Ok(o) => {
+                for (key, outcome) in o {
+                    console_log!("earnings {key}: {outcome:?}");
+                }
             }
+            Err(e) => console_error!("earnings build aborted: {e}"),
         }
-        Err(e) => console_error!("earnings build aborted: {e}"),
+        Ok("done".into())
     }
-    Ok(())
 }
 
 #[event(queue)]
@@ -221,46 +262,36 @@ async fn queue(batch: MessageBatch<Job>, env: Env, _ctx: Context) -> Result<()> 
         db: env.d1("DB")?,
         facts: env.bucket("FACTS")?,
     };
-    let md = Yahoo::new(WorkerHttp);
-    let ns = Tavily::new(WorkerHttp, secret_or_empty(&env, "TAVILY_API_KEY"));
-    let provider = text(&env, "LLM_PROVIDER").unwrap_or_else(|| "claude".into());
-    let key_var = api_key_var(&provider)
-        .ok_or_else(|| Error::RustError(unknown_provider(&provider).to_string()))?;
-    let llm = llm_from_env(
-        &provider,
-        WorkerHttp,
-        secret_or_empty(&env, key_var),
-        text(&env, "LLM_MODEL"),
-        text(&env, "LLM_EFFORT"),
-        |m| console_warn!("{m}"),
-    )
-    .map_err(|e| Error::RustError(e.to_string()))?;
+    let http = CountingHttp::new(WorkerHttp);
 
     for msg in batch.messages()? {
         let body = msg.body();
-        match body.job.as_str() {
-            "earnings" => {
-                if let Err(e) = earnings(&env, body.at.as_deref(), &store, &ns, llm.as_ref()).await
-                {
-                    console_error!("job earnings: {e}");
-                }
-            }
-            job => {
-                let outcome = tick_with_log(now(&env), &store, &md, &ns, llm.as_ref(), &|m| {
-                    console_log!("{m}")
-                })
-                .await;
-                console_log!("job {job}: {:?}", outcome);
-            }
+        let job = body.job.as_str();
+        http.reset();
+        let runner = Runner {
+            env: &env,
+            store: &store,
+            http: http.clone(),
+            fired: body
+                .at
+                .as_deref()
+                .and_then(|a| DateTime::parse_from_rfc3339(a).ok())
+                .map(|a| a.with_timezone(&Utc)),
+        };
+        // A config error is alerted (once per job per ET day) and acked, not
+        // retried: a retry would fail the same way, and the other messages
+        // and the alert delivery below must still run.
+        match run_job(now(&env), job, &store, &runner).await {
+            Ok(line) => console_log!("{line}"),
+            Err(line) => console_error!("{line}"),
         }
+        // Free plan: fetch subrequests this job used (limit 50 per invocation).
+        console_log!("subrequests={} job={job}", http.count());
         msg.ack();
     }
 
-    alerts::deliver(
-        &store,
-        &WorkerHttp,
-        text(&env, "ALERT_WEBHOOK_URL").as_deref(),
-    )
-    .await;
+    http.reset();
+    alerts::deliver(&store, &http, text(&env, "ALERT_WEBHOOK_URL").as_deref()).await;
+    console_log!("subrequests={} job=alerts", http.count());
     Ok(())
 }
