@@ -83,9 +83,9 @@ The generator runs on the Workers Free plan for now. The limits that matter:
 |---|---|---|
 | Cron triggers per account | 5 | `crates/generator/wrangler.toml` uses 3 (a test in `schedule.rs` keeps it at 3). |
 | CPU time per invocation | 10 ms | Each queue message is its own invocation (`max_batch_size = 1`). Waiting on the network is not CPU time; JSON parsing and drafting checks are. |
-| Fetch subrequests per invocation | 50 | Yahoo, Tavily, the LLM, the competitor feed and the alert webhook. |
+| Fetch subrequests per invocation | 50 | Yahoo, Tavily, the LLM, EDGAR, the competitor feed and the alert webhook. |
 | Subrequests to internal services | 1,000 | D1 and R2 binding calls. The [limits page](https://developers.cloudflare.com/workers/platform/limits/) counts calls to R2, KV and D1 as subrequests and gives Free a separate 1,000 row for internal services, so they are not counted in `subrequests=`. |
-| Queue operations per day | 10,000 | About 340 messages on a weekday, at about 3 operations each. |
+| Queue operations per day | 10,000 | About 650 cron messages on a weekday (premarket, recap and earnings every 5 minutes) plus earnings builds, at about 3 operations each. |
 
 ### Reading `subrequests=`
 
@@ -93,9 +93,17 @@ After each queue message, `pnpm exec wrangler tail` in `crates/generator` shows 
 
 - A premarket build is about 1 Yahoo cookie, 1 crumb, 11 v7 batches and 4 futures charts, plus 1 Tavily search and 1 LLM call per mover, 1 macro search and its LLM call, and 2-4 draft calls.
 - A recap build is 4 index charts, the cookie, the crumb and 11 v7 batches, plus the same news and LLM work.
+- An earnings poll (`job=earnings`) is at most 34 EDGAR submissions requests. A build (`job=earnings:build`) is the filing index, the exhibit, up to 5 XBRL `companyconcept` documents, the extraction and 2-4 draft calls: about 12, at most about 14 with a Chinese retry. The calendar (`job=earnings:calendar`) is the Yahoo cookie, crumb and 3 v7 batches plus up to 5 announcement searches with an LLM call each: about 15.
 - When a run retries, `runs.last_error` ends with `subrequests=N`: the count when the facts were built, before the drafts. Read it with `pnpm exec wrangler d1 execute prebell --remote --command "select run_key,last_error from runs order by updated_at desc limit 3"`.
 - Redirect hops count toward the 50 but are not visible here, so treat 45 or more as at the limit. Past 50, fetches fail with a network error, and the build shows them as `net=` or `search_err=` in its diagnostics.
 
 ### CPU overruns
 
 An invocation over 10 ms of CPU is killed. In `wrangler tail` it shows with outcome `exceededCpu`. If that happens, or if `subrequests=` gets near 50, the fix is Workers Paid ($5/month): 5 minutes of CPU (30 seconds by default) and 10,000 subrequests per invocation. No code change is needed.
+
+## Earnings
+
+- Create the queue before the first deploy: `pnpm exec wrangler queues create prebell-earnings`. Earnings run only on it (one consumer, one message at a time), so EDGAR is never hit in parallel.
+- `SEC_CONTACT` must be a real contact email: SEC blocks anonymous clients. With the placeholder, every earnings step is a config error with one `error` alert per ET day, keyed `config:earnings:<date>`.
+- SEC answering 403/429 stops that poll and raises one `error` alert per ET day (`sec-throttled:<date>`); the next firing tries again.
+- `EARNINGS_CALENDAR_SEED = "off"` stops reading Yahoo for calendar dates (for example while Yahoo throttles; a 429 shows as `yahoo_429=N` in the `job=earnings:calendar` log line). Company announcements and EDGAR filings still update the calendar.

@@ -981,6 +981,65 @@ mod tests {
         assert!(o.throttled);
     }
 
+    /// Counts every LLM call (each is one fetch subrequest).
+    struct CountingLlm<'a>(&'a FakeLlm, Cell<usize>);
+    #[async_trait(?Send)]
+    impl LlmProvider for CountingLlm<'_> {
+        async fn complete_json(&self, system: &str, user: &str) -> Result<Value, ProviderError> {
+            self.1.set(self.1.get() + 1);
+            self.0.complete_json(system, user).await
+        }
+    }
+
+    /// A build's fetch subrequests through the real `Edgar` client: the
+    /// filing index, the exhibit, the XBRL concepts, the extraction and
+    /// every draft attempt (Chinese failing both, the worst case), plus a
+    /// Chinese retry of another filing in the same invocation, stay under 40
+    /// of the Free plan's 50.
+    #[tokio::test]
+    async fn a_build_stays_under_40_subrequests() {
+        use crate::earnings::xbrl::tests::{EPS, NET_INCOME, REVENUE};
+        use crate::edgar::tests::{FakeHttp, RecTimer};
+        use crate::edgar::{concept_url, Edgar};
+        use crate::providers::CountingHttp;
+        let (base, es, _) = detected().await;
+        let mut http = FakeHttp::default();
+        let mut route = |u: String, body: &str| {
+            http.routes.insert(u, (200, body.to_string()));
+        };
+        route(filing_url(320193, ACC), INDEX);
+        let ex = exhibit_991(&parse_filing_index(INDEX)).unwrap().url.clone();
+        route(ex, EX991);
+        route(
+            concept_url(
+                320193,
+                "RevenueFromContractWithCustomerExcludingAssessedTax",
+            ),
+            REVENUE,
+        );
+        route(concept_url(320193, "EarningsPerShareDiluted"), EPS);
+        route(concept_url(320193, "NetIncomeLoss"), NET_INCOME);
+        let edgar = Edgar::new(
+            CountingHttp::new(http),
+            RecTimer::default(),
+            "ops@prebell.ai",
+        )
+        .unwrap();
+        let inner = llm(true, false);
+        let l = CountingLlm(&inner, Cell::new(0));
+        let o = build_tick(poll_time(), &es, base.as_ref(), &edgar, &l)
+            .await
+            .unwrap();
+        assert_eq!(o[0].1, TickOutcome::PublishedEnOnly, "{o:?}");
+        let fetches = edgar.http.count();
+        let used = fetches + l.1.get();
+        // index + exhibit + 4 concepts (no `Revenues`, then the current tag,
+        // EPS, net income) = 6 fetches; extraction + EN + 2 ZH attempts = 4.
+        assert_eq!((fetches, l.1.get()), (6, 4));
+        // A Chinese retry for another filing in the same invocation adds 2.
+        assert!(used + 2 <= 40, "{used}");
+    }
+
     #[tokio::test]
     async fn poll_outside_window_does_nothing() {
         let (base, es) = stores();

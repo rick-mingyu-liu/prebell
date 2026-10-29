@@ -12,6 +12,40 @@
 
 **Spec:** `docs/spec.md` §3 goals 3–4, §7 earnings detection + calendar, §8 rules. Plan 1 (`docs/plan-1.md`) conventions apply unless restated.
 
+## Free-plan revision (2026-10-29)
+
+Everything runs on free tiers until real DAU (`docs/spec.md` §10). On the
+Workers Free plan (50 fetch subrequests and 10 ms CPU per invocation, 5 crons
+per account) the earnings pipeline changed from the tasks below as follows;
+where a task says otherwise, this section wins.
+
+- **Crons:** no every-minute cron. The project keeps 3 crons; the weekday cron
+  is `"*/5 10-23 * * MON-FRI"` and, with `"*/5 0-3 * * TUE-SAT"`, covers every
+  5-minute slot of the 06:00-22:00 ET window under EDT and EST. Both queue
+  `earnings` (see `core::schedule`), on its own single-consumer `EARNINGS`
+  queue; premarket and recap stay clock-gated.
+- **Jobs:** `earnings` is a `JobKind` run through `jobs::run_job`. A poll
+  (`earnings`) sends at most **34** submissions requests (102 companies every
+  15 minutes over 3 firings), 125 ms apart, stopping on 403/429; it queues one
+  `earnings:build` message per detected filing (one while any filing is open)
+  and `earnings:calendar` once per ET day. Each message is its own invocation
+  and budget; a poll message older than 5 minutes is dropped. Config errors
+  (placeholder `SEC_CONTACT`, bad LLM config) alert once per ET day.
+- **XBRL:** never `companyfacts` (multi-MB, too much CPU). `xbrl::fetch_trend`
+  reads `companyconcept` per concept (revenue tags in order until one is
+  current, then `EarningsPerShareDiluted`, `NetIncomeLoss`; at most 5
+  requests, 2 MB cap each). A build is about 12 subrequests.
+- **EDGAR time:** `acceptanceDateTime` is UTC; ET dates come from it.
+- **Calendar:** seeded from Yahoo's v7 quote earnings fields
+  (`earningsTimestamp*`, `isEarningsDateEstimate`; about 5 requests), not
+  calendar HTML pages. `EARNINGS_CALENDAR_SEED = "yahoo" | "off"`. On a
+  press-release wire a proof must name the company as a whole word and list
+  its `(NYSE: X)` / `(NASDAQ: X)` ticker.
+- **Figures:** a figure's quote starts with a label naming its metric; revenue
+  table rows must be the total; EPS is never a dividend; operating margin is
+  GAAP. The 8-K chart bar needs a verified quarter and at most 2.5x the series
+  max.
+
 ## Global Constraints
 
 - Everything from Plan 1's Global Constraints (languages, ET schedule, UTC storage, missing data never guessed, EN-first/ZH-pending, no AlphaLab content, secrets only via `wrangler secret put`).
