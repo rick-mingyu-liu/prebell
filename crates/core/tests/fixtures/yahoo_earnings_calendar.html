@@ -1,0 +1,27 @@
+<!-- SYNTHETIC fixture hand-written in the shape of Yahoo Finance's
+     /calendar/earnings?day=YYYY-MM-DD page (one results table). Companies,
+     times and estimate values are invented; the estimate columns exist only
+     to prove the parser never reads them. -->
+<!DOCTYPE html>
+<html lang="en-US"><head><title>Earnings Calendar | Yahoo Finance</title>
+<script>window.YAHOO = {"context": "<table><tr><td>FAKE</td></tr></table>"};</script></head>
+<body>
+<div id="cal-res-table"><div class="Ovx(a) Ovx(h)--print Ovy(h) W(100%) ">
+<table class="W(100%)" data-test="cal-table">
+<thead><tr>
+<th class="Ta(start)" aria-label="Symbol"><span>Symbol</span></th>
+<th aria-label="Company"><span>Company</span></th>
+<th aria-label="Event Name"><span>Event Name</span></th>
+<th aria-label="Earnings Call Time"><span>Earnings Call Time</span></th>
+<th aria-label="EPS Estimate"><span>EPS Estimate</span></th>
+<th aria-label="Reported EPS"><span>Reported EPS</span></th>
+<th aria-label="Surprise(%)"><span>Surprise(%)</span></th>
+</tr></thead>
+<tbody>
+<tr class="simpTblRow"><td aria-label="Symbol"><a href="/quote/AAPL?p=AAPL" title="Apple Inc.">AAPL</a></td><td aria-label="Company">Apple Inc.</td><td aria-label="Event Name">Q4 2026 Earnings Call</td><td aria-label="Earnings Call Time"><span>After Market Close</span></td><td aria-label="EPS Estimate">1.77</td><td aria-label="Reported EPS">-</td><td aria-label="Surprise(%)">-</td></tr>
+<tr class="simpTblRow"><td aria-label="Symbol"><a href="/quote/XOM?p=XOM">XOM</a></td><td aria-label="Company">Exxon Mobil Corp</td><td aria-label="Event Name">Q3 2026 Earnings Release</td><td aria-label="Earnings Call Time"><span>Before Market Open</span></td><td aria-label="EPS Estimate">1.88</td><td aria-label="Reported EPS">-</td><td aria-label="Surprise(%)">-</td></tr>
+<tr class="simpTblRow"><td aria-label="Symbol"><a href="/quote/BRK-B?p=BRK-B">BRK-B</a></td><td aria-label="Company">Berkshire Hathaway Inc</td><td aria-label="Event Name">Q3 2026 Earnings Release</td><td aria-label="Earnings Call Time"><span>TAS</span></td><td aria-label="EPS Estimate">5.01</td><td aria-label="Reported EPS">-</td><td aria-label="Surprise(%)">-</td></tr>
+<tr class="simpTblRow"><td aria-label="Symbol"><a href="/quote/ZZZQ?p=ZZZQ">ZZZQ</a></td><td aria-label="Company">Not On The Watchlist Co</td><td aria-label="Event Name">Q3 2026 Earnings Call</td><td aria-label="Earnings Call Time"><span>Before Market Open</span></td><td aria-label="EPS Estimate">0.10</td><td aria-label="Reported EPS">-</td><td aria-label="Surprise(%)">-</td></tr>
+<tr class="simpTblRow"><td aria-label="Symbol"><a href="/quote/TM?p=TM">TM</a></td><td aria-label="Company">Toyota Motor Corp</td><td aria-label="Event Name">Q2 2027 Earnings Release</td><td aria-label="Earnings Call Time"><span>Time Not Supplied</span></td><td aria-label="EPS Estimate">4.50</td><td aria-label="Reported EPS">-</td><td aria-label="Surprise(%)">-</td></tr>
+</tbody></table></div></div>
+</body></html>

@@ -11,5 +11,6 @@ pub mod run;
 pub mod store;
 pub mod tavily;
 pub mod yahoo;
+pub mod yahoo_calendar;
 
 pub use numbers::Lang;
