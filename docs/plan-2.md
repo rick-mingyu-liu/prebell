@@ -185,13 +185,14 @@ docs/plan-2.md
 **Files:** Create `crates/core/src/schedule.rs`; modify `crates/generator/src/lib.rs`, `crates/generator/wrangler.toml`.
 
 **Interfaces:**
-- Produces: `const CRONS: &[(&str, &[&str])]` and `fn jobs_for_cron(cron) -> &'static [&'static str]` (unknown cron ⇒ every job, logged by the Worker).
+- Produces: `const CRONS: &[(&str, &[&str])]`, `const JOBS`, and `fn jobs_for_cron(cron) -> Option<&'static [&'static str]>` (unknown cron ⇒ `None`; the Worker logs it and runs every job).
+- Day-of-week is written with names: Cloudflare numbers weekdays 1-7 from Sunday, so Plan 1's numeric `1-5` meant Sunday-Thursday (fixed here).
 - Crons (UTC; `clock` decides what each firing means):
-  - `*/5 12-14 * * 1-5` → premarket (unchanged)
-  - `0 15-23 * * 1-5` → premarket (unchanged: hourly ZH retries)
-  - `*/5 17-23 * * 1-5` → recap: early-close window from 17:45Z (EDT) / 18:45Z (EST), full-day window from 20:45Z (EDT) / 21:45Z (EST)
-  - `*/5 0 * * 2-6` → recap: EST 19:00–19:55 ET (deadline skip) and the first hour of ZH retries
-  - `0 1-3 * * 2-6` → recap: hourly ZH retries until the 22:00 ET give-up under both offsets
+  - `*/5 12-14 * * MON-FRI` → premarket (Plan 1's hours)
+  - `0 15-23 * * MON-FRI` → premarket (Plan 1's hourly ZH retries)
+  - `*/5 17-23 * * MON-FRI` → recap: early-close window from 17:45Z (EDT) / 18:45Z (EST), full-day window from 20:45Z (EDT) / 21:45Z (EST)
+  - `*/5 0 * * TUE-SAT` → recap: EST 19:00–19:55 ET (deadline skip) and the first hour of ZH retries
+  - `0 1-3 * * TUE-SAT` → recap: hourly ZH retries until the 22:00 ET give-up under both offsets
 - Worker: `scheduled` enqueues one `Job` per job name for the firing cron; `queue` dispatches `"premarket"` → `run::tick`, `"recap"` → `recap::tick`, unknown → error log + ack.
 
 - [ ] **Step 1: Failing tests:** `CRONS` keys equal the `crons` array in `crates/generator/wrangler.toml` (read with `include_str!`); every recap window minute in EDT and EST for full and early-close days, the 19:00 ET deadline and the 22:00 ET give-up is matched by some recap cron (simulated with a tiny 5-field matcher over each minute of 2026-10-29, 2026-11-02, 2026-11-06, 2026-11-27); premarket jobs are only produced by premarket crons.

@@ -122,6 +122,15 @@ mod tests {
             assert!(!jobs.is_empty() && jobs.iter().all(|j| JOBS.contains(j)));
         }
         assert_eq!(jobs_for_cron("*/5 0 * * TUE-SAT"), Some(&["recap"][..]));
+        // Each cron serves one job, so a recap firing never adds premarket
+        // ZH retries and the reverse.
+        let premarket: Vec<&str> = CRONS
+            .iter()
+            .filter(|(_, j)| j.contains(&"premarket"))
+            .map(|(c, _)| *c)
+            .collect();
+        assert_eq!(premarket, ["*/5 12-14 * * MON-FRI", "0 15-23 * * MON-FRI"]);
+        assert!(CRONS.iter().all(|(_, j)| j.len() == 1));
         assert_eq!(jobs_for_cron("* * * * *"), None);
     }
 
