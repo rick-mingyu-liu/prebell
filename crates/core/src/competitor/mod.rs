@@ -38,7 +38,7 @@ pub enum CompetitorDecision {
 }
 
 /// Due when the ET time is in [07:30, 08:00), any day of the week. The cron
-/// fires at 11:30 and 12:30 UTC; exactly one of those is 07:30 ET.
+/// fires at 11:31 and 12:31 UTC; exactly one of those is 07:31 ET.
 pub fn competitor_decision(now_utc: DateTime<Utc>) -> CompetitorDecision {
     let local = et(now_utc);
     let start = NaiveTime::from_hms_opt(7, 30, 0).unwrap();
@@ -306,6 +306,10 @@ mod tests {
     fn decision_is_dst_safe() {
         let due = |s: &str| matches!(competitor_decision(utc(s)), CompetitorDecision::Due { .. });
         assert!(due("2026-10-30T11:30:00Z")); // EDT 07:30
+        assert!(due("2026-10-30T11:31:00Z")); // the actual cron minute
+        assert!(!due("2026-10-30T12:31:00Z"));
+        assert!(due("2026-11-02T12:31:00Z"));
+        assert!(!due("2026-11-02T11:31:00Z"));
         assert!(!due("2026-10-30T12:30:00Z")); // EDT 08:30
         assert!(due("2026-11-02T12:30:00Z")); // EST 07:30
         assert!(!due("2026-11-02T11:30:00Z")); // EST 06:30

@@ -16,7 +16,7 @@
 - Stored per item: **title, link, published time (UTC), category, tickers in the title**. Never descriptions, `content:encoded`, authors or bodies. The parser never returns them: `FeedItem` has no field to hold them.
 - **Never feeds generation.** `premarket/`, `run.rs`, `facts.rs`, `store.rs` and the prompts never import or read `competitor` code or tables. A core test enforces this by scanning those sources.
 - No AlphaLab text in any of our content. Titles appear only in the internal digest and the admin page.
-- Schedule: cron `30 11,12 * * *` (daily, both DST offsets). The run is due only when the ET time is in `[07:30, 08:00)`, so exactly one firing per day counts (EDT: 11:30Z; EST: 12:30Z). One report per ET date: an existing report for that date makes later firings a no-op.
+- Schedule: cron `31 11,12 * * *` (daily, both DST offsets). The run is due only when the ET time is in `[07:30, 08:00)`, so exactly one firing per day counts (EDT: 11:31Z; EST: 12:31Z). Minute 31 keeps it off every premarket cron minute, so each firing is its own scheduled event. One report per ET date: an existing report for that date makes later firings a no-op.
 - Report window: the 24 hours before the run (`now - 24h ≤ t < now`), for their items (`published_at`) and our posts (`published_at`, EN published).
 - Digest: one `alerts` row, `level = 'info'`, `run_key = 'competitor:YYYY-MM-DD'`; built to at most `DIGEST_MAX_CHARS = 1850` characters so `alerts::deliver`'s `"{level}: {run_key}: "` prefix keeps it under its 1900-char cap without truncating mid-line. Never includes the admin token.
 - Fetch failure, non-2xx, or a body that isn't RSS: an `error` alert, no report for that day; the next day runs normally.
@@ -45,7 +45,7 @@ crates/core/src/competitor/
 crates/core/tests/fixtures/alphalab_feed.xml   # hand-written, invented titles
 crates/generator/src/competitor.rs        # CompetitorStore on D1
 crates/generator/src/lib.rs               # cron + queue dispatch (modified)
-crates/generator/wrangler.toml            # + cron "30 11,12 * * *" (modified)
+crates/generator/wrangler.toml            # + cron "31 11,12 * * *" (modified)
 apps/web/src/lib/competitor.ts            # getLatestReport, listRecentItems, tokenMatches
 apps/web/src/app/admin/layout.tsx         # separate root layout, noindex
 apps/web/src/app/admin/competitor/page.tsx
@@ -154,10 +154,10 @@ apps/web/tests/competitor.test.ts
 
 **Interfaces:**
 - Consumes: `run_competitor`, `CompetitorStore`, `D1Store`, `WorkerHttp`, `alerts::deliver`.
-- Produces: `impl CompetitorStore for D1Store` (items upsert in one D1 batch, `ON CONFLICT(link) DO UPDATE` keeping `first_seen_at`; our posts = `posts` ⋈ EN `post_translations` with `status='published'` and `published_at` in the window, plus that post's `sources.title`); `COMPETITOR_CRON = "30 11,12 * * *"`; `scheduled` sends `{"job":"competitor"}` for that cron and `{"job":"premarket"}` otherwise; `queue` dispatches on `job`, running `run_competitor(now(&env), …, SEC_CONTACT)` for `competitor`, then delivers alerts as before. Premarket providers are built only for premarket jobs.
+- Produces: `impl CompetitorStore for D1Store` (items upsert in one D1 batch, `ON CONFLICT(link) DO UPDATE` keeping `first_seen_at`; our posts = `posts` ⋈ EN `post_translations` with `status='published'` and `published_at` in the window, plus that post's `sources.title`); `COMPETITOR_CRON = "31 11,12 * * *"`; `scheduled` sends `{"job":"competitor"}` for that cron and `{"job":"premarket"}` otherwise; `queue` dispatches on `job`, running `run_competitor(now(&env), …, SEC_CONTACT)` for `competitor`, then delivers alerts as before. Premarket providers are built only for premarket jobs.
 
 - [ ] **Step 1:** `cargo clippy --workspace --all-targets -- -D warnings`, `worker-build --release` → builds.
-- [ ] **Step 2: Verify locally (no network to alphalab needed for the dispatch check):** `wrangler d1 migrations apply prebell --local`; `wrangler dev --test-scheduled --local` with `FORCE_NOW_UTC=2026-10-30T11:30:00Z`; `curl "…/__scheduled?cron=30+11,12+*+*+*"` → log `job competitor: …`. Record the outcome in the PR.
+- [ ] **Step 2: Verify locally (no network to alphalab needed for the dispatch check):** `wrangler d1 migrations apply prebell --local`; `wrangler dev --test-scheduled --local` with `FORCE_NOW_UTC=2026-10-30T11:30:00Z`; `curl "…/__scheduled?cron=31+11,12+*+*+*"` → log `job competitor: …`. Record the outcome in the PR.
 - [ ] **Step 3: Commit** `feat(generator): daily competitor watch job`.
 
 ---

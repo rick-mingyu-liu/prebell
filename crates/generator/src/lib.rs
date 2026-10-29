@@ -19,7 +19,7 @@ use crate::store::D1Store;
 
 /// Daily competitor watch (wrangler.toml); `core::competitor` picks the
 /// firing that is 07:30 ET. Every other cron is the premarket job.
-const COMPETITOR_CRON: &str = "30 11,12 * * *";
+const COMPETITOR_CRON: &str = "31 11,12 * * *";
 
 /// Queue message body. A struct (not `serde_json::Value`) so it crosses the
 /// queue as a plain JS object rather than a JS `Map`.
