@@ -1,4 +1,5 @@
-//! Eastern Time clock and NYSE trading calendar for the premarket brief window.
+//! Eastern Time clock, NYSE trading calendar, and each content type's
+//! publishing window.
 
 use chrono::{DateTime, Datelike, NaiveDate, NaiveTime, Utc, Weekday};
 use chrono_tz::{America::New_York, Tz};
@@ -66,24 +67,67 @@ pub fn trading_day(date: NaiveDate) -> DayKind {
     }
 }
 
-/// Decides whether `now_utc` is inside the 08:30:00 <= ET < 09:25:00 premarket window
-/// on a trading day.
-pub fn premarket_decision(now_utc: DateTime<Utc>) -> SlotDecision {
+/// A publishing window in ET: `start <= t < end` is in the window, and `end`
+/// is the deadline after which the day is skipped.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Window {
+    pub start: NaiveTime,
+    pub end: NaiveTime,
+}
+
+fn hm(h: u32, m: u32) -> NaiveTime {
+    NaiveTime::from_hms_opt(h, m, 0).expect("valid built-in time")
+}
+
+/// Premarket brief: 08:30-09:25 ET on every trading day.
+pub fn premarket_window(_day: DayKind) -> Window {
+    Window {
+        start: hm(8, 30),
+        end: hm(9, 25),
+    }
+}
+
+/// After-close recap: 45 minutes after the close (16:45 ET, or 13:45 ET on
+/// a 1 PM early-close day), late up to 19:00 ET either way.
+pub fn recap_window(day: DayKind) -> Window {
+    let start = match day {
+        DayKind::EarlyClose => hm(13, 45),
+        DayKind::Full | DayKind::Closed => hm(16, 45),
+    };
+    Window {
+        start,
+        end: hm(19, 0),
+    }
+}
+
+/// Places `now_utc` against the ET trading day's window.
+pub fn decide(now_utc: DateTime<Utc>, window: impl Fn(DayKind) -> Window) -> SlotDecision {
     let local = et(now_utc);
     let trading_date = local.date_naive();
-    if trading_day(trading_date) == DayKind::Closed {
+    let day = trading_day(trading_date);
+    if day == DayKind::Closed {
         return SlotDecision::NotToday;
     }
-    let start = NaiveTime::from_hms_opt(8, 30, 0).unwrap();
-    let end = NaiveTime::from_hms_opt(9, 25, 0).unwrap();
+    let w = window(day);
     let t = local.time();
-    if t < start {
+    if t < w.start {
         SlotDecision::TooEarly
-    } else if t < end {
+    } else if t < w.end {
         SlotDecision::InWindow { trading_date }
     } else {
         SlotDecision::PastDeadline { trading_date }
     }
+}
+
+/// Decides whether `now_utc` is inside the 08:30:00 <= ET < 09:25:00 premarket window
+/// on a trading day.
+pub fn premarket_decision(now_utc: DateTime<Utc>) -> SlotDecision {
+    decide(now_utc, premarket_window)
+}
+
+/// Decides whether `now_utc` is inside the recap window on a trading day.
+pub fn recap_decision(now_utc: DateTime<Utc>) -> SlotDecision {
+    decide(now_utc, recap_window)
 }
 
 #[cfg(test)]
@@ -142,6 +186,96 @@ mod tests {
             premarket_decision(utc("2026-10-30T13:25:00Z")),
             SlotDecision::PastDeadline { .. }
         ));
+    }
+
+    #[test]
+    fn recap_window_edt_and_est() {
+        // Thu 2026-10-29 EDT: 20:45Z = 16:45 ET.
+        assert_eq!(
+            recap_decision(utc("2026-10-29T20:44:59Z")),
+            SlotDecision::TooEarly
+        );
+        assert_eq!(
+            recap_decision(utc("2026-10-29T20:45:00Z")),
+            SlotDecision::InWindow {
+                trading_date: d("2026-10-29")
+            }
+        );
+        // Mon 2026-11-02 EST: 20:45Z = 15:45 ET, 21:45Z = 16:45 ET.
+        assert_eq!(
+            recap_decision(utc("2026-11-02T20:45:00Z")),
+            SlotDecision::TooEarly
+        );
+        assert!(matches!(
+            recap_decision(utc("2026-11-02T21:45:00Z")),
+            SlotDecision::InWindow { .. }
+        ));
+    }
+
+    #[test]
+    fn recap_deadline_crosses_utc_midnight_in_est() {
+        // Fri 2026-11-06 18:59:59 ET = 23:59:59Z; 19:00 ET = Sat 00:00Z.
+        assert_eq!(
+            recap_decision(utc("2026-11-06T23:59:59Z")),
+            SlotDecision::InWindow {
+                trading_date: d("2026-11-06")
+            }
+        );
+        assert_eq!(
+            recap_decision(utc("2026-11-07T00:00:00Z")),
+            SlotDecision::PastDeadline {
+                trading_date: d("2026-11-06")
+            }
+        );
+        // EDT: 19:00 ET = 23:00Z the same UTC day.
+        assert!(matches!(
+            recap_decision(utc("2026-10-29T23:00:00Z")),
+            SlotDecision::PastDeadline { .. }
+        ));
+    }
+
+    #[test]
+    fn recap_early_close() {
+        // Fri 2026-11-27 EST, 1 PM close: the window opens 13:45 ET = 18:45Z.
+        assert_eq!(
+            recap_decision(utc("2026-11-27T18:44:00Z")),
+            SlotDecision::TooEarly
+        );
+        assert!(matches!(
+            recap_decision(utc("2026-11-27T18:45:00Z")),
+            SlotDecision::InWindow { .. }
+        ));
+        // The 7 PM deadline is the same as on full days.
+        assert!(matches!(
+            recap_decision(utc("2026-11-27T23:55:00Z")),
+            SlotDecision::InWindow { .. }
+        ));
+        assert!(matches!(
+            recap_decision(utc("2026-11-28T00:00:00Z")),
+            SlotDecision::PastDeadline { .. }
+        ));
+        // Thanksgiving: closed.
+        assert_eq!(
+            recap_decision(utc("2026-11-26T22:00:00Z")),
+            SlotDecision::NotToday
+        );
+    }
+
+    #[test]
+    fn windows_per_day_kind() {
+        let t = |h, m| NaiveTime::from_hms_opt(h, m, 0).unwrap();
+        assert_eq!(
+            recap_window(DayKind::Full),
+            Window {
+                start: t(16, 45),
+                end: t(19, 0)
+            }
+        );
+        assert_eq!(recap_window(DayKind::EarlyClose).start, t(13, 45));
+        assert_eq!(
+            premarket_window(DayKind::EarlyClose),
+            premarket_window(DayKind::Full)
+        );
     }
 
     #[test]
