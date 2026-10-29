@@ -14,3 +14,7 @@ chrono-tz = "0.10"
 async-trait = "0.1"
 regex = "1"
 thiserror = "2"
+futures = { version = "0.3", default-features = false, features = ["alloc"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt"] }

@@ -1,0 +1,78 @@
+{
+ "chart": {
+  "result": [
+   {
+    "meta": {
+     "currency": "USD",
+     "symbol": "ES=F",
+     "exchangeName": "CME",
+     "exchangeTimezoneName": "America/New_York",
+     "chartPreviousClose": 5890.0,
+     "regularMarketPrice": 5916.0,
+     "instrumentType": "FUTURE"
+    },
+    "timestamp": [
+     1736931600,
+     1736931660,
+     1736944200,
+     1736951280,
+     1736951340,
+     1736951400,
+     1736951460
+    ],
+    "indicators": {
+     "quote": [
+      {
+       "close": [
+        5900.25,
+        5901.0,
+        null,
+        5910.5,
+        5912.75,
+        5915.0,
+        5916.0
+       ],
+       "volume": [
+        1200,
+        800,
+        null,
+        500,
+        600,
+        900,
+        700
+       ],
+       "open": [
+        5900.25,
+        5901.0,
+        null,
+        5910.5,
+        5912.75,
+        5915.0,
+        5916.0
+       ],
+       "high": [
+        5900.25,
+        5901.0,
+        null,
+        5910.5,
+        5912.75,
+        5915.0,
+        5916.0
+       ],
+       "low": [
+        5900.25,
+        5901.0,
+        null,
+        5910.5,
+        5912.75,
+        5915.0,
+        5916.0
+       ]
+      }
+     ]
+    }
+   }
+  ],
+  "error": null
+ }
+}
