@@ -10,8 +10,7 @@ use std::cell::Cell;
 use std::sync::OnceLock;
 
 use async_trait::async_trait;
-use chrono::{DateTime, NaiveDateTime, TimeZone, Utc};
-use chrono_tz::America::New_York;
+use chrono::{DateTime, Utc};
 use regex::Regex;
 use serde::Deserialize;
 
@@ -208,16 +207,12 @@ struct Recent {
     primary_document: Vec<String>,
 }
 
-/// EDGAR's `acceptanceDateTime` ends in `Z` but holds Eastern wall-clock
-/// time (filings are accepted 06:00-22:00 ET; a 06:01 acceptance reads
-/// `T06:01:..Z`). It is read as America/New_York.
+/// EDGAR's `acceptanceDateTime` is RFC 3339 UTC (`2026-07-30T20:30:28.000Z`
+/// is Apple's 4:30 PM EDT release); callers convert to ET for dates.
 fn parse_accepted(s: &str) -> Option<DateTime<Utc>> {
-    let naive = s.trim_end_matches('Z');
-    let t = NaiveDateTime::parse_from_str(naive, "%Y-%m-%dT%H:%M:%S%.f").ok()?;
-    New_York
-        .from_local_datetime(&t)
-        .earliest()
-        .map(|d| d.with_timezone(&Utc))
+    DateTime::parse_from_rfc3339(s)
+        .ok()
+        .map(|t| t.with_timezone(&Utc))
 }
 
 pub fn parse_submissions(body: &str) -> Result<Submissions, ProviderError> {
@@ -496,11 +491,30 @@ pub(crate) mod tests {
         assert_eq!(f.form, "8-K");
         assert_eq!(f.items, "2.02,9.01");
         assert_eq!(f.primary_doc, "aapl-20261030.htm");
-        // 16:30:41 Eastern (EDT) = 20:30:41 UTC.
+        // EDGAR's acceptanceDateTime is UTC: 20:30:41Z is 16:30:41 EDT.
         assert_eq!(
             f.accepted_at,
             "2026-10-30T20:30:41Z".parse::<DateTime<Utc>>().unwrap()
         );
+    }
+
+    #[test]
+    fn acceptance_time_is_utc() {
+        let et_time = |s: &str| {
+            crate::clock::et(parse_accepted(s).unwrap())
+                .format("%Y-%m-%d %H:%M:%S")
+                .to_string()
+        };
+        // Apple's 4:30 PM ET releases, as EDGAR lists them (EDT, then EST).
+        assert_eq!(et_time("2026-07-30T20:30:28.000Z"), "2026-07-30 16:30:28");
+        assert_eq!(et_time("2026-01-29T21:30:33.000Z"), "2026-01-29 16:30:33");
+        // After 8 PM ET the UTC date is the next day; the ET date is not.
+        assert_eq!(et_time("2026-10-31T00:45:00.000Z"), "2026-10-30 20:45:00");
+        assert_eq!(
+            parse_accepted("2026-10-31T00:45:00.000Z"),
+            Some("2026-10-31T00:45:00Z".parse().unwrap())
+        );
+        assert_eq!(parse_accepted("2026-10-31 00:45"), None);
     }
 
     #[tokio::test]

@@ -823,6 +823,52 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_filing_after_8pm_et_keeps_its_et_date() {
+        // 20:45 ET on Fri 2026-10-30 is 00:45Z on Saturday.
+        let (base, es) = stores();
+        let mut sub = parse_submissions(SUBMISSIONS).unwrap();
+        sub.recent[1].accepted_at = utc("2026-10-31T00:45:00Z");
+        let f = earnings_filings(&sub, utc("2026-10-31T00:50:00Z"))[0].clone();
+        let row = FilingRow {
+            accession: f.accession.clone(),
+            cik: 320193,
+            ticker: "AAPL".into(),
+            form: f.form.clone(),
+            items: f.items.clone(),
+            filing_date: f.filing_date.clone(),
+            report_date: f.report_date.clone(),
+            accepted_at: iso(f.accepted_at),
+            primary_doc: f.primary_doc.clone(),
+            run_key: KEY.into(),
+            state: "open".into(),
+            detected_at: "2026-10-31T00:50:00Z".into(),
+        };
+        assert_eq!(trading_date(&row), "2026-10-30");
+        crate::earnings::calendar::record_filing(&es, &row, utc("2026-10-31T00:50:00Z"))
+            .await
+            .unwrap();
+        let cal = es.calendar_for("AAPL").await.unwrap();
+        assert_eq!(cal[0].report_date, "2026-10-30");
+        assert!(base.alerts.borrow().is_empty());
+    }
+
+    #[tokio::test]
+    async fn deadlines_count_from_the_utc_acceptance() {
+        // Accepted 20:30:41Z (16:30 ET); the 6 h build deadline is 02:30:41Z.
+        let (base, es, fl) = detected().await;
+        fl.no_exhibit.set(true);
+        let l = llm(true, true);
+        let o = build_tick(utc("2026-10-31T02:25:00Z"), &es, base.as_ref(), &fl, &l)
+            .await
+            .unwrap();
+        assert!(matches!(o[0].1, TickOutcome::Retrying(_)), "{o:?}");
+        let o = build_tick(utc("2026-10-31T02:31:00Z"), &es, base.as_ref(), &fl, &l)
+            .await
+            .unwrap();
+        assert_eq!(o[0].1, TickOutcome::Skipped, "{o:?}");
+    }
+
+    #[tokio::test]
     async fn poll_outside_window_does_nothing() {
         let (base, es) = stores();
         let fl = FakeFilings::default();
