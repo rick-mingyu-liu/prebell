@@ -7,8 +7,8 @@ mod store;
 
 use chrono::{DateTime, Utc};
 use prebell_core::competitor::run_competitor;
-use prebell_core::deepseek::llm_from_env;
-use prebell_core::run::tick;
+use prebell_core::llm::{api_key_var, llm_from_env, unknown_provider};
+use prebell_core::run::tick_with_log;
 use prebell_core::tavily::Tavily;
 use prebell_core::yahoo::Yahoo;
 use serde::{Deserialize, Serialize};
@@ -18,8 +18,9 @@ use crate::http::WorkerHttp;
 use crate::store::D1Store;
 
 /// Daily competitor watch (wrangler.toml); `core::competitor` picks the
-/// firing that is 07:30 ET. Every other cron is the premarket job.
-const COMPETITOR_CRON: &str = "31 11,12 * * *";
+/// firing that is 07:30 ET. Every other cron is the premarket job. Two
+/// crons rather than a comma list: the schedule parser can't read comma lists.
+const COMPETITOR_CRONS: [&str; 2] = ["31 11 * * *", "31 12 * * *"];
 
 /// Queue message body. A struct (not `serde_json::Value`) so it crosses the
 /// queue as a plain JS object rather than a JS `Map`.
@@ -72,7 +73,7 @@ async fn fetch(req: Request, _env: Env, _ctx: Context) -> Result<Response> {
 
 #[event(scheduled)]
 async fn scheduled(event: ScheduledEvent, env: Env, _ctx: ScheduleContext) {
-    let job = if event.cron() == COMPETITOR_CRON {
+    let job = if COMPETITOR_CRONS.contains(&event.cron().as_str()) {
         "competitor"
     } else {
         "premarket"
@@ -90,14 +91,22 @@ async fn scheduled(event: ScheduledEvent, env: Env, _ctx: ScheduleContext) {
 async fn premarket(env: &Env, store: &D1Store, job: &str) -> Result<()> {
     let md = Yahoo::new(WorkerHttp);
     let ns = Tavily::new(WorkerHttp, secret_or_empty(env, "TAVILY_API_KEY"));
-    let provider = text(env, "LLM_PROVIDER").unwrap_or_else(|| "deepseek".into());
+    let provider = text(env, "LLM_PROVIDER").unwrap_or_else(|| "claude".into());
+    let key_var = api_key_var(&provider)
+        .ok_or_else(|| Error::RustError(unknown_provider(&provider).to_string()))?;
     let llm = llm_from_env(
         &provider,
         WorkerHttp,
-        secret_or_empty(env, "DEEPSEEK_API_KEY"),
+        secret_or_empty(env, key_var),
+        text(env, "LLM_MODEL"),
+        text(env, "LLM_EFFORT"),
+        |m| console_warn!("{m}"),
     )
     .map_err(|e| Error::RustError(e.to_string()))?;
-    let outcome = tick(now(env), store, &md, &ns, llm.as_ref()).await;
+    let outcome = tick_with_log(now(env), store, &md, &ns, llm.as_ref(), &|m| {
+        console_log!("{m}")
+    })
+    .await;
     console_log!("job {job}: {outcome:?}");
     Ok(())
 }

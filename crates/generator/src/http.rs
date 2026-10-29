@@ -33,8 +33,13 @@ impl WorkerHttp {
         let req = Request::new_with_init(url, &init).map_err(net)?;
         let mut resp = Fetch::Request(req).send().await.map_err(net)?;
         let status = resp.status_code();
+        let set_cookie = resp.headers().get("set-cookie").map_err(net)?;
         let body = resp.text().await.map_err(net)?;
-        Ok(HttpResp { status, body })
+        Ok(HttpResp {
+            status,
+            body,
+            set_cookie,
+        })
     }
 }
 

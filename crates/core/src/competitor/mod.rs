@@ -308,6 +308,7 @@ mod tests {
             Ok(HttpResp {
                 status: self.status,
                 body: self.body.clone(),
+                set_cookie: None,
             })
         }
         async fn post_json(
