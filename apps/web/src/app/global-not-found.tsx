@@ -5,9 +5,9 @@ import en from "../../messages/en.json";
 import zh from "../../messages/zh.json";
 import "./globals.css";
 
-// The root layout is the dynamic [locale] segment, so a per-locale not-found.tsx cannot render
-// server-side (Next falls back to an empty error shell). This page serves every 404 instead,
-// in both languages since it receives no params.
+// Served server-side for unmatched routes only (e.g. /en/xyz). notFound() thrown by the [locale]
+// layout or a page still goes through [locale]/not-found.tsx, which Next 16 renders client-side
+// because the root layout is the dynamic [locale] segment. Bilingual since it receives no params.
 export const metadata: Metadata = { title: `${en.notFound.title} · ${zh.notFound.title}` };
 
 export default function GlobalNotFound() {

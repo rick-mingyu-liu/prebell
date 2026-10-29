@@ -1,12 +1,22 @@
 import type { Metadata } from "next";
 import { headers } from "next/headers";
 
-/** The site origin of the current request, so canonical and hreflang URLs are absolute on any domain. */
+/**
+ * The site origin for canonical and hreflang URLs.
+ *
+ * `SITE_URL` (wrangler.jsonc var) wins. Without it (local dev only) the request `Host` is used.
+ * `x-forwarded-*` headers are never read: on Workers nothing strips them, so a client could
+ * otherwise point canonical/hreflang at any domain and poison the shared cache (s-maxage=60).
+ */
+export function resolveOrigin(siteUrl: string | undefined, requestHeaders: Pick<Headers, "get">): URL {
+  if (siteUrl) return new URL(new URL(siteUrl).origin);
+  const host = requestHeaders.get("host") ?? "localhost";
+  const local = /^(localhost|127\.0\.0\.1)(:\d+)?$/.test(host);
+  return new URL(`${local ? "http" : "https"}://${host}`);
+}
+
 export async function siteOrigin(): Promise<URL> {
-  const h = await headers();
-  const host = h.get("x-forwarded-host") ?? h.get("host") ?? "localhost";
-  const proto = h.get("x-forwarded-proto") ?? (host.startsWith("localhost") || host.startsWith("127.") ? "http" : "https");
-  return new URL(`${proto}://${host}`);
+  return resolveOrigin(process.env.SITE_URL, await headers());
 }
 
 /**

@@ -15,6 +15,10 @@
       "database_name": "marketsite",
       "database_id": "00000000-0000-0000-0000-000000000000"
     }
-  ]
-  // CF_BEACON_TOKEN (Cloudflare Web Analytics) is optional; set it as a var to enable the beacon.
+  ],
+  "vars": {
+    // Origin for canonical and hreflang URLs; placeholder until the domain is chosen.
+    "SITE_URL": "https://marketsite-web.workers.dev"
+    // CF_BEACON_TOKEN (Cloudflare Web Analytics) is optional; set it as a var to enable the beacon.
+  }
 }
