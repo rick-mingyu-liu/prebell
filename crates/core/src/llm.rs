@@ -119,6 +119,9 @@ mod tests {
         assert!(llm.complete_json("s", "u").await.is_ok());
         let seen = h.seen.borrow();
         assert_eq!(seen[0].0, "https://api.deepseek.com/chat/completions");
+        assert!(seen[0]
+            .1
+            .contains(&("Authorization".into(), "Bearer dk".into())));
         assert_eq!(seen[0].2["model"], "deepseek-chat");
     }
 
@@ -165,7 +168,11 @@ mod tests {
     fn unknown_provider_errors() {
         assert!(matches!(
             llm_from_env("nope", fake("{}"), "k".into(), None),
-            Err(ProviderError::Parse(_))
+            Err(ProviderError::Parse(m)) if m == "unknown LLM provider: nope"
         ));
+        assert_eq!(
+            unknown_provider("x").to_string(),
+            "parse error: unknown LLM provider: x"
+        );
     }
 }
