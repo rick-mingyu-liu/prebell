@@ -146,18 +146,43 @@ pub async fn tick_with_log(
     llm: &dyn LlmProvider,
     log: &dyn Fn(&str),
 ) -> TickOutcome {
-    tick_content(now, store, &Premarket { md, ns, llm }, log).await
+    let hooks = Hooks {
+        log,
+        extra: &Vec::new,
+    };
+    tick_with_hooks(now, store, md, ns, llm, &hooks).await
 }
 
-/// One cron firing for content type `c`, passing the build's diagnostics
-/// line to `log` once when it builds. A store error is reported as `Retrying`.
+/// `tick` with the caller's `Hooks`.
+pub async fn tick_with_hooks(
+    now: DateTime<Utc>,
+    store: &dyn Store,
+    md: &dyn MarketData,
+    ns: &dyn NewsSearch,
+    llm: &dyn LlmProvider,
+    hooks: &Hooks<'_>,
+) -> TickOutcome {
+    tick_content(now, store, &Premarket { md, ns, llm }, hooks).await
+}
+
+/// What the caller adds to a tick.
+pub struct Hooks<'a> {
+    /// Receives the build's diagnostics line, once when it builds.
+    pub log: &'a dyn Fn(&str),
+    /// Lines appended to the build's diagnostics (log and `last_error`, not
+    /// the stored facts), read when the facts are built, e.g. the Worker's
+    /// subrequest count.
+    pub extra: &'a dyn Fn() -> Vec<String>,
+}
+
+/// One cron firing for content type `c`. A store error is reported as `Retrying`.
 pub async fn tick_content<C: Content>(
     now: DateTime<Utc>,
     store: &dyn Store,
     c: &C,
-    log: &dyn Fn(&str),
+    hooks: &Hooks<'_>,
 ) -> TickOutcome {
-    step(now, store, c, log)
+    step(now, store, c, hooks)
         .await
         .unwrap_or_else(TickOutcome::Retrying)
 }
@@ -166,7 +191,7 @@ async fn step<C: Content>(
     now: DateTime<Utc>,
     store: &dyn Store,
     c: &C,
-    log: &dyn Fn(&str),
+    hooks: &Hooks<'_>,
 ) -> Result<TickOutcome, String> {
     let decision = decide(now, |d| c.window(d));
     let date = match decision {
@@ -198,7 +223,7 @@ async fn step<C: Content>(
 
     match decision {
         SlotDecision::InWindow { .. } if in_flight => Ok(TickOutcome::Nothing),
-        SlotDecision::InWindow { .. } => build(now, store, c, log, date, run).await,
+        SlotDecision::InWindow { .. } => build(now, store, c, hooks, date, run).await,
         // Let an in-flight build finish; once its lease expires it is skipped.
         SlotDecision::PastDeadline { .. } if in_flight => Ok(TickOutcome::Nothing),
         SlotDecision::PastDeadline { .. } => skip(now, store, c, date, run).await,
@@ -308,7 +333,7 @@ async fn build<C: Content>(
     now: DateTime<Utc>,
     store: &dyn Store,
     c: &C,
-    log: &dyn Fn(&str),
+    hooks: &Hooks<'_>,
     date: NaiveDate,
     run: Option<RunRow>,
 ) -> Result<TickOutcome, String> {
@@ -320,8 +345,10 @@ async fn build<C: Content>(
     store.upsert_run(&row).await?;
 
     let facts = c.build_facts(date, now).await;
-    let diagnostics = c.diagnostics(&facts).join("; ");
-    log(&format!("diagnostics: {diagnostics}"));
+    let mut lines = c.diagnostics(&facts);
+    lines.extend((hooks.extra)());
+    let diagnostics = lines.join("; ");
+    (hooks.log)(&format!("diagnostics: {diagnostics}"));
     let missing = c.missing_required(&facts);
     if !missing.is_empty() {
         let mut err = missing.join(", ");
@@ -821,6 +848,38 @@ mod tests {
         );
         assert_eq!(s.alerts.borrow().len(), 1);
         assert!(s.posts.borrow().is_empty());
+    }
+
+    #[tokio::test]
+    async fn extra_diagnostics_reach_the_log_and_last_error() {
+        let s = MemStore::default();
+        let (m, l) = (md(false), llm(true, true));
+        let logs = std::cell::RefCell::new(Vec::<String>::new());
+        let log = |m: &str| logs.borrow_mut().push(m.to_string());
+        let extra = || vec!["subrequests=7".to_string()];
+        let hooks = Hooks {
+            log: &log,
+            extra: &extra,
+        };
+        let out = tick_with_hooks(utc("2026-10-29T12:30:00Z"), &s, &m, &FakeNs, &l, &hooks).await;
+        match out {
+            TickOutcome::Retrying(e) => {
+                assert!(e.starts_with("futures, movers | quotes ok=0 "), "{e}");
+                assert!(e.ends_with("; futures ok=0 err=4; subrequests=7"), "{e}");
+            }
+            o => panic!("{o:?}"),
+        }
+        assert!(
+            logs.borrow()[0].ends_with("; subrequests=7"),
+            "{:?}",
+            logs.borrow()
+        );
+        // Stored with the run, not with the facts.
+        assert!(s.runs.borrow()[KEY]
+            .last_error
+            .as_deref()
+            .unwrap()
+            .ends_with("subrequests=7"));
     }
 
     #[tokio::test]

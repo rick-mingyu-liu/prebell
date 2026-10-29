@@ -10,8 +10,9 @@ use chrono::{DateTime, Utc};
 use prebell_core::competitor::run_competitor;
 use prebell_core::jobs::{redact, run_job, JobRunner};
 use prebell_core::llm::{api_key_var, llm_from_env, unknown_provider};
+use prebell_core::providers::CountingHttp;
 use prebell_core::recap;
-use prebell_core::run::{tick_with_log, TickOutcome};
+use prebell_core::run::{tick_with_hooks, Hooks, TickOutcome};
 use prebell_core::schedule::{jobs_for_cron, ContentJob, JOBS};
 use prebell_core::tavily::Tavily;
 use prebell_core::yahoo::Yahoo;
@@ -101,6 +102,9 @@ async fn scheduled(event: ScheduledEvent, env: Env, _ctx: ScheduleContext) {
 struct Runner<'a> {
     env: &'a Env,
     store: &'a D1Store,
+    /// Every outgoing fetch goes through this, so `http.count()` is the
+    /// invocation's fetch subrequests (D1 and R2 binding calls not included).
+    http: CountingHttp<WorkerHttp>,
 }
 
 #[async_trait(?Send)]
@@ -110,16 +114,16 @@ impl JobRunner for Runner<'_> {
     /// names the variable and its value, never a secret.
     async fn content(&self, job: ContentJob) -> std::result::Result<TickOutcome, String> {
         let env = self.env;
-        let md = Yahoo::new(WorkerHttp);
+        let md = Yahoo::new(self.http.clone());
         let news_key = secret_or_empty(env, "TAVILY_API_KEY");
-        let ns = Tavily::new(WorkerHttp, news_key.clone());
+        let ns = Tavily::new(self.http.clone(), news_key.clone());
         let provider = text(env, "LLM_PROVIDER").unwrap_or_else(|| "claude".into());
         let key_var =
             api_key_var(&provider).ok_or_else(|| unknown_provider(&provider).to_string())?;
         let llm_key = secret_or_empty(env, key_var);
         let llm = llm_from_env(
             &provider,
-            WorkerHttp,
+            self.http.clone(),
             llm_key.clone(),
             text(env, "LLM_MODEL"),
             text(env, "LLM_EFFORT"),
@@ -127,18 +131,27 @@ impl JobRunner for Runner<'_> {
         )
         .map_err(|e| redact(&e.to_string(), &[&llm_key, &news_key]))?;
         let log = |m: &str| console_log!("{m}");
+        // Read when the facts are built, so a retrying run's last_error says
+        // how close the build came to the Free plan's 50.
+        let extra = || vec![format!("subrequests={}", self.http.count())];
+        let hooks = Hooks {
+            log: &log,
+            extra: &extra,
+        };
         let at = now(env);
         let store = self.store;
         Ok(match job {
-            ContentJob::Premarket => tick_with_log(at, store, &md, &ns, llm.as_ref(), &log).await,
+            ContentJob::Premarket => {
+                tick_with_hooks(at, store, &md, &ns, llm.as_ref(), &hooks).await
+            }
             ContentJob::Recap => {
-                recap::tick_with_log(at, store, &md, &ns, llm.as_ref(), &log).await
+                recap::tick_with_hooks(at, store, &md, &ns, llm.as_ref(), &hooks).await
             }
         })
     }
 
     async fn competitor(&self) -> String {
-        let outcome = run_competitor(now(self.env), &WorkerHttp, &WorkerTimer, self.store).await;
+        let outcome = run_competitor(now(self.env), &self.http, &WorkerTimer, self.store).await;
         format!("{outcome:?}")
     }
 }
@@ -152,24 +165,31 @@ async fn queue(batch: MessageBatch<Job>, env: Env, _ctx: Context) -> Result<()> 
     let runner = Runner {
         env: &env,
         store: &store,
+        http: CountingHttp::new(WorkerHttp),
     };
 
     for msg in batch.messages()? {
+        let job = msg.body().job.as_str();
+        runner.http.reset();
         // A config error is alerted (once per job per ET day) and acked, not
         // retried: a retry would fail the same way, and the other messages
         // and the alert delivery below must still run.
-        match run_job(now(&env), &msg.body().job, &store, &runner).await {
+        match run_job(now(&env), job, &store, &runner).await {
             Ok(line) => console_log!("{line}"),
             Err(line) => console_error!("{line}"),
         }
+        // Free plan trial: fetch subrequests this job used (limit 50 per invocation).
+        console_log!("subrequests={} job={job}", runner.http.count());
         msg.ack();
     }
 
+    runner.http.reset();
     alerts::deliver(
         &store,
-        &WorkerHttp,
+        &runner.http,
         text(&env, "ALERT_WEBHOOK_URL").as_deref(),
     )
     .await;
+    console_log!("subrequests={} job=alerts", runner.http.count());
     Ok(())
 }

@@ -65,6 +65,59 @@ pub trait Http {
     }
 }
 
+/// `Http` that counts the requests it sends (failed ones too), shared by
+/// its clones: the Workers Free plan allows 50 fetch subrequests per
+/// invocation, and the generator logs this count per job.
+#[derive(Clone)]
+pub struct CountingHttp<H> {
+    inner: H,
+    n: std::rc::Rc<std::cell::Cell<usize>>,
+}
+
+impl<H> CountingHttp<H> {
+    pub fn new(inner: H) -> Self {
+        Self {
+            inner,
+            n: Default::default(),
+        }
+    }
+    pub fn count(&self) -> usize {
+        self.n.get()
+    }
+    pub fn reset(&self) {
+        self.n.set(0);
+    }
+    fn bump(&self) {
+        self.n.set(self.n.get() + 1);
+    }
+}
+
+#[async_trait(?Send)]
+impl<H: Http> Http for CountingHttp<H> {
+    async fn get(&self, url: &str, headers: &[(&str, &str)]) -> Result<HttpResp, ProviderError> {
+        self.bump();
+        self.inner.get(url, headers).await
+    }
+    async fn post_json(
+        &self,
+        url: &str,
+        headers: &[(&str, &str)],
+        body: &serde_json::Value,
+    ) -> Result<HttpResp, ProviderError> {
+        self.bump();
+        self.inner.post_json(url, headers, body).await
+    }
+    async fn get_capped(
+        &self,
+        url: &str,
+        headers: &[(&str, &str)],
+        max_bytes: usize,
+    ) -> Result<HttpResp, ProviderError> {
+        self.bump();
+        self.inner.get_capped(url, headers, max_bytes).await
+    }
+}
+
 /// Waits, so a caller can put a deadline on a request (`worker::Delay` on Workers).
 #[async_trait(?Send)]
 pub trait Timer {
@@ -143,6 +196,48 @@ mod tests {
         ) -> Vec<(String, Result<Quote, ProviderError>)> {
             vec![]
         }
+    }
+
+    #[derive(Clone)]
+    struct Echo;
+    #[async_trait(?Send)]
+    impl Http for Echo {
+        async fn get(&self, url: &str, _: &[(&str, &str)]) -> Result<HttpResp, ProviderError> {
+            Ok(HttpResp {
+                status: 200,
+                body: url.into(),
+                set_cookie: None,
+            })
+        }
+        async fn post_json(
+            &self,
+            _: &str,
+            _: &[(&str, &str)],
+            _: &serde_json::Value,
+        ) -> Result<HttpResp, ProviderError> {
+            Err(ProviderError::Http(500))
+        }
+    }
+
+    #[tokio::test]
+    async fn counting_http_counts_every_request_across_clones() {
+        let h = CountingHttp::new(Echo);
+        let h2 = h.clone();
+        assert_eq!(h.count(), 0);
+        assert_eq!(
+            h.get("https://a.test", &[]).await.unwrap().body,
+            "https://a.test"
+        );
+        // A failed request is still a subrequest.
+        assert!(h2
+            .post_json("https://b.test", &[], &serde_json::json!({}))
+            .await
+            .is_err());
+        // The capped default calls `get` on the inner client once.
+        assert!(h2.get_capped("https://c.test", &[], 2).await.is_err());
+        assert_eq!((h.count(), h2.count()), (3, 3));
+        h.reset();
+        assert_eq!(h2.count(), 0);
     }
 
     #[tokio::test]

@@ -15,7 +15,7 @@ use crate::premarket::{
     articles_prompt, company_name, extract, system_prompt, universe, yahoo_symbol, Diag,
 };
 use crate::providers::{LlmProvider, MarketData, NewsSearch};
-use crate::run::{tick_content, Content, TickOutcome};
+use crate::run::{tick_content, Content, Hooks, TickOutcome};
 use crate::store::Store;
 
 /// `(label, Yahoo symbol)`: the indexes themselves, not ETF proxies, so the
@@ -377,7 +377,23 @@ pub async fn tick_with_log(
     llm: &dyn LlmProvider,
     log: &dyn Fn(&str),
 ) -> TickOutcome {
-    tick_content(now, store, &Recap { md, ns, llm }, log).await
+    let hooks = Hooks {
+        log,
+        extra: &Vec::new,
+    };
+    tick_with_hooks(now, store, md, ns, llm, &hooks).await
+}
+
+/// `tick` with the caller's `Hooks`.
+pub async fn tick_with_hooks(
+    now: DateTime<Utc>,
+    store: &dyn Store,
+    md: &dyn MarketData,
+    ns: &dyn NewsSearch,
+    llm: &dyn LlmProvider,
+    hooks: &Hooks<'_>,
+) -> TickOutcome {
+    tick_content(now, store, &Recap { md, ns, llm }, hooks).await
 }
 
 #[cfg(test)]
@@ -969,6 +985,22 @@ mod run_tests {
         assert!(s.translations.borrow()[&(1, "en".to_string())]
             .body_md
             .contains("| S&P 500 | 5,850.12 | +0.51% |"));
+    }
+
+    #[tokio::test]
+    async fn extra_diagnostics_reach_last_error() {
+        let s = MemStore::default();
+        let (m, l) = (md(false), llm(true, true));
+        let extra = || vec!["subrequests=4".to_string()];
+        let hooks = crate::run::Hooks {
+            log: &|_| {},
+            extra: &extra,
+        };
+        let out = tick_with_hooks(utc("2026-10-29T20:45:00Z"), &s, &m, &FakeNs, &l, &hooks).await;
+        assert!(
+            matches!(&out, TickOutcome::Retrying(e) if e.starts_with("indexes | ") && e.ends_with("; indexes ok=3 err=1; subrequests=4")),
+            "{out:?}"
+        );
     }
 
     #[tokio::test]
