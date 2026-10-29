@@ -45,7 +45,10 @@ fn secret_or_empty(env: &Env, name: &str) -> String {
 fn now(env: &Env) -> DateTime<Utc> {
     if let Some(forced) = text(env, "FORCE_NOW_UTC") {
         match DateTime::parse_from_rfc3339(&forced) {
-            Ok(t) => return t.with_timezone(&Utc),
+            Ok(t) => {
+                console_warn!("FORCE_NOW_UTC is set: using {forced} instead of the wall clock");
+                return t.with_timezone(&Utc);
+            }
             Err(e) => console_warn!("ignoring FORCE_NOW_UTC={forced}: {e}"),
         }
     }
