@@ -4,30 +4,29 @@ Operational notes for the owner. Plan 1 Task 13 adds the deploy, cron and rerun 
 
 ## LLM provider
 
-Every LLM call goes through one provider: reason extraction while building facts, and the EN/ZH drafts. The generator Worker picks the provider from config when each queue batch starts.
+Every LLM call goes through one provider: reason extraction while building facts, and the EN/ZH drafts. The generator Worker picks the provider from config when each queue batch starts. Claude is the primary provider and the default; DeepSeek is the fallback.
 
 | `LLM_PROVIDER` | API | Secret | Default model |
 |---|---|---|---|
-| `deepseek` (default) | `https://api.deepseek.com/chat/completions` | `DEEPSEEK_API_KEY` | `deepseek-chat` |
-| `claude` | `https://api.anthropic.com/v1/messages` | `ANTHROPIC_API_KEY` | `claude-sonnet-5-5` |
+| `claude` (default) | `https://api.anthropic.com/v1/messages` | `ANTHROPIC_API_KEY` | `claude-sonnet-5-5` |
+| `deepseek` (fallback) | `https://api.deepseek.com/chat/completions` | `DEEPSEEK_API_KEY` | `deepseek-chat` |
 
-- `LLM_PROVIDER` and the optional `LLM_MODEL` are plain vars in `crates/generator/wrangler.toml` under `[vars]`. If `LLM_MODEL` is unset or empty, the provider's default model is used.
+- `LLM_PROVIDER`, the optional `LLM_MODEL` and `LLM_EFFORT` are plain vars in `crates/generator/wrangler.toml` under `[vars]`. If `LLM_MODEL` is unset or empty, the provider's default model is used. If `LLM_PROVIDER` is unset, it is `claude`.
+- `LLM_EFFORT` (Claude only) sets `output_config.effort` on every request: `low` (default), `medium` or `high`. `none` leaves the field out; use it for a model that does not support effort. Any other value makes the queue handler fail at start with `parse error: unknown LLM_EFFORT: <value> ...`. DeepSeek ignores it.
 - The secrets are set only with `wrangler secret put` (production) or in `crates/generator/.dev.vars` (local, git-ignored). They are never committed.
 - Any other `LLM_PROVIDER` value makes the queue handler fail with `parse error: unknown LLM provider: <value>` before it does any work. No run row and no alert are written, so this shows only in `wrangler tail`.
 - The number check (`numbers::check`) and quote anchoring run the same way whichever provider is used. Switching provider does not loosen them.
 
-### Switch to Claude (owner only; this deploys)
+## Claude (default)
+
+### Set up (owner only; this deploys)
 
 1. `cd crates/generator && pnpm exec wrangler secret put ANTHROPIC_API_KEY` and paste the key.
-2. In `crates/generator/wrangler.toml`, set `LLM_PROVIDER = "claude"`. To use a different model, also add `LLM_MODEL = "<model id>"`, for example `claude-opus-5-5`.
-3. Redeploy the generator (`pnpm exec wrangler deploy` in `crates/generator`). Vars take effect on deploy.
+2. In `crates/generator/wrangler.toml`, `LLM_PROVIDER = "claude"` and `LLM_EFFORT = "low"` are already set. To use a different model, add `LLM_MODEL = "<model id>"`, for example `claude-opus-5-5`. If that model does not support effort, also set `LLM_EFFORT = "none"`.
+3. Deploy the generator (`pnpm exec wrangler deploy` in `crates/generator`). Vars take effect on deploy.
 4. Check the next run (and time it: compare `updated_at` with 08:30 ET): `pnpm exec wrangler d1 execute prebell --remote --command "select run_key,status,attempts,last_error from runs order by updated_at desc limit 3"`.
 
-Claude thinks before answering, so a build (up to 11 extraction calls plus the EN and ZH drafts) may take longer than on DeepSeek. A build older than 15 minutes counts as stale and a second one starts. If the first runs take more than about 10 minutes, tell the developer: a faster `LLM_MODEL` or a lower effort setting are the options.
-
-### Switch back to DeepSeek
-
-Set `LLM_PROVIDER = "deepseek"`, remove `LLM_MODEL` if you set it to a Claude model, and redeploy. `DEEPSEEK_API_KEY` can stay set the whole time, and so can `ANTHROPIC_API_KEY`.
+Claude thinks before answering, so a build (up to 11 extraction calls plus the EN and ZH drafts) may take longer than on DeepSeek. Effort `low` keeps that short. A build older than 15 minutes counts as stale and a second one starts. If the first runs take more than about 10 minutes, tell the developer: a faster `LLM_MODEL` is the option. Raise `LLM_EFFORT` to `medium` or `high` only if draft quality needs it.
 
 ### Local dev
 
@@ -40,6 +39,16 @@ ANTHROPIC_API_KEY=sk-ant-...
 
 Values in `.dev.vars` override `[vars]` under `wrangler dev`. Then follow the local steps in `docs/plan-1-notes.md`. A missing key logs `secret ANTHROPIC_API_KEY is not set; provider calls will fail`.
 
+## Fall back to DeepSeek
+
+Use this if Claude is down, the spend limit is reached or the key is revoked, and the run cannot wait.
+
+1. `cd crates/generator && pnpm exec wrangler secret put DEEPSEEK_API_KEY` (skip if it is still set).
+2. In `crates/generator/wrangler.toml`, set `LLM_PROVIDER = "deepseek"` and remove `LLM_MODEL` if you set it to a Claude model. `LLM_EFFORT` can stay; DeepSeek ignores it.
+3. Deploy the generator (`pnpm exec wrangler deploy` in `crates/generator`).
+
+Both secrets can stay set the whole time. To go back, set `LLM_PROVIDER = "claude"` and deploy.
+
 ### What Claude failures look like
 
 Where a failure shows up depends on which call failed.
@@ -48,14 +57,20 @@ Where a failure shows up depends on which call failed.
 - **EN draft:** each draft gets two attempts per tick. If both fail, `last_error` reads `en: llm: <error>` and the run retries on later ticks until 09:25 ET as above.
 - **ZH draft:** EN still publishes. ZH is stored as `pending` ("中文版稍后推出") and `last_error` reads `zh: llm: <error>`. Later firings retry ZH, hourly after the morning window. A failure at or after 18:00 ET marks ZH `failed` and raises one warn alert.
 
+Every HTTP error of 400 or above also writes one line to `wrangler tail` with the error type and request id, never the key or the body: `claude http <status>: error.type=<type> request_id=<id>`. Quote the `request_id` to Anthropic support.
+
 The `<error>` part:
 
 | Error | Meaning |
 |---|---|
+| `http status 400` | Bad request, or the organization or workspace spend limit was reached (the API returns 400 for both). `wrangler tail` shows `claude http 400: error.type=invalid_request_error request_id=req_...`; the message is not logged, so check the Claude Console usage and spend limit first, then the request (`LLM_MODEL`, `LLM_EFFORT`). If the limit is the cause, raise it or fall back to DeepSeek. |
 | `http status 401` | Wrong or missing `ANTHROPIC_API_KEY`. |
+| `http status 402` | `billing_error`: a billing or payment problem. Fix it in the Claude Console. |
+| `http status 403` | `permission_error`: the key has no access to this model or workspace. Check the key's workspace and the organization's model access in the Claude Console. |
+| `http status 404` | `not_found_error`: almost always a bad `LLM_MODEL` id. Fix or remove `LLM_MODEL` and redeploy. |
 | `http status 429` | Rate limit. |
 | `http status 529` / `5xx` | Anthropic overloaded or unavailable; usually clears on a later tick. |
-| `parse error: truncated` | The reply hit `max_tokens` (16000). It is never used as partial JSON. |
+| `parse error: truncated` | The reply hit `max_tokens` (16000) or the model's context window (`model_context_window_exceeded`). It is never used as partial JSON. |
 | `parse error: refusal: <category>` | The model declined the request. Facts are only saved after a successful EN draft, so a refused build leaves nothing in R2 to inspect; tell the developer the date and category. |
 | `parse error: stop_reason: <x>` | The turn ended unfinished in some other way. It is never used. |
 | `parse error: ...` (other) | The reply was not a JSON object. |
