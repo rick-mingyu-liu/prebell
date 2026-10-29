@@ -7,7 +7,7 @@ use regex::Regex;
 use serde::Deserialize;
 use serde_json::Value;
 
-use crate::anchor::{verify_quote, verify_reason};
+use crate::anchor::{has_word, verify_quote, verify_reason};
 use crate::earnings::facts::{Figure, FiscalPeriod, Metric, Metrics, Note, Unit};
 use crate::facts::{Field, NewsReason};
 use crate::numbers::{extract as extract_numbers, Lang};
@@ -86,12 +86,67 @@ fn loss_before(quote: &str, at: usize) -> bool {
     tail.contains("loss")
 }
 
-/// Applies the quote-anchoring rules: the quote is in the exhibit; the
-/// amount is a whole number in the quote, read with the unit words that
-/// follow it there; a dollar figure written as a bare table number has the
-/// scale of the table heading above it and is the row's first number;
-/// per-share figures carry no size word; a sign has evidence next to it.
-pub fn verify_figure(text: &str, unit: Unit, raw: &RawFigure) -> Result<Figure, String> {
+/// Words one of which the quote's label (the text before the amount) must
+/// contain, as whole words, for the figure to be that metric.
+pub fn label_keywords(m: Metric) -> &'static [&'static str] {
+    match m {
+        Metric::Revenue => &["revenue", "revenues", "net sales", "total revenues"],
+        // A loss is reported on the net income line.
+        Metric::NetIncome => &["net income", "net loss"],
+        Metric::EpsGaap | Metric::EpsNonGaap => &["diluted", "per share", "eps"],
+        Metric::GrossMargin => &["gross margin"],
+        Metric::OperatingMargin => &["operating margin"],
+        Metric::OperatingCashFlow => &["operating activities", "operating cash flow"],
+        Metric::FreeCashFlow => &["free cash flow"],
+    }
+}
+
+/// The quote names the metric: its label holds one of `label_keywords`
+/// (per-share figures may say "per share" right after the amount), and a
+/// per-share quote is never about a dividend.
+fn names_metric(m: Metric, label: &str, after: &str) -> Result<(), String> {
+    let lower = label.to_ascii_lowercase();
+    if matches!(m, Metric::EpsGaap | Metric::EpsNonGaap)
+        && (lower.contains("dividend") || after.to_ascii_lowercase().contains("dividend"))
+    {
+        return Err("a dividend per share is not earnings per share".into());
+    }
+    let near_after: String = after.chars().take(30).collect();
+    let per_share_after = matches!(m, Metric::EpsGaap | Metric::EpsNonGaap)
+        && (has_word(&near_after, "per share") || has_word(&near_after, "per diluted share"));
+    let words = label_keywords(m);
+    if per_share_after || words.iter().any(|w| has_word(label, w)) {
+        return Ok(());
+    }
+    Err(format!(
+        "the quote's label does not name {} (needs one of {words:?})",
+        words[0]
+    ))
+}
+
+/// A table row's revenue label is the total, not a segment: "Total net
+/// sales", "Revenues", "Net revenues", "Revenue, net" pass; "Products net
+/// sales" and "Services revenue" do not.
+fn total_revenue_row(label: &str) -> bool {
+    static R: OnceLock<Regex> = OnceLock::new();
+    let label = label.trim().trim_end_matches(['$', ':', ' ']).trim();
+    has_word(label, "total")
+        || R.get_or_init(|| {
+            Regex::new(r"(?i)^(?:net\s+)?(?:revenues?|sales)(?:\s*,\s*net)?$")
+                .expect("valid built-in regex")
+        })
+        .is_match(label)
+}
+
+/// Applies the quote-anchoring rules: the quote is in the exhibit; it starts
+/// with a label naming the metric (letters before the amount); the amount is
+/// a whole number in the quote, read with the unit words that follow it
+/// there; a dollar figure written as a bare table number has the scale of
+/// the table heading above it, is the row's first number and, for revenue,
+/// is the total row; per-share figures carry no size word and are not
+/// dividends; a sign has evidence next to it.
+pub fn verify_figure(text: &str, metric: Metric, raw: &RawFigure) -> Result<Figure, String> {
+    let unit = metric.unit();
     let quote = collapse(&raw.quote);
     let amount = collapse(&raw.amount);
     if amount.is_empty() {
@@ -105,6 +160,11 @@ pub fn verify_figure(text: &str, unit: Unit, raw: &RawFigure) -> Result<Figure, 
     }
     let at = whole_match(&quote, &amount)
         .ok_or_else(|| format!("amount {amount:?} is not in its quote"))?;
+    let label = &quote[..at];
+    if !label.chars().any(char::is_alphabetic) {
+        return Err("the quote must start with the row label, not mid-row".into());
+    }
+    names_metric(metric, label, &quote[at + amount.len()..])?;
     // Read the number in place, so a size word after it ("102.5 billion")
     // counts even when the amount omits it.
     let n = extract_numbers(&quote[at..], Lang::En)
@@ -128,6 +188,12 @@ pub fn verify_figure(text: &str, unit: Unit, raw: &RawFigure) -> Result<Figure, 
             }
             if quote[..at].chars().any(|c| c.is_ascii_digit()) {
                 return Err("a bare table amount must be the row's first number".into());
+            }
+            if metric == Metric::Revenue && !total_revenue_row(label) {
+                return Err(format!(
+                    "{:?} looks like a segment row; revenue must be the total",
+                    label.trim()
+                ));
             }
             match table_scale(text, &quote) {
                 Some(stated) if stated == scale => scale,
@@ -293,7 +359,10 @@ fn user_prompt(text: &str, company: &str, ticker: &str) -> String {
 
 /// Figures shown (and charted) as GAAP.
 fn is_gaap(m: Metric) -> bool {
-    matches!(m, Metric::Revenue | Metric::NetIncome | Metric::EpsGaap)
+    matches!(
+        m,
+        Metric::Revenue | Metric::NetIncome | Metric::EpsGaap | Metric::OperatingMargin
+    )
 }
 
 /// Wording that marks a figure as non-GAAP: adjusted, managed (banks' FTE
@@ -343,7 +412,7 @@ pub fn from_reply(text: &str, v: &Value) -> Extracted {
                 Ok(raw) if is_gaap(metric) && non_gaap_wording(&raw.quote) => Field::Missing {
                     reason: "unverified: a GAAP figure quoted with non-GAAP wording".into(),
                 },
-                Ok(raw) => match verify_figure(text, metric.unit(), &raw) {
+                Ok(raw) => match verify_figure(text, metric, &raw) {
                     Ok(f) => Field::Value(f),
                     Err(e) => Field::Missing {
                         reason: format!("unverified: {e}"),
@@ -399,10 +468,141 @@ mod tests {
     }
 
     #[test]
+    fn eps_quote_must_not_be_a_dividend() {
+        let t = "The board declared a cash dividend of $0.26 per share. Diluted EPS was $1.85 for the quarter.";
+        let e = verify_figure(
+            t,
+            Metric::EpsGaap,
+            &raw(
+                "$0.26",
+                "units",
+                false,
+                "declared a cash dividend of $0.26 per share",
+            ),
+        );
+        assert!(e.unwrap_err().contains("dividend"));
+        assert!(verify_figure(
+            t,
+            Metric::EpsGaap,
+            &raw(
+                "$1.85",
+                "units",
+                false,
+                "Diluted EPS was $1.85 for the quarter."
+            ),
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn a_mid_row_quote_is_rejected() {
+        let t = "(In millions) Total net sales $102,466 $85,777 $391,035 $94,930";
+        let e = verify_figure(
+            t,
+            Metric::Revenue,
+            &raw("85,777", "millions", false, "$85,777 $391,035 $94,930"),
+        );
+        assert!(
+            e.unwrap_err().contains("row label"),
+            "letters before the amount"
+        );
+    }
+
+    #[test]
+    fn the_quote_must_name_the_metric() {
+        let t = text();
+        // Net income's row quoted as revenue, and the reverse.
+        let e = verify_figure(
+            &t,
+            Metric::Revenue,
+            &raw("27,466", "millions", false, "Net income $27,466 $14,736"),
+        );
+        assert!(e.unwrap_err().contains("revenue"));
+        let e = verify_figure(
+            &t,
+            Metric::NetIncome,
+            &raw(
+                "102,466",
+                "millions",
+                false,
+                "Total net sales $102,466 $94,930",
+            ),
+        );
+        assert!(e.unwrap_err().contains("net income"));
+        // Operating income is not operating cash flow or margin.
+        let e = verify_figure(
+            &t,
+            Metric::OperatingCashFlow,
+            &raw(
+                "32,427",
+                "millions",
+                false,
+                "Operating income $32,427 $29,591",
+            ),
+        );
+        assert!(e.is_err());
+        for (m, kw) in [
+            (Metric::Revenue, "revenue"),
+            (Metric::NetIncome, "net income"),
+            (Metric::EpsGaap, "diluted"),
+            (Metric::OperatingMargin, "operating margin"),
+            (Metric::OperatingCashFlow, "operating activities"),
+            (Metric::FreeCashFlow, "free cash flow"),
+        ] {
+            assert!(label_keywords(m).contains(&kw), "{m:?}");
+        }
+    }
+
+    #[test]
+    fn segment_revenue_rows_need_total() {
+        let t = "(In millions) Products net sales $80,000 $70,000\nServices revenue $22,466 $20,000\nTotal net sales $102,466 $94,930\nNet revenues $9,000 $8,000";
+        for (amount, q) in [
+            ("80,000", "Products net sales $80,000 $70,000"),
+            ("22,466", "Services revenue $22,466 $20,000"),
+        ] {
+            let e = verify_figure(t, Metric::Revenue, &raw(amount, "millions", false, q));
+            assert!(e.unwrap_err().contains("segment"), "{q}");
+        }
+        for (amount, q) in [
+            ("102,466", "Total net sales $102,466 $94,930"),
+            ("9,000", "Net revenues $9,000 $8,000"),
+        ] {
+            assert!(
+                verify_figure(t, Metric::Revenue, &raw(amount, "millions", false, q)).is_ok(),
+                "{q}"
+            );
+        }
+    }
+
+    #[test]
+    fn operating_margin_is_gaap_only() {
+        let text = "Adjusted operating margin was 31.0% for the quarter. Operating margin was 29.5% for the quarter.";
+        let v = json!({"metrics": {"operating_margin_pct": {"amount": "31.0%", "scale": "units", "negative": false, "quote": "Adjusted operating margin was 31.0% for the quarter."}}});
+        assert!(from_reply(text, &v)
+            .metrics
+            .value(Metric::OperatingMargin)
+            .is_none());
+        let v = json!({"metrics": {"operating_margin_pct": {"amount": "29.5%", "scale": "units", "negative": false, "quote": "Operating margin was 29.5% for the quarter."}}});
+        assert_eq!(
+            from_reply(text, &v)
+                .metrics
+                .value(Metric::OperatingMargin)
+                .unwrap()
+                .value,
+            29.5
+        );
+        assert_eq!(
+            Metric::OperatingMargin.label_en(),
+            "Operating margin (GAAP)"
+        );
+        assert_eq!(Metric::OperatingMargin.label_zh(), "营业利润率（GAAP）");
+    }
+
+    #[test]
     fn prose_amount_with_size_word() {
         let f = verify_figure(
             &text(),
-            Unit::Usd,
+            Metric::Revenue,
             &raw(
                 "$102.5 billion",
                 "units",
@@ -420,7 +620,7 @@ mod tests {
         let t = text();
         let f = verify_figure(
             &t,
-            Unit::Usd,
+            Metric::Revenue,
             &raw(
                 "102,466",
                 "millions",
@@ -433,7 +633,7 @@ mod tests {
         // A bare number needs a scale, and one the document states.
         assert!(verify_figure(
             &t,
-            Unit::Usd,
+            Metric::Revenue,
             &raw(
                 "102,466",
                 "units",
@@ -445,7 +645,7 @@ mod tests {
         // The heading also says "reflected in thousands" (shares); the table is in millions.
         assert!(verify_figure(
             &t,
-            Unit::Usd,
+            Metric::Revenue,
             &raw(
                 "102,466",
                 "thousands",
@@ -458,7 +658,7 @@ mod tests {
         let bare = "Total net sales $102,466 $94,930 (in millions)";
         assert!(verify_figure(
             bare,
-            Unit::Usd,
+            Metric::Revenue,
             &raw(
                 "102,466",
                 "millions",
@@ -474,7 +674,7 @@ mod tests {
         let t = text();
         let e = verify_figure(
             &t,
-            Unit::Usd,
+            Metric::Revenue,
             &raw(
                 "$103 billion",
                 "units",
@@ -485,7 +685,7 @@ mod tests {
         assert!(e.unwrap_err().contains("not found"));
         let e = verify_figure(
             &t,
-            Unit::Usd,
+            Metric::Revenue,
             &raw(
                 "$99.9 billion",
                 "units",
@@ -496,7 +696,7 @@ mod tests {
         assert!(e.unwrap_err().contains("not in its quote"));
         let e = verify_figure(
             &t,
-            Unit::Usd,
+            Metric::Revenue,
             &raw(
                 "$102.5 billion, up 8",
                 "units",
@@ -512,7 +712,7 @@ mod tests {
         let t = text();
         let eps = verify_figure(
             &t,
-            Unit::UsdPerShare,
+            Metric::EpsGaap,
             &raw(
                 "$1.85",
                 "units",
@@ -524,7 +724,7 @@ mod tests {
         assert_eq!((eps.value, eps.unit), (1.85, Unit::UsdPerShare));
         let gm = verify_figure(
             &t,
-            Unit::Percent,
+            Metric::GrossMargin,
             &raw(
                 "47.2 percent",
                 "units",
@@ -536,7 +736,7 @@ mod tests {
         assert_eq!(gm.value, 47.2);
         assert!(verify_figure(
             &t,
-            Unit::Percent,
+            Metric::GrossMargin,
             &raw(
                 "$1.85",
                 "units",
@@ -547,7 +747,7 @@ mod tests {
         .is_err());
         assert!(verify_figure(
             &t,
-            Unit::Usd,
+            Metric::Revenue,
             &raw(
                 "8 percent",
                 "units",
@@ -563,7 +763,7 @@ mod tests {
         let t = "Net loss per share $(0.25) for the quarter; diluted EPS was $0.40 in the period.";
         let f = verify_figure(
             t,
-            Unit::UsdPerShare,
+            Metric::EpsGaap,
             &raw(
                 "$(0.25)",
                 "units",
@@ -575,7 +775,7 @@ mod tests {
         assert_eq!(f.value, -0.25);
         let f = verify_figure(
             t,
-            Unit::UsdPerShare,
+            Metric::EpsGaap,
             &raw(
                 "0.25",
                 "units",
@@ -587,7 +787,7 @@ mod tests {
         assert_eq!(f.value, -0.25);
         let e = verify_figure(
             t,
-            Unit::UsdPerShare,
+            Metric::EpsGaap,
             &raw(
                 "$0.40",
                 "units",
@@ -602,24 +802,26 @@ mod tests {
     fn amount_must_be_a_whole_number_in_the_quote() {
         let t = text();
         let q = "quarterly diluted earnings per share of $1.85, up 91 percent";
-        assert!(verify_figure(&t, Unit::UsdPerShare, &raw("$1.8", "units", false, q)).is_err());
+        assert!(verify_figure(&t, Metric::EpsGaap, &raw("$1.8", "units", false, q)).is_err());
         let q = "Net income $27,466 $14,736";
-        assert!(verify_figure(&t, Unit::Usd, &raw("7,466", "millions", false, q)).is_err());
+        assert!(verify_figure(&t, Metric::NetIncome, &raw("7,466", "millions", false, q)).is_err());
         assert_eq!(
-            verify_figure(&t, Unit::Usd, &raw("27,466", "millions", false, q))
+            verify_figure(&t, Metric::NetIncome, &raw("27,466", "millions", false, q))
                 .unwrap()
                 .value,
             27.466e9
         );
         // The prior-year column is not the row's first number.
-        assert!(verify_figure(&t, Unit::Usd, &raw("14,736", "millions", false, q)).is_err());
+        assert!(
+            verify_figure(&t, Metric::NetIncome, &raw("14,736", "millions", false, q)).is_err()
+        );
     }
 
     #[test]
     fn size_word_after_the_amount_counts() {
         let t = text();
         let q = "The Company posted quarterly revenue of $102.5 billion, up 8 percent";
-        let f = verify_figure(&t, Unit::Usd, &raw("102.5", "millions", false, q)).unwrap();
+        let f = verify_figure(&t, Metric::Revenue, &raw("102.5", "millions", false, q)).unwrap();
         assert_eq!(f.value, 102.5e9);
     }
 
@@ -628,13 +830,13 @@ mod tests {
         let t = "Revenue was $1.2 billion. Net income per share was $0.40 for the period.";
         assert!(verify_figure(
             t,
-            Unit::UsdPerShare,
+            Metric::EpsGaap,
             &raw("$1.2 billion", "units", false, "Revenue was $1.2 billion.")
         )
         .is_err());
         assert!(verify_figure(
             t,
-            Unit::UsdPerShare,
+            Metric::EpsGaap,
             &raw(
                 "$0.40",
                 "units",
@@ -651,7 +853,7 @@ mod tests {
             "Net loss was $25 million in the quarter. Net income (loss) $27,466 for the period.";
         let f = verify_figure(
             t,
-            Unit::Usd,
+            Metric::NetIncome,
             &raw(
                 "$25 million",
                 "units",
@@ -662,7 +864,7 @@ mod tests {
         assert_eq!(f.unwrap().value, -25e6);
         let f = verify_figure(
             t,
-            Unit::Usd,
+            Metric::NetIncome,
             &raw(
                 "$25 million",
                 "units",
@@ -675,7 +877,7 @@ mod tests {
         let t2 = "(In millions) Net income (loss) $27,466 for the period.";
         let f = verify_figure(
             t2,
-            Unit::Usd,
+            Metric::NetIncome,
             &raw(
                 "27,466",
                 "millions",
@@ -686,7 +888,7 @@ mod tests {
         assert!(f.is_err());
         let f = verify_figure(
             t2,
-            Unit::Usd,
+            Metric::NetIncome,
             &raw(
                 "27,466",
                 "millions",

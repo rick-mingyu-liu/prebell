@@ -81,7 +81,7 @@ impl Metric {
             Metric::EpsGaap => "Diluted EPS (GAAP)",
             Metric::EpsNonGaap => "Diluted EPS (non-GAAP)",
             Metric::GrossMargin => "Gross margin",
-            Metric::OperatingMargin => "Operating margin",
+            Metric::OperatingMargin => "Operating margin (GAAP)",
             Metric::OperatingCashFlow => "Operating cash flow",
             Metric::FreeCashFlow => "Free cash flow (non-GAAP)",
         }
@@ -94,7 +94,7 @@ impl Metric {
             Metric::EpsGaap => "摊薄每股收益（GAAP）",
             Metric::EpsNonGaap => "摊薄每股收益（非GAAP）",
             Metric::GrossMargin => "毛利率",
-            Metric::OperatingMargin => "营业利润率",
+            Metric::OperatingMargin => "营业利润率（GAAP）",
             Metric::OperatingCashFlow => "经营现金流",
             Metric::FreeCashFlow => "自由现金流（非GAAP）",
         }

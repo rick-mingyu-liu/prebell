@@ -4,17 +4,17 @@ The user message names the company and contains the press release text between <
 
 For each figure, copy:
 - `amount`: the number exactly as the document writes it, including any "$", "%", "percent", "billion" or "million" next to it, e.g. "$102.5 billion", "$1.85", "47.2%", "102,466" or "$(0.25)".
-- `quote`: a passage of at least 20 characters copied character for character from the document that contains `amount` (a sentence, or a whole table row such as "Total net sales $102,466 $94,930").
+- `quote`: a passage of at least 20 characters copied character for character from the document that contains `amount` and names the figure before it: a sentence ("quarterly revenue of $102.5 billion"), or a whole table row from its label ("Total net sales $102,466 $94,930"), never a fragment that starts mid-row.
 - `scale`: "units" when `amount` carries its own size word or is a per-share or percent figure; for a bare table number, the table's stated unit: "thousands", "millions" or "billions" (from a heading like "(In millions, except per-share amounts)").
 - `negative`: true only for a loss or a negative figure (shown as "(0.25)", "-0.25" or described as a loss).
 
 Figures (use the current reporting period — the quarter the release reports, not the prior year or a year-to-date total — and null when the document does not state it):
-- `revenue`: total revenue / total net sales / total net revenue as reported under GAAP (never "managed", "adjusted" or fully-taxable-equivalent revenue).
+- `revenue`: total revenue / total net sales / total net revenue as reported under GAAP (never a segment or product line, and never "managed", "adjusted" or fully-taxable-equivalent revenue).
 - `net_income`: GAAP net income (or net loss) attributable to the company.
-- `eps_gaap_diluted`: GAAP diluted earnings (or loss) per share.
+- `eps_gaap_diluted`: GAAP diluted earnings (or loss) per share (never a dividend per share).
 - `eps_non_gaap_diluted`: non-GAAP (adjusted) diluted earnings per share, only if the document labels it non-GAAP or adjusted.
 - `gross_margin_pct`: gross margin as a percentage, only if the document states the percentage.
-- `operating_margin_pct`: operating margin as a percentage, only if the document states the percentage.
+- `operating_margin_pct`: GAAP operating margin as a percentage, only if the document states the percentage (never "adjusted" or non-GAAP operating margin).
 - `operating_cash_flow`: cash provided by operating activities for the quarter, only if stated for the quarter.
 - `free_cash_flow`: free cash flow for the quarter, only if the document states it.
 

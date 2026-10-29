@@ -11,7 +11,7 @@ use serde_json::Value;
 
 use regex::Regex;
 
-use crate::anchor::{normalize, verify_quote};
+use crate::anchor::{has_word, normalize, verify_quote};
 use crate::clock::{et, trading_day, DayKind};
 use crate::earnings::store::{CalendarRow, EarningsStore, FilingRow};
 use crate::earnings::{find, watchlist, WatchEntry};
@@ -325,20 +325,6 @@ fn names_date(quote: &str, d: NaiveDate) -> bool {
     forms.iter().any(|f| {
         q.match_indices(f.as_str())
             .any(|(i, _)| !q[..i].ends_with(|c: char| c.is_ascii_digit()))
-    })
-}
-
-/// `needle` occurs in `hay` (ASCII case-insensitive) with no letter or
-/// digit right before or after it: "Intuit" is not in "Intuitive".
-fn has_word(hay: &str, needle: &str) -> bool {
-    if needle.is_empty() {
-        return false;
-    }
-    let (h, n) = (hay.to_ascii_lowercase(), needle.to_ascii_lowercase());
-    h.match_indices(&n).any(|(i, _)| {
-        let before = h[..i].chars().next_back();
-        let after = h[i + n.len()..].chars().next();
-        !before.is_some_and(char::is_alphanumeric) && !after.is_some_and(char::is_alphanumeric)
     })
 }
 
