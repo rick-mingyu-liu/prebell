@@ -25,6 +25,8 @@ use crate::store::D1Store;
 /// The every-minute cron (wrangler.toml) that drives earnings polling.
 const EARNINGS_CRON: &str = "* * * * *";
 const PLACEHOLDER_CONTACT: &str = "placeholder@example.com";
+/// An earnings message older than this skips its poll (still builds).
+const MAX_POLL_LAG_MINUTES: i64 = 3;
 
 /// `Pause` on the Workers timer.
 struct WorkerPause;
@@ -41,6 +43,10 @@ impl Pause for WorkerPause {
 #[derive(Serialize, Deserialize, Debug)]
 struct Job {
     job: String,
+    /// When the cron fired (RFC 3339), for earnings jobs: picks the watchlist
+    /// batch, so a late message neither skips nor repeats one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    at: Option<String>,
 }
 
 fn text(env: &Env, name: &str) -> Option<String> {
@@ -87,17 +93,28 @@ async fn fetch(req: Request, _env: Env, _ctx: Context) -> Result<Response> {
 
 #[event(scheduled)]
 async fn scheduled(event: ScheduledEvent, env: Env, _ctx: ScheduleContext) {
-    let job = if event.cron() == EARNINGS_CRON {
+    // Earnings go to their own queue (one consumer, one message at a time) so
+    // a minutes-long earnings build never delays the premarket brief or runs
+    // twice in parallel against EDGAR.
+    let t = now(&env);
+    let (job, binding, at) = if event.cron() == EARNINGS_CRON {
         // Earnings jobs run only in the polling window (weekdays 06:00-22:00 ET).
-        if !in_window(now(&env)) {
+        if !in_window(t) {
             return;
         }
-        "earnings"
+        let at = t.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        ("earnings", "EARNINGS", Some(at))
     } else {
-        "premarket"
+        ("premarket", "JOBS", None)
     };
-    let sent = match env.queue("JOBS") {
-        Ok(q) => q.send(Job { job: job.into() }).await,
+    let sent = match env.queue(binding) {
+        Ok(q) => {
+            q.send(Job {
+                job: job.into(),
+                at,
+            })
+            .await
+        }
         Err(e) => Err(e),
     };
     match sent {
@@ -110,25 +127,38 @@ async fn scheduled(event: ScheduledEvent, env: Env, _ctx: ScheduleContext) {
 /// day), then build at most one queued filing.
 async fn earnings(
     env: &Env,
+    at: Option<&str>,
     store: &D1Store,
     ns: &dyn NewsSearch,
     llm: &dyn LlmProvider,
 ) -> Result<()> {
     let contact = text(env, "SEC_CONTACT").unwrap_or_default();
+    // SEC blocks anonymous clients; never poll as the placeholder.
     if contact == PLACEHOLDER_CONTACT {
-        console_warn!("SEC_CONTACT is the placeholder; set a real contact email before deploying");
+        return Err(Error::RustError(
+            "SEC_CONTACT is the placeholder; set a real contact email".into(),
+        ));
     }
     let edgar = Edgar::new(WorkerHttp, WorkerPause, &contact)
         .map_err(|e| Error::RustError(e.to_string()))?;
     let t = now(env);
-    match poll_tick(t, store, store, &edgar).await {
-        Ok(o) => {
-            for e in &o.errors {
-                console_warn!("earnings poll: {e}");
+    let fired = at
+        .and_then(|a| DateTime::parse_from_rfc3339(a).ok())
+        .map_or(t, |a| a.with_timezone(&Utc));
+    // A backlog (a long build held the queue) polls only the newest minutes;
+    // the older batches come round again within five minutes.
+    if t - fired <= chrono::Duration::minutes(MAX_POLL_LAG_MINUTES) {
+        match poll_tick(fired, store, store, &edgar).await {
+            Ok(o) => {
+                for e in &o.errors {
+                    console_warn!("earnings poll: {e}");
+                }
+                console_log!("earnings poll: checked {}, new {:?}", o.checked, o.detected);
             }
-            console_log!("earnings poll: checked {}, new {:?}", o.checked, o.detected);
+            Err(e) => console_error!("earnings poll aborted: {e}"),
         }
-        Err(e) => console_error!("earnings poll aborted: {e}"),
+    } else {
+        console_log!("earnings poll skipped: message from {fired} is stale");
     }
     let cal = YahooCalendar::new(WorkerHttp);
     match refresh_tick(t, store, store, &cal, ns, llm).await {
@@ -164,9 +194,11 @@ async fn queue(batch: MessageBatch<Job>, env: Env, _ctx: Context) -> Result<()> 
     .map_err(|e| Error::RustError(e.to_string()))?;
 
     for msg in batch.messages()? {
-        match msg.body().job.as_str() {
+        let body = msg.body();
+        match body.job.as_str() {
             "earnings" => {
-                if let Err(e) = earnings(&env, &store, &ns, llm.as_ref()).await {
+                if let Err(e) = earnings(&env, body.at.as_deref(), &store, &ns, llm.as_ref()).await
+                {
                     console_error!("job earnings: {e}");
                 }
             }

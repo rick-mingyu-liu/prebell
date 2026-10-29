@@ -36,7 +36,7 @@
 - `crates/core/Cargo.toml`: add `plotters`.
 - `crates/generator/src/lib.rs`: dispatch on the cron string and on `Job.job` (`"premarket"` unchanged, new `"earnings"`); build the EDGAR/calendar providers.
 - `crates/generator/src/store.rs`: none; the new `EarningsStore` impl lives in `crates/generator/src/earnings_store.rs`.
-- `crates/generator/wrangler.toml`: one more cron `"* * * * *"`.
+- `crates/generator/wrangler.toml`: one more cron `"* * * * *"` and a second queue `prebell-earnings` (producer `EARNINGS` + its own consumer). The queue must be created before deploy (`wrangler queues create prebell-earnings`).
 - `apps/web`: `tests/d1.ts` loads every `migrations/*.sql` in order; layout nav gets an "Earnings" link; the post page renders charts; home page gets a "Latest earnings checks" list; `wrangler.jsonc` gets the `FACTS` R2 binding (read-only use) for chart SVGs.
 
 ## Review Focus
@@ -240,7 +240,7 @@ apps/web/
 **Interfaces:**
 - `impl EarningsStore for D1Store` (SQL per Task 1 tables; `insert_filing` is `INSERT … ON CONFLICT(accession) DO NOTHING RETURNING accession`).
 - `struct WorkerPause` (`worker::Delay`).
-- `scheduled`: cron `"* * * * *"` ⇒ if `earnings::in_window(now)` send `Job { job: "earnings" }`; other crons ⇒ `"premarket"` as before.
+- `scheduled`: cron `"* * * * *"` ⇒ if `earnings::in_window(now)` send `Job { job: "earnings", at: <cron time> }` to a **separate queue** `prebell-earnings` (binding `EARNINGS`, consumer `max_batch_size = 1`, `max_concurrency = 1`), so a minutes-long build never delays the premarket job and never runs twice in parallel against EDGAR; other crons ⇒ `"premarket"` on `JOBS` as before. `Job` gains an optional `at` (the cron time picks the poll batch; a message older than 3 min skips its poll but still builds). Earnings refuse to run with the placeholder `SEC_CONTACT`.
 - `queue`: `"premarket"` ⇒ Plan 1 `tick`; `"earnings"` ⇒ `poll_tick`, then `calendar::refresh_tick`, then `build_tick`; alerts delivered after the batch as before. A warning is logged when `SEC_CONTACT` is the placeholder.
 
 - [ ] **Step 1:** `worker-build --release` → builds. `cargo clippy --workspace --all-targets -- -D warnings` clean.

@@ -29,6 +29,18 @@ queue = "prebell-jobs"
 [[queues.consumers]]
 queue = "prebell-jobs"
 
+# Earnings jobs (every minute in the ET polling window) on their own queue:
+# one consumer and one message per batch, so builds never run in parallel
+# (EDGAR fair access, one build per filing) and never delay the premarket job.
+[[queues.producers]]
+binding = "EARNINGS"
+queue = "prebell-earnings"
+
+[[queues.consumers]]
+queue = "prebell-earnings"
+max_batch_size = 1
+max_concurrency = 1
+
 [vars]
 LLM_PROVIDER = "deepseek"
 SEC_CONTACT = "placeholder@example.com"
