@@ -15,17 +15,17 @@ pub struct D1Store {
     pub facts: Bucket,
 }
 
-fn s(v: &str) -> JsValue {
+pub(crate) fn s(v: &str) -> JsValue {
     JsValue::from_str(v)
 }
-fn opt(v: Option<&str>) -> JsValue {
+pub(crate) fn opt(v: Option<&str>) -> JsValue {
     v.map_or(JsValue::NULL, JsValue::from_str)
 }
-fn int(v: i64) -> JsValue {
+pub(crate) fn int(v: i64) -> JsValue {
     // D1 takes JS numbers; BigInt is rejected.
     JsValue::from_f64(v as f64)
 }
-fn err(ctx: &str, e: worker::Error) -> String {
+pub(crate) fn err(ctx: &str, e: worker::Error) -> String {
     format!("{ctx}: {e}")
 }
 
@@ -86,7 +86,7 @@ pub fn now_iso() -> String {
 }
 
 impl D1Store {
-    async fn first<T: DeserializeOwned>(
+    pub(crate) async fn first<T: DeserializeOwned>(
         &self,
         sql: &str,
         args: &[JsValue],
@@ -95,7 +95,7 @@ impl D1Store {
         stmt.first::<T>(None).await.map_err(|e| err(sql, e))
     }
 
-    async fn run(&self, sql: &str, args: &[JsValue]) -> Result<(), String> {
+    pub(crate) async fn run(&self, sql: &str, args: &[JsValue]) -> Result<(), String> {
         let stmt = self.db.prepare(sql).bind(args).map_err(|e| err(sql, e))?;
         let r = stmt.run().await.map_err(|e| err(sql, e))?;
         match r.error() {
