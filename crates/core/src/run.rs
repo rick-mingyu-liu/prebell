@@ -1,18 +1,92 @@
-//! The premarket run state machine. Each cron firing calls `tick`, which
-//! decides from the ET clock and the stored run what to do. Re-running a tick
-//! never duplicates a post: the run key is the idempotency key.
+//! The run state machine shared by every scheduled content type. Each cron
+//! firing calls `tick_content`, which decides from the ET clock and the stored
+//! run what to do. Re-running a tick never duplicates a post: the run key is
+//! the idempotency key. `Content` supplies what differs per type.
 
+use async_trait::async_trait;
 use chrono::{DateTime, Duration, NaiveDate, NaiveTime, SecondsFormat, Utc};
+use serde::de::DeserializeOwned;
+use serde::Serialize;
 
-use crate::clock::{et, premarket_decision, SlotDecision};
+use crate::clock::{decide, et, premarket_window, trading_day, DayKind, SlotDecision, Window};
 use crate::facts::{missing_required, Field, NewsReason, PremarketFacts};
 use crate::numbers::Lang;
 use crate::premarket::build_facts;
-use crate::premarket::draft::{write, TEMPLATE_ID};
+use crate::premarket::draft::{write, Draft, TEMPLATE_ID};
 use crate::providers::{LlmProvider, MarketData, NewsSearch};
 use crate::store::{PostRow, RunRow, Store, TranslationRow};
 
-const CONTENT_TYPE: &str = "premarket";
+/// One scheduled content type (premarket brief, recap): its window, facts,
+/// gate, drafting and sources. Everything else is the shared state machine.
+#[async_trait(?Send)]
+pub trait Content {
+    type Facts: Serialize + DeserializeOwned;
+    /// `posts.content_type`; also prefixes the run key, slug and facts key.
+    fn content_type(&self) -> &'static str;
+    /// `posts.template_id`, e.g. `premarket:v1`.
+    fn template_id(&self) -> &'static str;
+    /// Human name for alerts, e.g. "premarket brief".
+    fn label(&self) -> &'static str;
+    /// The ET publishing window on a trading day of this kind.
+    fn window(&self, day: DayKind) -> Window;
+    /// ET time from which a still-failing ZH draft is marked `failed`.
+    fn zh_give_up(&self) -> NaiveTime;
+    async fn build_facts(&self, date: NaiveDate, now: DateTime<Utc>) -> Self::Facts;
+    /// Names of required sections that are unavailable; empty = publishable.
+    fn missing_required(&self, f: &Self::Facts) -> Vec<&'static str>;
+    async fn write(&self, f: &Self::Facts, lang: Lang) -> Result<(Draft, String), Vec<String>>;
+    /// The post's sources, one per url.
+    fn sources(&self, f: &Self::Facts) -> Vec<NewsReason>;
+
+    fn run_key(&self, date: NaiveDate) -> String {
+        format!("{}:{}", self.content_type(), date.format("%Y-%m-%d"))
+    }
+    fn slug(&self, date: NaiveDate) -> String {
+        format!("{}-{}", self.content_type(), date.format("%Y-%m-%d"))
+    }
+    fn facts_key(&self, date: NaiveDate) -> String {
+        format!("{}/{}.json", self.content_type(), date.format("%Y-%m-%d"))
+    }
+}
+
+/// The premarket brief (Plan 1).
+pub struct Premarket<'a> {
+    pub md: &'a dyn MarketData,
+    pub ns: &'a dyn NewsSearch,
+    pub llm: &'a dyn LlmProvider,
+}
+
+#[async_trait(?Send)]
+impl Content for Premarket<'_> {
+    type Facts = PremarketFacts;
+    fn content_type(&self) -> &'static str {
+        "premarket"
+    }
+    fn template_id(&self) -> &'static str {
+        TEMPLATE_ID
+    }
+    fn label(&self) -> &'static str {
+        "premarket brief"
+    }
+    fn window(&self, day: DayKind) -> Window {
+        premarket_window(day)
+    }
+    fn zh_give_up(&self) -> NaiveTime {
+        NaiveTime::from_hms_opt(18, 0, 0).expect("valid built-in time")
+    }
+    async fn build_facts(&self, date: NaiveDate, now: DateTime<Utc>) -> PremarketFacts {
+        build_facts(self.md, self.ns, self.llm, date, now).await
+    }
+    fn missing_required(&self, f: &PremarketFacts) -> Vec<&'static str> {
+        missing_required(f)
+    }
+    async fn write(&self, f: &PremarketFacts, lang: Lang) -> Result<(Draft, String), Vec<String>> {
+        write(self.llm, f, lang).await
+    }
+    fn sources(&self, f: &PremarketFacts) -> Vec<NewsReason> {
+        sources(f)
+    }
+}
 /// A `building` run younger than this is assumed to be in flight. A build
 /// takes 3-8 minutes and the cron fires every 5, so this must cover several
 /// firings or a running build is treated as crashed and rebuilt.
@@ -27,6 +101,7 @@ pub enum TickOutcome {
     Skipped,
 }
 
+/// The premarket run key, `premarket:YYYY-MM-DD`.
 pub fn run_key(trading_date: NaiveDate) -> String {
     format!("premarket:{}", trading_date.format("%Y-%m-%d"))
 }
@@ -35,7 +110,7 @@ fn iso(t: DateTime<Utc>) -> String {
     t.to_rfc3339_opts(SecondsFormat::Secs, true)
 }
 
-/// One cron firing. A store error is reported as `Retrying`.
+/// One premarket cron firing. A store error is reported as `Retrying`.
 pub async fn tick(
     now: DateTime<Utc>,
     store: &dyn Store,
@@ -43,19 +118,22 @@ pub async fn tick(
     ns: &dyn NewsSearch,
     llm: &dyn LlmProvider,
 ) -> TickOutcome {
-    step(now, store, md, ns, llm)
+    tick_content(now, store, &Premarket { md, ns, llm }).await
+}
+
+/// One cron firing for content type `c`. A store error is reported as `Retrying`.
+pub async fn tick_content<C: Content>(now: DateTime<Utc>, store: &dyn Store, c: &C) -> TickOutcome {
+    step(now, store, c)
         .await
         .unwrap_or_else(TickOutcome::Retrying)
 }
 
-async fn step(
+async fn step<C: Content>(
     now: DateTime<Utc>,
     store: &dyn Store,
-    md: &dyn MarketData,
-    ns: &dyn NewsSearch,
-    llm: &dyn LlmProvider,
+    c: &C,
 ) -> Result<TickOutcome, String> {
-    let decision = premarket_decision(now);
+    let decision = decide(now, |d| c.window(d));
     let date = match decision {
         SlotDecision::NotToday => return Ok(TickOutcome::Nothing),
         SlotDecision::TooEarly => et(now).date_naive(),
@@ -63,12 +141,12 @@ async fn step(
             trading_date
         }
     };
-    let key = run_key(date);
+    let key = c.run_key(date);
     // Any read error aborts the tick before a write: a failed read is never "no row".
     let run = store.get_run(&key).await?;
 
     if let Some(r) = run.as_ref().filter(|r| r.status == "published") {
-        return retry_zh(now, store, llm, r).await;
+        return retry_zh(now, store, c, r).await;
     }
     let in_flight = run
         .as_ref()
@@ -78,17 +156,17 @@ async fn step(
         SlotDecision::InWindow { .. } | SlotDecision::PastDeadline { .. }
     );
     if may_act && !in_flight {
-        if let Some(r) = reconcile(now, store, date, run.clone()).await? {
-            return retry_zh(now, store, llm, &r).await;
+        if let Some(r) = reconcile(now, store, c, date, run.clone()).await? {
+            return retry_zh(now, store, c, &r).await;
         }
     }
 
     match decision {
         SlotDecision::InWindow { .. } if in_flight => Ok(TickOutcome::Nothing),
-        SlotDecision::InWindow { .. } => build(now, store, md, ns, llm, date, run).await,
+        SlotDecision::InWindow { .. } => build(now, store, c, date, run).await,
         // Let an in-flight build finish; once its lease expires it is skipped.
         SlotDecision::PastDeadline { .. } if in_flight => Ok(TickOutcome::Nothing),
-        SlotDecision::PastDeadline { .. } => skip(now, store, date, run).await,
+        SlotDecision::PastDeadline { .. } => skip(now, store, c, date, run).await,
         _ => Ok(TickOutcome::Nothing),
     }
 }
@@ -96,13 +174,14 @@ async fn step(
 /// A store failure part-way through publishing can leave EN live while the
 /// run is not `published`. If so, mark the run published (adding a pending
 /// ZH row when none exists) without touching EN, and return the run.
-async fn reconcile(
+async fn reconcile<C: Content>(
     now: DateTime<Utc>,
     store: &dyn Store,
+    c: &C,
     date: NaiveDate,
     run: Option<RunRow>,
 ) -> Result<Option<RunRow>, String> {
-    let Some(post) = store.get_post_by_run(&run_key(date)).await? else {
+    let Some(post) = store.get_post_by_run(&c.run_key(date)).await? else {
         return Ok(None);
     };
     let post_id = post.id.ok_or("post has no id")?;
@@ -127,11 +206,11 @@ async fn reconcile(
     }
     // The failed write may have been `add_sources`; it replaces, so redo it.
     if let Some(json) = store.get_facts(&post.facts_r2_key).await? {
-        let facts: PremarketFacts =
+        let facts: C::Facts =
             serde_json::from_str(&json).map_err(|e| format!("facts json: {e}"))?;
-        store.add_sources(post_id, &sources(&facts)).await?;
+        store.add_sources(post_id, &c.sources(&facts)).await?;
     }
-    let mut row = run.unwrap_or_else(|| new_run(now, date));
+    let mut row = run.unwrap_or_else(|| new_run(now, c, date));
     row.status = "published".into();
     row.updated_at = ts;
     store.upsert_run(&row).await?;
@@ -145,16 +224,17 @@ fn is_stale(r: &RunRow, now: DateTime<Utc>) -> bool {
     }
 }
 
-async fn skip(
+async fn skip<C: Content>(
     now: DateTime<Utc>,
     store: &dyn Store,
+    c: &C,
     date: NaiveDate,
     run: Option<RunRow>,
 ) -> Result<TickOutcome, String> {
     if run.as_ref().is_some_and(|r| r.status == "skipped") {
         return Ok(TickOutcome::Nothing);
     }
-    let mut row = run.unwrap_or_else(|| new_run(now, date));
+    let mut row = run.unwrap_or_else(|| new_run(now, c, date));
     row.status = "skipped".into();
     row.updated_at = iso(now);
     let why = row
@@ -166,16 +246,20 @@ async fn skip(
         .add_alert(
             &row.run_key,
             "error",
-            &format!("premarket brief skipped for {date}: not ready by 09:25 ET ({why})"),
+            &format!(
+                "{} skipped for {date}: not ready by {} ET ({why})",
+                c.label(),
+                c.window(trading_day(date)).end.format("%H:%M")
+            ),
         )
         .await?;
     Ok(TickOutcome::Skipped)
 }
 
-fn new_run(now: DateTime<Utc>, date: NaiveDate) -> RunRow {
+fn new_run<C: Content>(now: DateTime<Utc>, c: &C, date: NaiveDate) -> RunRow {
     RunRow {
-        run_key: run_key(date),
-        content_type: CONTENT_TYPE.into(),
+        run_key: c.run_key(date),
+        content_type: c.content_type().into(),
         trading_date: date.format("%Y-%m-%d").to_string(),
         status: "pending".into(),
         attempts: 0,
@@ -185,40 +269,38 @@ fn new_run(now: DateTime<Utc>, date: NaiveDate) -> RunRow {
     }
 }
 
-async fn build(
+async fn build<C: Content>(
     now: DateTime<Utc>,
     store: &dyn Store,
-    md: &dyn MarketData,
-    ns: &dyn NewsSearch,
-    llm: &dyn LlmProvider,
+    c: &C,
     date: NaiveDate,
     run: Option<RunRow>,
 ) -> Result<TickOutcome, String> {
     let ts = iso(now);
-    let mut row = run.unwrap_or_else(|| new_run(now, date));
+    let mut row = run.unwrap_or_else(|| new_run(now, c, date));
     row.status = "building".into();
     row.attempts += 1;
     row.updated_at = ts.clone();
     store.upsert_run(&row).await?;
 
-    let facts = build_facts(md, ns, llm, date, now).await;
-    let missing = missing_required(&facts);
+    let facts = c.build_facts(date, now).await;
+    let missing = c.missing_required(&facts);
     if !missing.is_empty() {
         return retry_later(store, row, missing.join(", ")).await;
     }
 
-    let (en, en_md) = match write(llm, &facts, Lang::En).await {
+    let (en, en_md) = match c.write(&facts, Lang::En).await {
         Ok(x) => x,
         Err(e) => return retry_later(store, row, format!("en: {}", e.join("; "))).await,
     };
-    let zh = write(llm, &facts, Lang::Zh).await;
+    let zh = c.write(&facts, Lang::Zh).await;
 
     // The build took minutes; another tick may have finished this run since
     // it was read. If so, keep its post and facts untouched.
     if superseded(store, &row.run_key).await? {
         return Ok(TickOutcome::Nothing);
     }
-    let facts_key = format!("premarket/{}.json", row.trading_date);
+    let facts_key = c.facts_key(date);
     let json = serde_json::to_string(&facts).map_err(|e| format!("facts json: {e}"))?;
     store.put_facts(&facts_key, &json).await?;
 
@@ -226,10 +308,10 @@ async fn build(
         .upsert_post(&PostRow {
             id: None,
             run_key: row.run_key.clone(),
-            content_type: CONTENT_TYPE.into(),
-            template_id: TEMPLATE_ID.into(),
+            content_type: c.content_type().into(),
+            template_id: c.template_id().into(),
             trading_date: row.trading_date.clone(),
-            slug: format!("premarket-{}", row.trading_date),
+            slug: c.slug(date),
             facts_r2_key: facts_key,
             published_at: Some(ts.clone()),
         })
@@ -263,7 +345,7 @@ async fn build(
         ),
     };
     store.upsert_translation(&zh_row).await?;
-    store.add_sources(post_id, &sources(&facts)).await?;
+    store.add_sources(post_id, &c.sources(&facts)).await?;
 
     row.status = "published".into();
     row.last_error = zh_err.clone();
@@ -340,11 +422,12 @@ fn sources(f: &PremarketFacts) -> Vec<NewsReason> {
 }
 
 /// After EN published: retry a pending ZH draft for the rest of the ET day;
-/// at/after 18:00 ET a failure marks it `failed` with one warn alert.
-async fn retry_zh(
+/// from `zh_give_up` (18:00 ET for premarket) a failure marks it `failed`
+/// with one warn alert.
+async fn retry_zh<C: Content>(
     now: DateTime<Utc>,
     store: &dyn Store,
-    llm: &dyn LlmProvider,
+    c: &C,
     run: &RunRow,
 ) -> Result<TickOutcome, String> {
     let post = store
@@ -361,10 +444,9 @@ async fn retry_zh(
         .get_facts(&post.facts_r2_key)
         .await?
         .ok_or("facts not found")?;
-    let facts: PremarketFacts =
-        serde_json::from_str(&json).map_err(|e| format!("facts json: {e}"))?;
+    let facts: C::Facts = serde_json::from_str(&json).map_err(|e| format!("facts json: {e}"))?;
     let ts = iso(now);
-    match write(llm, &facts, Lang::Zh).await {
+    match c.write(&facts, Lang::Zh).await {
         Ok((d, body)) => {
             store
                 .upsert_translation(&translation_zh(
@@ -380,7 +462,7 @@ async fn retry_zh(
         }
         Err(e) => {
             let err = format!("zh: {}", e.join("; "));
-            if et(now).time() >= NaiveTime::from_hms_opt(18, 0, 0).unwrap() {
+            if et(now).time() >= c.zh_give_up() {
                 let failed = translation_zh(
                     post_id,
                     "failed",
@@ -395,7 +477,8 @@ async fn retry_zh(
                         &run.run_key,
                         "warn",
                         &format!(
-                            "Chinese premarket brief failed for {}: {err}",
+                            "Chinese {} failed for {}: {err}",
+                            c.label(),
                             run.trading_date
                         ),
                     )
