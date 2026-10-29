@@ -24,8 +24,8 @@ fn decode_entity(name: &str) -> Option<char> {
     }
 }
 
-/// Decode entities, unify curly quotes, collapse whitespace, trim.
-fn normalize(s: &str) -> String {
+/// Decodes HTML entities (`&amp;`, `&#8217;`, `&#x27;`, ...); unknown ones stay as written.
+pub(crate) fn decode_entities(s: &str) -> String {
     let mut decoded = String::with_capacity(s.len());
     let mut rest = s;
     while let Some(i) = rest.find('&') {
@@ -47,7 +47,12 @@ fn normalize(s: &str) -> String {
         }
     }
     decoded.push_str(rest);
-    let mapped: String = decoded
+    decoded
+}
+
+/// Decode entities, unify curly quotes, collapse whitespace, trim.
+fn normalize(s: &str) -> String {
+    let mapped: String = decode_entities(s)
         .chars()
         .map(|c| match c {
             '\u{2018}' | '\u{2019}' => '\'',
