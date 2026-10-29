@@ -53,5 +53,7 @@ th { font-weight: 600; }
 .post-list time { display: block; }
 .post-list p { margin: 0.25rem 0 0; color: var(--muted); }
 .pager { display: flex; justify-content: space-between; margin-top: 1.5rem; }
+.filters { display: flex; gap: 1rem; flex-wrap: wrap; margin: 0 0 1rem; }
+.filters a[aria-current="page"] { font-weight: 600; text-decoration: none; }
 .site-footer { margin-top: 3rem; padding-top: 1rem; border-top: 1px solid var(--rule); }
 .disclaimer { color: var(--muted); font-size: 0.85rem; }

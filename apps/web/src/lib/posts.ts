@@ -2,6 +2,16 @@
 
 export type Lang = "en" | "zh";
 
+/** Scheduled content types the site lists; `posts.content_type` values. */
+export const CONTENT_TYPES = ["premarket", "recap"] as const;
+export type ContentType = (typeof CONTENT_TYPES)[number];
+
+/** A known content type from a query parameter, or null. */
+export function parseContentType(raw: string | string[] | undefined): ContentType | null {
+  const v = Array.isArray(raw) ? raw[0] : raw;
+  return CONTENT_TYPES.find((t) => t === v) ?? null;
+}
+
 /** The slice of the D1 API these queries use, so tests can pass an SQLite adapter. */
 export interface D1StatementLike {
   bind(...values: unknown[]): D1StatementLike;
@@ -14,6 +24,7 @@ export interface D1Like {
 
 export interface PostView {
   slug: string;
+  contentType: string;
   tradingDate: string;
   publishedAt: string | null;
   title: string;
@@ -36,11 +47,13 @@ export interface PostListItem {
 
 export const PAGE_SIZE = 20;
 
+
 const other = (lang: Lang): Lang => (lang === "en" ? "zh" : "en");
 
 interface Row {
   id: number;
   slug: string;
+  content_type: string;
   trading_date: string;
   published_at: string | null;
   status: string;
@@ -54,7 +67,7 @@ interface Row {
 // pending while the EN text is published — the page then links to English.
 const VISIBLE = `(t.status = 'published' OR (t.lang = 'zh' AND t.status = 'pending' AND o.status = 'published'))`;
 
-const SELECT_VIEW = `SELECT p.id, p.slug, p.trading_date, p.published_at, t.status, t.title, t.summary, t.body_md,
+const SELECT_VIEW = `SELECT p.id, p.slug, p.content_type, p.trading_date, p.published_at, t.status, t.title, t.summary, t.body_md,
   o.status AS other_status
 FROM posts p
 JOIN post_translations t ON t.post_id = p.id AND t.lang = ?
@@ -68,6 +81,7 @@ async function toView(db: D1Like, row: Row | null): Promise<PostView | null> {
     .all<{ url: string; title: string | null }>();
   return {
     slug: row.slug,
+    contentType: row.content_type,
     tradingDate: row.trading_date,
     publishedAt: row.published_at,
     title: row.title ?? "",
@@ -87,29 +101,39 @@ export async function getPostBySlug(db: D1Like, slug: string, lang: Lang): Promi
   return toView(db, row);
 }
 
-export async function getLatestPremarket(db: D1Like, lang: Lang): Promise<PostView | null> {
+/** The newest visible post of `type` in `lang`. */
+export async function getLatestPost(db: D1Like, lang: Lang, type: ContentType): Promise<PostView | null> {
   const row = await db
     .prepare(
-      `${SELECT_VIEW} WHERE p.content_type = 'premarket' AND ${VISIBLE}
+      `${SELECT_VIEW} WHERE p.content_type = ? AND ${VISIBLE}
        ORDER BY p.trading_date DESC, p.published_at DESC LIMIT 1`,
     )
-    .bind(lang, other(lang))
+    .bind(lang, other(lang), type)
     .first<Row>();
   return toView(db, row);
 }
 
-/** Published posts in `lang`, newest first; `page` starts at 1. */
-export async function listPosts(db: D1Like, lang: Lang, page: number): Promise<PostListItem[]> {
+export function getLatestPremarket(db: D1Like, lang: Lang): Promise<PostView | null> {
+  return getLatestPost(db, lang, "premarket");
+}
+
+/** Published posts in `lang`, newest first, optionally of one `type`; `page` starts at 1. */
+export async function listPosts(
+  db: D1Like,
+  lang: Lang,
+  page: number,
+  type: ContentType | null = null,
+): Promise<PostListItem[]> {
   const p = Number.isFinite(page) && page >= 1 ? Math.floor(page) : 1;
   const { results } = await db
     .prepare(
       `SELECT p.slug, p.content_type, p.trading_date, p.published_at, t.title, t.summary
        FROM posts p JOIN post_translations t ON t.post_id = p.id AND t.lang = ?
-       WHERE t.status = 'published'
+       WHERE t.status = 'published' AND (? IS NULL OR p.content_type = ?)
        ORDER BY p.trading_date DESC, p.published_at DESC, p.id DESC
        LIMIT ? OFFSET ?`,
     )
-    .bind(lang, PAGE_SIZE, (p - 1) * PAGE_SIZE)
+    .bind(lang, type, type, PAGE_SIZE, (p - 1) * PAGE_SIZE)
     .all<{
       slug: string;
       content_type: string;

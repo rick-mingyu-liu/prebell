@@ -5,7 +5,8 @@ import LangSwitch from "@/components/LangSwitch";
 import PostList from "@/components/PostList";
 import type { Locale } from "@/i18n/routing";
 import { getDb } from "@/lib/db";
-import { listPosts, PAGE_SIZE } from "@/lib/posts";
+import { typeLabel } from "@/lib/labels";
+import { CONTENT_TYPES, type ContentType, listPosts, PAGE_SIZE, parseContentType } from "@/lib/posts";
 import { pairedAlternates } from "@/lib/seo";
 
 function pageNumber(raw: string | string[] | undefined): number {
@@ -13,35 +14,56 @@ function pageNumber(raw: string | string[] | undefined): number {
   return Number.isInteger(n) && n >= 1 ? n : 1;
 }
 
+/** The archive path after the locale, keeping only meaningful parameters. */
+function archivePath(type: ContentType | null, page: number): string {
+  const q = new URLSearchParams();
+  if (type) q.set("type", type);
+  if (page > 1) q.set("page", String(page));
+  const s = q.toString();
+  return s ? `/archive?${s}` : "/archive";
+}
+
 export async function generateMetadata({ params, searchParams }: PageProps<"/[locale]/archive">): Promise<Metadata> {
   const { locale } = await params;
-  const page = pageNumber((await searchParams).page);
-  const t = await getTranslations({ locale, namespace: "archive" });
-  const query = page > 1 ? `?page=${page}` : "";
-  return { title: t("title"), alternates: pairedAlternates(locale, `/archive${query}`) };
+  const sp = await searchParams;
+  const page = pageNumber(sp.page);
+  const type = parseContentType(sp.type);
+  const t = await getTranslations({ locale });
+  const title = type ? `${t("archive.title")} · ${typeLabel(t, type)}` : t("archive.title");
+  return { title, alternates: pairedAlternates(locale, archivePath(type, page)) };
 }
 
 export default async function Archive({ params, searchParams }: PageProps<"/[locale]/archive">) {
   const locale = (await params).locale as Locale;
   setRequestLocale(locale);
-  const page = pageNumber((await searchParams).page);
-  const t = await getTranslations("archive");
-  const items = await listPosts(getDb(), locale, page);
-  const href = (n: number) => (n > 1 ? `/${locale}/archive?page=${n}` : `/${locale}/archive`);
+  const sp = await searchParams;
+  const page = pageNumber(sp.page);
+  const type = parseContentType(sp.type);
+  const t = await getTranslations();
+  const items = await listPosts(getDb(), locale, page, type);
+  const href = (ty: ContentType | null, n: number) => `/${locale}${archivePath(ty, n)}`;
 
   return (
     <>
       <div className="page-tools">
         <h1>
-          {t("title")}
-          {page > 1 && <span className="muted"> · {t("page", { page })}</span>}
+          {t("archive.title")}
+          {type && <span className="muted"> · {typeLabel(t, type)}</span>}
+          {page > 1 && <span className="muted"> · {t("archive.page", { page })}</span>}
         </h1>
-        <LangSwitch locale={locale} path="/archive" />
+        <LangSwitch locale={locale} path={archivePath(type, page)} />
       </div>
-      {items.length === 0 ? <p>{t("empty")}</p> : <PostList locale={locale} items={items} />}
+      <nav className="filters" aria-label={t("archive.filter")}>
+        {[null, ...CONTENT_TYPES].map((ty) => (
+          <Link key={ty ?? "all"} href={href(ty, 1)} aria-current={ty === type ? "page" : undefined}>
+            {ty ? typeLabel(t, ty) : t("archive.all")}
+          </Link>
+        ))}
+      </nav>
+      {items.length === 0 ? <p>{t("archive.empty")}</p> : <PostList locale={locale} items={items} />}
       <nav className="pager">
-        {page > 1 && <Link href={href(page - 1)}>← {t("newer")}</Link>}
-        {items.length === PAGE_SIZE && <Link href={href(page + 1)}>{t("older")} →</Link>}
+        {page > 1 && <Link href={href(type, page - 1)}>← {t("archive.newer")}</Link>}
+        {items.length === PAGE_SIZE && <Link href={href(type, page + 1)}>{t("archive.older")} →</Link>}
       </nav>
     </>
   );

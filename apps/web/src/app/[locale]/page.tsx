@@ -7,7 +7,8 @@ import PostBody from "@/components/PostBody";
 import PostList from "@/components/PostList";
 import type { Locale } from "@/i18n/routing";
 import { getDb } from "@/lib/db";
-import { getLatestPremarket, listPosts } from "@/lib/posts";
+import { pendingTitle } from "@/lib/labels";
+import { getLatestPost, listPosts } from "@/lib/posts";
 import { pairedAlternates } from "@/lib/seo";
 import { formatDate, formatEt } from "@/lib/time";
 
@@ -21,8 +22,13 @@ export default async function Home({ params }: PageProps<"/[locale]">) {
   setRequestLocale(locale);
   const t = await getTranslations();
   const db = getDb();
-  const [latest, recent] = await Promise.all([getLatestPremarket(db, locale), listPosts(db, locale, 1)]);
-  const others = recent.filter((p) => p.slug !== latest?.slug).slice(0, 10);
+  const [latest, recap, recent] = await Promise.all([
+    getLatestPost(db, locale, "premarket"),
+    getLatestPost(db, locale, "recap"),
+    listPosts(db, locale, 1),
+  ]);
+  const shown = new Set([latest?.slug, recap?.slug]);
+  const others = recent.filter((p) => !shown.has(p.slug)).slice(0, 10);
 
   return (
     <>
@@ -33,10 +39,10 @@ export default async function Home({ params }: PageProps<"/[locale]">) {
         <h2 id="latest" className="eyebrow">
           {t("home.latest")}
         </h2>
-        {!latest && <p>{t("home.empty")}</p>}
+        {!latest && !recap && <p>{t("home.empty")}</p>}
         {latest?.status === "pending" && (
           <>
-            <h1>{t("post.pendingTitle", { date: formatDate(latest.tradingDate, locale) })}</h1>
+            <h1>{pendingTitle(t, latest, locale)}</h1>
             <PendingNotice slug={latest.slug} />
           </>
         )}
@@ -53,6 +59,24 @@ export default async function Home({ params }: PageProps<"/[locale]">) {
           </article>
         )}
       </section>
+      {recap && (
+        <section aria-labelledby="recap">
+          <h2 id="recap" className="eyebrow">
+            {t("home.latestRecap")}
+          </h2>
+          <article>
+            <h3>
+              <Link href={`/${locale}/p/${recap.slug}`}>
+                {recap.status === "published" ? recap.title : pendingTitle(t, recap, locale)}
+              </Link>
+            </h3>
+            <p className="meta">
+              <time dateTime={recap.tradingDate}>{formatDate(recap.tradingDate, locale)}</time>
+            </p>
+            {recap.status === "published" ? recap.summary && <p>{recap.summary}</p> : <PendingNotice slug={recap.slug} />}
+          </article>
+        </section>
+      )}
       {others.length > 0 && (
         <section aria-labelledby="recent">
           <h2 id="recent">{t("home.recent")}</h2>
