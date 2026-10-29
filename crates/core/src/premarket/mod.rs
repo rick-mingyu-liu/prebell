@@ -1,6 +1,7 @@
 //! Gathers everything the morning brief may say. Every news reason must carry
 //! a verbatim quote that code verifies against the fetched article.
 
+pub mod draft;
 mod universe;
 
 pub use universe::{company_name, universe, yahoo_symbol};
