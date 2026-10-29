@@ -1,4 +1,11 @@
 //! Tickers named in a title, e.g. `MSFT`, `(KLAC)`, `$NVDA`, `（TSM）`.
+//! A bare word counts only when it is in our universe (S&P 500 ∪
+//! Nasdaq-100); `$` and parenthesized forms are explicit enough without.
+
+use std::collections::HashSet;
+use std::sync::OnceLock;
+
+use crate::premarket::universe;
 
 /// Uppercase words that look like tickers but, in a headline, almost never
 /// are. Applied to bare words and parenthesized words, not to `$` prefixes.
@@ -13,6 +20,8 @@ const STOPWORDS: &[&str] = &[
     "IV", "ESG", "ROE", "ROI", "PE", "EBIT", "GAAP", "REIT", "ADR", "AND", "THE", "FOR", "OF",
     "TO", "IN", "ON", "AT", "BY", "IS", "ARE", "WITH", "FROM", "NOT", "BUT", "OR", "INTO", "OVER",
     "AFTER", "AHEAD", "AS", "DRAM", "NAND", "CHIPS", "CHIP", "TSMC", "SOX", "SPX", "NDX", "VIX",
+    // `(A)`, `(B)`: list labels and share classes far more often than tickers.
+    "A", "B",
 ];
 const EXCHANGES: &[&str] = &["NASDAQ", "NYSE", "AMEX", "NYSEARCA", "OTC"];
 
@@ -24,6 +33,12 @@ fn is_symbol(tok: &str, min: usize) -> bool {
     };
     let upper = |s: &str| s.bytes().all(|b| b.is_ascii_uppercase());
     (min..=5).contains(&base.len()) && upper(base) && class.is_none_or(|c| c.len() == 1 && upper(c))
+}
+
+fn in_universe(tok: &str) -> bool {
+    static SET: OnceLock<HashSet<String>> = OnceLock::new();
+    SET.get_or_init(|| universe().into_iter().collect())
+        .contains(tok)
 }
 
 fn is_open(c: Option<char>) -> bool {
@@ -71,24 +86,26 @@ pub fn tickers_in(text: &str) -> Vec<String> {
             if opened {
                 is_symbol(tok, 1) && !stop
             } else {
-                is_symbol(tok, 2) && !stop
+                is_symbol(tok, 2) && !stop && in_universe(tok)
             }
         } else {
             // A bare word right before a parenthesized ticker, as in
             // `KLA (KLAC)`, is the company name.
-            // Also `KLA (NASDAQ: KLAC)`.
+            // Also `KLA (NASDAQ: KLAC)`. A stopword in parentheses, as in
+            // `MSFT (AI)` or `AAPL (NASDAQ)`, is not a ticker, so it names nothing.
+            let paren_ticker = |t: &str| is_symbol(t, 1) && !STOPWORDS.contains(&t);
             let named = is_open(after(e))
                 && toks.get(k + 1).is_some_and(|&(ns, ne)| {
                     let next = &text[ns..ne];
-                    let direct = is_open(before(ns)) && is_close(after(ne)) && is_symbol(next, 1);
+                    let direct = is_open(before(ns)) && is_close(after(ne)) && paren_ticker(next);
                     let listed = EXCHANGES.contains(&next)
                         && after(ne) == Some(':')
                         && toks.get(k + 2).is_some_and(|&(ts, te)| {
-                            is_close(after(te)) && is_symbol(&text[ts..te], 1)
+                            is_close(after(te)) && paren_ticker(&text[ts..te])
                         });
                     direct || listed
                 });
-            is_symbol(tok, 2) && !stop && !named
+            is_symbol(tok, 2) && !stop && !named && in_universe(tok)
         };
         if ticker && !out.iter().any(|t| t == tok) {
             out.push(tok.to_string());
@@ -135,6 +152,27 @@ mod tests {
         assert!(t("Nvidia rallies").is_empty());
         assert!(t("($1.2B deal) (Q3) (AI)").is_empty());
         assert!(t("ABCDEF is too long").is_empty());
+    }
+
+    #[test]
+    fn bare_words_must_be_in_the_universe() {
+        for s in [
+            "AWS",
+            "HPC",
+            "BTC",
+            "TW",
+            "(A)",
+            "(B)",
+            "AWS HPC BTC TW (A) (B)",
+        ] {
+            assert!(t(s).is_empty(), "{s}: {:?}", t(s));
+        }
+        assert_eq!(t("MSFT (AI) capex"), ["MSFT"]);
+        assert_eq!(t("AAPL (NASDAQ)"), ["AAPL"]);
+        assert_eq!(t("Apple (AAPL)"), ["AAPL"]);
+        assert_eq!(t("$NVDA"), ["NVDA"]);
+        // `$` and parenthesized forms need no universe entry.
+        assert_eq!(t("$BTC and Taiwan Semi (TSM)"), ["BTC", "TSM"]);
     }
 
     #[test]

@@ -98,8 +98,8 @@ apps/web/tests/competitor.test.ts
 - Produces: `fn tickers_in(text: &str) -> Vec<String>` — unique, in first-seen order.
 - Rules: an ASCII token is a maximal run of `[A-Za-z0-9.]` (trailing `.` dropped), so CJK text bounds it (`微软MSFT财报` → `MSFT`).
   - `$` prefix (`$NVDA`, `$F`): 1–5 uppercase letters, optional `.X` class suffix → ticker.
-  - In parentheses, ASCII or full-width (`(KLAC)`, `（TSM）`), optionally `EXCHANGE:` first (`NASDAQ`, `NYSE`, `AMEX`, `NYSEARCA`, `OTC`) → 1–5 uppercase letters (+ `.X`) → ticker.
-  - Bare token: 2–5 uppercase letters (+ optional `.X`), not in `STOPWORDS` (`AI`, `CEO`, `CFO`, `US`, `GDP`, `CPI`, `PCE`, `FOMC`, `FED`, `ETF`, `EPS`, `IPO`, `SEC`, `NYSE`, `NASDAQ`, `ET`, `AM`, `PM`, `YOY`, `QOQ`, `USD`, `EV`, `GPU`, `HBM`, …). Tokens containing digits (`Q3`, `FY2027`) are never tickers.
+  - In parentheses, ASCII or full-width (`(KLAC)`, `（TSM）`), optionally `EXCHANGE:` first (`NASDAQ`, `NYSE`, `AMEX`, `NYSEARCA`, `OTC`) → 1–5 uppercase letters (+ `.X`), not in `STOPWORDS` (which includes `A`, `B`) → ticker.
+  - Bare token: 2–5 uppercase letters (+ optional `.X`) in the S&P 500 ∪ Nasdaq-100 universe (`data/universe.txt`; so `AWS`, `HPC`, `BTC`, `TW` are not tickers), not in `STOPWORDS` (`AI`, `CEO`, `CFO`, `US`, `GDP`, `CPI`, `PCE`, `FOMC`, `FED`, `ETF`, `EPS`, `IPO`, `SEC`, `NYSE`, `NASDAQ`, `ET`, `AM`, `PM`, `YOY`, `QOQ`, `USD`, `EV`, `GPU`, `HBM`, …). Tokens containing digits (`Q3`, `FY2027`) are never tickers. A bare word before a parenthesized ticker is the company name (`KLA (KLAC)`), but not before a parenthesized stopword (`MSFT (AI)` → `[MSFT]`, `AAPL (NASDAQ)` → `[AAPL]`).
 
 - [ ] **Step 1: Failing tests:** `"Why MSFT and $NVDA moved"` → `[MSFT, NVDA]`; `"KLA (KLAC) beats"` → `[KLAC]`; `"台积电（TSM）"` → `[TSM]`; `"(NASDAQ: AAPL)"` → `[AAPL]`; `"BRK.B rises."` → `[BRK.B]`; `"AI capex, CEO says GDP Q3 FY2027 ETF FOMC"` → `[]`; `"Ford ($F)"` → `[F]`; a lone `"F"` → `[]`; duplicates collapse.
 - [ ] **Step 2–4:** FAIL → implement → `cargo test -p prebell-core competitor::tickers` PASS.
