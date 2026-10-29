@@ -1,5 +1,5 @@
 //! SEC EDGAR behind the `Filings` trait: company submissions, filing
-//! indexes, filed documents and XBRL `companyfacts`.
+//! indexes, filed documents and XBRL `companyconcept` documents.
 //!
 //! Fair access (https://www.sec.gov/os/webmaster-faq#developers): every
 //! request carries a descriptive User-Agent with a contact address, and
@@ -60,36 +60,8 @@ pub struct FilingDoc {
     pub url: String,
 }
 
-/// The slice of `companyfacts` the earnings trend uses. Every other concept
-/// in the (multi-megabyte) document is skipped by serde without allocation.
-#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
-pub struct CompanyFacts {
-    #[serde(default)]
-    pub facts: FactsRoot,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
-pub struct FactsRoot {
-    #[serde(rename = "us-gaap", default)]
-    pub us_gaap: UsGaap,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
-pub struct UsGaap {
-    #[serde(rename = "Revenues")]
-    pub revenues: Option<Concept>,
-    #[serde(rename = "RevenueFromContractWithCustomerExcludingAssessedTax")]
-    pub revenue_from_contracts: Option<Concept>,
-    #[serde(rename = "RevenuesNetOfInterestExpense")]
-    pub revenues_net_of_interest: Option<Concept>,
-    #[serde(rename = "SalesRevenueNet")]
-    pub sales_revenue_net: Option<Concept>,
-    #[serde(rename = "EarningsPerShareDiluted")]
-    pub eps_diluted: Option<Concept>,
-    #[serde(rename = "NetIncomeLoss")]
-    pub net_income: Option<Concept>,
-}
-
+/// One XBRL concept of one company (`companyconcept`): only the unit
+/// tables the trend reads; labels and descriptions are skipped.
 #[derive(Debug, Clone, Default, PartialEq, Deserialize)]
 pub struct Concept {
     #[serde(default)]
@@ -123,7 +95,16 @@ pub trait Filings {
         -> Result<Vec<FilingDoc>, ProviderError>;
     /// A filed document as plain text (`html_to_text`).
     async fn document_text(&self, url: &str) -> Result<String, ProviderError>;
-    async fn company_facts(&self, cik: u64) -> Result<CompanyFacts, ProviderError>;
+    /// One us-gaap concept, or `None` when the company never tagged it (404).
+    async fn company_concept(&self, cik: u64, tag: &str) -> Result<Option<Concept>, ProviderError>;
+}
+
+/// `https://data.sec.gov/api/xbrl/companyconcept/CIK##########/us-gaap/<tag>.json`.
+pub fn concept_url(cik: u64, tag: &str) -> String {
+    format!(
+        "https://data.sec.gov/api/xbrl/companyconcept/CIK{}/us-gaap/{tag}.json",
+        cik10(cik)
+    )
 }
 
 pub struct Edgar<H: Http, T: Timer> {
@@ -422,13 +403,17 @@ impl<H: Http, T: Timer> Filings for Edgar<H, T> {
         Ok(text)
     }
 
-    async fn company_facts(&self, cik: u64) -> Result<CompanyFacts, ProviderError> {
-        let url = format!(
-            "https://data.sec.gov/api/xbrl/companyfacts/CIK{}.json",
-            cik10(cik)
-        );
-        let body = self.get(&url).await?;
-        serde_json::from_str(&body).map_err(|e| ProviderError::Parse(e.to_string()))
+    async fn company_concept(&self, cik: u64, tag: &str) -> Result<Option<Concept>, ProviderError> {
+        if !tag.chars().all(|c| c.is_ascii_alphanumeric()) {
+            return Err(ProviderError::Parse(format!("bad concept tag {tag:?}")));
+        }
+        match self.get(&concept_url(cik, tag)).await {
+            Ok(body) => serde_json::from_str(&body)
+                .map(Some)
+                .map_err(|e| ProviderError::Parse(e.to_string())),
+            Err(ProviderError::Http(404)) => Ok(None),
+            Err(e) => Err(e),
+        }
     }
 }
 
@@ -443,8 +428,6 @@ pub(crate) mod tests {
         include_str!("../tests/fixtures/edgar_submissions_AAPL.json");
     pub(crate) const INDEX: &str = include_str!("../tests/fixtures/edgar_index_AAPL.htm");
     pub(crate) const EX991: &str = include_str!("../tests/fixtures/edgar_ex991_AAPL.htm");
-    pub(crate) const COMPANYFACTS: &str =
-        include_str!("../tests/fixtures/edgar_companyfacts_AAPL.json");
 
     type Headers = Vec<(String, String)>;
 
@@ -502,7 +485,7 @@ pub(crate) mod tests {
     const SUB_URL: &str = "https://data.sec.gov/submissions/CIK0000320193.json";
     const IDX_URL: &str = "https://www.sec.gov/Archives/edgar/data/320193/000032019326000070/0000320193-26-000070-index.htm";
     const EX_URL: &str = "https://www.sec.gov/Archives/edgar/data/320193/000032019326000070/a8-kex991q4202609262026.htm";
-    const CF_URL: &str = "https://data.sec.gov/api/xbrl/companyfacts/CIK0000320193.json";
+    const CC_URL: &str = "https://data.sec.gov/api/xbrl/companyconcept/CIK0000320193/us-gaap/EarningsPerShareDiluted.json";
 
     fn edgar(routes: &[(&str, u16, &str)]) -> Edgar<FakeHttp, RecTimer> {
         let http = FakeHttp {
@@ -707,14 +690,34 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn company_facts_keeps_needed_concepts() {
-        let e = edgar(&[(CF_URL, 200, COMPANYFACTS)]);
-        let cf = e.company_facts(320193).await.unwrap();
-        let g = cf.facts.us_gaap;
-        assert!(g.revenues.is_none());
-        assert!(!g.revenue_from_contracts.unwrap().units.usd.is_empty());
-        assert!(!g.eps_diluted.unwrap().units.usd_per_share.is_empty());
-        assert!(g.net_income.is_some());
+    async fn company_concept_reads_units_and_404_is_none() {
+        let e = edgar(&[(CC_URL, 200, crate::earnings::xbrl::tests::EPS)]);
+        let c = e
+            .company_concept(320193, "EarningsPerShareDiluted")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(c.units.usd_per_share.len(), 7);
+        assert!(c.units.usd.is_empty());
+        // Never tagged: 404.
+        assert_eq!(e.company_concept(320193, "Revenues").await, Ok(None));
+        let seen: Vec<String> = e.http.seen.borrow().iter().map(|s| s.0.clone()).collect();
+        assert_eq!(seen[0], CC_URL);
+        assert!(seen[1].ends_with("/CIK0000320193/us-gaap/Revenues.json"));
+        // Throttling and oversized bodies are errors, not "never tagged".
+        let e = edgar(&[(CC_URL, 429, "")]);
+        assert_eq!(
+            e.company_concept(320193, "EarningsPerShareDiluted").await,
+            Err(ProviderError::Http(429))
+        );
+        let big = format!("{{\"units\":{{}},\"x\":\"{}\"}}", "x".repeat(MAX_BYTES));
+        let e = edgar(&[(CC_URL, 200, &big)]);
+        assert_eq!(
+            e.company_concept(320193, "EarningsPerShareDiluted").await,
+            Err(ProviderError::TooLarge(MAX_BYTES))
+        );
+        // Tags are path segments: nothing but letters and digits.
+        assert!(e.company_concept(320193, "../x").await.is_err());
     }
 
     #[test]

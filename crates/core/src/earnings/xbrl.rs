@@ -1,19 +1,33 @@
-//! GAAP quarterly history from XBRL `companyfacts`. Only discrete quarters
-//! a company actually reported in a 10-Q or 10-K are used; a quarter the
-//! company never tagged (often fiscal Q4, which appears only inside the
-//! annual total) stays a gap rather than being derived.
+//! GAAP quarterly history from XBRL, one `companyconcept` document per
+//! concept (never the multi-megabyte `companyfacts`, which would not fit the
+//! Free plan's CPU budget). Only discrete quarters a company actually
+//! reported in a 10-Q or 10-K are used; a quarter the company never tagged
+//! (often fiscal Q4, which appears only inside the annual total) stays a gap
+//! rather than being derived.
 
 use std::collections::BTreeMap;
 
 use chrono::NaiveDate;
 
 use crate::earnings::facts::{QuarterPoint, Trend};
-use crate::edgar::{CompanyFacts, Concept, FactEntry};
+use crate::edgar::{Concept, FactEntry, Filings};
+use crate::providers::ProviderError;
 
 /// Quarters kept per series.
 pub const QUARTERS: usize = 8;
 /// A release is filed within ~10 weeks of its quarter's end.
 const RELEASE_QUARTER_MAX_DAYS: i64 = 75;
+/// Revenue tags in order of preference; companies switch tags over time.
+pub const REVENUE_TAGS: [&str; 3] = [
+    "Revenues",
+    "RevenueFromContractWithCustomerExcludingAssessedTax",
+    "RevenuesNetOfInterestExpense",
+];
+pub const EPS_TAG: &str = "EarningsPerShareDiluted";
+pub const NET_INCOME_TAG: &str = "NetIncomeLoss";
+/// A revenue tag whose latest quarter ended this close before the filing is
+/// the company's current tag: later fallbacks are not fetched.
+const CURRENT_TAG_DAYS: i64 = 200;
 
 fn date(s: &str) -> Option<NaiveDate> {
     NaiveDate::parse_from_str(s, "%Y-%m-%d").ok()
@@ -61,39 +75,55 @@ fn last_n(all: Vec<QuarterPoint>) -> Vec<QuarterPoint> {
     all.into_iter().skip(skip).collect()
 }
 
-fn all_quarters(c: &Option<Concept>) -> Vec<QuarterPoint> {
-    c.as_ref()
-        .map(|c| quarters(&c.units.usd))
-        .unwrap_or_default()
-}
-
-/// Revenue, diluted EPS and net income series, the last `QUARTERS` each.
-pub fn trend(cf: &CompanyFacts) -> Trend {
-    let g = &cf.facts.us_gaap;
-    // Companies switch revenue tags over time: merge the candidates by
-    // period end, the first-listed tag winning a quarter both report.
+/// Revenue (merged across `revenue` tags by period end, the first-listed
+/// tag winning a quarter both report), diluted EPS and net income series,
+/// the last `QUARTERS` each.
+pub fn trend(revenue: &[Concept], eps: Option<&Concept>, net_income: Option<&Concept>) -> Trend {
     let mut merged: BTreeMap<NaiveDate, QuarterPoint> = BTreeMap::new();
-    for c in [
-        &g.revenues,
-        &g.revenue_from_contracts,
-        &g.revenues_net_of_interest,
-        &g.sales_revenue_net,
-    ] {
-        for p in all_quarters(c) {
+    for c in revenue {
+        for p in quarters(&c.units.usd) {
             merged.entry(p.period_end).or_insert(p);
         }
     }
-    let revenue = last_n(merged.into_values().collect());
     Trend {
-        revenue,
+        revenue: last_n(merged.into_values().collect()),
         eps_diluted: last_n(
-            g.eps_diluted
-                .as_ref()
-                .map(|c| quarters(&c.units.usd_per_share))
+            eps.map(|c| quarters(&c.units.usd_per_share))
                 .unwrap_or_default(),
         ),
-        net_income: last_n(all_quarters(&g.net_income)),
+        net_income: last_n(
+            net_income
+                .map(|c| quarters(&c.units.usd))
+                .unwrap_or_default(),
+        ),
     }
+}
+
+/// Fetches the concepts the trend needs: revenue tags in order until one is
+/// current for `filing_date` (at most 3), then EPS and net income: at most 5
+/// requests. A concept the company never tagged is skipped; any other error
+/// fails the trend.
+pub async fn fetch_trend(
+    filings: &dyn Filings,
+    cik: u64,
+    filing_date: NaiveDate,
+) -> Result<Trend, ProviderError> {
+    let mut revenue = Vec::new();
+    for tag in REVENUE_TAGS {
+        let Some(c) = filings.company_concept(cik, tag).await? else {
+            continue;
+        };
+        let current = quarters(&c.units.usd)
+            .last()
+            .is_some_and(|p| (filing_date - p.period_end).num_days() <= CURRENT_TAG_DAYS);
+        revenue.push(c);
+        if current {
+            break;
+        }
+    }
+    let eps = filings.company_concept(cik, EPS_TAG).await?;
+    let net_income = filings.company_concept(cik, NET_INCOME_TAG).await?;
+    Ok(trend(&revenue, eps.as_ref(), net_income.as_ref()))
 }
 
 /// The series' latest XBRL quarter is the quarter this press release
@@ -108,16 +138,42 @@ pub fn release_already_in_trend(points: &[QuarterPoint], filing_date: NaiveDate)
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
-    use crate::edgar::tests::COMPANYFACTS;
-    use crate::edgar::{FactsRoot, Units, UsGaap};
+    use crate::edgar::Units;
+    use async_trait::async_trait;
+    use std::cell::RefCell;
+    use std::collections::HashMap;
+
+    pub(crate) const REVENUE: &str = include_str!(
+        "../../tests/fixtures/edgar_concept_AAPL_RevenueFromContractWithCustomerExcludingAssessedTax.json"
+    );
+    pub(crate) const EPS: &str =
+        include_str!("../../tests/fixtures/edgar_concept_AAPL_EarningsPerShareDiluted.json");
+    pub(crate) const NET_INCOME: &str =
+        include_str!("../../tests/fixtures/edgar_concept_AAPL_NetIncomeLoss.json");
+
+    /// The AAPL concept fixtures by tag.
+    pub(crate) fn aapl_concept(tag: &str) -> Option<Concept> {
+        let body = match tag {
+            "RevenueFromContractWithCustomerExcludingAssessedTax" => REVENUE,
+            EPS_TAG => EPS,
+            NET_INCOME_TAG => NET_INCOME,
+            _ => return None,
+        };
+        Some(serde_json::from_str(body).unwrap())
+    }
 
     fn d(s: &str) -> NaiveDate {
         s.parse().unwrap()
     }
-    fn fixture() -> CompanyFacts {
-        serde_json::from_str(COMPANYFACTS).unwrap()
+    fn fixture() -> Trend {
+        let rev = aapl_concept(REVENUE_TAGS[1]).unwrap();
+        trend(
+            &[rev],
+            aapl_concept(EPS_TAG).as_ref(),
+            aapl_concept(NET_INCOME_TAG).as_ref(),
+        )
     }
     fn entry(start: &str, end: &str, val: f64, form: &str, filed: &str) -> FactEntry {
         FactEntry {
@@ -128,18 +184,18 @@ mod tests {
             filed: filed.into(),
         }
     }
-    fn concept(e: Vec<FactEntry>) -> Option<Concept> {
-        Some(Concept {
+    fn concept(e: Vec<FactEntry>) -> Concept {
+        Concept {
             units: Units {
                 usd: e,
                 usd_per_share: vec![],
             },
-        })
+        }
     }
 
     #[test]
     fn fixture_trend() {
-        let t = trend(&fixture());
+        let t = fixture();
         let ends: Vec<_> = t.revenue.iter().map(|p| p.period_end.to_string()).collect();
         // Fiscal Q4s (annual-only), the 9-month YTD, the annual total and the
         // 8-K fact are not quarters; no Q4 is derived.
@@ -181,15 +237,7 @@ mod tests {
                 ));
             }
         }
-        let cf = CompanyFacts {
-            facts: FactsRoot {
-                us_gaap: UsGaap {
-                    revenues: concept(e),
-                    ..Default::default()
-                },
-            },
-        };
-        let t = trend(&cf);
+        let t = trend(&[concept(e)], None, None);
         assert_eq!(t.revenue.len(), QUARTERS);
         assert_eq!(t.revenue[0].period_end, d("2022-03-31"));
     }
@@ -198,22 +246,13 @@ mod tests {
     fn revenue_tags_are_merged() {
         let old = vec![entry("2019-01-01", "2019-03-31", 5.0, "10-Q", "2019-05-01")];
         let new = vec![entry("2026-04-01", "2026-06-30", 9.0, "10-Q", "2026-08-01")];
-        let cf = CompanyFacts {
-            facts: FactsRoot {
-                us_gaap: UsGaap {
-                    revenues: concept(old),
-                    revenue_from_contracts: concept(new),
-                    ..Default::default()
-                },
-            },
-        };
-        let r = trend(&cf).revenue;
+        let r = trend(&[concept(old), concept(new)], None, None).revenue;
         assert_eq!(r.iter().map(|p| p.value).collect::<Vec<_>>(), [5.0, 9.0]);
     }
 
     #[test]
     fn same_day_periodic_report() {
-        let t = trend(&fixture());
+        let t = fixture();
         // Q3 ended 2026-06-27; its 10-Q was filed 2026-07-31.
         assert!(!release_already_in_trend(&t.revenue, d("2026-10-30")));
         assert!(release_already_in_trend(&t.revenue, d("2026-07-31")));
@@ -222,5 +261,97 @@ mod tests {
         let mut late = t.revenue.clone();
         late.last_mut().unwrap().filed = d("2026-12-01");
         assert!(!release_already_in_trend(&late, d("2026-12-01")));
+    }
+
+    /// Serves concepts by tag; records each requested tag.
+    pub(crate) struct ConceptFilings {
+        pub concepts: HashMap<&'static str, Result<Concept, ProviderError>>,
+        pub asked: RefCell<Vec<String>>,
+    }
+    #[async_trait(?Send)]
+    impl Filings for ConceptFilings {
+        async fn submissions(&self, _: u64) -> Result<crate::edgar::Submissions, ProviderError> {
+            unreachable!()
+        }
+        async fn filing_docs(
+            &self,
+            _: u64,
+            _: &str,
+        ) -> Result<Vec<crate::edgar::FilingDoc>, ProviderError> {
+            unreachable!()
+        }
+        async fn document_text(&self, _: &str) -> Result<String, ProviderError> {
+            unreachable!()
+        }
+        async fn company_concept(
+            &self,
+            _: u64,
+            tag: &str,
+        ) -> Result<Option<Concept>, ProviderError> {
+            self.asked.borrow_mut().push(tag.into());
+            self.concepts.get(tag).cloned().transpose()
+        }
+    }
+
+    #[tokio::test]
+    async fn fetch_stops_at_the_current_revenue_tag() {
+        // AAPL: no `Revenues`, current `RevenueFromContract...`: the third
+        // tag is never asked for; 4 requests.
+        let f = ConceptFilings {
+            concepts: [REVENUE_TAGS[1], EPS_TAG, NET_INCOME_TAG]
+                .into_iter()
+                .map(|t| (t, Ok(aapl_concept(t).unwrap())))
+                .collect(),
+            asked: RefCell::new(vec![]),
+        };
+        let t = fetch_trend(&f, 320193, d("2026-10-30")).await.unwrap();
+        assert_eq!(t, fixture());
+        assert_eq!(
+            *f.asked.borrow(),
+            [REVENUE_TAGS[0], REVENUE_TAGS[1], EPS_TAG, NET_INCOME_TAG]
+        );
+    }
+
+    #[tokio::test]
+    async fn fetch_falls_back_through_stale_tags_with_at_most_five_requests() {
+        // A bank: an old `Revenues` series, then `RevenuesNetOfInterestExpense`.
+        let old = concept(vec![entry(
+            "2019-01-01",
+            "2019-03-31",
+            5.0,
+            "10-Q",
+            "2019-05-01",
+        )]);
+        let new = concept(vec![entry(
+            "2026-04-01",
+            "2026-06-30",
+            9.0,
+            "10-Q",
+            "2026-08-01",
+        )]);
+        let f = ConceptFilings {
+            concepts: [(REVENUE_TAGS[0], Ok(old)), (REVENUE_TAGS[2], Ok(new))]
+                .into_iter()
+                .collect(),
+            asked: RefCell::new(vec![]),
+        };
+        let t = fetch_trend(&f, 1, d("2026-10-15")).await.unwrap();
+        assert_eq!(t.revenue.len(), 2);
+        assert!(t.eps_diluted.is_empty() && t.net_income.is_empty());
+        assert_eq!(f.asked.borrow().len(), 5);
+    }
+
+    #[tokio::test]
+    async fn fetch_error_fails_the_trend() {
+        let f = ConceptFilings {
+            concepts: [(REVENUE_TAGS[0], Err(ProviderError::TooLarge(1)))]
+                .into_iter()
+                .collect(),
+            asked: RefCell::new(vec![]),
+        };
+        assert_eq!(
+            fetch_trend(&f, 1, d("2026-10-15")).await,
+            Err(ProviderError::TooLarge(1))
+        );
     }
 }

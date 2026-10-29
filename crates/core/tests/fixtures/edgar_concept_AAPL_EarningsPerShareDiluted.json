@@ -1,0 +1,83 @@
+{
+ "_note": "SYNTHETIC fixture in the data.sec.gov/api/xbrl/companyconcept shape (confirmed against a live response); values are invented.",
+ "cik": 320193,
+ "taxonomy": "us-gaap",
+ "tag": "EarningsPerShareDiluted",
+ "label": "Earnings Per Share, Diluted",
+ "description": "...",
+ "entityName": "Apple Inc.",
+ "units": {
+  "USD/shares": [
+   {
+    "start": "2024-09-29",
+    "end": "2024-12-28",
+    "val": 2.4,
+    "accn": "0000320193-250131",
+    "fy": 2025,
+    "fp": "Q1",
+    "form": "10-Q",
+    "filed": "2025-01-31"
+   },
+   {
+    "start": "2024-12-29",
+    "end": "2025-03-29",
+    "val": 1.65,
+    "accn": "0000320193-250502",
+    "fy": 2025,
+    "fp": "Q2",
+    "form": "10-Q",
+    "filed": "2025-05-02"
+   },
+   {
+    "start": "2025-03-30",
+    "end": "2025-06-28",
+    "val": 1.57,
+    "accn": "0000320193-250801",
+    "fy": 2025,
+    "fp": "Q3",
+    "form": "10-Q",
+    "filed": "2025-08-01"
+   },
+   {
+    "start": "2025-09-28",
+    "end": "2025-12-27",
+    "val": 2.6,
+    "accn": "0000320193-260130",
+    "fy": 2026,
+    "fp": "Q1",
+    "form": "10-Q",
+    "filed": "2026-01-30"
+   },
+   {
+    "start": "2025-12-28",
+    "end": "2026-03-28",
+    "val": 1.8,
+    "accn": "0000320193-260501",
+    "fy": 2026,
+    "fp": "Q2",
+    "form": "10-Q",
+    "filed": "2026-05-01"
+   },
+   {
+    "start": "2026-03-29",
+    "end": "2026-06-27",
+    "val": 1.71,
+    "accn": "0000320193-260731",
+    "fy": 2026,
+    "fp": "Q3",
+    "form": "10-Q",
+    "filed": "2026-07-31"
+   },
+   {
+    "start": "2024-09-29",
+    "end": "2025-09-27",
+    "val": 7.46,
+    "accn": "0000320193-251031",
+    "fy": 2025,
+    "fp": "FY",
+    "form": "10-K",
+    "filed": "2025-10-31"
+   }
+  ]
+ }
+}

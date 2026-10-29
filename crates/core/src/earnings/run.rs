@@ -15,7 +15,7 @@ use crate::earnings::draft::{slug, write, CONTENT_TYPE, TEMPLATE_ID};
 use crate::earnings::extract::{extract, Extracted};
 use crate::earnings::facts::{missing_required, EarningsFacts, Metrics};
 use crate::earnings::store::{ChartRow, EarningsStore, FilingRow};
-use crate::earnings::xbrl::trend;
+use crate::earnings::xbrl::fetch_trend;
 use crate::earnings::{find, in_window, poll_batch};
 use crate::edgar::{exhibit_991, filing_url, Filings};
 use crate::facts::{Field, NewsReason};
@@ -352,17 +352,17 @@ async fn gather(
         Ok(t) => Some(extract(llm, t, &company, &f.ticker).await),
         Err(_) => None,
     };
-    let trend = match filings.company_facts(f.cik).await {
-        Ok(cf) => Field::Value(trend(&cf)),
-        Err(e) => Field::Missing {
-            reason: format!("companyfacts: {e}"),
-        },
-    };
     let accepted_at = parse_iso(&f.accepted_at).ok_or("bad accepted_at")?;
     let filing_date = f
         .filing_date
         .parse()
         .map_err(|e| format!("bad filing_date: {e}"))?;
+    let trend = match fetch_trend(filings, f.cik, filing_date).await {
+        Ok(t) => Field::Value(t),
+        Err(e) => Field::Missing {
+            reason: format!("xbrl: {e}"),
+        },
+    };
     let x = x.unwrap_or_else(|| {
         let reason = text.err().unwrap_or_default();
         Extracted {
@@ -727,9 +727,10 @@ mod tests {
     use super::*;
     use crate::earnings::draft::tests::reply;
     use crate::earnings::store::MemEarningsStore;
-    use crate::edgar::tests::{COMPANYFACTS, EX991, INDEX, SUBMISSIONS};
+    use crate::earnings::xbrl::tests::aapl_concept;
+    use crate::edgar::tests::{EX991, INDEX, SUBMISSIONS};
     use crate::edgar::{
-        html_to_text, parse_filing_index, parse_submissions, CompanyFacts, FilingDoc, Submissions,
+        html_to_text, parse_filing_index, parse_submissions, Concept, FilingDoc, Submissions,
     };
     use crate::store::MemStore;
     use async_trait::async_trait;
@@ -781,8 +782,12 @@ mod tests {
         async fn document_text(&self, _: &str) -> Result<String, ProviderError> {
             Ok(html_to_text(EX991))
         }
-        async fn company_facts(&self, _: u64) -> Result<CompanyFacts, ProviderError> {
-            Ok(serde_json::from_str(COMPANYFACTS).unwrap())
+        async fn company_concept(
+            &self,
+            _: u64,
+            tag: &str,
+        ) -> Result<Option<Concept>, ProviderError> {
+            Ok(aapl_concept(tag))
         }
     }
 
