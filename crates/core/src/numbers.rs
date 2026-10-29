@@ -45,12 +45,20 @@ fn ignore_res() -> &'static [Regex] {
     static R: OnceLock<Vec<Regex>> = OnceLock::new();
     R.get_or_init(|| {
         const MONTH: &str = r"(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|June?|July?|Aug(?:ust)?|Sep(?:t(?:ember)?)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)";
+        const MD: &str = r"(?:0?[1-9]|1[0-2])";
+        const DD: &str = r"(?:0?[1-9]|[12]\d|3[01])";
+        const END: &str = r"(?:[^\d.．]|[.．](?:\D|$)|$)";
         [
             // Dates.
-            r"\d{4}[-/.]\d{1,2}[-/.]\d{1,2}".to_string(),
-            r"\d{1,2}/\d{1,2}(?:/\d{2,4})?".to_string(),
+            // Bounded numeric dates: same separator twice, month <= 12, day <= 31,
+            // no digit or decimal on either side (the leading side is guarded in
+            // `extract`), so "5812.25-5830.50" and "2650.1/2680.3" stay figures.
+            format!(r"(?:19|20)\d{{2}}-{MD}-{DD}{END}"),
+            format!(r"(?:19|20)\d{{2}}/{MD}/{DD}{END}"),
+            format!(r"(?:19|20)\d{{2}}\.{MD}\.{DD}{END}"),
+            format!(r"{MD}/{DD}(?:/(?:19|20)?\d{{2}})?{END}"),
             format!(r"{MONTH}\.?\s+\d{{1,2}}(?:st|nd|rd|th)?(?:,?\s+\d{{4}})?"),
-            format!(r"\d{{1,2}}(?:st|nd|rd|th)?\s+{MONTH}(?:,?\s+\d{{4}})?"),
+            format!(r"\d{{1,2}}(?:st|nd|rd|th)?\s+{MONTH}\b(?:,?\s+\d{{4}})?"),
             r"\d{4}\s?年".to_string(),
             r"\d{1,2}\s?月".to_string(),
             r"\d{1,2}\s?[日号]".to_string(),
@@ -70,6 +78,8 @@ fn ignore_res() -> &'static [Regex] {
             r"第\s?\d+".to_string(),
             r"\d\s?季度?".to_string(),
             r"\d{2,4}\s?财年".to_string(),
+            // Period compounds ("30-year yield", "52-week high").
+            r"\d+-(?:year|yr|week|wk|day|month|quarter)s?(?:[^A-Za-z]|$)".to_string(),
             // List ordinals at line start ("1." / "2)" / "3、").
             r"(?m)^[ \t]*\d{1,3}[.)．、](?:[ \t]|$)".to_string(),
             // Exchange-suffixed tickers (0700.HK, 600519.SS).
@@ -81,7 +91,7 @@ fn ignore_res() -> &'static [Regex] {
             r"Dow(?:\s+Jones)?\s?30(?:\D|$)".to_string(),
             r"(?:(?i:euro)\s?)?(?i:stoxx)\s?(?:50|600)(?:\D|$)".to_string(),
             r"(?:Nikkei\s?225|FTSE\s?100|DAX\s?40|CAC\s?40|CSI\s?300)(?:\D|$)".to_string(),
-            r"(?:标普|纳斯达克|纳指|罗素|道琼斯|沪深|中证|日经|富时)\s?\d+".to_string(),
+            r"(?:标普\s?500|纳斯达克\s?100|纳指\s?100|罗素\s?2000|道琼斯\s?30|沪深\s?300|中证\s?500|中证\s?1000|日经\s?225|富时\s?100)(?:\D|$)".to_string(),
         ]
         .iter()
         .map(|p| re(p))
@@ -139,18 +149,52 @@ fn parse_unit(rest: &str, has_dollar: bool) -> (usize, f64, bool) {
             ("bn", 1e9),
             ("mn", 1e6),
             ("tn", 1e12),
+            ("mm", 1e6),
             ("B", 1e9),
             ("M", 1e6),
             ("K", 1e3),
             ("k", 1e3),
             ("T", 1e12),
+            ("m", 1e6),
+            ("b", 1e9),
         ] {
             if trimmed.starts_with(abbr) && !next_is_letter(&trimmed[abbr.len()..]) {
                 return (ws + abbr.len(), mult, false);
             }
         }
     }
+    // Unit-1 suffixes (basis points, multiples, points): checked as-is.
+    if ws == 0 {
+        for suffix in ["bps", "bp", "pts", "x"] {
+            if trimmed.starts_with(suffix) && !next_is_letter(&trimmed[suffix.len()..]) {
+                return (suffix.len(), 1.0, false);
+            }
+        }
+    }
     (0, 1.0, false)
+}
+
+/// Glued suffixes that mark a non-figure ("5G", "3D", "1st", "22nd").
+fn is_exempt_suffix(rest: &str) -> bool {
+    let word: String = rest
+        .chars()
+        .take_while(|c| c.is_ascii_alphabetic())
+        .collect();
+    matches!(word.as_str(), "G" | "D" | "st" | "nd" | "rd" | "th")
+}
+
+/// A bare year (19xx/20xx) in prose: integer, no unit, percent, sign or `$`,
+/// and not followed by index points.
+fn is_bare_year(core: &str, rest: &str, has_unit: bool, signed: bool, has_dollar: bool) -> bool {
+    let year_shaped = core.len() == 4
+        && (core.starts_with("19") || core.starts_with("20"))
+        && core.bytes().all(|b| b.is_ascii_digit());
+    let rest = rest.trim_start();
+    let points = rest.starts_with('点')
+        || rest
+            .get(..6)
+            .is_some_and(|w| w.eq_ignore_ascii_case("points"));
+    year_shaped && !has_unit && !signed && !has_dollar && !points
 }
 
 /// Extracts every checkable number from `text`, skipping dates, times,
@@ -176,7 +220,7 @@ pub fn extract(text: &str, _lang: Lang) -> Vec<Num> {
         if ignored.iter().any(|&(a, b)| s < b && a < e) {
             continue;
         }
-        // Ticker-embedded digits: a letter glued on either side.
+        // Ticker-embedded digits and Q/H/FY labels: a letter glued before.
         if prev_char(text, s).is_some_and(|c| c.is_ascii_alphabetic()) {
             continue;
         }
@@ -217,8 +261,17 @@ pub fn extract(text: &str, _lang: Lang) -> Vec<Num> {
 
         let (unit_len, multiplier, is_percent) = parse_unit(&text[e..], has_dollar);
         let end = e + unit_len;
-        // A letter glued after the number (e.g. "5G", "3D", "1st") is not a figure.
-        if unit_len == 0 && text[e..].starts_with(|c: char| c.is_ascii_alphabetic()) {
+        // Other glued letters are still checked, except a few non-figure suffixes.
+        if unit_len == 0 && is_exempt_suffix(&text[e..]) {
+            continue;
+        }
+        if is_bare_year(
+            m.as_str(),
+            &text[e..],
+            unit_len > 0,
+            sign.is_some(),
+            has_dollar,
+        ) {
             continue;
         }
 
@@ -442,6 +495,70 @@ mod tests {
             check("ES -0.3%", Lang::En, &[0.3]),
             Err(vec!["-0.3%".into()])
         );
+    }
+    // Fix round 1 regressions.
+    #[test]
+    fn fix1_glued_suffixes_are_checked() {
+        for (text, ok) in [
+            ("Revenue was $1.2m", 1.2e6),
+            ("$3.4b", 3.4e9),
+            ("Fed cut 50bp", 50.0),
+            ("yield up 12bps", 12.0),
+            ("trades at 25x earnings", 25.0),
+            ("gained 15pts", 15.0),
+            ("$2.5mm raise", 2.5e6),
+            ("rose 12abc", 12.0),
+        ] {
+            assert!(check(text, Lang::En, &[]).is_err(), "should fail: {text}");
+            assert_eq!(check(text, Lang::En, &[ok]), Ok(()), "should pass: {text}");
+        }
+        // Whitelisted glued suffixes stay ignored.
+        assert_eq!(
+            check("5G rollout, 3D chips, 21st and 32nd", Lang::En, &[]),
+            Ok(())
+        );
+    }
+    #[test]
+    fn fix2_decimal_ranges_not_dates() {
+        assert!(check("ES traded 5812.25-5830.50", Lang::En, &[]).is_err());
+        assert_eq!(
+            check("ES traded 5812.25-5830.50", Lang::En, &[5812.25, 5830.5]),
+            Ok(())
+        );
+        assert!(check("Gold 2650.1/2680.3", Lang::En, &[]).is_err());
+        assert_eq!(
+            check("Gold 2650.1/2680.3", Lang::En, &[2650.1, 2680.3]),
+            Ok(())
+        );
+        assert_eq!(
+            check("on 2026-10-29. Also 2026/10/29 and 10/29", Lang::En, &[]),
+            Ok(())
+        );
+    }
+    #[test]
+    fn fix3_zh_index_exact_pairs_only() {
+        assert!(check("纳指18500点", Lang::Zh, &[]).is_err());
+        assert_eq!(check("纳指18500点", Lang::Zh, &[18500.0]), Ok(()));
+        assert!(check("道琼斯42000点", Lang::Zh, &[]).is_err());
+        assert_eq!(check("道琼斯42000点", Lang::Zh, &[42000.0]), Ok(()));
+        assert_eq!(check("沪深300、中证1000与日经225", Lang::Zh, &[]), Ok(()));
+    }
+    #[test]
+    fn fix4_years_and_period_compounds_ignored() {
+        assert_eq!(check("full-year 2026 guidance", Lang::En, &[]), Ok(()));
+        assert_eq!(check("the 30-year yield", Lang::En, &[]), Ok(()));
+        assert_eq!(check("52-week high", Lang::En, &[]), Ok(()));
+        assert_eq!(check("a 90-day window, 6-month low", Lang::En, &[]), Ok(()));
+        // A year-shaped figure with a unit, decimal, percent, sign or $ is still checked.
+        assert!(check("revenue of $2026 million", Lang::En, &[]).is_err());
+        assert!(check("gold at 2026.5", Lang::En, &[]).is_err());
+        assert!(check("道指上涨2000点", Lang::Zh, &[]).is_err());
+    }
+    #[test]
+    fn month_needs_word_boundary() {
+        assert!(check("10 Juniper shares", Lang::En, &[]).is_ok()); // small count
+        assert!(check("25 Juniper shares", Lang::En, &[]).is_err());
+        assert_eq!(check("29 Oct 2026", Lang::En, &[]), Ok(()));
     }
     #[test]
     fn multiple_failures_in_order() {
