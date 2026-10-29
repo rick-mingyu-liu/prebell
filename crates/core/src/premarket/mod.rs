@@ -64,14 +64,24 @@ async fn extract(
     max: usize,
 ) -> Result<Vec<NewsReason>, ProviderError> {
     let v = llm.complete_json(system, user).await?;
-    let items = v.get("reasons").and_then(Value::as_array).cloned().unwrap_or_default();
+    let items = v
+        .get("reasons")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
     Ok(items
         .into_iter()
         .filter_map(|it| serde_json::from_value::<NewsReason>(it).ok())
         .filter_map(|r| {
-            let h = hits.iter().find(|h| h.url == r.url && verify_reason(&h.content, &r))?;
+            let h = hits
+                .iter()
+                .find(|h| h.url == r.url && verify_reason(&h.content, &r))?;
             // Title and url come from the fetched hit, never from the LLM.
-            Some(NewsReason { url: h.url.clone(), title: h.title.clone(), ..r })
+            Some(NewsReason {
+                url: h.url.clone(),
+                title: h.title.clone(),
+                ..r
+            })
         })
         .take(max)
         .collect())
@@ -84,7 +94,10 @@ async fn mover_reasons(
     name: &str,
     change_pct: f64,
 ) -> Vec<NewsReason> {
-    let Ok(hits) = ns.search(&format!("{name} ({ticker}) stock"), HITS_PER_MOVER).await else {
+    let Ok(hits) = ns
+        .search(&format!("{name} ({ticker}) stock"), HITS_PER_MOVER)
+        .await
+    else {
         return vec![];
     };
     let system = system_prompt(
@@ -92,24 +105,44 @@ async fn mover_reasons(
         MOVER_REASONS,
     );
     let header = format!("Ticker: {ticker}\nCompany: {name}\nPremarket change: {change_pct:+.2}%");
-    extract(llm, &system, &articles_prompt(&header, &hits), &hits, MOVER_REASONS)
-        .await
-        .unwrap_or_default()
+    extract(
+        llm,
+        &system,
+        &articles_prompt(&header, &hits),
+        &hits,
+        MOVER_REASONS,
+    )
+    .await
+    .unwrap_or_default()
 }
 
 async fn macro_items(ns: &dyn NewsSearch, llm: &dyn LlmProvider) -> Field<Vec<NewsReason>> {
     let hits = match ns.search(MACRO_QUERY, MACRO_HITS).await {
         Ok(h) => h,
-        Err(e) => return Field::Missing { reason: e.to_string() },
+        Err(e) => {
+            return Field::Missing {
+                reason: e.to_string(),
+            }
+        }
     };
     let system = system_prompt(
         "list the overnight and macro news items that matter for today's US stock market open",
         MACRO_ITEMS,
     );
     let header = "Topic: overnight and macro news ahead of the US stock market open";
-    match extract(llm, &system, &articles_prompt(header, &hits), &hits, MACRO_ITEMS).await {
+    match extract(
+        llm,
+        &system,
+        &articles_prompt(header, &hits),
+        &hits,
+        MACRO_ITEMS,
+    )
+    .await
+    {
         Ok(v) => Field::Value(v),
-        Err(e) => Field::Missing { reason: e.to_string() },
+        Err(e) => Field::Missing {
+            reason: e.to_string(),
+        },
     }
 }
 
@@ -141,13 +174,19 @@ pub async fn build_facts(
     for (label, sym) in FUTURES {
         let f = match md.quote(sym).await {
             Ok(q) => Field::Value(q),
-            Err(e) => Field::Missing { reason: e.to_string() },
+            Err(e) => Field::Missing {
+                reason: e.to_string(),
+            },
         };
         futures.push((label.to_string(), f));
     }
 
     let quotes = liquid_quotes(md).await;
-    let mut up: Vec<Quote> = quotes.iter().filter(|q| q.change_pct > 0.0).cloned().collect();
+    let mut up: Vec<Quote> = quotes
+        .iter()
+        .filter(|q| q.change_pct > 0.0)
+        .cloned()
+        .collect();
     up.sort_by(|a, b| b.change_pct.total_cmp(&a.change_pct));
     up.truncate(MOVERS_PER_SIDE);
     let mut down: Vec<Quote> = quotes.into_iter().filter(|q| q.change_pct < 0.0).collect();
@@ -170,14 +209,22 @@ pub async fn build_facts(
         gainers,
         losers,
         macro_items: macro_items(ns, llm).await,
-        watch_list: Field::Missing { reason: "not available in v1".into() },
+        watch_list: Field::Missing {
+            reason: "not available in v1".into(),
+        },
     }
 }
 
 async fn to_mover(ns: &dyn NewsSearch, llm: &dyn LlmProvider, quote: Quote) -> Mover {
-    let name = company_name(&quote.symbol).unwrap_or(&quote.symbol).to_string();
+    let name = company_name(&quote.symbol)
+        .unwrap_or(&quote.symbol)
+        .to_string();
     let reasons = mover_reasons(ns, llm, &quote.symbol, &name, quote.change_pct).await;
-    Mover { quote, name, reasons }
+    Mover {
+        quote,
+        name,
+        reasons,
+    }
 }
 
 #[cfg(test)]
@@ -195,7 +242,13 @@ mod tests {
     const URL: &str = "https://news.test/aapl";
 
     fn q(sym: &str, last: f64, pct: f64, vol: Option<u64>) -> Quote {
-        Quote { symbol: sym.into(), last, prev_close: last / (1.0 + pct / 100.0), change_pct: pct, volume: vol }
+        Quote {
+            symbol: sym.into(),
+            last,
+            prev_close: last / (1.0 + pct / 100.0),
+            change_pct: pct,
+            volume: vol,
+        }
     }
 
     struct FakeMd {
@@ -206,21 +259,35 @@ mod tests {
     impl MarketData for FakeMd {
         async fn quote(&self, symbol: &str) -> Result<Quote, ProviderError> {
             match &self.futures {
-                Some(f) => Ok(Quote { symbol: symbol.into(), ..f.clone() }),
+                Some(f) => Ok(Quote {
+                    symbol: symbol.into(),
+                    ..f.clone()
+                }),
                 None => Err(ProviderError::Http(429)),
             }
         }
-        async fn premarket_quotes(&self, symbols: &[String]) -> Vec<(String, Result<Quote, ProviderError>)> {
+        async fn premarket_quotes(
+            &self,
+            symbols: &[String],
+        ) -> Vec<(String, Result<Quote, ProviderError>)> {
             symbols
                 .iter()
-                .map(|s| (s.clone(), self.stocks.get(s).cloned().ok_or(ProviderError::Http(404))))
+                .map(|s| {
+                    (
+                        s.clone(),
+                        self.stocks.get(s).cloned().ok_or(ProviderError::Http(404)),
+                    )
+                })
                 .collect()
         }
     }
     fn md(stocks: &[Quote]) -> FakeMd {
         FakeMd {
             futures: Some(q("ES=F", 5800.0, 0.4, Some(1000))),
-            stocks: stocks.iter().map(|s| (s.symbol.clone(), s.clone())).collect(),
+            stocks: stocks
+                .iter()
+                .map(|s| (s.symbol.clone(), s.clone()))
+                .collect(),
         }
     }
 
@@ -228,11 +295,18 @@ mod tests {
     #[async_trait(?Send)]
     impl NewsSearch for FakeNs {
         async fn search(&self, query: &str, _max: usize) -> Result<Vec<SearchHit>, ProviderError> {
-            self.0.get(query).cloned().unwrap_or(Err(ProviderError::Empty))
+            self.0
+                .get(query)
+                .cloned()
+                .unwrap_or(Err(ProviderError::Empty))
         }
     }
     fn hit(url: &str, content: &str) -> SearchHit {
-        SearchHit { url: url.into(), title: "Title".into(), content: content.into() }
+        SearchHit {
+            url: url.into(),
+            title: "Title".into(),
+            content: content.into(),
+        }
     }
     fn ns(items: Vec<(&str, Result<Vec<SearchHit>, ProviderError>)>) -> FakeNs {
         FakeNs(items.into_iter().map(|(k, v)| (k.to_string(), v)).collect())
@@ -255,10 +329,15 @@ mod tests {
         }
     }
     fn llm(rules: Vec<(&str, Result<Value, ProviderError>)>) -> FakeLlm {
-        FakeLlm { rules: rules.into_iter().map(|(k, v)| (k.to_string(), v)).collect(), prompts: RefCell::new(vec![]) }
+        FakeLlm {
+            rules: rules.into_iter().map(|(k, v)| (k.to_string(), v)).collect(),
+            prompts: RefCell::new(vec![]),
+        }
     }
     fn reasons(url: &str, quote: &str, summary: &str) -> Result<Value, ProviderError> {
-        Ok(json!({"reasons": [{"url": url, "title": "Title", "quote": quote, "summary_en": summary}]}))
+        Ok(
+            json!({"reasons": [{"url": url, "title": "Title", "quote": quote, "summary_en": summary}]}),
+        )
     }
 
     fn date() -> NaiveDate {
@@ -273,7 +352,10 @@ mod tests {
     async fn verified_reason_is_kept() {
         let m = md(&[q("AAPL", 230.0, 8.0, Some(2_000_000))]);
         let n = ns(vec![(AAPL_Q, Ok(vec![hit(URL, ARTICLE)]))]);
-        let l = llm(vec![("AAPL", reasons(URL, QUOTE, "Apple rose 8% on record iPhone sales."))]);
+        let l = llm(vec![(
+            "AAPL",
+            reasons(URL, QUOTE, "Apple rose 8% on record iPhone sales."),
+        )]);
         let f = build_facts(&m, &n, &l, date(), now()).await;
         assert_eq!(f.trading_date, date());
         assert_eq!(f.as_of_utc, now());
@@ -281,7 +363,12 @@ mod tests {
         assert_eq!(f.gainers[0].name, "Apple");
         assert_eq!(f.gainers[0].reasons.len(), 1);
         assert_eq!(f.gainers[0].reasons[0].quote, QUOTE);
-        assert_eq!(f.watch_list, Field::Missing { reason: "not available in v1".into() });
+        assert_eq!(
+            f.watch_list,
+            Field::Missing {
+                reason: "not available in v1".into()
+            }
+        );
         assert!(missing_required(&f).is_empty());
         let (sys, user) = &l.prompts.borrow()[0];
         assert!(sys.contains("verbatim") && sys.contains("ONLY"));
@@ -292,7 +379,14 @@ mod tests {
     async fn unanchored_quote_is_dropped() {
         let m = md(&[q("AAPL", 230.0, 8.0, Some(2_000_000))]);
         let n = ns(vec![(AAPL_Q, Ok(vec![hit(URL, ARTICLE)]))]);
-        let l = llm(vec![("AAPL", reasons(URL, "Apple announced a surprise buyback of shares", "Buyback."))]);
+        let l = llm(vec![(
+            "AAPL",
+            reasons(
+                URL,
+                "Apple announced a surprise buyback of shares",
+                "Buyback.",
+            ),
+        )]);
         let f = build_facts(&m, &n, &l, date(), now()).await;
         assert_eq!(f.gainers.len(), 1);
         assert_eq!(f.gainers[0].reasons, vec![]);
@@ -304,7 +398,9 @@ mod tests {
         let n = ns(vec![(AAPL_Q, Ok(vec![hit(URL, ARTICLE)]))]);
         let l = llm(vec![(
             "AAPL",
-            Ok(json!({"reasons": [{"url": URL, "title": "Apple to be acquired, sources say", "quote": QUOTE, "summary_en": "Apple rose."}]})),
+            Ok(
+                json!({"reasons": [{"url": URL, "title": "Apple to be acquired, sources say", "quote": QUOTE, "summary_en": "Apple rose."}]}),
+            ),
         )]);
         let f = build_facts(&m, &n, &l, date(), now()).await;
         assert_eq!(f.gainers[0].reasons.len(), 1);
@@ -316,14 +412,20 @@ mod tests {
     async fn reason_with_foreign_url_is_dropped() {
         let m = md(&[q("AAPL", 230.0, 8.0, Some(2_000_000))]);
         let n = ns(vec![(AAPL_Q, Ok(vec![hit(URL, ARTICLE)]))]);
-        let l = llm(vec![("AAPL", reasons("https://elsewhere.test/x", QUOTE, "Apple rose."))]);
+        let l = llm(vec![(
+            "AAPL",
+            reasons("https://elsewhere.test/x", QUOTE, "Apple rose."),
+        )]);
         let f = build_facts(&m, &n, &l, date(), now()).await;
         assert_eq!(f.gainers[0].reasons, vec![]);
     }
 
     #[tokio::test]
     async fn llm_error_keeps_mover_with_no_reasons() {
-        let m = md(&[q("AAPL", 230.0, 8.0, Some(2_000_000)), q("MSFT", 400.0, -6.0, Some(900_000))]);
+        let m = md(&[
+            q("AAPL", 230.0, 8.0, Some(2_000_000)),
+            q("MSFT", 400.0, -6.0, Some(900_000)),
+        ]);
         let n = ns(vec![(AAPL_Q, Ok(vec![hit(URL, ARTICLE)]))]);
         let l = llm(vec![("AAPL", Err(ProviderError::Http(500)))]);
         let f = build_facts(&m, &n, &l, date(), now()).await;
@@ -337,16 +439,35 @@ mod tests {
 
     #[tokio::test]
     async fn penny_stock_is_never_a_mover() {
-        let m = md(&[q("F", 3.10, 40.0, Some(5_000_000)), q("AAPL", 230.0, 2.0, Some(2_000_000))]);
+        let m = md(&[
+            q("F", 3.10, 40.0, Some(5_000_000)),
+            q("AAPL", 230.0, 2.0, Some(2_000_000)),
+        ]);
         let f = build_facts(&m, &ns(vec![]), &llm(vec![]), date(), now()).await;
-        assert_eq!(f.gainers.iter().map(|m| m.quote.symbol.as_str()).collect::<Vec<_>>(), vec!["AAPL"]);
+        assert_eq!(
+            f.gainers
+                .iter()
+                .map(|m| m.quote.symbol.as_str())
+                .collect::<Vec<_>>(),
+            vec!["AAPL"]
+        );
     }
 
     #[tokio::test]
     async fn low_or_unknown_volume_is_excluded() {
-        let m = md(&[q("AAPL", 230.0, 9.0, Some(49_999)), q("MSFT", 400.0, 9.0, None), q("NVDA", 180.0, 1.0, Some(50_000))]);
+        let m = md(&[
+            q("AAPL", 230.0, 9.0, Some(49_999)),
+            q("MSFT", 400.0, 9.0, None),
+            q("NVDA", 180.0, 1.0, Some(50_000)),
+        ]);
         let f = build_facts(&m, &ns(vec![]), &llm(vec![]), date(), now()).await;
-        assert_eq!(f.gainers.iter().map(|m| m.quote.symbol.as_str()).collect::<Vec<_>>(), vec!["NVDA"]);
+        assert_eq!(
+            f.gainers
+                .iter()
+                .map(|m| m.quote.symbol.as_str())
+                .collect::<Vec<_>>(),
+            vec!["NVDA"]
+        );
     }
 
     #[tokio::test]
@@ -391,9 +512,22 @@ mod tests {
         m.futures = None;
         let f = build_facts(&m, &ns(vec![]), &llm(vec![]), date(), now()).await;
         let labels: Vec<&str> = f.futures.iter().map(|(l, _)| l.as_str()).collect();
-        assert_eq!(labels, vec!["S&P 500 futures", "Nasdaq 100 futures", "Dow futures", "Russell 2000 futures"]);
+        assert_eq!(
+            labels,
+            vec![
+                "S&P 500 futures",
+                "Nasdaq 100 futures",
+                "Dow futures",
+                "Russell 2000 futures"
+            ]
+        );
         for (_, fq) in &f.futures {
-            assert_eq!(fq, &Field::Missing { reason: ProviderError::Http(429).to_string() });
+            assert_eq!(
+                fq,
+                &Field::Missing {
+                    reason: ProviderError::Http(429).to_string()
+                }
+            );
         }
         assert!(missing_required(&f).contains(&"futures"));
     }
@@ -414,7 +548,8 @@ mod tests {
 
     #[tokio::test]
     async fn macro_items_verified() {
-        let src = "Stock futures rose overnight as Treasury yields fell after the Fed signaled patience.";
+        let src =
+            "Stock futures rose overnight as Treasury yields fell after the Fed signaled patience.";
         let n = ns(vec![(
             "stock market futures today",
             Ok(vec![hit("https://news.test/macro", src)]),
@@ -439,14 +574,37 @@ mod tests {
     #[tokio::test]
     async fn macro_search_error_is_missing() {
         let f = build_facts(&md(&[]), &ns(vec![]), &llm(vec![]), date(), now()).await;
-        assert_eq!(f.macro_items, Field::Missing { reason: ProviderError::Empty.to_string() });
+        assert_eq!(
+            f.macro_items,
+            Field::Missing {
+                reason: ProviderError::Empty.to_string()
+            }
+        );
     }
 
     #[tokio::test]
     async fn macro_llm_error_is_missing_and_zero_verified_is_empty() {
-        let n = ns(vec![("stock market futures today", Ok(vec![hit("https://news.test/m", "Some macro text here, long enough.")]))]);
-        let f = build_facts(&md(&[]), &n, &llm(vec![("overnight", Err(ProviderError::Http(503)))]), date(), now()).await;
-        assert_eq!(f.macro_items, Field::Missing { reason: ProviderError::Http(503).to_string() });
+        let n = ns(vec![(
+            "stock market futures today",
+            Ok(vec![hit(
+                "https://news.test/m",
+                "Some macro text here, long enough.",
+            )]),
+        )]);
+        let f = build_facts(
+            &md(&[]),
+            &n,
+            &llm(vec![("overnight", Err(ProviderError::Http(503)))]),
+            date(),
+            now(),
+        )
+        .await;
+        assert_eq!(
+            f.macro_items,
+            Field::Missing {
+                reason: ProviderError::Http(503).to_string()
+            }
+        );
         let f = build_facts(&md(&[]), &n, &llm(vec![]), date(), now()).await;
         assert_eq!(f.macro_items, Field::Value(vec![]));
     }

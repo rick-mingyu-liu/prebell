@@ -85,7 +85,11 @@ pub fn now_iso() -> String {
 }
 
 impl D1Store {
-    async fn first<T: DeserializeOwned>(&self, sql: &str, args: &[JsValue]) -> Result<Option<T>, String> {
+    async fn first<T: DeserializeOwned>(
+        &self,
+        sql: &str,
+        args: &[JsValue],
+    ) -> Result<Option<T>, String> {
         let stmt = self.db.prepare(sql).bind(args).map_err(|e| err(sql, e))?;
         stmt.first::<T>(None).await.map_err(|e| err(sql, e))
     }
@@ -114,7 +118,8 @@ impl D1Store {
     }
 
     pub async fn mark_alert_sent(&self, id: i64) -> Result<(), String> {
-        self.run("UPDATE alerts SET sent = 1 WHERE id = ?1", &[int(id)]).await
+        self.run("UPDATE alerts SET sent = 1 WHERE id = ?1", &[int(id)])
+            .await
     }
 }
 
@@ -203,7 +208,8 @@ impl Store for D1Store {
                 ],
             )
             .await?;
-        r.map(|r| r.id).ok_or_else(|| "upsert_post returned no id".to_string())
+        r.map(|r| r.id)
+            .ok_or_else(|| "upsert_post returned no id".to_string())
     }
 
     async fn get_translation(&self, post_id: i64, lang: &str) -> Option<TranslationRow> {
@@ -247,7 +253,9 @@ impl Store for D1Store {
         for r in src {
             stmts.push(
                 self.db
-                    .prepare("INSERT INTO sources (post_id, url, title, quote) VALUES (?1, ?2, ?3, ?4)")
+                    .prepare(
+                        "INSERT INTO sources (post_id, url, title, quote) VALUES (?1, ?2, ?3, ?4)",
+                    )
                     .bind(&[int(post_id), s(&r.url), s(&r.title), s(&r.quote)])
                     .map_err(|e| err(ctx, e))?,
             );

@@ -52,10 +52,18 @@ pub struct PremarketFacts {
 /// Names of required sections that are unavailable. Empty means publishable.
 pub fn missing_required(f: &PremarketFacts) -> Vec<&'static str> {
     let mut out = Vec::new();
-    if f.futures.iter().all(|(_, q)| matches!(q, Field::Missing { .. })) {
+    if f.futures
+        .iter()
+        .all(|(_, q)| matches!(q, Field::Missing { .. }))
+    {
         out.push("futures");
     }
-    if !f.gainers.iter().chain(&f.losers).any(|m| !m.reasons.is_empty()) {
+    if !f
+        .gainers
+        .iter()
+        .chain(&f.losers)
+        .any(|m| !m.reasons.is_empty())
+    {
         out.push("movers");
     }
     out
@@ -113,33 +121,58 @@ mod tests {
     use super::*;
 
     fn quote(sym: &str) -> Quote {
-        Quote { symbol: sym.into(), last: 5800.25, prev_close: 5790.0, change_pct: 0.45, volume: Some(1200) }
+        Quote {
+            symbol: sym.into(),
+            last: 5800.25,
+            prev_close: 5790.0,
+            change_pct: 0.45,
+            volume: Some(1200),
+        }
     }
     fn reason(text: &str) -> NewsReason {
-        NewsReason { url: "https://x.test/a".into(), title: "t".into(), quote: text.into(), summary_en: "s".into() }
+        NewsReason {
+            url: "https://x.test/a".into(),
+            title: "t".into(),
+            quote: text.into(),
+            summary_en: "s".into(),
+        }
     }
     fn mover(reasons: Vec<NewsReason>) -> Mover {
-        Mover { quote: quote("ABC"), name: "ABC Inc".into(), reasons }
+        Mover {
+            quote: quote("ABC"),
+            name: "ABC Inc".into(),
+            reasons,
+        }
     }
     fn missing() -> Field<Quote> {
-        Field::Missing { reason: "feed down".into() }
+        Field::Missing {
+            reason: "feed down".into(),
+        }
     }
     fn facts() -> PremarketFacts {
         PremarketFacts {
             trading_date: NaiveDate::from_ymd_opt(2026, 10, 29).unwrap(),
             as_of_utc: "2026-10-29T12:00:00Z".parse().unwrap(),
-            futures: vec![("ES".into(), Field::Value(quote("ES"))), ("NQ".into(), missing())],
+            futures: vec![
+                ("ES".into(), Field::Value(quote("ES"))),
+                ("NQ".into(), missing()),
+            ],
             gainers: vec![mover(vec![reason("shares rose")])],
             losers: vec![],
             macro_items: Field::Value(vec![reason("CPI was 3.1%")]),
-            watch_list: Field::Missing { reason: "none".into() },
+            watch_list: Field::Missing {
+                reason: "none".into(),
+            },
         }
     }
 
     #[test]
     fn all_futures_missing_gates_futures() {
         let mut f = facts();
-        f.futures = ["ES", "NQ", "YM", "RTY"].iter().map(|l| (l.to_string(), missing())).collect();
+        f.futures = ["ES", "NQ", "YM", "RTY"]
+            .iter()
+            .map(|l| (l.to_string(), missing()))
+            .collect();
         assert_eq!(missing_required(&f), vec!["futures"]);
     }
 

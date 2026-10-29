@@ -161,12 +161,27 @@ mod tests {
     struct FakeHttp(HashMap<String, (u16, String)>);
     #[async_trait(?Send)]
     impl Http for FakeHttp {
-        async fn get(&self, url: &str, headers: &[(&str, &str)]) -> Result<HttpResp, ProviderError> {
-            assert!(headers.iter().any(|(k, v)| *k == "User-Agent" && v.contains("Mozilla")));
-            let (status, body) = self.0.get(url).cloned().ok_or(ProviderError::Network(url.into()))?;
+        async fn get(
+            &self,
+            url: &str,
+            headers: &[(&str, &str)],
+        ) -> Result<HttpResp, ProviderError> {
+            assert!(headers
+                .iter()
+                .any(|(k, v)| *k == "User-Agent" && v.contains("Mozilla")));
+            let (status, body) = self
+                .0
+                .get(url)
+                .cloned()
+                .ok_or(ProviderError::Network(url.into()))?;
             Ok(HttpResp { status, body })
         }
-        async fn post_json(&self, _: &str, _: &[(&str, &str)], _: &serde_json::Value) -> Result<HttpResp, ProviderError> {
+        async fn post_json(
+            &self,
+            _: &str,
+            _: &[(&str, &str)],
+            _: &serde_json::Value,
+        ) -> Result<HttpResp, ProviderError> {
             unreachable!()
         }
     }
@@ -174,7 +189,12 @@ mod tests {
         format!("https://query1.finance.yahoo.com/v8/finance/chart/{s}?interval=1m&range=1d&includePrePost=true")
     }
     fn yahoo(items: &[(&str, u16, &str)]) -> Yahoo<FakeHttp> {
-        Yahoo::new(FakeHttp(items.iter().map(|(s, c, b)| (url(s), (*c, b.to_string()))).collect()))
+        Yahoo::new(FakeHttp(
+            items
+                .iter()
+                .map(|(s, c, b)| (url(s), (*c, b.to_string())))
+                .collect(),
+        ))
     }
 
     #[tokio::test]
@@ -227,9 +247,17 @@ mod tests {
 
     #[tokio::test]
     async fn empty_result_is_empty() {
-        let r = yahoo(&[("X", 200, r#"{"chart":{"result":[],"error":null}}"#)]).quote("X").await;
+        let r = yahoo(&[("X", 200, r#"{"chart":{"result":[],"error":null}}"#)])
+            .quote("X")
+            .await;
         assert_eq!(r, Err(ProviderError::Empty));
-        let r = yahoo(&[("X", 200, r#"{"chart":{"result":null,"error":{"code":"Not Found"}}}"#)]).quote("X").await;
+        let r = yahoo(&[(
+            "X",
+            200,
+            r#"{"chart":{"result":null,"error":{"code":"Not Found"}}}"#,
+        )])
+        .quote("X")
+        .await;
         assert_eq!(r, Err(ProviderError::Empty));
     }
 

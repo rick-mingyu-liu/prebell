@@ -27,7 +27,9 @@ impl WorkerHttp {
             h.set("content-type", "application/json").map_err(net)?;
         }
         let mut init = RequestInit::new();
-        init.with_method(method).with_headers(h).with_body(body.map(|b| JsValue::from_str(&b)));
+        init.with_method(method)
+            .with_headers(h)
+            .with_body(body.map(|b| JsValue::from_str(&b)));
         let req = Request::new_with_init(url, &init).map_err(net)?;
         let mut resp = Fetch::Request(req).send().await.map_err(net)?;
         let status = resp.status_code();
@@ -48,6 +50,7 @@ impl Http for WorkerHttp {
         headers: &[(&str, &str)],
         body: &serde_json::Value,
     ) -> Result<HttpResp, ProviderError> {
-        self.send(Method::Post, url, headers, Some(body.to_string())).await
+        self.send(Method::Post, url, headers, Some(body.to_string()))
+            .await
     }
 }

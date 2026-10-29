@@ -75,13 +75,21 @@ mod tests {
     use super::*;
 
     fn reason(quote: &str, summary: &str) -> NewsReason {
-        NewsReason { url: "u".into(), title: "t".into(), quote: quote.into(), summary_en: summary.into() }
+        NewsReason {
+            url: "u".into(),
+            title: "t".into(),
+            quote: quote.into(),
+            summary_en: summary.into(),
+        }
     }
 
     #[test]
     fn whitespace_and_amp() {
         let src = "Profits at AT&amp;T\n  rose   sharply this quarter.";
-        assert!(verify_quote(src, "Profits at AT&T rose sharply this quarter."));
+        assert!(verify_quote(
+            src,
+            "Profits at AT&T rose sharply this quarter."
+        ));
     }
     #[test]
     fn short_quote_rejected() {
@@ -92,17 +100,29 @@ mod tests {
     }
     #[test]
     fn absent_quote() {
-        assert!(!verify_quote("Shares rose after earnings beat estimates.", "Shares fell after earnings missed estimates."));
+        assert!(!verify_quote(
+            "Shares rose after earnings beat estimates.",
+            "Shares fell after earnings missed estimates."
+        ));
     }
     #[test]
     fn curly_quotes() {
         let src = "The CEO said \"we're very confident\" on the call.";
-        assert!(verify_quote(src, "The CEO said \u{201c}we\u{2019}re very confident\u{201d} on the call."));
+        assert!(verify_quote(
+            src,
+            "The CEO said \u{201c}we\u{2019}re very confident\u{201d} on the call."
+        ));
     }
     #[test]
     fn numeric_entity() {
-        assert!(verify_quote("The firm&#39;s revenue grew strongly in Q3.", "The firm's revenue grew strongly in Q3."));
-        assert!(verify_quote("The firm&#x27;s revenue grew strongly in Q3.", "The firm's revenue grew strongly in Q3."));
+        assert!(verify_quote(
+            "The firm&#39;s revenue grew strongly in Q3.",
+            "The firm's revenue grew strongly in Q3."
+        ));
+        assert!(verify_quote(
+            "The firm&#x27;s revenue grew strongly in Q3.",
+            "The firm's revenue grew strongly in Q3."
+        ));
     }
     #[test]
     fn summary_number_mismatch() {

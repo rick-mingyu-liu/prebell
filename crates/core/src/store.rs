@@ -91,7 +91,11 @@ impl Store for MemStore {
         Ok(())
     }
     async fn get_post_by_run(&self, run_key: &str) -> Option<PostRow> {
-        self.posts.borrow().iter().find(|p| p.run_key == run_key).cloned()
+        self.posts
+            .borrow()
+            .iter()
+            .find(|p| p.run_key == run_key)
+            .cloned()
     }
     async fn upsert_post(&self, p: &PostRow) -> Result<i64, String> {
         let mut posts = self.posts.borrow_mut();
@@ -101,14 +105,22 @@ impl Store for MemStore {
             return id.ok_or_else(|| "stored post has no id".to_string());
         }
         let id = posts.len() as i64 + 1;
-        posts.push(PostRow { id: Some(id), ..p.clone() });
+        posts.push(PostRow {
+            id: Some(id),
+            ..p.clone()
+        });
         Ok(id)
     }
     async fn get_translation(&self, post_id: i64, lang: &str) -> Option<TranslationRow> {
-        self.translations.borrow().get(&(post_id, lang.to_string())).cloned()
+        self.translations
+            .borrow()
+            .get(&(post_id, lang.to_string()))
+            .cloned()
     }
     async fn upsert_translation(&self, t: &TranslationRow) -> Result<(), String> {
-        self.translations.borrow_mut().insert((t.post_id, t.lang.clone()), t.clone());
+        self.translations
+            .borrow_mut()
+            .insert((t.post_id, t.lang.clone()), t.clone());
         Ok(())
     }
     async fn add_sources(&self, post_id: i64, s: &[NewsReason]) -> Result<(), String> {
@@ -116,7 +128,9 @@ impl Store for MemStore {
         Ok(())
     }
     async fn add_alert(&self, run_key: &str, level: &str, msg: &str) -> Result<(), String> {
-        self.alerts.borrow_mut().push((run_key.into(), level.into(), msg.into()));
+        self.alerts
+            .borrow_mut()
+            .push((run_key.into(), level.into(), msg.into()));
         Ok(())
     }
     async fn put_facts(&self, key: &str, json: &str) -> Result<(), String> {

@@ -23,11 +23,18 @@ struct Job {
 }
 
 fn text(env: &Env, name: &str) -> Option<String> {
-    env.var(name).ok().map(|v| v.to_string()).filter(|v| !v.is_empty())
+    env.var(name)
+        .ok()
+        .map(|v| v.to_string())
+        .filter(|v| !v.is_empty())
 }
 
 fn secret_or_empty(env: &Env, name: &str) -> String {
-    let v = env.secret(name).ok().map(|v| v.to_string()).unwrap_or_default();
+    let v = env
+        .secret(name)
+        .ok()
+        .map(|v| v.to_string())
+        .unwrap_or_default();
     if v.is_empty() {
         console_warn!("secret {name} is not set; provider calls will fail");
     }
@@ -57,7 +64,12 @@ async fn fetch(req: Request, _env: Env, _ctx: Context) -> Result<Response> {
 #[event(scheduled)]
 async fn scheduled(event: ScheduledEvent, env: Env, _ctx: ScheduleContext) {
     let sent = match env.queue("JOBS") {
-        Ok(q) => q.send(Job { job: "premarket".into() }).await,
+        Ok(q) => {
+            q.send(Job {
+                job: "premarket".into(),
+            })
+            .await
+        }
         Err(e) => Err(e),
     };
     match sent {
@@ -68,12 +80,19 @@ async fn scheduled(event: ScheduledEvent, env: Env, _ctx: ScheduleContext) {
 
 #[event(queue)]
 async fn queue(batch: MessageBatch<Job>, env: Env, _ctx: Context) -> Result<()> {
-    let store = D1Store { db: env.d1("DB")?, facts: env.bucket("FACTS")? };
+    let store = D1Store {
+        db: env.d1("DB")?,
+        facts: env.bucket("FACTS")?,
+    };
     let md = Yahoo::new(WorkerHttp);
     let ns = Tavily::new(WorkerHttp, secret_or_empty(&env, "TAVILY_API_KEY"));
     let provider = text(&env, "LLM_PROVIDER").unwrap_or_else(|| "deepseek".into());
-    let llm = llm_from_env(&provider, WorkerHttp, secret_or_empty(&env, "DEEPSEEK_API_KEY"))
-        .map_err(|e| Error::RustError(e.to_string()))?;
+    let llm = llm_from_env(
+        &provider,
+        WorkerHttp,
+        secret_or_empty(&env, "DEEPSEEK_API_KEY"),
+    )
+    .map_err(|e| Error::RustError(e.to_string()))?;
 
     for msg in batch.messages()? {
         let outcome = tick(now(&env), &store, &md, &ns, llm.as_ref()).await;
@@ -81,6 +100,11 @@ async fn queue(batch: MessageBatch<Job>, env: Env, _ctx: Context) -> Result<()> 
         msg.ack();
     }
 
-    alerts::deliver(&store, &WorkerHttp, text(&env, "ALERT_WEBHOOK_URL").as_deref()).await;
+    alerts::deliver(
+        &store,
+        &WorkerHttp,
+        text(&env, "ALERT_WEBHOOK_URL").as_deref(),
+    )
+    .await;
     Ok(())
 }

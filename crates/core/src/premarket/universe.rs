@@ -19,7 +19,10 @@ pub fn universe() -> Vec<String> {
 
 /// Company name for a universe ticker.
 pub fn company_name(ticker: &str) -> Option<&'static str> {
-    entries().find(|(t, _)| *t == ticker).map(|(_, n)| n).filter(|n| !n.is_empty())
+    entries()
+        .find(|(t, _)| *t == ticker)
+        .map(|(_, n)| n)
+        .filter(|n| !n.is_empty())
 }
 
 /// Yahoo spells class shares with a dash: `BRK.B` -> `BRK-B`.

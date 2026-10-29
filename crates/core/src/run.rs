@@ -41,7 +41,9 @@ pub async fn tick(
     ns: &dyn NewsSearch,
     llm: &dyn LlmProvider,
 ) -> TickOutcome {
-    step(now, store, md, ns, llm).await.unwrap_or_else(TickOutcome::Retrying)
+    step(now, store, md, ns, llm)
+        .await
+        .unwrap_or_else(TickOutcome::Retrying)
 }
 
 async fn step(
@@ -55,7 +57,9 @@ async fn step(
     let date = match decision {
         SlotDecision::NotToday => return Ok(TickOutcome::Nothing),
         SlotDecision::TooEarly => et(now).date_naive(),
-        SlotDecision::InWindow { trading_date } | SlotDecision::PastDeadline { trading_date } => trading_date,
+        SlotDecision::InWindow { trading_date } | SlotDecision::PastDeadline { trading_date } => {
+            trading_date
+        }
     };
     let key = run_key(date);
     let run = store.get_run(&key).await;
@@ -63,8 +67,13 @@ async fn step(
     if let Some(r) = run.as_ref().filter(|r| r.status == "published") {
         return retry_zh(now, store, llm, r).await;
     }
-    let in_flight = run.as_ref().is_some_and(|r| r.status == "building" && !is_stale(r, now));
-    let may_act = matches!(decision, SlotDecision::InWindow { .. } | SlotDecision::PastDeadline { .. });
+    let in_flight = run
+        .as_ref()
+        .is_some_and(|r| r.status == "building" && !is_stale(r, now));
+    let may_act = matches!(
+        decision,
+        SlotDecision::InWindow { .. } | SlotDecision::PastDeadline { .. }
+    );
     if may_act && !in_flight {
         if let Some(r) = reconcile(now, store, date, run.clone()).await? {
             return retry_zh(now, store, llm, &r).await;
@@ -94,17 +103,29 @@ async fn reconcile(
         return Ok(None);
     };
     let post_id = post.id.ok_or("post has no id")?;
-    if !store.get_translation(post_id, "en").await.is_some_and(|t| t.status == "published") {
+    if !store
+        .get_translation(post_id, "en")
+        .await
+        .is_some_and(|t| t.status == "published")
+    {
         return Ok(None);
     }
     let ts = iso(now);
     if store.get_translation(post_id, "zh").await.is_none() {
-        let pending = translation_zh(post_id, "pending", String::new(), String::new(), String::new(), &ts);
+        let pending = translation_zh(
+            post_id,
+            "pending",
+            String::new(),
+            String::new(),
+            String::new(),
+            &ts,
+        );
         store.upsert_translation(&pending).await?;
     }
     // The failed write may have been `add_sources`; it replaces, so redo it.
     if let Some(json) = store.get_facts(&post.facts_r2_key).await {
-        let facts: PremarketFacts = serde_json::from_str(&json).map_err(|e| format!("facts json: {e}"))?;
+        let facts: PremarketFacts =
+            serde_json::from_str(&json).map_err(|e| format!("facts json: {e}"))?;
         store.add_sources(post_id, &sources(&facts)).await?;
     }
     let mut row = run.unwrap_or_else(|| new_run(now, date));
@@ -133,10 +154,17 @@ async fn skip(
     let mut row = run.unwrap_or_else(|| new_run(now, date));
     row.status = "skipped".into();
     row.updated_at = iso(now);
-    let why = row.last_error.clone().unwrap_or_else(|| "no attempt succeeded".into());
+    let why = row
+        .last_error
+        .clone()
+        .unwrap_or_else(|| "no attempt succeeded".into());
     store.upsert_run(&row).await?;
     store
-        .add_alert(&row.run_key, "error", &format!("premarket brief skipped for {date}: not ready by 09:25 ET ({why})"))
+        .add_alert(
+            &row.run_key,
+            "error",
+            &format!("premarket brief skipped for {date}: not ready by 09:25 ET ({why})"),
+        )
         .await?;
     Ok(TickOutcome::Skipped)
 }
@@ -210,9 +238,19 @@ async fn build(
         })
         .await?;
     let (zh_row, zh_err) = match zh {
-        Ok((d, body)) => (translation_zh(post_id, "published", d.title, d.summary, body, &ts), None),
+        Ok((d, body)) => (
+            translation_zh(post_id, "published", d.title, d.summary, body, &ts),
+            None,
+        ),
         Err(e) => (
-            translation_zh(post_id, "pending", String::new(), String::new(), String::new(), &ts),
+            translation_zh(
+                post_id,
+                "pending",
+                String::new(),
+                String::new(),
+                String::new(),
+                &ts,
+            ),
             Some(format!("zh: {}", e.join("; "))),
         ),
     };
@@ -223,18 +261,41 @@ async fn build(
     row.last_error = zh_err.clone();
     row.updated_at = ts;
     store.upsert_run(&row).await?;
-    Ok(if zh_err.is_some() { TickOutcome::PublishedEnOnly } else { TickOutcome::Published })
+    Ok(if zh_err.is_some() {
+        TickOutcome::PublishedEnOnly
+    } else {
+        TickOutcome::Published
+    })
 }
 
-async fn retry_later(store: &dyn Store, mut row: RunRow, err: String) -> Result<TickOutcome, String> {
+async fn retry_later(
+    store: &dyn Store,
+    mut row: RunRow,
+    err: String,
+) -> Result<TickOutcome, String> {
     row.status = "pending".into();
     row.last_error = Some(err.clone());
     store.upsert_run(&row).await?;
     Ok(TickOutcome::Retrying(err))
 }
 
-fn translation_zh(post_id: i64, status: &str, title: String, summary: String, body_md: String, ts: &str) -> TranslationRow {
-    TranslationRow { post_id, lang: "zh".into(), status: status.into(), title, summary, body_md, updated_at: ts.into() }
+fn translation_zh(
+    post_id: i64,
+    status: &str,
+    title: String,
+    summary: String,
+    body_md: String,
+    ts: &str,
+) -> TranslationRow {
+    TranslationRow {
+        post_id,
+        lang: "zh".into(),
+        status: status.into(),
+        title,
+        summary,
+        body_md,
+        updated_at: ts.into(),
+    }
 }
 
 /// Every kept reason (gainers, losers, macro), first occurrence per url.
@@ -244,7 +305,13 @@ fn sources(f: &PremarketFacts) -> Vec<NewsReason> {
         Field::Missing { .. } => &[],
     };
     let mut out: Vec<NewsReason> = Vec::new();
-    for r in f.gainers.iter().chain(&f.losers).flat_map(|m| &m.reasons).chain(macro_items) {
+    for r in f
+        .gainers
+        .iter()
+        .chain(&f.losers)
+        .flat_map(|m| &m.reasons)
+        .chain(macro_items)
+    {
         if !out.iter().any(|o| o.url == r.url) {
             out.push(r.clone());
         }
@@ -260,28 +327,58 @@ async fn retry_zh(
     llm: &dyn LlmProvider,
     run: &RunRow,
 ) -> Result<TickOutcome, String> {
-    let post = store.get_post_by_run(&run.run_key).await.ok_or("published run has no post")?;
+    let post = store
+        .get_post_by_run(&run.run_key)
+        .await
+        .ok_or("published run has no post")?;
     let post_id = post.id.ok_or("post has no id")?;
     if let Some(t) = store.get_translation(post_id, "zh").await {
         if t.status != "pending" {
             return Ok(TickOutcome::Nothing);
         }
     }
-    let json = store.get_facts(&post.facts_r2_key).await.ok_or("facts not found")?;
-    let facts: PremarketFacts = serde_json::from_str(&json).map_err(|e| format!("facts json: {e}"))?;
+    let json = store
+        .get_facts(&post.facts_r2_key)
+        .await
+        .ok_or("facts not found")?;
+    let facts: PremarketFacts =
+        serde_json::from_str(&json).map_err(|e| format!("facts json: {e}"))?;
     let ts = iso(now);
     match write(llm, &facts, Lang::Zh).await {
         Ok((d, body)) => {
-            store.upsert_translation(&translation_zh(post_id, "published", d.title, d.summary, body, &ts)).await?;
+            store
+                .upsert_translation(&translation_zh(
+                    post_id,
+                    "published",
+                    d.title,
+                    d.summary,
+                    body,
+                    &ts,
+                ))
+                .await?;
             Ok(TickOutcome::Published)
         }
         Err(e) => {
             let err = format!("zh: {}", e.join("; "));
             if et(now).time() >= NaiveTime::from_hms_opt(18, 0, 0).unwrap() {
-                let failed = translation_zh(post_id, "failed", String::new(), String::new(), String::new(), &ts);
+                let failed = translation_zh(
+                    post_id,
+                    "failed",
+                    String::new(),
+                    String::new(),
+                    String::new(),
+                    &ts,
+                );
                 store.upsert_translation(&failed).await?;
                 store
-                    .add_alert(&run.run_key, "warn", &format!("Chinese premarket brief failed for {}: {err}", run.trading_date))
+                    .add_alert(
+                        &run.run_key,
+                        "warn",
+                        &format!(
+                            "Chinese premarket brief failed for {}: {err}",
+                            run.trading_date
+                        ),
+                    )
                     .await?;
             }
             Ok(TickOutcome::Retrying(err))
@@ -292,9 +389,9 @@ async fn retry_zh(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::facts::NewsReason;
     use crate::facts::Quote;
     use crate::providers::{ProviderError, SearchHit};
-    use crate::facts::NewsReason;
     use crate::store::{MemStore, PostRow, RunRow, TranslationRow};
     use async_trait::async_trait;
     use serde_json::{json, Value};
@@ -310,7 +407,13 @@ mod tests {
     }
 
     fn q(sym: &str, last: f64, pct: f64) -> Quote {
-        Quote { symbol: sym.into(), last, prev_close: last / (1.0 + pct / 100.0), change_pct: pct, volume: Some(2_000_000) }
+        Quote {
+            symbol: sym.into(),
+            last,
+            prev_close: last / (1.0 + pct / 100.0),
+            change_pct: pct,
+            volume: Some(2_000_000),
+        }
     }
 
     /// `ok = false` makes every call fail with HTTP 429.
@@ -322,9 +425,16 @@ mod tests {
     impl MarketData for FakeMd {
         async fn quote(&self, symbol: &str) -> Result<Quote, ProviderError> {
             self.calls.set(self.calls.get() + 1);
-            if self.ok { Ok(q(symbol, 5800.0, 0.4)) } else { Err(ProviderError::Http(429)) }
+            if self.ok {
+                Ok(q(symbol, 5800.0, 0.4))
+            } else {
+                Err(ProviderError::Http(429))
+            }
         }
-        async fn premarket_quotes(&self, symbols: &[String]) -> Vec<(String, Result<Quote, ProviderError>)> {
+        async fn premarket_quotes(
+            &self,
+            symbols: &[String],
+        ) -> Vec<(String, Result<Quote, ProviderError>)> {
             self.calls.set(self.calls.get() + 1);
             symbols
                 .iter()
@@ -342,7 +452,10 @@ mod tests {
         }
     }
     fn md(ok: bool) -> FakeMd {
-        FakeMd { ok, calls: Cell::new(0) }
+        FakeMd {
+            ok,
+            calls: Cell::new(0),
+        }
     }
 
     struct FakeNs;
@@ -350,7 +463,11 @@ mod tests {
     impl NewsSearch for FakeNs {
         async fn search(&self, query: &str, _max: usize) -> Result<Vec<SearchHit>, ProviderError> {
             if query.contains("AAPL") {
-                Ok(vec![SearchHit { url: URL.into(), title: "Apple jumps".into(), content: ARTICLE.into() }])
+                Ok(vec![SearchHit {
+                    url: URL.into(),
+                    title: "Apple jumps".into(),
+                    content: ARTICLE.into(),
+                }])
             } else {
                 Err(ProviderError::Empty)
             }
@@ -373,21 +490,36 @@ mod tests {
             } else if system.starts_with("你负责撰写美股盘前晨报") {
                 Ok(draft_reply(true, self.zh_ok.get()))
             } else {
-                Ok(json!({"reasons": [{"url": URL, "title": "x", "quote": QUOTE, "summary_en": "Apple rose on record iPhone sales."}]}))
+                Ok(
+                    json!({"reasons": [{"url": URL, "title": "x", "quote": QUOTE, "summary_en": "Apple rose on record iPhone sales."}]}),
+                )
             }
         }
     }
     fn llm(en_ok: bool, zh_ok: bool) -> FakeLlm {
-        FakeLlm { en_ok: Cell::new(en_ok), zh_ok: Cell::new(zh_ok), calls: Cell::new(0) }
+        FakeLlm {
+            en_ok: Cell::new(en_ok),
+            zh_ok: Cell::new(zh_ok),
+            calls: Cell::new(0),
+        }
     }
     fn draft_reply(zh: bool, ok: bool) -> Value {
         let heads: [&str; 4] = if zh {
             ["期货", "盘前异动", "宏观与隔夜", "今日关注"]
         } else {
-            ["Futures", "Biggest premarket movers", "Macro & overnight", "What to watch"]
+            [
+                "Futures",
+                "Biggest premarket movers",
+                "Macro & overnight",
+                "What to watch",
+            ]
         };
         // 7.5% is not in the facts, so a bad reply fails the number check.
-        let body = if ok { "Futures were firm." } else { "Nasdaq futures rose 7.5%." };
+        let body = if ok {
+            "Futures were firm."
+        } else {
+            "Nasdaq futures rose 7.5%."
+        };
         json!({
             "title": "Futures firm; Apple jumps",
             "summary": "Futures edged up while Apple rose.",
@@ -399,7 +531,9 @@ mod tests {
         s.runs.borrow()[KEY].status.clone()
     }
     fn tr_status(s: &MemStore, lang: &str) -> String {
-        s.translations.borrow()[&(1, lang.to_string())].status.clone()
+        s.translations.borrow()[&(1, lang.to_string())]
+            .status
+            .clone()
     }
 
     #[test]
@@ -455,8 +589,17 @@ mod tests {
             facts_r2_key: "premarket/2026-10-29.json".into(),
             published_at: None,
         });
-        s.runs.borrow_mut().insert(KEY.into(), building_run("2026-10-29T12:35:00Z"));
-        let out = tick(utc("2026-10-29T12:45:00Z"), &s, &md(true), &FakeNs, &llm(true, true)).await;
+        s.runs
+            .borrow_mut()
+            .insert(KEY.into(), building_run("2026-10-29T12:35:00Z"));
+        let out = tick(
+            utc("2026-10-29T12:45:00Z"),
+            &s,
+            &md(true),
+            &FakeNs,
+            &llm(true, true),
+        )
+        .await;
         assert_eq!(out, TickOutcome::Published);
         assert_eq!(s.posts.borrow().len(), 1);
         assert_eq!(s.posts.borrow()[0].id, Some(7));
@@ -480,7 +623,9 @@ mod tests {
     #[tokio::test]
     async fn fresh_building_run_is_left_alone() {
         let s = MemStore::default();
-        s.runs.borrow_mut().insert(KEY.into(), building_run("2026-10-29T12:44:00Z"));
+        s.runs
+            .borrow_mut()
+            .insert(KEY.into(), building_run("2026-10-29T12:44:00Z"));
         let (m, l) = (md(true), llm(true, true));
         let out = tick(utc("2026-10-29T12:45:00Z"), &s, &m, &FakeNs, &l).await;
         assert_eq!(out, TickOutcome::Nothing);
@@ -499,10 +644,16 @@ mod tests {
                 o => panic!("{o:?}"),
             }
             assert_eq!(run_status(&s), "pending");
-            assert_eq!(s.runs.borrow()[KEY].last_error.as_deref(), Some("futures, movers"));
+            assert_eq!(
+                s.runs.borrow()[KEY].last_error.as_deref(),
+                Some("futures, movers")
+            );
         }
         assert_eq!(s.runs.borrow()[KEY].attempts, 2);
-        assert_eq!(tick(utc("2026-10-29T13:25:00Z"), &s, &m, &FakeNs, &l).await, TickOutcome::Skipped);
+        assert_eq!(
+            tick(utc("2026-10-29T13:25:00Z"), &s, &m, &FakeNs, &l).await,
+            TickOutcome::Skipped
+        );
         assert_eq!(run_status(&s), "skipped");
         assert!(s.posts.borrow().is_empty());
         {
@@ -510,7 +661,10 @@ mod tests {
             assert_eq!(alerts.len(), 1);
             assert_eq!((alerts[0].0.as_str(), alerts[0].1.as_str()), (KEY, "error"));
         }
-        assert_eq!(tick(utc("2026-10-29T13:30:00Z"), &s, &m, &FakeNs, &l).await, TickOutcome::Nothing);
+        assert_eq!(
+            tick(utc("2026-10-29T13:30:00Z"), &s, &m, &FakeNs, &l).await,
+            TickOutcome::Nothing
+        );
         assert_eq!(s.alerts.borrow().len(), 1);
         assert!(s.posts.borrow().is_empty());
     }
@@ -519,7 +673,10 @@ mod tests {
     async fn en_ok_zh_bad_then_zh_retry_publishes() {
         let s = MemStore::default();
         let (m, l) = (md(true), llm(true, false));
-        assert_eq!(tick(utc("2026-10-29T12:30:00Z"), &s, &m, &FakeNs, &l).await, TickOutcome::PublishedEnOnly);
+        assert_eq!(
+            tick(utc("2026-10-29T12:30:00Z"), &s, &m, &FakeNs, &l).await,
+            TickOutcome::PublishedEnOnly
+        );
         assert_eq!(run_status(&s), "published");
         assert_eq!(tr_status(&s, "en"), "published");
         let zh = s.translations.borrow()[&(1, "zh".to_string())].clone();
@@ -528,29 +685,49 @@ mod tests {
         assert!(s.posts.borrow()[0].published_at.is_some());
 
         // Still bad: stays pending.
-        assert!(matches!(tick(utc("2026-10-29T12:35:00Z"), &s, &m, &FakeNs, &l).await, TickOutcome::Retrying(_)));
+        assert!(matches!(
+            tick(utc("2026-10-29T12:35:00Z"), &s, &m, &FakeNs, &l).await,
+            TickOutcome::Retrying(_)
+        ));
         assert_eq!(tr_status(&s, "zh"), "pending");
 
         // ZH retries continue past 09:25 ET.
         l.zh_ok.set(true);
-        assert_eq!(tick(utc("2026-10-29T15:00:00Z"), &s, &m, &FakeNs, &l).await, TickOutcome::Published);
+        assert_eq!(
+            tick(utc("2026-10-29T15:00:00Z"), &s, &m, &FakeNs, &l).await,
+            TickOutcome::Published
+        );
         assert_eq!(tr_status(&s, "zh"), "published");
-        assert!(s.translations.borrow()[&(1, "zh".to_string())].body_md.contains("## 期货"));
+        assert!(s.translations.borrow()[&(1, "zh".to_string())]
+            .body_md
+            .contains("## 期货"));
         assert_eq!(s.posts.borrow().len(), 1);
-        assert_eq!(tick(utc("2026-10-29T15:05:00Z"), &s, &m, &FakeNs, &l).await, TickOutcome::Nothing);
+        assert_eq!(
+            tick(utc("2026-10-29T15:05:00Z"), &s, &m, &FakeNs, &l).await,
+            TickOutcome::Nothing
+        );
     }
 
     #[tokio::test]
     async fn zh_failing_at_1805_et_is_failed_with_one_warn() {
         let s = MemStore::default();
         let (m, l) = (md(true), llm(true, false));
-        assert_eq!(tick(utc("2026-10-29T12:30:00Z"), &s, &m, &FakeNs, &l).await, TickOutcome::PublishedEnOnly);
+        assert_eq!(
+            tick(utc("2026-10-29T12:30:00Z"), &s, &m, &FakeNs, &l).await,
+            TickOutcome::PublishedEnOnly
+        );
         // 17:00 ET: still pending.
-        assert!(matches!(tick(utc("2026-10-29T21:00:00Z"), &s, &m, &FakeNs, &l).await, TickOutcome::Retrying(_)));
+        assert!(matches!(
+            tick(utc("2026-10-29T21:00:00Z"), &s, &m, &FakeNs, &l).await,
+            TickOutcome::Retrying(_)
+        ));
         assert_eq!(tr_status(&s, "zh"), "pending");
         assert!(s.alerts.borrow().is_empty());
         // 18:05 ET: give up.
-        assert!(matches!(tick(utc("2026-10-29T22:05:00Z"), &s, &m, &FakeNs, &l).await, TickOutcome::Retrying(_)));
+        assert!(matches!(
+            tick(utc("2026-10-29T22:05:00Z"), &s, &m, &FakeNs, &l).await,
+            TickOutcome::Retrying(_)
+        ));
         assert_eq!(tr_status(&s, "zh"), "failed");
         assert_eq!(run_status(&s), "published");
         {
@@ -558,17 +735,31 @@ mod tests {
             assert_eq!(alerts.len(), 1);
             assert_eq!((alerts[0].0.as_str(), alerts[0].1.as_str()), (KEY, "warn"));
         }
-        assert_eq!(tick(utc("2026-10-29T23:00:00Z"), &s, &m, &FakeNs, &l).await, TickOutcome::Nothing);
+        assert_eq!(
+            tick(utc("2026-10-29T23:00:00Z"), &s, &m, &FakeNs, &l).await,
+            TickOutcome::Nothing
+        );
         assert_eq!(s.alerts.borrow().len(), 1);
     }
 
     #[tokio::test]
     async fn en_error_publishes_nothing() {
         let s = MemStore::default();
-        let out = tick(utc("2026-10-29T12:30:00Z"), &s, &md(true), &FakeNs, &llm(false, true)).await;
+        let out = tick(
+            utc("2026-10-29T12:30:00Z"),
+            &s,
+            &md(true),
+            &FakeNs,
+            &llm(false, true),
+        )
+        .await;
         assert!(matches!(out, TickOutcome::Retrying(_)), "{out:?}");
         assert_eq!(run_status(&s), "pending");
-        assert!(s.runs.borrow()[KEY].last_error.as_deref().unwrap().starts_with("en: "));
+        assert!(s.runs.borrow()[KEY]
+            .last_error
+            .as_deref()
+            .unwrap()
+            .starts_with("en: "));
         assert!(s.posts.borrow().is_empty());
         assert!(s.translations.borrow().is_empty());
     }
@@ -577,7 +768,10 @@ mod tests {
     async fn thanksgiving_is_nothing() {
         let s = MemStore::default();
         let (m, l) = (md(true), llm(true, true));
-        assert_eq!(tick(utc("2026-11-26T13:30:00Z"), &s, &m, &FakeNs, &l).await, TickOutcome::Nothing);
+        assert_eq!(
+            tick(utc("2026-11-26T13:30:00Z"), &s, &m, &FakeNs, &l).await,
+            TickOutcome::Nothing
+        );
         assert!(s.runs.borrow().is_empty());
         assert_eq!(m.calls.get(), 0);
     }
@@ -585,7 +779,14 @@ mod tests {
     #[tokio::test]
     async fn too_early_is_nothing() {
         let s = MemStore::default();
-        let out = tick(utc("2026-10-29T12:25:00Z"), &s, &md(true), &FakeNs, &llm(true, true)).await;
+        let out = tick(
+            utc("2026-10-29T12:25:00Z"),
+            &s,
+            &md(true),
+            &FakeNs,
+            &llm(true, true),
+        )
+        .await;
         assert_eq!(out, TickOutcome::Nothing);
         assert!(s.runs.borrow().is_empty());
     }
@@ -637,7 +838,8 @@ mod tests {
     }
 
     /// First tick publishes EN, then the final run write fails.
-    async fn en_written_run_write_failed() -> (FailStore, FakeMd, FakeLlm, TranslationRow, PostRow) {
+    async fn en_written_run_write_failed() -> (FailStore, FakeMd, FakeLlm, TranslationRow, PostRow)
+    {
         let s = FailStore::default();
         s.fail_published_run.set(true);
         let (m, l) = (md(true), llm(true, true));
@@ -682,7 +884,11 @@ mod tests {
         let (m, l) = (md(true), llm(true, true));
         let out = tick(utc("2026-10-29T12:30:00Z"), &s, &m, &FakeNs, &l).await;
         assert_eq!(out, TickOutcome::Retrying("d1: zh row failed".into()));
-        assert!(!s.inner.translations.borrow().contains_key(&(1, "zh".to_string())));
+        assert!(!s
+            .inner
+            .translations
+            .borrow()
+            .contains_key(&(1, "zh".to_string())));
         let (md_calls, llm_calls) = (m.calls.get(), l.calls.get());
         let out = tick(utc("2026-10-29T12:35:00Z"), &s, &m, &FakeNs, &l).await;
         assert_eq!(out, TickOutcome::Published);

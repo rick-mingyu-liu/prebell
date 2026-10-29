@@ -31,7 +31,10 @@ impl<H: Http> NewsSearch for Tavily<H> {
             .http
             .post_json(
                 URL,
-                &[("Authorization", auth.as_str()), ("Content-Type", "application/json")],
+                &[
+                    ("Authorization", auth.as_str()),
+                    ("Content-Type", "application/json"),
+                ],
                 &body,
             )
             .await?;
@@ -53,8 +56,16 @@ impl<H: Http> NewsSearch for Tavily<H> {
                     return None;
                 }
                 let raw = s(r, "raw_content");
-                let content = if raw.trim().is_empty() { s(r, "content") } else { raw };
-                Some(SearchHit { url, title: s(r, "title"), content })
+                let content = if raw.trim().is_empty() {
+                    s(r, "content")
+                } else {
+                    raw
+                };
+                Some(SearchHit {
+                    url,
+                    title: s(r, "title"),
+                    content,
+                })
             })
             .collect();
         if hits.is_empty() {
@@ -91,15 +102,25 @@ mod tests {
         ) -> Result<HttpResp, ProviderError> {
             self.seen.borrow_mut().push((
                 url.into(),
-                headers.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect(),
+                headers
+                    .iter()
+                    .map(|(k, v)| (k.to_string(), v.to_string()))
+                    .collect(),
                 body.clone(),
             ));
-            Ok(HttpResp { status: self.status, body: self.body.clone() })
+            Ok(HttpResp {
+                status: self.status,
+                body: self.body.clone(),
+            })
         }
     }
     fn tavily(status: u16, body: &str) -> Tavily<FakeHttp> {
         Tavily::new(
-            FakeHttp { status, body: body.into(), seen: RefCell::new(vec![]) },
+            FakeHttp {
+                status,
+                body: body.into(),
+                seen: RefCell::new(vec![]),
+            },
             "tk".into(),
         )
     }

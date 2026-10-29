@@ -31,7 +31,12 @@ pub struct Draft {
 
 fn headings(lang: Lang) -> [&'static str; 4] {
     match lang {
-        Lang::En => ["Futures", "Biggest premarket movers", "Macro & overnight", "What to watch"],
+        Lang::En => [
+            "Futures",
+            "Biggest premarket movers",
+            "Macro & overnight",
+            "What to watch",
+        ],
         Lang::Zh => ["期货", "盘前异动", "宏观与隔夜", "今日关注"],
     }
 }
@@ -61,7 +66,11 @@ fn fmt_num(v: f64) -> String {
         }
         grouped.push(c);
     }
-    let sign = if v < 0.0 && s.bytes().any(|b| b.is_ascii_digit() && b != b'0') { "-" } else { "" };
+    let sign = if v < 0.0 && s.bytes().any(|b| b.is_ascii_digit() && b != b'0') {
+        "-"
+    } else {
+        ""
+    };
     format!("{sign}{grouped}.{frac}")
 }
 
@@ -84,7 +93,10 @@ fn mover_row(m: &Mover, lang: Lang) -> String {
         fmt_pct(q.change_pct)
     );
     if lang == Lang::En {
-        let why = m.reasons.first().map_or(na(lang), |r| r.summary_en.as_str());
+        let why = m
+            .reasons
+            .first()
+            .map_or(na(lang), |r| r.summary_en.as_str());
         row.push_str(&format!(" {} |", cell(why)));
     }
     row
@@ -112,7 +124,9 @@ pub fn render_markdown(d: &Draft, f: &PremarketFacts) -> String {
     let movers: Vec<&Mover> = f.gainers.iter().chain(&f.losers).collect();
     if !movers.is_empty() {
         out.push_str(match lang {
-            Lang::En => "| Ticker | Company | Premarket | Change | Why |\n|---|---|---:|---:|---|\n",
+            Lang::En => {
+                "| Ticker | Company | Premarket | Change | Why |\n|---|---|---:|---:|---|\n"
+            }
             Lang::Zh => "| 代码 | 公司 | 盘前价 | 涨跌 |\n|---|---|---:|---:|\n",
         });
         for m in movers {
@@ -195,18 +209,32 @@ fn parse(v: &Value, lang: Lang) -> Result<Draft, String> {
     let title = one_line(v, "title")?;
     let summary = one_line(v, "summary")?;
     let want = headings(lang);
-    let items = v.get("sections").and_then(Value::as_array).ok_or("missing \"sections\" array")?;
+    let items = v
+        .get("sections")
+        .and_then(Value::as_array)
+        .ok_or("missing \"sections\" array")?;
     let got: Vec<(String, String)> = items
         .iter()
         .map(|s| {
-            let h = s.get("heading").and_then(Value::as_str).unwrap_or("").trim().to_string();
-            let m = s.get("markdown").and_then(Value::as_str).unwrap_or("").to_string();
+            let h = s
+                .get("heading")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .trim()
+                .to_string();
+            let m = s
+                .get("markdown")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
             (h, m)
         })
         .collect();
     if got.len() != want.len() || got.iter().zip(want).any(|((h, _), w)| h != w) {
         let seen: Vec<&str> = got.iter().map(|(h, _)| h.as_str()).collect();
-        return Err(format!("sections must be exactly {want:?} in order, got {seen:?}"));
+        return Err(format!(
+            "sections must be exactly {want:?} in order, got {seen:?}"
+        ));
     }
     for (h, m) in &got {
         reject_markup(&format!("section {h:?}"), m)?;
@@ -214,7 +242,12 @@ fn parse(v: &Value, lang: Lang) -> Result<Draft, String> {
             return Err(format!("section {h:?} contains a heading line"));
         }
     }
-    Ok(Draft { lang, title, summary, sections: got })
+    Ok(Draft {
+        lang,
+        title,
+        summary,
+        sections: got,
+    })
 }
 
 fn attempt(v: Result<Value, ProviderError>, lang: Lang, allowed: &[f64]) -> Result<Draft, Problem> {
@@ -256,7 +289,8 @@ pub async fn write(
     f: &PremarketFacts,
     lang: Lang,
 ) -> Result<(Draft, String), Vec<String>> {
-    let facts_json = serde_json::to_string_pretty(f).map_err(|e| vec![format!("draft: facts json: {e}")])?;
+    let facts_json =
+        serde_json::to_string_pretty(f).map_err(|e| vec![format!("draft: facts json: {e}")])?;
     let allowed = numbers_in_facts(f);
     let mut user = facts_json.clone();
     let mut last = None;
@@ -299,11 +333,20 @@ mod tests {
         }
     }
     fn llm(replies: Vec<Result<Value, ProviderError>>) -> FakeLlm {
-        FakeLlm { replies: RefCell::new(replies), prompts: RefCell::new(vec![]) }
+        FakeLlm {
+            replies: RefCell::new(replies),
+            prompts: RefCell::new(vec![]),
+        }
     }
 
     fn quote(sym: &str, last: f64, pct: f64) -> Quote {
-        Quote { symbol: sym.into(), last, prev_close: last / (1.0 + pct / 100.0), change_pct: pct, volume: Some(2_000_000) }
+        Quote {
+            symbol: sym.into(),
+            last,
+            prev_close: last / (1.0 + pct / 100.0),
+            change_pct: pct,
+            volume: Some(2_000_000),
+        }
     }
     fn reason(url: &str, title: &str) -> NewsReason {
         NewsReason {
@@ -318,8 +361,16 @@ mod tests {
             trading_date: NaiveDate::from_ymd_opt(2026, 10, 29).unwrap(),
             as_of_utc: "2026-10-29T12:45:00Z".parse().unwrap(),
             futures: vec![
-                ("S&P 500 futures".into(), Field::Value(quote("ES=F", 5812.25, 0.45))),
-                ("Nasdaq 100 futures".into(), Field::Missing { reason: "feed down".into() }),
+                (
+                    "S&P 500 futures".into(),
+                    Field::Value(quote("ES=F", 5812.25, 0.45)),
+                ),
+                (
+                    "Nasdaq 100 futures".into(),
+                    Field::Missing {
+                        reason: "feed down".into(),
+                    },
+                ),
             ],
             gainers: vec![Mover {
                 quote: quote("AAPL", 230.5, 8.0),
@@ -327,8 +378,12 @@ mod tests {
                 reasons: vec![reason("https://news.test/aapl", "Apple jumps")],
             }],
             losers: vec![],
-            macro_items: Field::Missing { reason: "none".into() },
-            watch_list: Field::Missing { reason: "not available in v1".into() },
+            macro_items: Field::Missing {
+                reason: "none".into(),
+            },
+            watch_list: Field::Missing {
+                reason: "not available in v1".into(),
+            },
         }
     }
 
@@ -377,12 +432,18 @@ mod tests {
     #[tokio::test]
     async fn two_bad_replies_fail_with_numbers() {
         let l = llm(vec![bad(Lang::En), bad(Lang::En)]);
-        assert_eq!(write(&l, &facts(), Lang::En).await.unwrap_err(), vec!["7.5%"]);
+        assert_eq!(
+            write(&l, &facts(), Lang::En).await.unwrap_err(),
+            vec!["7.5%"]
+        );
     }
 
     #[tokio::test]
     async fn malformed_then_good_reply_is_ok() {
-        let l = llm(vec![Ok(json!({"title": "", "summary": "x", "sections": []})), clean(Lang::En)]);
+        let l = llm(vec![
+            Ok(json!({"title": "", "summary": "x", "sections": []})),
+            clean(Lang::En),
+        ]);
         assert!(write(&l, &facts(), Lang::En).await.is_ok());
         let p = l.prompts.borrow();
         assert_eq!(p.len(), 2);
@@ -398,7 +459,10 @@ mod tests {
 
     #[tokio::test]
     async fn provider_errors_are_reported() {
-        let l = llm(vec![Err(ProviderError::Http(500)), Err(ProviderError::Http(503))]);
+        let l = llm(vec![
+            Err(ProviderError::Http(500)),
+            Err(ProviderError::Http(503)),
+        ]);
         let err = write(&l, &facts(), Lang::Zh).await.unwrap_err();
         assert_eq!(err, vec!["llm: http status 503"]);
         let p = l.prompts.borrow();
@@ -420,18 +484,27 @@ mod tests {
             lang,
             title: "T".into(),
             summary: "S".into(),
-            sections: headings(lang).iter().map(|h| (h.to_string(), "body".into())).collect(),
+            sections: headings(lang)
+                .iter()
+                .map(|h| (h.to_string(), "body".into()))
+                .collect(),
         }
     }
 
     #[test]
     fn render_contains_es_last_from_facts() {
         let md = render_markdown(&draft(Lang::En), &facts());
-        assert!(md.contains("| S&P 500 futures | 5,812.25 | +0.45% |"), "{md}");
+        assert!(
+            md.contains("| S&P 500 futures | 5,812.25 | +0.45% |"),
+            "{md}"
+        );
         assert!(md.contains("| Nasdaq 100 futures | n/a | n/a |"), "{md}");
         assert!(md.contains("Contract | Last | Change"));
         assert!(md.contains("Ticker | Company | Premarket | Change | Why"));
-        assert!(md.contains("| AAPL | Apple | 230.50 | +8.00% | Record iPhone sales. |"), "{md}");
+        assert!(
+            md.contains("| AAPL | Apple | 230.50 | +8.00% | Record iPhone sales. |"),
+            "{md}"
+        );
         assert!(md.contains("## Sources") && md.contains("[Apple jumps](https://news.test/aapl)"));
         assert!(md.trim_end().ends_with(DISCLAIMER_EN));
     }
@@ -451,13 +524,19 @@ mod tests {
         f.losers = vec![Mover {
             quote: quote("MSFT", 410.0, -3.1),
             name: "Microsoft".into(),
-            reasons: vec![reason("https://news.test/aapl", "Apple jumps"), reason("https://news.test/msft", "MSFT")],
+            reasons: vec![
+                reason("https://news.test/aapl", "Apple jumps"),
+                reason("https://news.test/msft", "MSFT"),
+            ],
         }];
         f.macro_items = Field::Value(vec![reason("https://news.test/msft", "MSFT")]);
         let md = render_markdown(&draft(Lang::En), &f);
         assert_eq!(md.matches("(https://news.test/aapl)").count(), 1, "{md}");
         assert_eq!(md.matches("(https://news.test/msft)").count(), 1, "{md}");
-        assert!(md.contains("| MSFT | Microsoft | 410.00 | -3.10% |"), "{md}");
+        assert!(
+            md.contains("| MSFT | Microsoft | 410.00 | -3.10% |"),
+            "{md}"
+        );
     }
 
     #[tokio::test]
@@ -476,14 +555,20 @@ mod tests {
 
     #[tokio::test]
     async fn links_in_body_fail_as_malformed() {
-        let l = llm(vec![reply(Lang::En, "See [x](https://a.test)."), reply(Lang::En, "See [x](https://a.test).")]);
+        let l = llm(vec![
+            reply(Lang::En, "See [x](https://a.test)."),
+            reply(Lang::En, "See [x](https://a.test)."),
+        ]);
         let err = write(&l, &facts(), Lang::En).await.unwrap_err();
         assert!(err.iter().any(|e| e.starts_with("draft:")), "{err:?}");
     }
 
     #[tokio::test]
     async fn heading_line_in_body_is_malformed() {
-        let l = llm(vec![reply(Lang::En, "ok\n## Sources"), reply(Lang::En, "<b>hi</b>")]);
+        let l = llm(vec![
+            reply(Lang::En, "ok\n## Sources"),
+            reply(Lang::En, "<b>hi</b>"),
+        ]);
         let err = write(&l, &facts(), Lang::En).await.unwrap_err();
         assert!(err.len() == 1 && err[0].starts_with("draft:"), "{err:?}");
         assert!(l.prompts.borrow()[1].1.contains("heading line"));
@@ -498,7 +583,10 @@ mod tests {
         let (d, md) = write(&l, &facts(), Lang::En).await.unwrap();
         assert_eq!(d.title, "Futures edge up; Apple jumps 8%");
         assert_eq!(d.summary, "Apple gained 8%.");
-        assert!(md.starts_with("# Futures edge up; Apple jumps 8%\n\nApple gained 8%.\n\n"), "{md}");
+        assert!(
+            md.starts_with("# Futures edge up; Apple jumps 8%\n\nApple gained 8%.\n\n"),
+            "{md}"
+        );
     }
 
     #[test]

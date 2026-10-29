@@ -12,7 +12,11 @@ pub struct DeepSeek<H> {
 
 impl<H> DeepSeek<H> {
     pub fn new(http: H, api_key: String, model: String) -> Self {
-        Self { http, api_key, model }
+        Self {
+            http,
+            api_key,
+            model,
+        }
     }
 }
 
@@ -45,7 +49,10 @@ impl<H: Http> LlmProvider for DeepSeek<H> {
             .http
             .post_json(
                 URL,
-                &[("Authorization", auth.as_str()), ("Content-Type", "application/json")],
+                &[
+                    ("Authorization", auth.as_str()),
+                    ("Content-Type", "application/json"),
+                ],
                 &body,
             )
             .await?;
@@ -81,8 +88,14 @@ pub fn llm_from_env<H: Http + 'static>(
     api_key: String,
 ) -> Result<Box<dyn LlmProvider>, ProviderError> {
     match provider {
-        "deepseek" => Ok(Box::new(DeepSeek::new(http, api_key, "deepseek-chat".into()))),
-        other => Err(ProviderError::Parse(format!("unknown LLM provider: {other}"))),
+        "deepseek" => Ok(Box::new(DeepSeek::new(
+            http,
+            api_key,
+            "deepseek-chat".into(),
+        ))),
+        other => Err(ProviderError::Parse(format!(
+            "unknown LLM provider: {other}"
+        ))),
     }
 }
 
@@ -116,14 +129,24 @@ mod tests {
         ) -> Result<HttpResp, ProviderError> {
             self.seen.borrow_mut().push((
                 url.into(),
-                headers.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect(),
+                headers
+                    .iter()
+                    .map(|(k, v)| (k.to_string(), v.to_string()))
+                    .collect(),
                 body.clone(),
             ));
-            Ok(HttpResp { status: self.status, body: self.body.clone() })
+            Ok(HttpResp {
+                status: self.status,
+                body: self.body.clone(),
+            })
         }
     }
     fn fake(status: u16, body: &str) -> FakeHttp {
-        FakeHttp { status, body: body.into(), seen: Rc::new(RefCell::new(vec![])) }
+        FakeHttp {
+            status,
+            body: body.into(),
+            seen: Rc::new(RefCell::new(vec![])),
+        }
     }
     fn ds(h: FakeHttp) -> DeepSeek<FakeHttp> {
         DeepSeek::new(h, "dk".into(), "deepseek-chat".into())
@@ -147,27 +170,39 @@ mod tests {
 
     #[tokio::test]
     async fn non_object_json_is_parse_error() {
-        let r = ds(fake(200, &wrap("[1,2]", "stop"))).complete_json("s", "u").await;
+        let r = ds(fake(200, &wrap("[1,2]", "stop")))
+            .complete_json("s", "u")
+            .await;
         assert!(matches!(r, Err(ProviderError::Parse(_))));
     }
 
     #[tokio::test]
     async fn fenced_json_accepted() {
         let b = wrap("```json\n{\"a\":1}\n```", "stop");
-        assert_eq!(ds(fake(200, &b)).complete_json("s", "u").await.unwrap()["a"], 1);
+        assert_eq!(
+            ds(fake(200, &b)).complete_json("s", "u").await.unwrap()["a"],
+            1
+        );
         let b = wrap("```\n{\"a\":2}\n```", "stop");
-        assert_eq!(ds(fake(200, &b)).complete_json("s", "u").await.unwrap()["a"], 2);
+        assert_eq!(
+            ds(fake(200, &b)).complete_json("s", "u").await.unwrap()["a"],
+            2
+        );
     }
 
     #[tokio::test]
     async fn finish_length_is_truncated_parse_error() {
-        let r = ds(fake(200, &wrap("{\"a\":", "length"))).complete_json("s", "u").await;
+        let r = ds(fake(200, &wrap("{\"a\":", "length")))
+            .complete_json("s", "u")
+            .await;
         assert_eq!(r, Err(ProviderError::Parse("truncated".into())));
     }
 
     #[tokio::test]
     async fn empty_choices_and_http_error() {
-        let r = ds(fake(200, "{\"choices\":[]}")).complete_json("s", "u").await;
+        let r = ds(fake(200, "{\"choices\":[]}"))
+            .complete_json("s", "u")
+            .await;
         assert_eq!(r, Err(ProviderError::Empty));
         let r = ds(fake(429, "{}")).complete_json("s", "u").await;
         assert_eq!(r, Err(ProviderError::Http(429)));
@@ -181,7 +216,9 @@ mod tests {
         let (url, headers, body) = &seen[0];
         assert_eq!(url, "https://api.deepseek.com/chat/completions");
         assert!(headers.contains(&("Authorization".into(), "Bearer dk".into())));
-        assert!(body.to_string().contains("\"response_format\":{\"type\":\"json_object\"}"));
+        assert!(body
+            .to_string()
+            .contains("\"response_format\":{\"type\":\"json_object\"}"));
         assert_eq!(body["temperature"], 0.3);
         assert_eq!(body["model"], "deepseek-chat");
         assert_eq!(body["messages"][0]["role"], "system");
@@ -193,6 +230,9 @@ mod tests {
         let h = fake(200, OK);
         let llm = llm_from_env("deepseek", h.clone(), "dk".into()).unwrap();
         assert!(llm.complete_json("s", "u").await.is_ok());
-        assert!(matches!(llm_from_env("nope", h, "k".into()), Err(ProviderError::Parse(_))));
+        assert!(matches!(
+            llm_from_env("nope", h, "k".into()),
+            Err(ProviderError::Parse(_))
+        ));
     }
 }

@@ -23,10 +23,26 @@ pub enum SlotDecision {
 /// Limitation: only 2026 and 2027 are covered. Dates outside that range are
 /// treated as `Full` on weekdays; a later plan extends the table.
 const CLOSED: &[(i32, u32, u32)] = &[
-    (2026, 1, 1), (2026, 1, 19), (2026, 2, 16), (2026, 4, 3), (2026, 5, 25),
-    (2026, 6, 19), (2026, 7, 3), (2026, 9, 7), (2026, 11, 26), (2026, 12, 25),
-    (2027, 1, 1), (2027, 1, 18), (2027, 2, 15), (2027, 3, 26), (2027, 5, 31),
-    (2027, 6, 18), (2027, 7, 5), (2027, 9, 6), (2027, 11, 25), (2027, 12, 24),
+    (2026, 1, 1),
+    (2026, 1, 19),
+    (2026, 2, 16),
+    (2026, 4, 3),
+    (2026, 5, 25),
+    (2026, 6, 19),
+    (2026, 7, 3),
+    (2026, 9, 7),
+    (2026, 11, 26),
+    (2026, 12, 25),
+    (2027, 1, 1),
+    (2027, 1, 18),
+    (2027, 2, 15),
+    (2027, 3, 26),
+    (2027, 5, 31),
+    (2027, 6, 18),
+    (2027, 7, 5),
+    (2027, 9, 6),
+    (2027, 11, 25),
+    (2027, 12, 24),
 ];
 const EARLY_CLOSE: &[(i32, u32, u32)] = &[(2026, 11, 27), (2026, 12, 24), (2027, 11, 26)];
 
@@ -83,9 +99,18 @@ mod tests {
 
     #[test]
     fn dst_day_only_one_cron_counts() {
-        assert!(matches!(premarket_decision(utc("2026-11-02T13:30:00Z")), SlotDecision::InWindow { .. }));
-        assert_eq!(premarket_decision(utc("2026-11-02T12:30:00Z")), SlotDecision::TooEarly);
-        assert!(matches!(premarket_decision(utc("2026-10-30T12:30:00Z")), SlotDecision::InWindow { .. }));
+        assert!(matches!(
+            premarket_decision(utc("2026-11-02T13:30:00Z")),
+            SlotDecision::InWindow { .. }
+        ));
+        assert_eq!(
+            premarket_decision(utc("2026-11-02T12:30:00Z")),
+            SlotDecision::TooEarly
+        );
+        assert!(matches!(
+            premarket_decision(utc("2026-10-30T12:30:00Z")),
+            SlotDecision::InWindow { .. }
+        ));
     }
 
     #[test]
@@ -94,7 +119,10 @@ mod tests {
         assert_eq!(trading_day(d("2026-11-27")), DayKind::EarlyClose);
         assert_eq!(trading_day(d("2026-12-25")), DayKind::Closed);
         assert_eq!(trading_day(d("2026-10-31")), DayKind::Closed);
-        assert_eq!(premarket_decision(utc("2026-11-26T13:30:00Z")), SlotDecision::NotToday);
+        assert_eq!(
+            premarket_decision(utc("2026-11-26T13:30:00Z")),
+            SlotDecision::NotToday
+        );
     }
 
     #[test]
@@ -106,15 +134,23 @@ mod tests {
 
     #[test]
     fn deadline() {
-        assert!(matches!(premarket_decision(utc("2026-10-30T13:24:59Z")), SlotDecision::InWindow { .. }));
-        assert!(matches!(premarket_decision(utc("2026-10-30T13:25:00Z")), SlotDecision::PastDeadline { .. }));
+        assert!(matches!(
+            premarket_decision(utc("2026-10-30T13:24:59Z")),
+            SlotDecision::InWindow { .. }
+        ));
+        assert!(matches!(
+            premarket_decision(utc("2026-10-30T13:25:00Z")),
+            SlotDecision::PastDeadline { .. }
+        ));
     }
 
     #[test]
     fn early_close_day_is_in_window() {
         assert_eq!(
             premarket_decision(utc("2026-11-27T13:30:00Z")),
-            SlotDecision::InWindow { trading_date: d("2026-11-27") }
+            SlotDecision::InWindow {
+                trading_date: d("2026-11-27")
+            }
         );
     }
 }
