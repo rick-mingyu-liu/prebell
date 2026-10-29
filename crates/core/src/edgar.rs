@@ -21,6 +21,7 @@ use crate::providers::{Http, ProviderError};
 
 /// Pause before every EDGAR request after the first: at most 8 requests/second.
 pub const GAP_MS: u64 = 125;
+const _: () = assert!(GAP_MS >= 100, "EDGAR fair access: at most 10 requests/second");
 const ARCHIVES: &str = "https://www.sec.gov/Archives/edgar/data/";
 
 /// An async sleep (Workers `Delay` in production, a recorder in tests).
@@ -394,11 +395,13 @@ pub(crate) mod tests {
     pub(crate) const COMPANYFACTS: &str =
         include_str!("../tests/fixtures/edgar_companyfacts_AAPL.json");
 
+    type Headers = Vec<(String, String)>;
+
     /// URL -> (status, body); records each request's URL and headers.
     #[derive(Default)]
     pub(crate) struct FakeHttp {
         pub routes: HashMap<String, (u16, String)>,
-        pub seen: RefCell<Vec<(String, Vec<(String, String)>)>>,
+        pub seen: RefCell<Vec<(String, Headers)>>,
     }
     #[async_trait(?Send)]
     impl Http for FakeHttp {
@@ -493,7 +496,6 @@ pub(crate) mod tests {
         }
         // No pause before the first request, one before each later one.
         assert_eq!(*e.pause.0.borrow(), vec![GAP_MS, GAP_MS]);
-        assert!(GAP_MS >= 100, "must stay under 10 requests/second");
     }
 
     #[tokio::test]
