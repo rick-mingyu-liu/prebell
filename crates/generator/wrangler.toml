@@ -1,0 +1,32 @@
+name = "marketsite-generator"
+main = "build/worker/shim.mjs"
+compatibility_date = "2025-01-01"
+
+[build]
+command = "worker-build --release"
+
+[triggers]
+# Every 5 min across both DST offsets of the 8:30-9:25 ET window; hourly afterwards for ZH retries.
+# `clock` decides what each firing means.
+crons = ["*/5 12-14 * * 1-5", "0 15-23 * * 1-5"]
+
+[[d1_databases]]
+binding = "DB"
+database_name = "marketsite"
+database_id = "00000000-0000-0000-0000-000000000000"
+migrations_dir = "../../migrations"
+
+[[r2_buckets]]
+binding = "FACTS"
+bucket_name = "marketsite-facts"
+
+[[queues.producers]]
+binding = "JOBS"
+queue = "marketsite-jobs"
+
+[[queues.consumers]]
+queue = "marketsite-jobs"
+
+[vars]
+LLM_PROVIDER = "deepseek"
+SEC_CONTACT = "placeholder@example.com"

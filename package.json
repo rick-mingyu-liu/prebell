@@ -1,0 +1,7 @@
+{
+  "name": "marketsite",
+  "private": true,
+  "devDependencies": {
+    "wrangler": "^4.154.0"
+  }
+}
