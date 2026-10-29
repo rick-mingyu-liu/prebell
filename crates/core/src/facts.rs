@@ -69,8 +69,14 @@ fn push_quote(out: &mut Vec<f64>, q: &Quote) {
 }
 
 fn push_reason(out: &mut Vec<f64>, r: &NewsReason) {
-    // `Num.value` is already scaled to base units.
-    out.extend(numbers::extract(&r.quote, Lang::En).into_iter().map(|n| n.value));
+    // `Num.value` is already scaled to base units. Without an explicit sign
+    // marker the quote carries no direction, so allow both signs.
+    for n in numbers::extract(&r.quote, Lang::En) {
+        out.push(n.value);
+        if !n.signed {
+            out.push(-n.value);
+        }
+    }
 }
 
 /// Every number a draft may cite: quote fields plus numbers inside source quotes.
@@ -158,5 +164,19 @@ mod tests {
         assert!(n.contains(&12.0), "{n:?}");
         assert!(n.iter().any(|v| (v - 1.2e9).abs() < 1.0), "{n:?}");
         assert!(n.contains(&5800.25) && n.contains(&1200.0));
+    }
+
+    #[test]
+    fn unsigned_quote_numbers_allow_both_directions() {
+        let mut f = facts();
+        f.gainers = vec![mover(vec![reason("shares fell 3% in premarket trading")])];
+        let n = numbers_in_facts(&f);
+        assert!(numbers::check("下跌3%", Lang::Zh, &n).is_ok());
+        assert!(numbers::check("上涨3%", Lang::Zh, &n).is_ok());
+    }
+
+    #[test]
+    fn macro_quote_numbers_collected() {
+        assert!(numbers_in_facts(&facts()).contains(&3.1));
     }
 }
