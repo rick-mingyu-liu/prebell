@@ -291,6 +291,22 @@ fn user_prompt(text: &str, company: &str, ticker: &str) -> String {
     format!("Company: {company} ({ticker})\n\n<document>\n{doc}\n</document>\n")
 }
 
+/// Figures shown (and charted) as GAAP.
+fn is_gaap(m: Metric) -> bool {
+    matches!(m, Metric::Revenue | Metric::NetIncome | Metric::EpsGaap)
+}
+
+/// Wording that marks a figure as non-GAAP: adjusted, managed (banks' FTE
+/// revenue), "excluding" items.
+fn non_gaap_wording(quote: &str) -> bool {
+    static R: OnceLock<Regex> = OnceLock::new();
+    R.get_or_init(|| {
+        Regex::new(r"(?i)\b(?:non-?\s?gaap|adjusted|managed|fte|fully\s+taxable|excluding)\b")
+            .expect("valid built-in regex")
+    })
+    .is_match(quote)
+}
+
 /// Asks the LLM for the figures and keeps only what verifies. An LLM error
 /// leaves every field `Missing`.
 pub async fn extract(llm: &dyn LlmProvider, text: &str, company: &str, ticker: &str) -> Extracted {
@@ -324,6 +340,9 @@ pub fn from_reply(text: &str, v: &Value) -> Extracted {
         let field = match m.and_then(|m| m.get(metric.key())) {
             None | Some(Value::Null) => continue,
             Some(raw) => match serde_json::from_value::<RawFigure>(raw.clone()) {
+                Ok(raw) if is_gaap(metric) && non_gaap_wording(&raw.quote) => Field::Missing {
+                    reason: "unverified: a GAAP figure quoted with non-GAAP wording".into(),
+                },
                 Ok(raw) => match verify_figure(text, metric.unit(), &raw) {
                     Ok(f) => Field::Value(f),
                     Err(e) => Field::Missing {
@@ -676,6 +695,29 @@ mod tests {
             ),
         );
         assert_eq!(f.unwrap().value, 27.466e9);
+    }
+
+    #[test]
+    fn gaap_metrics_reject_non_gaap_wording() {
+        let text = "Managed revenue of $42.1 billion on a fully taxable-equivalent basis. Reported revenue of $41.5 billion for the quarter.";
+        let v = json!({"metrics": {
+            "revenue": {"amount": "$42.1 billion", "scale": "units", "negative": false, "quote": "Managed revenue of $42.1 billion on a fully taxable-equivalent basis."},
+            "eps_non_gaap_diluted": null
+        }});
+        assert!(from_reply(text, &v)
+            .metrics
+            .value(Metric::Revenue)
+            .is_none());
+        assert!(!non_gaap_wording("Revenue rose after strong iPhone sales"));
+        let v = json!({"metrics": {"revenue": {"amount": "$41.5 billion", "scale": "units", "negative": false, "quote": "Reported revenue of $41.5 billion for the quarter."}}});
+        assert_eq!(
+            from_reply(text, &v)
+                .metrics
+                .value(Metric::Revenue)
+                .unwrap()
+                .value,
+            41.5e9
+        );
     }
 
     #[test]

@@ -14,6 +14,7 @@ export interface D1Like {
 
 export interface PostView {
   slug: string;
+  contentType: string;
   tradingDate: string;
   publishedAt: string | null;
   title: string;
@@ -41,6 +42,7 @@ const other = (lang: Lang): Lang => (lang === "en" ? "zh" : "en");
 interface Row {
   id: number;
   slug: string;
+  content_type: string;
   trading_date: string;
   published_at: string | null;
   status: string;
@@ -54,7 +56,7 @@ interface Row {
 // pending while the EN text is published — the page then links to English.
 const VISIBLE = `(t.status = 'published' OR (t.lang = 'zh' AND t.status = 'pending' AND o.status = 'published'))`;
 
-const SELECT_VIEW = `SELECT p.id, p.slug, p.trading_date, p.published_at, t.status, t.title, t.summary, t.body_md,
+const SELECT_VIEW = `SELECT p.id, p.slug, p.content_type, p.trading_date, p.published_at, t.status, t.title, t.summary, t.body_md,
   o.status AS other_status
 FROM posts p
 JOIN post_translations t ON t.post_id = p.id AND t.lang = ?
@@ -68,6 +70,7 @@ async function toView(db: D1Like, row: Row | null): Promise<PostView | null> {
     .all<{ url: string; title: string | null }>();
   return {
     slug: row.slug,
+    contentType: row.content_type,
     tradingDate: row.trading_date,
     publishedAt: row.published_at,
     title: row.title ?? "",

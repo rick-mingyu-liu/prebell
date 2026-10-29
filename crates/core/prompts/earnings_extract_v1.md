@@ -9,7 +9,7 @@ For each figure, copy:
 - `negative`: true only for a loss or a negative figure (shown as "(0.25)", "-0.25" or described as a loss).
 
 Figures (use the current reporting period — the quarter the release reports, not the prior year or a year-to-date total — and null when the document does not state it):
-- `revenue`: total revenue / total net sales / total net revenue.
+- `revenue`: total revenue / total net sales / total net revenue as reported under GAAP (never "managed", "adjusted" or fully-taxable-equivalent revenue).
 - `net_income`: GAAP net income (or net loss) attributable to the company.
 - `eps_gaap_diluted`: GAAP diluted earnings (or loss) per share.
 - `eps_non_gaap_diluted`: non-GAAP (adjusted) diluted earnings per share, only if the document labels it non-GAAP or adjusted.

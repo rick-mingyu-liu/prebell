@@ -10,9 +10,11 @@ use prebell_core::deepseek::llm_from_env;
 use prebell_core::earnings::calendar::refresh_tick;
 use prebell_core::earnings::in_window;
 use prebell_core::earnings::run::{build_tick, poll_tick};
+use prebell_core::earnings::store::EarningsStore;
 use prebell_core::edgar::{Edgar, Pause};
 use prebell_core::providers::{LlmProvider, NewsSearch};
 use prebell_core::run::tick;
+use prebell_core::store::Store;
 use prebell_core::tavily::Tavily;
 use prebell_core::yahoo::Yahoo;
 use prebell_core::yahoo_calendar::YahooCalendar;
@@ -25,7 +27,7 @@ use crate::store::D1Store;
 /// The every-minute cron (wrangler.toml) that drives earnings polling.
 const EARNINGS_CRON: &str = "* * * * *";
 const PLACEHOLDER_CONTACT: &str = "placeholder@example.com";
-/// An earnings message older than this skips its poll (still builds).
+/// An earnings message older than this polls the current minute's batch.
 const MAX_POLL_LAG_MINUTES: i64 = 3;
 
 /// `Pause` on the Workers timer.
@@ -123,6 +125,24 @@ async fn scheduled(event: ScheduledEvent, env: Env, _ctx: ScheduleContext) {
     }
 }
 
+/// Adds an alert at most once per ET day per `key` (kv `alert:{key}`).
+async fn alert_once(store: &D1Store, now: DateTime<Utc>, key: &str, msg: &str) {
+    let day = prebell_core::clock::et(now).date_naive().to_string();
+    let kv = format!("alert:{key}");
+    match store.kv_get(&kv).await {
+        Ok(Some(d)) if d == day => return,
+        Err(e) => return console_error!("alert {key}: {e}"),
+        _ => {}
+    }
+    let stamp = now.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    if let Err(e) = store.kv_set(&kv, &day, &stamp).await {
+        return console_error!("alert {key}: {e}");
+    }
+    if let Err(e) = store.add_alert(key, "error", msg).await {
+        console_error!("alert {key}: {e}");
+    }
+}
+
 /// One earnings tick: poll a watchlist batch, refresh the calendar (once a
 /// day), then build at most one queued filing.
 async fn earnings(
@@ -132,33 +152,51 @@ async fn earnings(
     ns: &dyn NewsSearch,
     llm: &dyn LlmProvider,
 ) -> Result<()> {
+    let t = now(env);
     let contact = text(env, "SEC_CONTACT").unwrap_or_default();
     // SEC blocks anonymous clients; never poll as the placeholder.
     if contact == PLACEHOLDER_CONTACT {
-        return Err(Error::RustError(
-            "SEC_CONTACT is the placeholder; set a real contact email".into(),
-        ));
+        alert_once(
+            store,
+            t,
+            "sec-contact",
+            "earnings are off: SEC_CONTACT is the placeholder; set a real contact email",
+        )
+        .await;
+        return Err(Error::RustError("SEC_CONTACT is the placeholder".into()));
     }
     let edgar = Edgar::new(WorkerHttp, WorkerPause, &contact)
         .map_err(|e| Error::RustError(e.to_string()))?;
-    let t = now(env);
     let fired = at
         .and_then(|a| DateTime::parse_from_rfc3339(a).ok())
         .map_or(t, |a| a.with_timezone(&Utc));
-    // A backlog (a long build held the queue) polls only the newest minutes;
-    // the older batches come round again within five minutes.
-    if t - fired <= chrono::Duration::minutes(MAX_POLL_LAG_MINUTES) {
-        match poll_tick(fired, store, store, &edgar).await {
-            Ok(o) => {
-                for e in &o.errors {
-                    console_warn!("earnings poll: {e}");
-                }
-                console_log!("earnings poll: checked {}, new {:?}", o.checked, o.detected);
-            }
-            Err(e) => console_error!("earnings poll aborted: {e}"),
-        }
+    // A message delayed by a long build polls the current minute's batch
+    // instead of its own; batches rotate every minute either way.
+    let poll_at = if t - fired <= chrono::Duration::minutes(MAX_POLL_LAG_MINUTES) {
+        fired
     } else {
-        console_log!("earnings poll skipped: message from {fired} is stale");
+        t
+    };
+    match poll_tick(poll_at, store, store, &edgar).await {
+        Ok(o) => {
+            for e in &o.errors {
+                console_warn!("earnings poll: {e}");
+            }
+            if o.throttled {
+                alert_once(
+                    store,
+                    t,
+                    "sec-throttled",
+                    &format!(
+                        "SEC EDGAR refused requests (403/429); polling paused this tick: {}",
+                        o.errors.last().cloned().unwrap_or_default()
+                    ),
+                )
+                .await;
+            }
+            console_log!("earnings poll: checked {}, new {:?}", o.checked, o.detected);
+        }
+        Err(e) => console_error!("earnings poll aborted: {e}"),
     }
     let cal = YahooCalendar::new(WorkerHttp);
     match refresh_tick(t, store, store, &cal, ns, llm).await {

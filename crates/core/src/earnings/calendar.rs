@@ -367,9 +367,8 @@ fn slot_in(quote: &str) -> TimeSlot {
 }
 
 /// A search hit proves the date only if it is the company's own page (its
-/// domain or a subdomain) or a press-release wire (whose quote must also be
-/// about results), the quote is in the page, and the quote names the
-/// company and the date.
+/// domain or a subdomain) or a press-release wire, the quote is in the page
+/// and is about results, and it names the company and the date.
 pub fn proof_from_hit(e: &WatchEntry, hit: &SearchHit, quote: &str, d: NaiveDate) -> Option<Proof> {
     let h = host(&hit.url)?;
     let own = e.domains.iter().any(|dom| host_matches(&h, dom));
@@ -378,10 +377,11 @@ pub fn proof_from_hit(e: &WatchEntry, hit: &SearchHit, quote: &str, d: NaiveDate
         return None;
     }
     let lower = normalize(quote).to_ascii_lowercase();
-    if wire
-        && !["results", "earnings", "conference call"]
-            .iter()
-            .any(|w| lower.contains(w))
+    // Every proof must be about results: a dividend or investor-day page that
+    // names a date is not an earnings date.
+    if !["results", "earnings", "conference call"]
+        .iter()
+        .any(|w| lower.contains(w))
     {
         return None;
     }
@@ -829,6 +829,20 @@ mod tests {
     const PR: &str = "CUPERTINO, California -- Apple will report results for its fiscal fourth quarter on Thursday, October 30, 2026 after the market closes.";
 
     #[test]
+    fn proof_must_be_about_results() {
+        let e = find("AAPL").unwrap();
+        let page = "Apple declared a cash dividend payable on October 30, 2026 to shareholders.";
+        let q = "Apple declared a cash dividend payable on October 30, 2026";
+        assert!(proof_from_hit(
+            &e,
+            &hit("https://investor.apple.com/x", page),
+            q,
+            d("2026-10-30")
+        )
+        .is_none());
+    }
+
+    #[test]
     fn proof_rules() {
         let e = find("AAPL").unwrap();
         let q = "Apple will report results for its fiscal fourth quarter on Thursday, October 30, 2026 after the market closes.";
@@ -886,7 +900,7 @@ mod tests {
         let q = "Results will be released on October 30, 2026 at 5 pm ET.";
         assert!(!names_company(q, &pm));
         assert!(names_company(
-            "Philip Morris International (NYSE: PM) will report on October 30, 2026",
+            "Philip Morris International (NYSE: PM) will report results on October 30, 2026",
             &pm
         ));
         let t = find("T").unwrap();

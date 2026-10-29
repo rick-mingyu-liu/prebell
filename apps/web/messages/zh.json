@@ -23,7 +23,8 @@
     "published": "发布于 {time}",
     "pendingTitle": "盘前简报 {date}",
     "pending": "中文版稍后推出",
-    "readEnglish": "阅读英文版"
+    "readEnglish": "阅读英文版",
+    "earningsPendingTitle": "财报速评 {date}"
   },
   "archive": {
     "title": "归档",

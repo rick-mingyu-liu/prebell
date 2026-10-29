@@ -13,6 +13,10 @@ import { getPostBySlug } from "@/lib/posts";
 import { pairedAlternates } from "@/lib/seo";
 import { formatDate, formatEt } from "@/lib/time";
 
+/** The pending page's title names the kind of post. */
+const pendingTitleKey = (contentType: string) =>
+  contentType === "earnings" ? "earningsPendingTitle" : "pendingTitle";
+
 // One D1 read shared by generateMetadata and the page.
 const load = cache((slug: string, locale: Locale) => getPostBySlug(getDb(), slug, locale));
 
@@ -23,7 +27,7 @@ export async function generateMetadata({ params }: PageProps<"/[locale]/p/[slug]
   const t = await getTranslations({ locale, namespace: "post" });
   if (post.status === "pending") {
     // Not indexed and not paired until the Chinese text is published.
-    return { title: t("pendingTitle", { date: formatDate(post.tradingDate, locale as Locale) }), robots: { index: false } };
+    return { title: t(pendingTitleKey(post.contentType), { date: formatDate(post.tradingDate, locale as Locale) }), robots: { index: false } };
   }
   return {
     title: post.title,
@@ -43,7 +47,7 @@ export default async function PostPage({ params }: PageProps<"/[locale]/p/[slug]
   if (post.status === "pending") {
     return (
       <article>
-        <h1>{t("pendingTitle", { date: formatDate(post.tradingDate, locale as Locale) })}</h1>
+        <h1>{t(pendingTitleKey(post.contentType), { date: formatDate(post.tradingDate, locale as Locale) })}</h1>
         <PendingNotice slug={post.slug} />
       </article>
     );

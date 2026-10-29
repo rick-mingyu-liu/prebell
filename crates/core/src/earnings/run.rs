@@ -41,6 +41,8 @@ pub struct PollOutcome {
     pub detected: Vec<String>,
     /// Per-company problems (provider errors, ticker mismatches).
     pub errors: Vec<String>,
+    /// SEC answered 403/429 (blocked or rate-limited) and the batch stopped.
+    pub throttled: bool,
 }
 
 pub fn run_key(ticker: &str, accession: &str) -> String {
@@ -76,6 +78,7 @@ pub async fn poll_tick(
             Err(e) => {
                 out.errors.push(format!("{}: {e}", entry.ticker));
                 if matches!(e, ProviderError::Http(403 | 429)) {
+                    out.throttled = true;
                     break;
                 }
                 continue;
@@ -850,6 +853,7 @@ mod tests {
         fl.errors.insert(first, ProviderError::Http(429));
         let o = poll_tick(t, &es, base.as_ref(), &fl).await.unwrap();
         assert_eq!(fl.sub_calls.borrow().len(), 1, "stop after SEC throttles");
+        assert!(o.throttled);
         assert_eq!(o.checked, 0);
     }
 

@@ -13,7 +13,7 @@ How to read the facts:
 Rules:
 - If a figure is `Missing`, write "n/a" for it. Never fill it in, guess it or explain it with outside knowledge.
 - Use only numbers that appear in the facts. You may round them (102466000000 can become $102.5 billion), but never compute new numbers such as growth rates, differences, ratios or margins.
-- Report results and guidance only. Never mention analyst estimates, consensus, expectations, or whether results beat or missed anything; do not use the words "beat", "miss", "estimate", "consensus", "expectations", "topped", "fell short" or "Wall Street", or phrases like "better than expected".
+- Report results and guidance only. Never mention analyst estimates, consensus, expectations, or whether results beat or missed anything; do not use the words "beat", "miss", "estimate", "consensus", "expectations", "topped", "fell short", "analyst" or "Wall Street", or phrases like "better than expected".
 - Give no buy or sell advice, recommendations or price targets.
 - Do not include links, URLs, images or HTML; the page lists the sources. `title` and `summary` are single lines of plain text. Section bodies must not contain heading lines (lines starting with `#`).
 - Do not repeat the key-figures table; the page already shows it. Explain what the numbers say.

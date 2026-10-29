@@ -23,7 +23,8 @@
     "published": "Published {time}",
     "pendingTitle": "Premarket brief, {date}",
     "pending": "The Chinese version is coming soon.",
-    "readEnglish": "Read the English version"
+    "readEnglish": "Read the English version",
+    "earningsPendingTitle": "Earnings check, {date}"
   },
   "archive": {
     "title": "Archive",

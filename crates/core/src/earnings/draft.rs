@@ -53,11 +53,11 @@ fn verdict_re(lang: Lang) -> &'static Regex {
     static ZH: OnceLock<Regex> = OnceLock::new();
     match lang {
         Lang::En => EN.get_or_init(|| {
-            Regex::new(r"(?i)\b(?:beat|beating|miss|misses|missed|estimates?|consensus|expectations?|wall street|topped|fell short)\b|\b(?:better|worse|stronger|weaker|higher|lower)\s+than\s+(?:expected|anticipated|forecast)")
+            Regex::new(r"(?i)\b(?:beat|beating|miss|misses|missed|estimates?|consensus|expectations?|wall street|topped|fell short|analysts?)\b|\b(?:better|worse|stronger|weaker|higher|lower)\s+than\s+(?:expected|anticipated|forecast)")
                 .expect("valid built-in regex")
         }),
         Lang::Zh => ZH.get_or_init(|| {
-            Regex::new(r"预期|预估|共识|預期|預估|共識|华尔街").expect("valid built-in regex")
+            Regex::new(r"预期|预估|共识|預期|預估|共識|华尔街|分析师|估计").expect("valid built-in regex")
         }),
     }
 }
@@ -468,6 +468,8 @@ pub(crate) mod tests {
         assert!(!ok("Results missed estimates.", Lang::En));
         assert!(!ok("业绩不及预期。", Lang::Zh));
         assert!(!ok("華爾街預期", Lang::Zh));
+        assert!(!ok("Revenue came in ahead of analyst forecasts.", Lang::En));
+        assert!(!ok("营收高于分析师估计。", Lang::Zh));
     }
 
     #[tokio::test]

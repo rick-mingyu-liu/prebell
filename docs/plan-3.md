@@ -19,7 +19,7 @@
 - **Polling window:** weekdays **06:00 ≤ ET < 22:00** (spec: ~6 AM–9 PM, plus one hour of slack for late filers). Builds and ZH retries run in the same window.
 - **Detection rule:** form exactly `8-K` (not `8-K/A`), `items` contains `2.02`, accepted within the last **96 h** (covers a Saturday filing picked up Monday), accession not seen before. 6-K/20-F filers are `foreign` in the watchlist: calendar only, never polled, never auto-written.
 - **Quote-anchored figures:** a press-release figure is kept only if (a) its quote is ≥ 20 chars and appears in the fetched exhibit text (`anchor::verify_quote`), (b) its `amount` string appears inside that quote, and (c) `amount` parses to exactly one number. Anything else is `Missing { reason }`. A negative value needs a parenthesised amount, a minus sign, or the word "loss" in the quote.
-- **No consensus, no beat/miss, no estimates.** The Yahoo calendar's EPS-estimate column is never parsed or stored. Prompts forbid "beat", "miss", "expectations", "consensus", "estimates"; drafts containing those words (EN) or 预期/预估/共识/超出/不及 (ZH) are rejected like an unbacked number.
+- **No consensus, no beat/miss, no estimates.** The Yahoo calendar's EPS-estimate column is never parsed or stored. Prompts forbid "beat", "miss", "expectations", "consensus", "estimates", "analyst", "Wall Street", "topped", "fell short", "better/worse than expected"; drafts containing them (EN) or 预期/预估/共识/华尔街/分析师/估计 (ZH, simplified and traditional) are rejected like an unbacked number. ("Missing", "Beats" the brand, "estimated", 超出 in "营收超出1000亿美元" are allowed.) GAAP metrics (revenue, net income, GAAP EPS) whose quote says non-GAAP/adjusted/managed/FTE/excluding are dropped.
 - **Charts are GAAP only:** quarterly GAAP values from XBRL (`us-gaap` duration facts of 80–100 days, from 10-Q/10-K) plus the current quarter's GAAP figure from the press release. Non-GAAP appears only as text for the current quarter. Q4 is never derived (FY − 9M); a missing quarter is a gap.
 - **Charts never measure text:** `plotters` on `wasm32-unknown-unknown` measures text through `web_sys::window()`, which does not exist in a Worker. Charts use only `SVGBackend` + `DrawingArea` primitives (`Rectangle`, `PathElement`, `Text` with explicit anchors). No `ChartBuilder`, `configure_mesh`, `titled` or `estimate_text_size`.
 - **Required sections (earnings check):** revenue, at least one EPS figure (GAAP or non-GAAP), and a filing link. Optional: net income, margins, cash flow, guidance, highlights → "n/a" / "暂缺".
@@ -33,11 +33,14 @@
 
 - `crates/core/src/lib.rs`: add `pub mod earnings; pub mod edgar; pub mod yahoo_calendar;`.
 - `crates/core/src/premarket/draft.rs`: `one_line`, `is_setext_underline`, `fmt_num` become `pub(crate)` (reused by earnings drafting). No behaviour change.
+- `crates/core/src/premarket/mod.rs`: `unclose` becomes `pub(crate)` (calendar prompt delimiting). No behaviour change.
+- `crates/core/src/anchor.rs`: entity decoding split out as `pub(crate) decode_entities`; `normalize` becomes `pub(crate)`. No behaviour change.
 - `crates/core/Cargo.toml`: add `plotters`.
 - `crates/generator/src/lib.rs`: dispatch on the cron string and on `Job.job` (`"premarket"` unchanged, new `"earnings"`); build the EDGAR/calendar providers.
-- `crates/generator/src/store.rs`: none; the new `EarningsStore` impl lives in `crates/generator/src/earnings_store.rs`.
+- `crates/generator/src/store.rs`: the helpers `s`, `opt`, `int`, `err`, `first`, `run` become `pub(crate)`; the new `EarningsStore` impl lives in `crates/generator/src/earnings_store.rs`.
+- `crates/generator/src/lib.rs`: `Job` gains an optional `at` field (absent for premarket jobs, so their messages are unchanged).
 - `crates/generator/wrangler.toml`: one more cron `"* * * * *"` and a second queue `prebell-earnings` (producer `EARNINGS` + its own consumer). The queue must be created before deploy (`wrangler queues create prebell-earnings`).
-- `apps/web`: `tests/d1.ts` loads every `migrations/*.sql` in order; layout nav gets an "Earnings" link; the post page renders charts; home page gets a "Latest earnings checks" list; `wrangler.jsonc` gets the `FACTS` R2 binding (read-only use) for chart SVGs.
+- `apps/web`: `tests/d1.ts` loads every `migrations/*.sql` in order; layout nav gets an "Earnings" link; the post page renders charts and titles a pending earnings page "Earnings check, {date}"; `PostView` gains `contentType`; the home page lists recent briefs (non-earnings, via `listRecentBriefs`) and a "Latest earnings checks" list separately; `messages/*.json`, `globals.css`, `cloudflare-env.d.ts` gain earnings entries; `wrangler.jsonc` gets the `FACTS` R2 binding (read-only use) for chart SVGs.
 
 ## Review Focus
 
@@ -240,7 +243,7 @@ apps/web/
 **Interfaces:**
 - `impl EarningsStore for D1Store` (SQL per Task 1 tables; `insert_filing` is `INSERT … ON CONFLICT(accession) DO NOTHING RETURNING accession`).
 - `struct WorkerPause` (`worker::Delay`).
-- `scheduled`: cron `"* * * * *"` ⇒ if `earnings::in_window(now)` send `Job { job: "earnings", at: <cron time> }` to a **separate queue** `prebell-earnings` (binding `EARNINGS`, consumer `max_batch_size = 1`, `max_concurrency = 1`), so a minutes-long build never delays the premarket job and never runs twice in parallel against EDGAR; other crons ⇒ `"premarket"` on `JOBS` as before. `Job` gains an optional `at` (the cron time picks the poll batch; a message older than 3 min skips its poll but still builds). Earnings refuse to run with the placeholder `SEC_CONTACT`.
+- `scheduled`: cron `"* * * * *"` ⇒ if `earnings::in_window(now)` send `Job { job: "earnings", at: <cron time> }` to a **separate queue** `prebell-earnings` (binding `EARNINGS`, consumer `max_batch_size = 1`, `max_concurrency = 1`), so a minutes-long build never delays the premarket job and never runs twice in parallel against EDGAR; other crons ⇒ `"premarket"` on `JOBS` as before. `Job` gains an optional `at` (the cron time picks the poll batch; a message older than 3 min polls the current minute's batch instead). Earnings refuse to run with the placeholder `SEC_CONTACT` and raise one error alert per ET day; SEC 403/429 on a poll raises one alert per day too.
 - `queue`: `"premarket"` ⇒ Plan 1 `tick`; `"earnings"` ⇒ `poll_tick`, then `calendar::refresh_tick`, then `build_tick`; alerts delivered after the batch as before. A warning is logged when `SEC_CONTACT` is the placeholder.
 
 - [ ] **Step 1:** `worker-build --release` → builds. `cargo clippy --workspace --all-targets -- -D warnings` clean.
