@@ -13,8 +13,10 @@ use crate::providers::{LlmProvider, MarketData, NewsSearch};
 use crate::store::{PostRow, RunRow, Store, TranslationRow};
 
 const CONTENT_TYPE: &str = "premarket";
-/// A `building` run younger than this is assumed to be in flight.
-const BUILD_LEASE_MINUTES: i64 = 4;
+/// A `building` run younger than this is assumed to be in flight. A build
+/// takes 3-8 minutes and the cron fires every 5, so this must cover several
+/// firings or a running build is treated as crashed and rebuilt.
+const BUILD_LEASE_MINUTES: i64 = 15;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum TickOutcome {
@@ -205,15 +207,20 @@ async fn build(
         return retry_later(store, row, missing.join(", ")).await;
     }
 
-    let facts_key = format!("premarket/{}.json", row.trading_date);
-    let json = serde_json::to_string(&facts).map_err(|e| format!("facts json: {e}"))?;
-    store.put_facts(&facts_key, &json).await?;
-
     let (en, en_md) = match write(llm, &facts, Lang::En).await {
         Ok(x) => x,
         Err(e) => return retry_later(store, row, format!("en: {}", e.join("; "))).await,
     };
     let zh = write(llm, &facts, Lang::Zh).await;
+
+    // The build took minutes; another tick may have finished this run since
+    // it was read. If so, keep its post and facts untouched.
+    if superseded(store, &row.run_key).await? {
+        return Ok(TickOutcome::Nothing);
+    }
+    let facts_key = format!("premarket/{}.json", row.trading_date);
+    let json = serde_json::to_string(&facts).map_err(|e| format!("facts json: {e}"))?;
+    store.put_facts(&facts_key, &json).await?;
 
     let post_id = store
         .upsert_post(&PostRow {
@@ -269,11 +276,23 @@ async fn build(
     })
 }
 
+/// True when another tick finished this run (published or skipped) while
+/// this one was building; the caller must then write nothing.
+async fn superseded(store: &dyn Store, run_key: &str) -> Result<bool, String> {
+    Ok(store
+        .get_run(run_key)
+        .await?
+        .is_some_and(|r| r.status == "published" || r.status == "skipped"))
+}
+
 async fn retry_later(
     store: &dyn Store,
     mut row: RunRow,
     err: String,
 ) -> Result<TickOutcome, String> {
+    if superseded(store, &row.run_key).await? {
+        return Ok(TickOutcome::Nothing);
+    }
     row.status = "pending".into();
     row.last_error = Some(err.clone());
     store.upsert_run(&row).await?;
@@ -579,7 +598,7 @@ mod tests {
     #[tokio::test]
     async fn stale_building_rerun_reuses_post() {
         let s = MemStore::default();
-        // A crashed build left a post and a `building` run 10 minutes old.
+        // A crashed build left a post and a `building` run 15 minutes old.
         s.posts.borrow_mut().push(PostRow {
             id: Some(7),
             run_key: KEY.into(),
@@ -592,7 +611,7 @@ mod tests {
         });
         s.runs
             .borrow_mut()
-            .insert(KEY.into(), building_run("2026-10-29T12:35:00Z"));
+            .insert(KEY.into(), building_run("2026-10-29T12:30:00Z"));
         let out = tick(
             utc("2026-10-29T12:45:00Z"),
             &s,
@@ -798,12 +817,23 @@ mod tests {
         fail_published_run: Cell<bool>,
         fail_zh_row: Cell<bool>,
         fail_get_run: Cell<bool>,
+        get_run_calls: Cell<usize>,
+        /// `(call number, status)`: on that `get_run` call, first set the
+        /// stored run to `status`, as a concurrent tick finishing would.
+        race_on_get_run: Cell<Option<(usize, &'static str)>>,
     }
     #[async_trait(?Send)]
     impl Store for FailStore {
         async fn get_run(&self, key: &str) -> Result<Option<RunRow>, String> {
             if self.fail_get_run.get() {
                 return Err("d1: get_run failed".into());
+            }
+            let n = self.get_run_calls.get() + 1;
+            self.get_run_calls.set(n);
+            if let Some((_, status)) = self.race_on_get_run.get().filter(|(at, _)| *at == n) {
+                if let Some(r) = self.inner.runs.borrow_mut().get_mut(key) {
+                    r.status = status.into();
+                }
             }
             self.inner.get_run(key).await
         }
@@ -865,7 +895,12 @@ mod tests {
     async fn failed_run_write_is_reconciled_without_rebuild() {
         let (s, m, l, en, post) = en_written_run_write_failed().await;
         let (md_calls, llm_calls) = (m.calls.get(), l.calls.get());
+        // Within the lease the half-written run still looks in flight.
         let out = tick(utc("2026-10-29T12:35:00Z"), &s, &m, &FakeNs, &l).await;
+        assert_eq!(out, TickOutcome::Nothing);
+        assert_eq!(run_status(&s.inner), "building");
+        // Once the lease expires it is reconciled.
+        let out = tick(utc("2026-10-29T12:45:00Z"), &s, &m, &FakeNs, &l).await;
         assert_eq!(out, TickOutcome::Nothing);
         assert_eq!(run_status(&s.inner), "published");
         assert_eq!((m.calls.get(), l.calls.get()), (md_calls, llm_calls));
@@ -899,7 +934,8 @@ mod tests {
             .borrow()
             .contains_key(&(1, "zh".to_string())));
         let (md_calls, llm_calls) = (m.calls.get(), l.calls.get());
-        let out = tick(utc("2026-10-29T12:35:00Z"), &s, &m, &FakeNs, &l).await;
+        // After the build lease expires.
+        let out = tick(utc("2026-10-29T12:45:00Z"), &s, &m, &FakeNs, &l).await;
         assert_eq!(out, TickOutcome::Published);
         assert_eq!(run_status(&s.inner), "published");
         assert_eq!(tr_status(&s.inner, "zh"), "published");
@@ -944,5 +980,71 @@ mod tests {
             assert!(s.inner.facts.borrow().is_empty());
             assert!(s.inner.alerts.borrow().is_empty());
         }
+    }
+
+    #[tokio::test]
+    async fn past_deadline_fresh_building_is_nothing() {
+        // 10 minutes old: a realistic build still running past 09:25 ET.
+        let s = MemStore::default();
+        s.runs
+            .borrow_mut()
+            .insert(KEY.into(), building_run("2026-10-29T13:20:00Z"));
+        let (m, l) = (md(true), llm(true, true));
+        let out = tick(utc("2026-10-29T13:30:00Z"), &s, &m, &FakeNs, &l).await;
+        assert_eq!(out, TickOutcome::Nothing);
+        assert_eq!((m.calls.get(), l.calls.get()), (0, 0));
+        assert_eq!(s.runs.borrow()[KEY], building_run("2026-10-29T13:20:00Z"));
+        assert!(s.alerts.borrow().is_empty());
+    }
+
+    #[tokio::test]
+    async fn past_deadline_stale_building_without_en_skips_once() {
+        let s = MemStore::default();
+        s.runs
+            .borrow_mut()
+            .insert(KEY.into(), building_run("2026-10-29T13:10:00Z"));
+        let (m, l) = (md(true), llm(true, true));
+        let out = tick(utc("2026-10-29T13:30:00Z"), &s, &m, &FakeNs, &l).await;
+        assert_eq!(out, TickOutcome::Skipped);
+        assert_eq!(run_status(&s), "skipped");
+        let out = tick(utc("2026-10-29T13:35:00Z"), &s, &m, &FakeNs, &l).await;
+        assert_eq!(out, TickOutcome::Nothing);
+        let alerts = s.alerts.borrow();
+        assert_eq!(alerts.len(), 1);
+        assert_eq!((alerts[0].0.as_str(), alerts[0].1.as_str()), (KEY, "error"));
+        assert!(s.posts.borrow().is_empty());
+        assert_eq!((m.calls.get(), l.calls.get()), (0, 0));
+    }
+
+    #[tokio::test]
+    async fn build_superseded_at_reread_writes_nothing() {
+        // Call 1 is the tick's own read; call 2 is the re-read just before the
+        // post rows, by which time another tick finished the run.
+        for status in ["published", "skipped"] {
+            let s = FailStore::default();
+            s.race_on_get_run.set(Some((2, status)));
+            let (m, l) = (md(true), llm(true, true));
+            let out = tick(utc("2026-10-29T12:30:00Z"), &s, &m, &FakeNs, &l).await;
+            assert_eq!(out, TickOutcome::Nothing, "{status}");
+            assert_eq!(s.get_run_calls.get(), 2);
+            assert!(l.calls.get() > 0, "the build ran");
+            assert_eq!(run_status(&s.inner), status);
+            assert!(s.inner.posts.borrow().is_empty());
+            assert!(s.inner.translations.borrow().is_empty());
+            assert!(s.inner.facts.borrow().is_empty());
+            assert!(s.inner.sources.borrow().is_empty());
+            assert!(s.inner.alerts.borrow().is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn failed_build_does_not_reopen_a_finished_run() {
+        // EN fails, but another tick skipped the run meanwhile: stay skipped.
+        let s = FailStore::default();
+        s.race_on_get_run.set(Some((2, "skipped")));
+        let (m, l) = (md(true), llm(false, true));
+        let out = tick(utc("2026-10-29T12:30:00Z"), &s, &m, &FakeNs, &l).await;
+        assert_eq!(out, TickOutcome::Nothing);
+        assert_eq!(run_status(&s.inner), "skipped");
     }
 }
