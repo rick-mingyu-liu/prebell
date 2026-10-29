@@ -1,7 +1,7 @@
 //! The single stored record both language drafts are written from, plus the
 //! publish gate and the number allow-list.
 
-use chrono::{DateTime, NaiveDate, Utc};
+use chrono::{DateTime, Datelike, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::numbers::{self, Lang};
@@ -94,9 +94,11 @@ fn push_reason(out: &mut Vec<f64>, r: &NewsReason) {
     out.extend(quote_numbers(&r.quote));
 }
 
-/// Every number a draft may cite: quote fields plus numbers inside source quotes.
+/// Every number a draft may cite: quote fields, numbers inside source quotes,
+/// and the trading year and its neighbours ("full-year 2026 guidance").
 pub fn numbers_in_facts(f: &PremarketFacts) -> Vec<f64> {
-    let mut out = Vec::new();
+    let year = f64::from(f.trading_date.year());
+    let mut out = vec![year - 1.0, year, year + 1.0];
     for (_, fq) in &f.futures {
         if let Field::Value(q) = fq {
             push_quote(&mut out, q);
@@ -213,6 +215,20 @@ mod tests {
         let n = numbers_in_facts(&f);
         assert!(numbers::check("下跌3%", Lang::Zh, &n).is_ok());
         assert!(numbers::check("上涨3%", Lang::Zh, &n).is_ok());
+    }
+
+    #[test]
+    fn trading_year_and_neighbours_are_allowed() {
+        let n = numbers_in_facts(&facts());
+        for y in [2025.0, 2026.0, 2027.0] {
+            assert!(n.contains(&y), "{y} missing from {n:?}");
+        }
+        assert!(numbers::check("full-year 2026 guidance", Lang::En, &n).is_ok());
+        assert!(numbers::check("a 2027 target", Lang::En, &n).is_ok());
+        assert_eq!(
+            numbers::check("Russell futures at 2045", Lang::En, &n),
+            Err(vec!["2045".to_string()])
+        );
     }
 
     #[test]

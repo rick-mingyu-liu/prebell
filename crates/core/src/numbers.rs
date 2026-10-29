@@ -183,20 +183,6 @@ fn is_exempt_suffix(rest: &str) -> bool {
     matches!(word.as_str(), "G" | "D" | "st" | "nd" | "rd" | "th")
 }
 
-/// A bare year (19xx/20xx) in prose: integer, no unit, percent, sign or `$`,
-/// and not followed by index points.
-fn is_bare_year(core: &str, rest: &str, has_unit: bool, signed: bool, has_dollar: bool) -> bool {
-    let year_shaped = core.len() == 4
-        && (core.starts_with("19") || core.starts_with("20"))
-        && core.bytes().all(|b| b.is_ascii_digit());
-    let rest = rest.trim_start();
-    let points = rest.starts_with('点')
-        || rest
-            .get(..6)
-            .is_some_and(|w| w.eq_ignore_ascii_case("points"));
-    year_shaped && !has_unit && !signed && !has_dollar && !points
-}
-
 /// Extracts every checkable number from `text`, skipping dates, times,
 /// fiscal labels, list ordinals, tickers and index names.
 ///
@@ -263,15 +249,6 @@ pub fn extract(text: &str, _lang: Lang) -> Vec<Num> {
         let end = e + unit_len;
         // Other glued letters are still checked, except a few non-figure suffixes.
         if unit_len == 0 && is_exempt_suffix(&text[e..]) {
-            continue;
-        }
-        if is_bare_year(
-            m.as_str(),
-            &text[e..],
-            unit_len > 0,
-            sign.is_some(),
-            has_dollar,
-        ) {
             continue;
         }
 
@@ -544,8 +521,22 @@ mod tests {
         assert_eq!(check("沪深300、中证1000与日经225", Lang::Zh, &[]), Ok(()));
     }
     #[test]
-    fn fix4_years_and_period_compounds_ignored() {
-        assert_eq!(check("full-year 2026 guidance", Lang::En, &[]), Ok(()));
+    fn fix4_period_compounds_ignored_bare_years_checked() {
+        // Bare years are checked like any figure; the facts allow the trading
+        // year and its neighbours (`facts::numbers_in_facts`).
+        assert!(check("full-year 2026 guidance", Lang::En, &[]).is_err());
+        assert_eq!(
+            check("full-year 2026 guidance", Lang::En, &[2026.0]),
+            Ok(())
+        );
+        assert_eq!(
+            check("Russell futures at 2045", Lang::En, &[2026.0]),
+            Err(vec!["2045".into()])
+        );
+        assert_eq!(
+            check("Russell futures at 2045", Lang::En, &[2045.0]),
+            Ok(())
+        );
         assert_eq!(check("the 30-year yield", Lang::En, &[]), Ok(()));
         assert_eq!(check("52-week high", Lang::En, &[]), Ok(()));
         assert_eq!(check("a 90-day window, 6-month low", Lang::En, &[]), Ok(()));
