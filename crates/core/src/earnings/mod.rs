@@ -3,6 +3,7 @@
 //! history from XBRL, chart it, and publish EN + ZH posts. Plus the earnings
 //! calendar.
 
+pub mod detect;
 pub mod watchlist;
 
 pub use watchlist::{by_cik, cik10, find, in_window, poll_batch, watchlist, Filer, WatchEntry};

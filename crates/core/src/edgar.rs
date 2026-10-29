@@ -21,7 +21,10 @@ use crate::providers::{Http, ProviderError};
 
 /// Pause before every EDGAR request after the first: at most 8 requests/second.
 pub const GAP_MS: u64 = 125;
-const _: () = assert!(GAP_MS >= 100, "EDGAR fair access: at most 10 requests/second");
+const _: () = assert!(
+    GAP_MS >= 100,
+    "EDGAR fair access: at most 10 requests/second"
+);
 const ARCHIVES: &str = "https://www.sec.gov/Archives/edgar/data/";
 
 /// An async sleep (Workers `Delay` in production, a recorder in tests).
