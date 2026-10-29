@@ -4,3 +4,4 @@ node_modules/
 .wrangler/
 .dev.vars
 crates/generator/build/
+.env
