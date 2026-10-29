@@ -1,0 +1,552 @@
+//! The premarket run state machine. Each cron firing calls `tick`, which
+//! decides from the ET clock and the stored run what to do. Re-running a tick
+//! never duplicates a post: the run key is the idempotency key.
+
+use chrono::{DateTime, Duration, NaiveDate, NaiveTime, SecondsFormat, Utc};
+
+use crate::clock::{et, premarket_decision, SlotDecision};
+use crate::facts::{missing_required, Field, NewsReason, PremarketFacts};
+use crate::numbers::Lang;
+use crate::premarket::build_facts;
+use crate::premarket::draft::{write, TEMPLATE_ID};
+use crate::providers::{LlmProvider, MarketData, NewsSearch};
+use crate::store::{PostRow, RunRow, Store, TranslationRow};
+
+const CONTENT_TYPE: &str = "premarket";
+/// A `building` run younger than this is assumed to be in flight.
+const BUILD_LEASE_MINUTES: i64 = 4;
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum TickOutcome {
+    Nothing,
+    Published,
+    PublishedEnOnly,
+    Retrying(String),
+    Skipped,
+}
+
+pub fn run_key(trading_date: NaiveDate) -> String {
+    format!("premarket:{}", trading_date.format("%Y-%m-%d"))
+}
+
+fn iso(t: DateTime<Utc>) -> String {
+    t.to_rfc3339_opts(SecondsFormat::Secs, true)
+}
+
+/// One cron firing. A store error is reported as `Retrying`.
+pub async fn tick(
+    now: DateTime<Utc>,
+    store: &dyn Store,
+    md: &dyn MarketData,
+    ns: &dyn NewsSearch,
+    llm: &dyn LlmProvider,
+) -> TickOutcome {
+    step(now, store, md, ns, llm).await.unwrap_or_else(TickOutcome::Retrying)
+}
+
+async fn step(
+    now: DateTime<Utc>,
+    store: &dyn Store,
+    md: &dyn MarketData,
+    ns: &dyn NewsSearch,
+    llm: &dyn LlmProvider,
+) -> Result<TickOutcome, String> {
+    let decision = premarket_decision(now);
+    let date = match decision {
+        SlotDecision::NotToday => return Ok(TickOutcome::Nothing),
+        SlotDecision::TooEarly => et(now).date_naive(),
+        SlotDecision::InWindow { trading_date } | SlotDecision::PastDeadline { trading_date } => trading_date,
+    };
+    let key = run_key(date);
+    let run = store.get_run(&key).await;
+
+    if let Some(r) = run.as_ref().filter(|r| r.status == "published") {
+        return retry_zh(now, store, llm, r).await;
+    }
+    let in_flight = run.as_ref().is_some_and(|r| r.status == "building" && !is_stale(r, now));
+
+    match decision {
+        SlotDecision::InWindow { .. } if in_flight => Ok(TickOutcome::Nothing),
+        SlotDecision::InWindow { .. } => build(now, store, md, ns, llm, date, run).await,
+        // Let an in-flight build finish; once its lease expires it is skipped.
+        SlotDecision::PastDeadline { .. } if in_flight => Ok(TickOutcome::Nothing),
+        SlotDecision::PastDeadline { .. } => skip(now, store, date, run).await,
+        _ => Ok(TickOutcome::Nothing),
+    }
+}
+
+fn is_stale(r: &RunRow, now: DateTime<Utc>) -> bool {
+    match DateTime::parse_from_rfc3339(&r.updated_at) {
+        Ok(t) => now - t.with_timezone(&Utc) >= Duration::minutes(BUILD_LEASE_MINUTES),
+        Err(_) => true,
+    }
+}
+
+async fn skip(
+    now: DateTime<Utc>,
+    store: &dyn Store,
+    date: NaiveDate,
+    run: Option<RunRow>,
+) -> Result<TickOutcome, String> {
+    if run.as_ref().is_some_and(|r| r.status == "skipped") {
+        return Ok(TickOutcome::Nothing);
+    }
+    let mut row = run.unwrap_or_else(|| new_run(now, date));
+    row.status = "skipped".into();
+    row.updated_at = iso(now);
+    let why = row.last_error.clone().unwrap_or_else(|| "no attempt succeeded".into());
+    store.upsert_run(&row).await?;
+    store
+        .add_alert(&row.run_key, "error", &format!("premarket brief skipped for {date}: not ready by 09:25 ET ({why})"))
+        .await?;
+    Ok(TickOutcome::Skipped)
+}
+
+fn new_run(now: DateTime<Utc>, date: NaiveDate) -> RunRow {
+    RunRow {
+        run_key: run_key(date),
+        content_type: CONTENT_TYPE.into(),
+        trading_date: date.format("%Y-%m-%d").to_string(),
+        status: "pending".into(),
+        attempts: 0,
+        last_error: None,
+        created_at: iso(now),
+        updated_at: iso(now),
+    }
+}
+
+async fn build(
+    now: DateTime<Utc>,
+    store: &dyn Store,
+    md: &dyn MarketData,
+    ns: &dyn NewsSearch,
+    llm: &dyn LlmProvider,
+    date: NaiveDate,
+    run: Option<RunRow>,
+) -> Result<TickOutcome, String> {
+    let ts = iso(now);
+    let mut row = run.unwrap_or_else(|| new_run(now, date));
+    row.status = "building".into();
+    row.attempts += 1;
+    row.updated_at = ts.clone();
+    store.upsert_run(&row).await?;
+
+    let facts = build_facts(md, ns, llm, date, now).await;
+    let missing = missing_required(&facts);
+    if !missing.is_empty() {
+        return retry_later(store, row, missing.join(", ")).await;
+    }
+
+    let facts_key = format!("premarket/{}.json", row.trading_date);
+    let json = serde_json::to_string(&facts).map_err(|e| format!("facts json: {e}"))?;
+    store.put_facts(&facts_key, &json).await?;
+
+    let (en, en_md) = match write(llm, &facts, Lang::En).await {
+        Ok(x) => x,
+        Err(e) => return retry_later(store, row, format!("en: {}", e.join("; "))).await,
+    };
+    let zh = write(llm, &facts, Lang::Zh).await;
+
+    let post_id = store
+        .upsert_post(&PostRow {
+            id: None,
+            run_key: row.run_key.clone(),
+            content_type: CONTENT_TYPE.into(),
+            template_id: TEMPLATE_ID.into(),
+            trading_date: row.trading_date.clone(),
+            slug: format!("premarket-{}", row.trading_date),
+            facts_r2_key: facts_key,
+            published_at: Some(ts.clone()),
+        })
+        .await?;
+    store
+        .upsert_translation(&TranslationRow {
+            post_id,
+            lang: "en".into(),
+            status: "published".into(),
+            title: en.title,
+            summary: en.summary,
+            body_md: en_md,
+            updated_at: ts.clone(),
+        })
+        .await?;
+    let (zh_row, zh_err) = match zh {
+        Ok((d, body)) => (translation_zh(post_id, "published", d.title, d.summary, body, &ts), None),
+        Err(e) => (
+            translation_zh(post_id, "pending", String::new(), String::new(), String::new(), &ts),
+            Some(format!("zh: {}", e.join("; "))),
+        ),
+    };
+    store.upsert_translation(&zh_row).await?;
+    store.add_sources(post_id, &sources(&facts)).await?;
+
+    row.status = "published".into();
+    row.last_error = zh_err.clone();
+    row.updated_at = ts;
+    store.upsert_run(&row).await?;
+    Ok(if zh_err.is_some() { TickOutcome::PublishedEnOnly } else { TickOutcome::Published })
+}
+
+async fn retry_later(store: &dyn Store, mut row: RunRow, err: String) -> Result<TickOutcome, String> {
+    row.status = "pending".into();
+    row.last_error = Some(err.clone());
+    store.upsert_run(&row).await?;
+    Ok(TickOutcome::Retrying(err))
+}
+
+fn translation_zh(post_id: i64, status: &str, title: String, summary: String, body_md: String, ts: &str) -> TranslationRow {
+    TranslationRow { post_id, lang: "zh".into(), status: status.into(), title, summary, body_md, updated_at: ts.into() }
+}
+
+/// Every kept reason (gainers, losers, macro), first occurrence per url.
+fn sources(f: &PremarketFacts) -> Vec<NewsReason> {
+    let macro_items = match &f.macro_items {
+        Field::Value(v) => v.as_slice(),
+        Field::Missing { .. } => &[],
+    };
+    let mut out: Vec<NewsReason> = Vec::new();
+    for r in f.gainers.iter().chain(&f.losers).flat_map(|m| &m.reasons).chain(macro_items) {
+        if !out.iter().any(|o| o.url == r.url) {
+            out.push(r.clone());
+        }
+    }
+    out
+}
+
+/// After EN published: retry a pending ZH draft for the rest of the ET day;
+/// at/after 18:00 ET a failure marks it `failed` with one warn alert.
+async fn retry_zh(
+    now: DateTime<Utc>,
+    store: &dyn Store,
+    llm: &dyn LlmProvider,
+    run: &RunRow,
+) -> Result<TickOutcome, String> {
+    let post = store.get_post_by_run(&run.run_key).await.ok_or("published run has no post")?;
+    let post_id = post.id.ok_or("post has no id")?;
+    if let Some(t) = store.get_translation(post_id, "zh").await {
+        if t.status != "pending" {
+            return Ok(TickOutcome::Nothing);
+        }
+    }
+    let json = store.get_facts(&post.facts_r2_key).await.ok_or("facts not found")?;
+    let facts: PremarketFacts = serde_json::from_str(&json).map_err(|e| format!("facts json: {e}"))?;
+    let ts = iso(now);
+    match write(llm, &facts, Lang::Zh).await {
+        Ok((d, body)) => {
+            store.upsert_translation(&translation_zh(post_id, "published", d.title, d.summary, body, &ts)).await?;
+            Ok(TickOutcome::Published)
+        }
+        Err(e) => {
+            let err = format!("zh: {}", e.join("; "));
+            if et(now).time() >= NaiveTime::from_hms_opt(18, 0, 0).unwrap() {
+                let failed = translation_zh(post_id, "failed", String::new(), String::new(), String::new(), &ts);
+                store.upsert_translation(&failed).await?;
+                store
+                    .add_alert(&run.run_key, "warn", &format!("Chinese premarket brief failed for {}: {err}", run.trading_date))
+                    .await?;
+            }
+            Ok(TickOutcome::Retrying(err))
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::facts::Quote;
+    use crate::providers::{ProviderError, SearchHit};
+    use crate::store::{MemStore, PostRow, RunRow};
+    use async_trait::async_trait;
+    use serde_json::{json, Value};
+    use std::cell::Cell;
+
+    const ARTICLE: &str = "Apple shares jumped 8% in premarket trading after the company reported record iPhone sales for the quarter.";
+    const QUOTE: &str = "Apple shares jumped 8% in premarket trading";
+    const URL: &str = "https://news.test/aapl";
+    const KEY: &str = "premarket:2026-10-29";
+
+    fn utc(s: &str) -> DateTime<Utc> {
+        s.parse().unwrap()
+    }
+
+    fn q(sym: &str, last: f64, pct: f64) -> Quote {
+        Quote { symbol: sym.into(), last, prev_close: last / (1.0 + pct / 100.0), change_pct: pct, volume: Some(2_000_000) }
+    }
+
+    /// `ok = false` makes every call fail with HTTP 429.
+    struct FakeMd {
+        ok: bool,
+        calls: Cell<usize>,
+    }
+    #[async_trait(?Send)]
+    impl MarketData for FakeMd {
+        async fn quote(&self, symbol: &str) -> Result<Quote, ProviderError> {
+            self.calls.set(self.calls.get() + 1);
+            if self.ok { Ok(q(symbol, 5800.0, 0.4)) } else { Err(ProviderError::Http(429)) }
+        }
+        async fn premarket_quotes(&self, symbols: &[String]) -> Vec<(String, Result<Quote, ProviderError>)> {
+            self.calls.set(self.calls.get() + 1);
+            symbols
+                .iter()
+                .map(|s| {
+                    let r = if !self.ok {
+                        Err(ProviderError::Http(429))
+                    } else if s == "AAPL" {
+                        Ok(q("AAPL", 230.0, 8.0))
+                    } else {
+                        Err(ProviderError::Http(404))
+                    };
+                    (s.clone(), r)
+                })
+                .collect()
+        }
+    }
+    fn md(ok: bool) -> FakeMd {
+        FakeMd { ok, calls: Cell::new(0) }
+    }
+
+    struct FakeNs;
+    #[async_trait(?Send)]
+    impl NewsSearch for FakeNs {
+        async fn search(&self, query: &str, _max: usize) -> Result<Vec<SearchHit>, ProviderError> {
+            if query.contains("AAPL") {
+                Ok(vec![SearchHit { url: URL.into(), title: "Apple jumps".into(), content: ARTICLE.into() }])
+            } else {
+                Err(ProviderError::Empty)
+            }
+        }
+    }
+
+    /// Reason extraction always answers with the anchored Apple reason;
+    /// drafts answer clean or bad per language.
+    struct FakeLlm {
+        en_ok: Cell<bool>,
+        zh_ok: Cell<bool>,
+        calls: Cell<usize>,
+    }
+    #[async_trait(?Send)]
+    impl LlmProvider for FakeLlm {
+        async fn complete_json(&self, system: &str, _user: &str) -> Result<Value, ProviderError> {
+            self.calls.set(self.calls.get() + 1);
+            if system.starts_with("You write the US premarket") {
+                Ok(draft_reply(false, self.en_ok.get()))
+            } else if system.starts_with("你负责撰写美股盘前晨报") {
+                Ok(draft_reply(true, self.zh_ok.get()))
+            } else {
+                Ok(json!({"reasons": [{"url": URL, "title": "x", "quote": QUOTE, "summary_en": "Apple rose on record iPhone sales."}]}))
+            }
+        }
+    }
+    fn llm(en_ok: bool, zh_ok: bool) -> FakeLlm {
+        FakeLlm { en_ok: Cell::new(en_ok), zh_ok: Cell::new(zh_ok), calls: Cell::new(0) }
+    }
+    fn draft_reply(zh: bool, ok: bool) -> Value {
+        let heads: [&str; 4] = if zh {
+            ["期货", "盘前异动", "宏观与隔夜", "今日关注"]
+        } else {
+            ["Futures", "Biggest premarket movers", "Macro & overnight", "What to watch"]
+        };
+        // 7.5% is not in the facts, so a bad reply fails the number check.
+        let body = if ok { "Futures were firm." } else { "Nasdaq futures rose 7.5%." };
+        json!({
+            "title": "Futures firm; Apple jumps",
+            "summary": "Futures edged up while Apple rose.",
+            "sections": heads.iter().map(|h| json!({"heading": h, "markdown": body})).collect::<Vec<_>>(),
+        })
+    }
+
+    fn run_status(s: &MemStore) -> String {
+        s.runs.borrow()[KEY].status.clone()
+    }
+    fn tr_status(s: &MemStore, lang: &str) -> String {
+        s.translations.borrow()[&(1, lang.to_string())].status.clone()
+    }
+
+    #[test]
+    fn run_key_format() {
+        assert_eq!(run_key(NaiveDate::from_ymd_opt(2026, 10, 29).unwrap()), KEY);
+    }
+
+    #[tokio::test]
+    async fn two_ticks_same_time_make_one_post() {
+        let s = MemStore::default();
+        let (m, l) = (md(true), llm(true, true));
+        let now = utc("2026-10-29T12:30:00Z");
+        assert_eq!(tick(now, &s, &m, &FakeNs, &l).await, TickOutcome::Published);
+        assert_eq!(tick(now, &s, &m, &FakeNs, &l).await, TickOutcome::Nothing);
+        let posts = s.posts.borrow();
+        assert_eq!(posts.len(), 1);
+        let p = &posts[0];
+        assert_eq!(p.id, Some(1));
+        assert_eq!(p.run_key, KEY);
+        assert_eq!(p.content_type, "premarket");
+        assert_eq!(p.template_id, "premarket:v1");
+        assert_eq!(p.trading_date, "2026-10-29");
+        assert_eq!(p.slug, "premarket-2026-10-29");
+        assert_eq!(p.facts_r2_key, "premarket/2026-10-29.json");
+        assert_eq!(p.published_at.as_deref(), Some("2026-10-29T12:30:00Z"));
+        drop(posts);
+        assert_eq!(run_status(&s), "published");
+        assert_eq!(s.runs.borrow()[KEY].attempts, 1);
+        assert_eq!(tr_status(&s, "en"), "published");
+        assert_eq!(tr_status(&s, "zh"), "published");
+        let en = s.translations.borrow()[&(1, "en".to_string())].clone();
+        assert_eq!(en.title, "Futures firm; Apple jumps");
+        assert!(en.body_md.starts_with("# Futures firm; Apple jumps"));
+        assert_eq!(en.updated_at, "2026-10-29T12:30:00Z");
+        assert!(s.facts.borrow().contains_key("premarket/2026-10-29.json"));
+        let src = s.sources.borrow()[&1].clone();
+        assert_eq!(src.len(), 1);
+        assert_eq!(src[0].url, URL);
+        assert!(s.alerts.borrow().is_empty());
+    }
+
+    #[tokio::test]
+    async fn stale_building_rerun_reuses_post() {
+        let s = MemStore::default();
+        // A crashed build left a post and a `building` run 10 minutes old.
+        s.posts.borrow_mut().push(PostRow {
+            id: Some(7),
+            run_key: KEY.into(),
+            content_type: "premarket".into(),
+            template_id: "premarket:v1".into(),
+            trading_date: "2026-10-29".into(),
+            slug: "premarket-2026-10-29".into(),
+            facts_r2_key: "premarket/2026-10-29.json".into(),
+            published_at: None,
+        });
+        s.runs.borrow_mut().insert(KEY.into(), building_run("2026-10-29T12:35:00Z"));
+        let out = tick(utc("2026-10-29T12:45:00Z"), &s, &md(true), &FakeNs, &llm(true, true)).await;
+        assert_eq!(out, TickOutcome::Published);
+        assert_eq!(s.posts.borrow().len(), 1);
+        assert_eq!(s.posts.borrow()[0].id, Some(7));
+        assert_eq!(s.runs.borrow()[KEY].attempts, 2);
+        assert!(s.translations.borrow().contains_key(&(7, "en".to_string())));
+    }
+
+    fn building_run(updated_at: &str) -> RunRow {
+        RunRow {
+            run_key: KEY.into(),
+            content_type: "premarket".into(),
+            trading_date: "2026-10-29".into(),
+            status: "building".into(),
+            attempts: 1,
+            last_error: None,
+            created_at: "2026-10-29T12:30:00Z".into(),
+            updated_at: updated_at.into(),
+        }
+    }
+
+    #[tokio::test]
+    async fn fresh_building_run_is_left_alone() {
+        let s = MemStore::default();
+        s.runs.borrow_mut().insert(KEY.into(), building_run("2026-10-29T12:44:00Z"));
+        let (m, l) = (md(true), llm(true, true));
+        let out = tick(utc("2026-10-29T12:45:00Z"), &s, &m, &FakeNs, &l).await;
+        assert_eq!(out, TickOutcome::Nothing);
+        assert_eq!(m.calls.get(), 0);
+        assert_eq!(l.calls.get(), 0);
+        assert_eq!(s.runs.borrow()[KEY], building_run("2026-10-29T12:44:00Z"));
+    }
+
+    #[tokio::test]
+    async fn all_429_retries_then_skips_once() {
+        let s = MemStore::default();
+        let (m, l) = (md(false), llm(true, true));
+        for t in ["2026-10-29T12:30:00Z", "2026-10-29T12:35:00Z"] {
+            match tick(utc(t), &s, &m, &FakeNs, &l).await {
+                TickOutcome::Retrying(e) => assert_eq!(e, "futures, movers"),
+                o => panic!("{o:?}"),
+            }
+            assert_eq!(run_status(&s), "pending");
+            assert_eq!(s.runs.borrow()[KEY].last_error.as_deref(), Some("futures, movers"));
+        }
+        assert_eq!(s.runs.borrow()[KEY].attempts, 2);
+        assert_eq!(tick(utc("2026-10-29T13:25:00Z"), &s, &m, &FakeNs, &l).await, TickOutcome::Skipped);
+        assert_eq!(run_status(&s), "skipped");
+        assert!(s.posts.borrow().is_empty());
+        {
+            let alerts = s.alerts.borrow();
+            assert_eq!(alerts.len(), 1);
+            assert_eq!((alerts[0].0.as_str(), alerts[0].1.as_str()), (KEY, "error"));
+        }
+        assert_eq!(tick(utc("2026-10-29T13:30:00Z"), &s, &m, &FakeNs, &l).await, TickOutcome::Nothing);
+        assert_eq!(s.alerts.borrow().len(), 1);
+        assert!(s.posts.borrow().is_empty());
+    }
+
+    #[tokio::test]
+    async fn en_ok_zh_bad_then_zh_retry_publishes() {
+        let s = MemStore::default();
+        let (m, l) = (md(true), llm(true, false));
+        assert_eq!(tick(utc("2026-10-29T12:30:00Z"), &s, &m, &FakeNs, &l).await, TickOutcome::PublishedEnOnly);
+        assert_eq!(run_status(&s), "published");
+        assert_eq!(tr_status(&s, "en"), "published");
+        let zh = s.translations.borrow()[&(1, "zh".to_string())].clone();
+        assert_eq!(zh.status, "pending");
+        assert!(zh.title.is_empty() && zh.summary.is_empty() && zh.body_md.is_empty());
+        assert!(s.posts.borrow()[0].published_at.is_some());
+
+        // Still bad: stays pending.
+        assert!(matches!(tick(utc("2026-10-29T12:35:00Z"), &s, &m, &FakeNs, &l).await, TickOutcome::Retrying(_)));
+        assert_eq!(tr_status(&s, "zh"), "pending");
+
+        // ZH retries continue past 09:25 ET.
+        l.zh_ok.set(true);
+        assert_eq!(tick(utc("2026-10-29T15:00:00Z"), &s, &m, &FakeNs, &l).await, TickOutcome::Published);
+        assert_eq!(tr_status(&s, "zh"), "published");
+        assert!(s.translations.borrow()[&(1, "zh".to_string())].body_md.contains("## 期货"));
+        assert_eq!(s.posts.borrow().len(), 1);
+        assert_eq!(tick(utc("2026-10-29T15:05:00Z"), &s, &m, &FakeNs, &l).await, TickOutcome::Nothing);
+    }
+
+    #[tokio::test]
+    async fn zh_failing_at_1805_et_is_failed_with_one_warn() {
+        let s = MemStore::default();
+        let (m, l) = (md(true), llm(true, false));
+        assert_eq!(tick(utc("2026-10-29T12:30:00Z"), &s, &m, &FakeNs, &l).await, TickOutcome::PublishedEnOnly);
+        // 17:00 ET: still pending.
+        assert!(matches!(tick(utc("2026-10-29T21:00:00Z"), &s, &m, &FakeNs, &l).await, TickOutcome::Retrying(_)));
+        assert_eq!(tr_status(&s, "zh"), "pending");
+        assert!(s.alerts.borrow().is_empty());
+        // 18:05 ET: give up.
+        assert!(matches!(tick(utc("2026-10-29T22:05:00Z"), &s, &m, &FakeNs, &l).await, TickOutcome::Retrying(_)));
+        assert_eq!(tr_status(&s, "zh"), "failed");
+        assert_eq!(run_status(&s), "published");
+        {
+            let alerts = s.alerts.borrow();
+            assert_eq!(alerts.len(), 1);
+            assert_eq!((alerts[0].0.as_str(), alerts[0].1.as_str()), (KEY, "warn"));
+        }
+        assert_eq!(tick(utc("2026-10-29T23:00:00Z"), &s, &m, &FakeNs, &l).await, TickOutcome::Nothing);
+        assert_eq!(s.alerts.borrow().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn en_error_publishes_nothing() {
+        let s = MemStore::default();
+        let out = tick(utc("2026-10-29T12:30:00Z"), &s, &md(true), &FakeNs, &llm(false, true)).await;
+        assert!(matches!(out, TickOutcome::Retrying(_)), "{out:?}");
+        assert_eq!(run_status(&s), "pending");
+        assert!(s.runs.borrow()[KEY].last_error.as_deref().unwrap().starts_with("en: "));
+        assert!(s.posts.borrow().is_empty());
+        assert!(s.translations.borrow().is_empty());
+    }
+
+    #[tokio::test]
+    async fn thanksgiving_is_nothing() {
+        let s = MemStore::default();
+        let (m, l) = (md(true), llm(true, true));
+        assert_eq!(tick(utc("2026-11-26T13:30:00Z"), &s, &m, &FakeNs, &l).await, TickOutcome::Nothing);
+        assert!(s.runs.borrow().is_empty());
+        assert_eq!(m.calls.get(), 0);
+    }
+
+    #[tokio::test]
+    async fn too_early_is_nothing() {
+        let s = MemStore::default();
+        let out = tick(utc("2026-10-29T12:25:00Z"), &s, &md(true), &FakeNs, &llm(true, true)).await;
+        assert_eq!(out, TickOutcome::Nothing);
+        assert!(s.runs.borrow().is_empty());
+    }
+}
