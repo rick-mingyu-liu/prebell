@@ -3,7 +3,34 @@
 //! numbers days 1-7 from Sunday, unlike most cron dialects.
 
 /// Every job name the queue consumer understands.
-pub const JOBS: &[&str] = &["premarket", "recap"];
+pub const JOBS: &[&str] = &["premarket", "recap", "competitor"];
+
+/// A content job: a `run::Content` tick that needs the market, news and LLM
+/// providers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContentJob {
+    Premarket,
+    Recap,
+}
+
+/// What a queue message's `job` runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JobKind {
+    Content(ContentJob),
+    /// The competitor watch; it needs no LLM.
+    Competitor,
+}
+
+impl JobKind {
+    pub fn parse(job: &str) -> Option<JobKind> {
+        match job {
+            "premarket" => Some(JobKind::Content(ContentJob::Premarket)),
+            "recap" => Some(JobKind::Content(ContentJob::Recap)),
+            "competitor" => Some(JobKind::Competitor),
+            _ => None,
+        }
+    }
+}
 
 /// `(cron, jobs)`. Must match `crons` in `crates/generator/wrangler.toml`.
 pub const CRONS: &[(&str, &[&str])] = &[
@@ -19,6 +46,11 @@ pub const CRONS: &[(&str, &[&str])] = &[
     ("*/5 0 * * TUE-SAT", &["recap"]),
     // Hourly recap ZH retries through the 22:00 ET give-up.
     ("0 1-3 * * TUE-SAT", &["recap"]),
+    // Competitor watch, daily: 07:31 ET under either offset (11:31Z EDT,
+    // 12:31Z EST); `competitor_decision` picks the firing that counts.
+    // Minute 31 so no other job fires with it.
+    ("31 11 * * *", &["competitor"]),
+    ("31 12 * * *", &["competitor"]),
 ];
 
 /// The jobs for a firing of `cron`, or `None` when the cron is unknown (the
@@ -48,32 +80,43 @@ mod tests {
             .find(|l| l.trim_start().starts_with("crons"))
             .expect("crons line");
         let list = &line[line.find('[').unwrap() + 1..line.rfind(']').unwrap()];
-        list.split(',')
-            .map(|s| s.trim().trim_matches('"').to_string())
-            .filter(|s| !s.is_empty())
+        // Quoted strings, so a comma inside a cron does not split it.
+        list.split('"')
+            .skip(1)
+            .step_by(2)
+            .map(String::from)
             .collect()
     }
 
-    fn dow(name: &str) -> u32 {
-        ["SUN", "MON", "TUE", "WED", "THU", "FRI", "SAT"]
+    const DAYS_OF_WEEK: [&str; 7] = ["SUN", "MON", "TUE", "WED", "THU", "FRI", "SAT"];
+
+    fn dow(name: &str) -> Option<u32> {
+        DAYS_OF_WEEK
             .iter()
             .position(|d| *d == name)
-            .unwrap_or_else(|| panic!("use day names, not {name:?}")) as u32
+            .map(|i| i as u32)
     }
 
-    /// One field: `*`, `*/n`, `a`, `a-b` (day names in the weekday field).
+    /// One field: a comma list of `*`, `*/n`, `a` or `a-b` (day names in the
+    /// weekday field). Anything else never matches.
     fn field(spec: &str, v: u32, weekday: bool) -> bool {
-        let num = |s: &str| if weekday { dow(s) } else { s.parse().unwrap() };
-        if spec == "*" {
-            return true;
-        }
-        if let Some(step) = spec.strip_prefix("*/") {
-            return v.is_multiple_of(step.parse::<u32>().unwrap());
-        }
-        match spec.split_once('-') {
-            Some((a, b)) => num(a) <= v && v <= num(b),
-            None => num(spec) == v,
-        }
+        let num = |s: &str| if weekday { dow(s) } else { s.parse().ok() };
+        spec.split(',').any(|part| {
+            if part == "*" {
+                return true;
+            }
+            if let Some(step) = part.strip_prefix("*/") {
+                return step
+                    .parse::<u32>()
+                    .ok()
+                    .filter(|n| *n > 0)
+                    .is_some_and(|n| v.is_multiple_of(n));
+            }
+            match part.split_once('-') {
+                Some((a, b)) => matches!((num(a), num(b)), (Some(a), Some(b)) if a <= v && v <= b),
+                None => num(part) == Some(v),
+            }
+        })
     }
 
     fn matches(cron: &str, t: DateTime<Utc>) -> bool {
@@ -118,6 +161,13 @@ mod tests {
     fn table_matches_wrangler_toml() {
         let mine: Vec<&str> = CRONS.iter().map(|(c, _)| *c).collect();
         assert_eq!(wrangler_crons(), mine);
+        // Day names, not numbers: Cloudflare numbers 1 = Sunday.
+        for (c, _) in CRONS {
+            let dow_field = c.split_whitespace().nth(4).unwrap();
+            for part in dow_field.split([',', '-']).filter(|p| *p != "*") {
+                assert!(dow(part).is_some(), "{c}: use day names, not {part:?}");
+            }
+        }
         for (_, jobs) in CRONS {
             assert!(!jobs.is_empty() && jobs.iter().all(|j| JOBS.contains(j)));
         }
@@ -132,6 +182,97 @@ mod tests {
         assert_eq!(premarket, ["*/5 12-14 * * MON-FRI", "0 15-23 * * MON-FRI"]);
         assert!(CRONS.iter().all(|(_, j)| j.len() == 1));
         assert_eq!(jobs_for_cron("* * * * *"), None);
+    }
+
+    #[test]
+    fn each_cron_maps_to_its_job() {
+        let want: [(&str, &str); 7] = [
+            ("*/5 12-14 * * MON-FRI", "premarket"),
+            ("0 15-23 * * MON-FRI", "premarket"),
+            ("*/5 17-23 * * MON-FRI", "recap"),
+            ("*/5 0 * * TUE-SAT", "recap"),
+            ("0 1-3 * * TUE-SAT", "recap"),
+            ("31 11 * * *", "competitor"),
+            ("31 12 * * *", "competitor"),
+        ];
+        for (cron, job) in want {
+            assert_eq!(jobs_for_cron(cron), Some(&[job][..]), "{cron}");
+        }
+        assert_eq!(CRONS.len(), want.len());
+        // Every job has a cron.
+        for j in JOBS {
+            assert!(CRONS.iter().any(|(_, jobs)| jobs.contains(j)), "{j}");
+        }
+    }
+
+    #[test]
+    fn job_kind_parses_every_job() {
+        assert_eq!(
+            JobKind::parse("premarket"),
+            Some(JobKind::Content(ContentJob::Premarket))
+        );
+        assert_eq!(
+            JobKind::parse("recap"),
+            Some(JobKind::Content(ContentJob::Recap))
+        );
+        assert_eq!(JobKind::parse("competitor"), Some(JobKind::Competitor));
+        assert_eq!(JobKind::parse("nope"), None);
+        let kinds: Vec<JobKind> = JOBS.iter().map(|j| JobKind::parse(j).unwrap()).collect();
+        assert_eq!(kinds.len(), 3);
+        for (i, k) in kinds.iter().enumerate() {
+            assert!(!kinds[..i].contains(k), "{k:?}");
+        }
+    }
+
+    #[test]
+    fn competitor_fires_once_at_0731_et_every_day() {
+        // The competitor job is due in [07:30, 08:00) ET; exactly one of its
+        // firings lands there each day. Includes a Saturday, a Sunday and the
+        // 2026-11-01 DST change.
+        let (start, end) = (
+            NaiveTime::from_hms_opt(7, 30, 0).unwrap(),
+            NaiveTime::from_hms_opt(8, 0, 0).unwrap(),
+        );
+        for date in [
+            "2026-10-29",
+            "2026-10-31",
+            "2026-11-01",
+            "2026-11-02",
+            "2026-11-26",
+        ] {
+            let d: NaiveDate = date.parse().unwrap();
+            let due: Vec<DateTime<Utc>> = minutes(date)
+                .into_iter()
+                .filter(|t| et(*t).date_naive() == d && fires("competitor", *t))
+                .filter(|t| (start..end).contains(&et(*t).time()))
+                .collect();
+            assert_eq!(due.len(), 1, "{date}: {due:?}");
+            assert_eq!(
+                et(due[0]).time(),
+                NaiveTime::from_hms_opt(7, 31, 0).unwrap()
+            );
+            // Minute 31: no other job fires with it.
+            assert!(!fires("premarket", due[0]) && !fires("recap", due[0]));
+        }
+    }
+
+    #[test]
+    fn field_reads_comma_lists_and_never_panics() {
+        let t: DateTime<Utc> = "2026-10-28T11:30:00Z".parse().unwrap(); // Wed
+        assert!(matches("0,30 11 * * MON,WED", t));
+        assert!(matches("15,30-35 9-10,11 * * MON-TUE,WED", t));
+        assert!(!matches("0,45 11 * * *", t));
+        assert!(!matches("30 11 * * MON,FRI", t));
+        // Malformed fields never match and never panic.
+        for bad in [
+            "x 11 * * *",
+            "30 11 * * FUNDAY",
+            "*/0 * * * *",
+            ", * * * *",
+            "1-x * * * *",
+        ] {
+            assert!(!matches(bad, t), "{bad}");
+        }
     }
 
     /// Every 5 minutes inside the window, plus the deadline minute itself.

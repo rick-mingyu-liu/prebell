@@ -10,7 +10,7 @@ use prebell_core::competitor::run_competitor;
 use prebell_core::llm::{api_key_var, llm_from_env, unknown_provider};
 use prebell_core::recap;
 use prebell_core::run::{tick_with_log, TickOutcome};
-use prebell_core::schedule::{jobs_for_cron, JOBS};
+use prebell_core::schedule::{jobs_for_cron, ContentJob, JobKind, JOBS};
 use prebell_core::tavily::Tavily;
 use prebell_core::yahoo::Yahoo;
 use serde::{Deserialize, Serialize};
@@ -97,7 +97,7 @@ async fn scheduled(event: ScheduledEvent, env: Env, _ctx: ScheduleContext) {
 
 /// A premarket or recap tick. Providers are built here, per message, so a bad
 /// LLM config fails only the jobs that need the LLM.
-async fn content(env: &Env, store: &D1Store, job: &str) -> Result<TickOutcome> {
+async fn content(env: &Env, store: &D1Store, job: ContentJob) -> Result<TickOutcome> {
     let md = Yahoo::new(WorkerHttp);
     let ns = Tavily::new(WorkerHttp, secret_or_empty(env, "TAVILY_API_KEY"));
     let provider = text(env, "LLM_PROVIDER").unwrap_or_else(|| "claude".into());
@@ -114,10 +114,9 @@ async fn content(env: &Env, store: &D1Store, job: &str) -> Result<TickOutcome> {
     .map_err(|e| Error::RustError(e.to_string()))?;
     let log = |m: &str| console_log!("{m}");
     let at = now(env);
-    Ok(if job == "recap" {
-        recap::tick_with_log(at, store, &md, &ns, llm.as_ref(), &log).await
-    } else {
-        tick_with_log(at, store, &md, &ns, llm.as_ref(), &log).await
+    Ok(match job {
+        ContentJob::Premarket => tick_with_log(at, store, &md, &ns, llm.as_ref(), &log).await,
+        ContentJob::Recap => recap::tick_with_log(at, store, &md, &ns, llm.as_ref(), &log).await,
     })
 }
 
@@ -130,18 +129,18 @@ async fn queue(batch: MessageBatch<Job>, env: Env, _ctx: Context) -> Result<()> 
 
     for msg in batch.messages()? {
         let job = msg.body().job.as_str();
-        match job {
-            "competitor" => {
+        match JobKind::parse(job) {
+            Some(JobKind::Competitor) => {
                 let outcome = run_competitor(now(&env), &WorkerHttp, &WorkerTimer, &store).await;
                 console_log!("job {job}: {outcome:?}");
             }
-            "premarket" | "recap" => match content(&env, &store, job).await {
+            Some(JobKind::Content(c)) => match content(&env, &store, c).await {
                 Ok(o) => console_log!("job {job}: {o:?}"),
                 // Logged, not returned: the error is config, so a queue retry
                 // would fail the same way, and other messages must still run.
                 Err(e) => console_error!("job {job}: {e}"),
             },
-            _ => console_error!("job {job}: unknown job, dropped"),
+            None => console_error!("job {job}: unknown job, dropped"),
         }
         msg.ack();
     }
