@@ -33,24 +33,22 @@ impl JobKind {
 }
 
 /// `(cron, jobs)`. Must match `crons` in `crates/generator/wrangler.toml`.
+/// Three crons because the Free Workers plan allows 5 per account. A firing
+/// may queue several jobs; each job's clock (and `Content::zh_retry_due`)
+/// decides what the firing means for it, so extra firings cost a D1 read.
 pub const CRONS: &[(&str, &[&str])] = &[
-    // Premarket 08:30-09:25 ET under both offsets (12:30Z EDT, 13:30Z EST).
-    ("*/5 12-14 * * MON-FRI", &["premarket"]),
-    // Hourly premarket ZH retries through the 18:00 ET give-up.
-    ("0 15-23 * * MON-FRI", &["premarket"]),
-    // Recap: early close opens 17:45Z (EDT) / 18:45Z (EST); full days
-    // 20:45Z (EDT) / 21:45Z (EST); EDT deadline 23:00Z.
-    ("*/5 17-23 * * MON-FRI", &["recap"]),
-    // EST 19:00-19:55 ET is 00:00-00:55Z the next UTC day: the deadline skip
-    // and the first hour of ZH retries.
-    ("*/5 0 * * TUE-SAT", &["recap"]),
-    // Hourly recap ZH retries through the 22:00 ET give-up.
-    ("0 1-3 * * TUE-SAT", &["recap"]),
+    // 12:00-23:55Z weekdays. Premarket 08:30-09:25 ET under both offsets
+    // (12:30Z EDT, 13:30Z EST) and its ZH retries to the 18:00 ET give-up;
+    // the recap window from 13:45 ET (early close) or 16:45 ET to 19:00 ET
+    // EDT (23:00Z), with its ZH retries.
+    ("*/5 12-23 * * MON-FRI", &["premarket", "recap"]),
+    // 00:00-03:55Z the next UTC day: the EST recap tail to 19:00 ET
+    // (00:00Z) and recap ZH retries to the 22:00 ET give-up.
+    ("*/5 0-3 * * TUE-SAT", &["recap"]),
     // Competitor watch, daily: 07:31 ET under either offset (11:31Z EDT,
     // 12:31Z EST); `competitor_decision` picks the firing that counts.
     // Minute 31 so no other job fires with it.
-    ("31 11 * * *", &["competitor"]),
-    ("31 12 * * *", &["competitor"]),
+    ("31 11-12 * * *", &["competitor"]),
 ];
 
 /// The jobs for a firing of `cron`, or `None` when the cron is unknown (the
@@ -171,32 +169,22 @@ mod tests {
         for (_, jobs) in CRONS {
             assert!(!jobs.is_empty() && jobs.iter().all(|j| JOBS.contains(j)));
         }
-        assert_eq!(jobs_for_cron("*/5 0 * * TUE-SAT"), Some(&["recap"][..]));
-        // Each cron serves one job, so a recap firing never adds premarket
-        // ZH retries and the reverse.
-        let premarket: Vec<&str> = CRONS
-            .iter()
-            .filter(|(_, j)| j.contains(&"premarket"))
-            .map(|(c, _)| *c)
-            .collect();
-        assert_eq!(premarket, ["*/5 12-14 * * MON-FRI", "0 15-23 * * MON-FRI"]);
-        assert!(CRONS.iter().all(|(_, j)| j.len() == 1));
+        // Free Workers plan: at most 5 cron triggers per account; keep 3.
+        assert_eq!(CRONS.len(), 3);
+        // No comma lists: one cron, one pattern per field.
+        assert!(CRONS.iter().all(|(c, _)| !c.contains(',')));
         assert_eq!(jobs_for_cron("* * * * *"), None);
     }
 
     #[test]
     fn each_cron_maps_to_its_job() {
-        let want: [(&str, &str); 7] = [
-            ("*/5 12-14 * * MON-FRI", "premarket"),
-            ("0 15-23 * * MON-FRI", "premarket"),
-            ("*/5 17-23 * * MON-FRI", "recap"),
-            ("*/5 0 * * TUE-SAT", "recap"),
-            ("0 1-3 * * TUE-SAT", "recap"),
-            ("31 11 * * *", "competitor"),
-            ("31 12 * * *", "competitor"),
+        let want: [(&str, &[&str]); 3] = [
+            ("*/5 12-23 * * MON-FRI", &["premarket", "recap"]),
+            ("*/5 0-3 * * TUE-SAT", &["recap"]),
+            ("31 11-12 * * *", &["competitor"]),
         ];
-        for (cron, job) in want {
-            assert_eq!(jobs_for_cron(cron), Some(&[job][..]), "{cron}");
+        for (cron, jobs) in want {
+            assert_eq!(jobs_for_cron(cron), Some(jobs), "{cron}");
         }
         assert_eq!(CRONS.len(), want.len());
         // Every job has a cron.
@@ -299,6 +287,28 @@ mod tests {
                 }
             }
             assert!(in_window > 0, "{date}");
+        }
+    }
+
+    /// Closed days, including the 2026-11-01 DST change (a Sunday) and
+    /// weekday holidays the weekday cron still fires on: every firing's
+    /// clock decision is `NotToday`, so nothing builds.
+    #[test]
+    fn closed_days_never_build() {
+        for date in ["2026-11-01", "2026-11-26", "2026-12-25", "2026-10-31"] {
+            let d: NaiveDate = date.parse().unwrap();
+            assert_eq!(trading_day(d), crate::clock::DayKind::Closed, "{date}");
+            for t in minutes(date) {
+                if et(t).date_naive() != d {
+                    continue;
+                }
+                if fires("premarket", t) {
+                    assert_eq!(premarket_decision(t), SlotDecision::NotToday, "{t}");
+                }
+                if fires("recap", t) {
+                    assert_eq!(recap_decision(t), SlotDecision::NotToday, "{t}");
+                }
+            }
         }
     }
 
