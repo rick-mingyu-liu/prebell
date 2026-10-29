@@ -182,7 +182,7 @@ apps/web/
 - Headings EN `"Results"`, `"Margins and cash flow"`, `"Guidance"`, `"What else stood out"`; ZH `"业绩概览"`, `"利润率与现金流"`, `"业绩指引"`, `"其他要点"`.
 - `fn render_markdown(d: &Draft, f: &EarningsFacts) -> String` — key-figures table from facts (n/a / 暂缺 for Missing), LLM sections, "Sources" with the 8-K and the press release, disclaimer.
 - `async fn write(llm, f, lang) -> Result<(Draft, String), Vec<String>>` — same contract as `premarket::draft::write` (one retry with the problem list); also rejects forbidden consensus words and fails if the full rendered markdown (link targets removed) fails `numbers::check`.
-- `fn slug(f: &EarningsFacts) -> String`, `fn title_period(f, lang) -> String`.
+- `fn slug(f: &EarningsFacts) -> String`, `fn period_label(f, lang) -> Option<String>` ("Fiscal Q4 2026" / "2026财年第四季度"). The company name and ticker are masked before the full-page number check ("3M" is a name, not 3 million).
 
 - [ ] **Step 1: Failing tests (FakeLlm):** clean draft → Ok and markdown contains the revenue figure formatted from facts and both source links; unbacked "12%" then clean → Ok after 2 calls with "12%" in the second prompt; "beat estimates" twice → Err; a section with `[x](http…)` → Err; ZH draft with 亿 amounts matching facts → Ok; slug `aapl-q4-fy2026-earnings`, `brk-b-...`, and date fallback.
 - [ ] **Step 2–4:** FAIL → implement → PASS. **Step 5: Commit** `feat(core): bilingual earnings drafting`.

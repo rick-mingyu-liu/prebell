@@ -53,11 +53,11 @@ fn verdict_re(lang: Lang) -> &'static Regex {
     static ZH: OnceLock<Regex> = OnceLock::new();
     match lang {
         Lang::En => EN.get_or_init(|| {
-            Regex::new(r"(?i)\b(?:beats?|beating|miss(?:es|ed|ing)?|estimates?|estimated|consensus|expectations?|forecasters?|analysts?)\b")
+            Regex::new(r"(?i)\b(?:beat|beating|miss|misses|missed|estimates?|consensus|expectations?|wall street|topped|fell short)\b|\b(?:better|worse|stronger|weaker|higher|lower)\s+than\s+(?:expected|anticipated|forecast)")
                 .expect("valid built-in regex")
         }),
         Lang::Zh => ZH.get_or_init(|| {
-            Regex::new(r"预期|预估|共识|超出|不及|分析师").expect("valid built-in regex")
+            Regex::new(r"预期|预估|共识|預期|預估|共識|华尔街").expect("valid built-in regex")
         }),
     }
 }
@@ -98,7 +98,11 @@ pub fn period_label(f: &EarningsFacts, lang: Lang) -> Option<String> {
     Some(match (lang, p.quarter) {
         (Lang::En, Some(q)) => format!("Fiscal Q{q} {}", p.fiscal_year),
         (Lang::En, None) => format!("Fiscal year {}", p.fiscal_year),
-        (Lang::Zh, Some(q)) => format!("{}财年{}", p.fiscal_year, zh_q[q as usize]),
+        (Lang::Zh, Some(q)) => format!(
+            "{}财年{}",
+            p.fiscal_year,
+            zh_q.get(q as usize).copied().unwrap_or("")
+        ),
         (Lang::Zh, None) => format!("{}财年", p.fiscal_year),
     })
 }
@@ -195,6 +199,17 @@ fn without_link_targets(md: &str) -> String {
         .into_owned()
 }
 
+/// The company name and ticker replaced by placeholders before the number check.
+fn mask_names(text: &str, f: &EarningsFacts) -> String {
+    let mut out = text.to_string();
+    for name in [f.company.as_str(), f.ticker.as_str()] {
+        if !name.is_empty() {
+            out = out.replace(name, "NAME");
+        }
+    }
+    out
+}
+
 enum Problem {
     Llm(ProviderError),
     Malformed(String),
@@ -261,8 +276,9 @@ fn attempt(
     let v = v.map_err(Problem::Llm)?;
     let d = parse(&v, lang).map_err(Problem::Malformed)?;
     let md = render_markdown(&d, f);
-    // The whole page, code-rendered parts included, is checked.
-    check(&without_link_targets(&md), lang, allowed).map_err(|bad| {
+    // The whole page, code-rendered parts included, is checked. Names are
+    // not figures: "3M" must not read as three million.
+    check(&mask_names(&without_link_targets(&md), f), lang, allowed).map_err(|bad| {
         let mut seen = HashSet::new();
         Problem::Numbers(bad.into_iter().filter(|n| seen.insert(n.clone())).collect())
     })?;
@@ -423,6 +439,60 @@ pub(crate) mod tests {
         let l = llm(vec![bad.clone(), bad]);
         let e = write(&l, &facts(), Lang::En).await.unwrap_err();
         assert!(e[0].contains("forbidden markup"), "{e:?}");
+    }
+
+    #[tokio::test]
+    async fn names_with_digits_are_not_figures() {
+        let mut f = facts();
+        f.company = "3M".into();
+        f.ticker = "MMM".into();
+        let mut r = reply(Lang::En, "3M reported revenue of $102.5 billion.");
+        r["title"] = "3M fiscal Q4 2026 results".into();
+        let l = llm(vec![r]);
+        let (_, md) = write(&l, &f, Lang::En).await.unwrap();
+        assert!(md.contains("**3M (MMM)**"));
+    }
+
+    #[test]
+    fn verdict_words() {
+        let ok = |t: &str, lang| verdict_re(lang).find(t).is_none();
+        assert!(ok("Free cash flow is missing from the release.", Lang::En));
+        assert!(ok(
+            "Revenue is expected to grow 10 to 12 percent.",
+            Lang::En
+        ));
+        assert!(ok("Beats headphones sales rose.", Lang::En));
+        assert!(ok("营收超出1000亿美元。", Lang::Zh));
+        assert!(!ok("Revenue was better than expected.", Lang::En));
+        assert!(!ok("EPS topped Wall Street forecasts.", Lang::En));
+        assert!(!ok("Results missed estimates.", Lang::En));
+        assert!(!ok("业绩不及预期。", Lang::Zh));
+        assert!(!ok("華爾街預期", Lang::Zh));
+    }
+
+    #[tokio::test]
+    async fn zh_rounding_and_loss_through_full_page_check() {
+        let mut f = facts();
+        if let Field::Value(fig) = &mut f.metrics.revenue {
+            fig.value = 102.466e9;
+            fig.amount = "102,466".into();
+            fig.scale = 1e6;
+            fig.quote = "Total net sales $102,466 $94,930".into();
+        }
+        f.metrics.net_income = Field::Value(crate::earnings::facts::Figure {
+            value: -25e6,
+            unit: Unit::Usd,
+            amount: "$25 million".into(),
+            scale: 1.0,
+            quote: "Net loss was $25 million in the quarter.".into(),
+        });
+        // The revenue quote is now a table row, so "up 8 percent" is gone.
+        let mut r = reply(Lang::Zh, "营收1024.7亿美元，净亏损2500万美元。");
+        r["summary"] = "营收1024.7亿美元。".into();
+        let l = llm(vec![r]);
+        let (_, md) = write(&l, &f, Lang::Zh).await.unwrap();
+        assert!(md.contains("| 营收 | 1024.7亿美元 |"), "{md}");
+        assert!(md.contains("| 净利润（GAAP） | -2500万美元 |"), "{md}");
     }
 
     #[test]
