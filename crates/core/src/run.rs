@@ -64,6 +64,12 @@ async fn step(
         return retry_zh(now, store, llm, r).await;
     }
     let in_flight = run.as_ref().is_some_and(|r| r.status == "building" && !is_stale(r, now));
+    let may_act = matches!(decision, SlotDecision::InWindow { .. } | SlotDecision::PastDeadline { .. });
+    if may_act && !in_flight {
+        if let Some(r) = reconcile(now, store, date, run.clone()).await? {
+            return retry_zh(now, store, llm, &r).await;
+        }
+    }
 
     match decision {
         SlotDecision::InWindow { .. } if in_flight => Ok(TickOutcome::Nothing),
@@ -73,6 +79,39 @@ async fn step(
         SlotDecision::PastDeadline { .. } => skip(now, store, date, run).await,
         _ => Ok(TickOutcome::Nothing),
     }
+}
+
+/// A store failure part-way through publishing can leave EN live while the
+/// run is not `published`. If so, mark the run published (adding a pending
+/// ZH row when none exists) without touching EN, and return the run.
+async fn reconcile(
+    now: DateTime<Utc>,
+    store: &dyn Store,
+    date: NaiveDate,
+    run: Option<RunRow>,
+) -> Result<Option<RunRow>, String> {
+    let Some(post) = store.get_post_by_run(&run_key(date)).await else {
+        return Ok(None);
+    };
+    let post_id = post.id.ok_or("post has no id")?;
+    if !store.get_translation(post_id, "en").await.is_some_and(|t| t.status == "published") {
+        return Ok(None);
+    }
+    let ts = iso(now);
+    if store.get_translation(post_id, "zh").await.is_none() {
+        let pending = translation_zh(post_id, "pending", String::new(), String::new(), String::new(), &ts);
+        store.upsert_translation(&pending).await?;
+    }
+    // The failed write may have been `add_sources`; it replaces, so redo it.
+    if let Some(json) = store.get_facts(&post.facts_r2_key).await {
+        let facts: PremarketFacts = serde_json::from_str(&json).map_err(|e| format!("facts json: {e}"))?;
+        store.add_sources(post_id, &sources(&facts)).await?;
+    }
+    let mut row = run.unwrap_or_else(|| new_run(now, date));
+    row.status = "published".into();
+    row.updated_at = ts;
+    store.upsert_run(&row).await?;
+    Ok(Some(row))
 }
 
 fn is_stale(r: &RunRow, now: DateTime<Utc>) -> bool {
@@ -255,7 +294,8 @@ mod tests {
     use super::*;
     use crate::facts::Quote;
     use crate::providers::{ProviderError, SearchHit};
-    use crate::store::{MemStore, PostRow, RunRow};
+    use crate::facts::NewsReason;
+    use crate::store::{MemStore, PostRow, RunRow, TranslationRow};
     use async_trait::async_trait;
     use serde_json::{json, Value};
     use std::cell::Cell;
@@ -548,5 +588,108 @@ mod tests {
         let out = tick(utc("2026-10-29T12:25:00Z"), &s, &md(true), &FakeNs, &llm(true, true)).await;
         assert_eq!(out, TickOutcome::Nothing);
         assert!(s.runs.borrow().is_empty());
+    }
+    /// MemStore that fails selected writes once each.
+    #[derive(Default)]
+    struct FailStore {
+        inner: MemStore,
+        fail_published_run: Cell<bool>,
+        fail_zh_row: Cell<bool>,
+    }
+    #[async_trait(?Send)]
+    impl Store for FailStore {
+        async fn get_run(&self, key: &str) -> Option<RunRow> {
+            self.inner.get_run(key).await
+        }
+        async fn upsert_run(&self, r: &RunRow) -> Result<(), String> {
+            if r.status == "published" && self.fail_published_run.replace(false) {
+                return Err("d1: upsert_run failed".into());
+            }
+            self.inner.upsert_run(r).await
+        }
+        async fn get_post_by_run(&self, run_key: &str) -> Option<PostRow> {
+            self.inner.get_post_by_run(run_key).await
+        }
+        async fn upsert_post(&self, p: &PostRow) -> Result<i64, String> {
+            self.inner.upsert_post(p).await
+        }
+        async fn get_translation(&self, post_id: i64, lang: &str) -> Option<TranslationRow> {
+            self.inner.get_translation(post_id, lang).await
+        }
+        async fn upsert_translation(&self, t: &TranslationRow) -> Result<(), String> {
+            if t.lang == "zh" && self.fail_zh_row.replace(false) {
+                return Err("d1: zh row failed".into());
+            }
+            self.inner.upsert_translation(t).await
+        }
+        async fn add_sources(&self, post_id: i64, s: &[NewsReason]) -> Result<(), String> {
+            self.inner.add_sources(post_id, s).await
+        }
+        async fn add_alert(&self, run_key: &str, level: &str, msg: &str) -> Result<(), String> {
+            self.inner.add_alert(run_key, level, msg).await
+        }
+        async fn put_facts(&self, key: &str, json: &str) -> Result<(), String> {
+            self.inner.put_facts(key, json).await
+        }
+        async fn get_facts(&self, key: &str) -> Option<String> {
+            self.inner.get_facts(key).await
+        }
+    }
+
+    /// First tick publishes EN, then the final run write fails.
+    async fn en_written_run_write_failed() -> (FailStore, FakeMd, FakeLlm, TranslationRow, PostRow) {
+        let s = FailStore::default();
+        s.fail_published_run.set(true);
+        let (m, l) = (md(true), llm(true, true));
+        let out = tick(utc("2026-10-29T12:30:00Z"), &s, &m, &FakeNs, &l).await;
+        assert_eq!(out, TickOutcome::Retrying("d1: upsert_run failed".into()));
+        assert_eq!(run_status(&s.inner), "building");
+        let en = s.inner.translations.borrow()[&(1, "en".to_string())].clone();
+        assert_eq!(en.status, "published");
+        let post = s.inner.posts.borrow()[0].clone();
+        (s, m, l, en, post)
+    }
+
+    #[tokio::test]
+    async fn failed_run_write_is_reconciled_without_rebuild() {
+        let (s, m, l, en, post) = en_written_run_write_failed().await;
+        let (md_calls, llm_calls) = (m.calls.get(), l.calls.get());
+        let out = tick(utc("2026-10-29T12:35:00Z"), &s, &m, &FakeNs, &l).await;
+        assert_eq!(out, TickOutcome::Nothing);
+        assert_eq!(run_status(&s.inner), "published");
+        assert_eq!((m.calls.get(), l.calls.get()), (md_calls, llm_calls));
+        assert_eq!(s.inner.translations.borrow()[&(1, "en".to_string())], en);
+        assert_eq!(s.inner.posts.borrow().as_slice(), &[post]);
+        assert_eq!(tr_status(&s.inner, "zh"), "published");
+        assert_eq!(s.inner.sources.borrow()[&1].len(), 1);
+    }
+
+    #[tokio::test]
+    async fn failed_run_write_is_not_skipped_past_deadline() {
+        let (s, m, l, en, post) = en_written_run_write_failed().await;
+        let out = tick(utc("2026-10-29T13:25:00Z"), &s, &m, &FakeNs, &l).await;
+        assert_ne!(out, TickOutcome::Skipped);
+        assert_eq!(run_status(&s.inner), "published");
+        assert!(s.inner.alerts.borrow().iter().all(|a| a.1 != "error"));
+        assert_eq!(s.inner.translations.borrow()[&(1, "en".to_string())], en);
+        assert_eq!(s.inner.posts.borrow().as_slice(), &[post]);
+    }
+
+    #[tokio::test]
+    async fn failed_zh_row_write_is_retried_later() {
+        let s = FailStore::default();
+        s.fail_zh_row.set(true);
+        let (m, l) = (md(true), llm(true, true));
+        let out = tick(utc("2026-10-29T12:30:00Z"), &s, &m, &FakeNs, &l).await;
+        assert_eq!(out, TickOutcome::Retrying("d1: zh row failed".into()));
+        assert!(!s.inner.translations.borrow().contains_key(&(1, "zh".to_string())));
+        let (md_calls, llm_calls) = (m.calls.get(), l.calls.get());
+        let out = tick(utc("2026-10-29T12:35:00Z"), &s, &m, &FakeNs, &l).await;
+        assert_eq!(out, TickOutcome::Published);
+        assert_eq!(run_status(&s.inner), "published");
+        assert_eq!(tr_status(&s.inner, "zh"), "published");
+        // Only the ZH draft ran: no market data, one LLM call.
+        assert_eq!((m.calls.get(), l.calls.get()), (md_calls, llm_calls + 1));
+        assert_eq!(s.inner.posts.borrow().len(), 1);
     }
 }
