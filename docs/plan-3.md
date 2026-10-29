@@ -87,7 +87,7 @@ apps/web/
 
 ### Task 1: Schema `0003_earnings.sql` + this plan
 
-**Files:** Create `docs/plan-3.md`, `migrations/0003_earnings.sql`; Test: `migrations/smoke_0003.sql`.
+**Files:** Create `docs/plan-3.md`, `migrations/0003_earnings.sql`. (No smoke file under `migrations/`: wrangler applies every `.sql` there. The web tests load the schema instead, Task 12.)
 
 **Interfaces (tables later tasks use by these exact names):**
 - `earnings_filings(accession TEXT PK, cik INTEGER, ticker TEXT, form TEXT, items TEXT, filing_date TEXT, report_date TEXT, accepted_at TEXT, primary_doc TEXT, run_key TEXT UNIQUE, state TEXT CHECK IN ('open','done'), detected_at TEXT)` + index `(state, accepted_at)`, `(ticker)`.
@@ -96,8 +96,8 @@ apps/web/
 - `kv(key TEXT PK, value TEXT, updated_at TEXT)` — small generator state (calendar refresh date).
 
 - [ ] **Step 1:** Write the plan (this file). Commit `docs: Plan 3 earnings plan`.
-- [ ] **Step 2:** Write the migration and a smoke script inserting one row in each table (plus a run/post for the FK), selecting them joined.
-- [ ] **Step 3: Verify** `pnpm exec wrangler d1 execute prebell --local --file migrations/0001_init.sql` then `0003` then smoke → rows (local only). Web tests load all migrations (Task 12).
+- [ ] **Step 2:** Write the migration. A scratch smoke script inserts one row in each table (plus a run/post for the FK) and selects them joined.
+- [ ] **Step 3: Verify** `wrangler d1 migrations apply prebell --local -c crates/generator/wrangler.toml --persist-to <scratch>` applies 0001 and 0003; the smoke script returns the joined row (local only).
 - [ ] **Step 4: Commit** `feat(db): earnings schema`.
 
 ---
