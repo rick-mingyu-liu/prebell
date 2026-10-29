@@ -67,8 +67,10 @@ async fn extract(
     Ok(items
         .into_iter()
         .filter_map(|it| serde_json::from_value::<NewsReason>(it).ok())
-        .filter(|r| {
-            hits.iter().any(|h| h.url == r.url && verify_reason(&h.content, r))
+        .filter_map(|r| {
+            let h = hits.iter().find(|h| h.url == r.url && verify_reason(&h.content, &r))?;
+            // Title and url come from the fetched hit, never from the LLM.
+            Some(NewsReason { url: h.url.clone(), title: h.title.clone(), ..r })
         })
         .take(max)
         .collect())
@@ -293,6 +295,20 @@ mod tests {
         let f = build_facts(&m, &n, &l, date(), now()).await;
         assert_eq!(f.gainers.len(), 1);
         assert_eq!(f.gainers[0].reasons, vec![]);
+    }
+
+    #[tokio::test]
+    async fn kept_reason_carries_hit_title_not_llm_title() {
+        let m = md(&[q("AAPL", 230.0, 8.0, Some(2_000_000))]);
+        let n = ns(vec![(AAPL_Q, Ok(vec![hit(URL, ARTICLE)]))]);
+        let l = llm(vec![(
+            "AAPL",
+            Ok(json!({"reasons": [{"url": URL, "title": "Apple to be acquired, sources say", "quote": QUOTE, "summary_en": "Apple rose."}]})),
+        )]);
+        let f = build_facts(&m, &n, &l, date(), now()).await;
+        assert_eq!(f.gainers[0].reasons.len(), 1);
+        assert_eq!(f.gainers[0].reasons[0].title, "Title");
+        assert_eq!(f.gainers[0].reasons[0].url, URL);
     }
 
     #[tokio::test]
