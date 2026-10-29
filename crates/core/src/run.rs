@@ -62,7 +62,8 @@ async fn step(
         }
     };
     let key = run_key(date);
-    let run = store.get_run(&key).await;
+    // Any read error aborts the tick before a write: a failed read is never "no row".
+    let run = store.get_run(&key).await?;
 
     if let Some(r) = run.as_ref().filter(|r| r.status == "published") {
         return retry_zh(now, store, llm, r).await;
@@ -99,19 +100,19 @@ async fn reconcile(
     date: NaiveDate,
     run: Option<RunRow>,
 ) -> Result<Option<RunRow>, String> {
-    let Some(post) = store.get_post_by_run(&run_key(date)).await else {
+    let Some(post) = store.get_post_by_run(&run_key(date)).await? else {
         return Ok(None);
     };
     let post_id = post.id.ok_or("post has no id")?;
     if !store
         .get_translation(post_id, "en")
-        .await
+        .await?
         .is_some_and(|t| t.status == "published")
     {
         return Ok(None);
     }
     let ts = iso(now);
-    if store.get_translation(post_id, "zh").await.is_none() {
+    if store.get_translation(post_id, "zh").await?.is_none() {
         let pending = translation_zh(
             post_id,
             "pending",
@@ -123,7 +124,7 @@ async fn reconcile(
         store.upsert_translation(&pending).await?;
     }
     // The failed write may have been `add_sources`; it replaces, so redo it.
-    if let Some(json) = store.get_facts(&post.facts_r2_key).await {
+    if let Some(json) = store.get_facts(&post.facts_r2_key).await? {
         let facts: PremarketFacts =
             serde_json::from_str(&json).map_err(|e| format!("facts json: {e}"))?;
         store.add_sources(post_id, &sources(&facts)).await?;
@@ -329,17 +330,17 @@ async fn retry_zh(
 ) -> Result<TickOutcome, String> {
     let post = store
         .get_post_by_run(&run.run_key)
-        .await
+        .await?
         .ok_or("published run has no post")?;
     let post_id = post.id.ok_or("post has no id")?;
-    if let Some(t) = store.get_translation(post_id, "zh").await {
+    if let Some(t) = store.get_translation(post_id, "zh").await? {
         if t.status != "pending" {
             return Ok(TickOutcome::Nothing);
         }
     }
     let json = store
         .get_facts(&post.facts_r2_key)
-        .await
+        .await?
         .ok_or("facts not found")?;
     let facts: PremarketFacts =
         serde_json::from_str(&json).map_err(|e| format!("facts json: {e}"))?;
@@ -790,16 +791,20 @@ mod tests {
         assert_eq!(out, TickOutcome::Nothing);
         assert!(s.runs.borrow().is_empty());
     }
-    /// MemStore that fails selected writes once each.
+    /// MemStore that fails selected writes once each, and can fail `get_run`.
     #[derive(Default)]
     struct FailStore {
         inner: MemStore,
         fail_published_run: Cell<bool>,
         fail_zh_row: Cell<bool>,
+        fail_get_run: Cell<bool>,
     }
     #[async_trait(?Send)]
     impl Store for FailStore {
-        async fn get_run(&self, key: &str) -> Option<RunRow> {
+        async fn get_run(&self, key: &str) -> Result<Option<RunRow>, String> {
+            if self.fail_get_run.get() {
+                return Err("d1: get_run failed".into());
+            }
             self.inner.get_run(key).await
         }
         async fn upsert_run(&self, r: &RunRow) -> Result<(), String> {
@@ -808,13 +813,17 @@ mod tests {
             }
             self.inner.upsert_run(r).await
         }
-        async fn get_post_by_run(&self, run_key: &str) -> Option<PostRow> {
+        async fn get_post_by_run(&self, run_key: &str) -> Result<Option<PostRow>, String> {
             self.inner.get_post_by_run(run_key).await
         }
         async fn upsert_post(&self, p: &PostRow) -> Result<i64, String> {
             self.inner.upsert_post(p).await
         }
-        async fn get_translation(&self, post_id: i64, lang: &str) -> Option<TranslationRow> {
+        async fn get_translation(
+            &self,
+            post_id: i64,
+            lang: &str,
+        ) -> Result<Option<TranslationRow>, String> {
             self.inner.get_translation(post_id, lang).await
         }
         async fn upsert_translation(&self, t: &TranslationRow) -> Result<(), String> {
@@ -832,7 +841,7 @@ mod tests {
         async fn put_facts(&self, key: &str, json: &str) -> Result<(), String> {
             self.inner.put_facts(key, json).await
         }
-        async fn get_facts(&self, key: &str) -> Option<String> {
+        async fn get_facts(&self, key: &str) -> Result<Option<String>, String> {
             self.inner.get_facts(key).await
         }
     }
@@ -897,5 +906,43 @@ mod tests {
         // Only the ZH draft ran: no market data, one LLM call.
         assert_eq!((m.calls.get(), l.calls.get()), (md_calls, llm_calls + 1));
         assert_eq!(s.inner.posts.borrow().len(), 1);
+    }
+
+    fn published_run() -> RunRow {
+        RunRow {
+            status: "published".into(),
+            ..building_run("2026-10-29T12:30:00Z")
+        }
+    }
+
+    #[tokio::test]
+    async fn get_run_read_error_retries_without_writes() {
+        // Empty store and a store holding a published run: a read error on the
+        // run must never look like "no row".
+        for seeded in [false, true] {
+            let s = FailStore::default();
+            if seeded {
+                s.inner
+                    .runs
+                    .borrow_mut()
+                    .insert(KEY.into(), published_run());
+            }
+            s.fail_get_run.set(true);
+            let (m, l) = (md(true), llm(true, true));
+            for now in ["2026-10-29T12:30:00Z", "2026-10-29T13:30:00Z"] {
+                let out = tick(utc(now), &s, &m, &FakeNs, &l).await;
+                assert_eq!(out, TickOutcome::Retrying("d1: get_run failed".into()));
+            }
+            assert_eq!((m.calls.get(), l.calls.get()), (0, 0));
+            if seeded {
+                assert_eq!(s.inner.runs.borrow()[KEY], published_run());
+            } else {
+                assert!(s.inner.runs.borrow().is_empty());
+            }
+            assert!(s.inner.posts.borrow().is_empty());
+            assert!(s.inner.translations.borrow().is_empty());
+            assert!(s.inner.facts.borrow().is_empty());
+            assert!(s.inner.alerts.borrow().is_empty());
+        }
     }
 }

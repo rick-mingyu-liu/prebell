@@ -1,5 +1,6 @@
 //! `Store` on D1 (rows) and R2 (facts JSON). Column names follow
-//! `migrations/0001_init.sql`; NULL text columns read back as "".
+//! `migrations/0001_init.sql`; NULL text columns read back as "". Read
+//! failures are returned as `Err`, never as a missing row.
 
 use async_trait::async_trait;
 use marketsite_core::facts::NewsReason;
@@ -7,7 +8,7 @@ use marketsite_core::store::{PostRow, RunRow, Store, TranslationRow};
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use worker::wasm_bindgen::JsValue;
-use worker::{console_error, Bucket, D1Database};
+use worker::{Bucket, D1Database};
 
 pub struct D1Store {
     pub db: D1Database,
@@ -103,14 +104,6 @@ impl D1Store {
         }
     }
 
-    /// Logs a read failure and treats it as "no row".
-    fn logged<T>(r: Result<Option<T>, String>) -> Option<T> {
-        r.unwrap_or_else(|e| {
-            console_error!("D1 read failed: {e}");
-            None
-        })
-    }
-
     pub async fn unsent_alerts(&self) -> Result<Vec<AlertRec>, String> {
         let sql = "SELECT id, run_key, level, message FROM alerts WHERE sent = 0 ORDER BY id";
         let r = self.db.prepare(sql).all().await.map_err(|e| err(sql, e))?;
@@ -125,16 +118,14 @@ impl D1Store {
 
 #[async_trait(?Send)]
 impl Store for D1Store {
-    async fn get_run(&self, key: &str) -> Option<RunRow> {
-        let r: Option<RunRec> = Self::logged(
-            self.first(
-                "SELECT run_key, content_type, trading_date, status, attempts, last_error, created_at, updated_at \
-                 FROM runs WHERE run_key = ?1",
-                &[s(key)],
-            )
-            .await,
-        );
-        r.map(|r| RunRow {
+    async fn get_run(&self, key: &str) -> Result<Option<RunRow>, String> {
+        let r: Option<RunRec> = self.first(
+            "SELECT run_key, content_type, trading_date, status, attempts, last_error, created_at, updated_at \
+             FROM runs WHERE run_key = ?1",
+            &[s(key)],
+        )
+        .await?;
+        Ok(r.map(|r| RunRow {
             run_key: r.run_key,
             content_type: r.content_type,
             trading_date: r.trading_date,
@@ -143,7 +134,7 @@ impl Store for D1Store {
             last_error: r.last_error,
             created_at: r.created_at,
             updated_at: r.updated_at,
-        })
+        }))
     }
 
     async fn upsert_run(&self, r: &RunRow) -> Result<(), String> {
@@ -167,16 +158,14 @@ impl Store for D1Store {
         .await
     }
 
-    async fn get_post_by_run(&self, run_key: &str) -> Option<PostRow> {
-        let r: Option<PostRec> = Self::logged(
-            self.first(
-                "SELECT id, run_key, content_type, template_id, trading_date, slug, facts_r2_key, published_at \
-                 FROM posts WHERE run_key = ?1",
-                &[s(run_key)],
-            )
-            .await,
-        );
-        r.map(|p| PostRow {
+    async fn get_post_by_run(&self, run_key: &str) -> Result<Option<PostRow>, String> {
+        let r: Option<PostRec> = self.first(
+            "SELECT id, run_key, content_type, template_id, trading_date, slug, facts_r2_key, published_at \
+             FROM posts WHERE run_key = ?1",
+            &[s(run_key)],
+        )
+        .await?;
+        Ok(r.map(|p| PostRow {
             id: Some(p.id),
             run_key: p.run_key,
             content_type: p.content_type,
@@ -185,7 +174,7 @@ impl Store for D1Store {
             slug: p.slug,
             facts_r2_key: p.facts_r2_key.unwrap_or_default(),
             published_at: p.published_at,
-        })
+        }))
     }
 
     async fn upsert_post(&self, p: &PostRow) -> Result<i64, String> {
@@ -212,16 +201,19 @@ impl Store for D1Store {
             .ok_or_else(|| "upsert_post returned no id".to_string())
     }
 
-    async fn get_translation(&self, post_id: i64, lang: &str) -> Option<TranslationRow> {
-        let r: Option<TrRec> = Self::logged(
-            self.first(
+    async fn get_translation(
+        &self,
+        post_id: i64,
+        lang: &str,
+    ) -> Result<Option<TranslationRow>, String> {
+        let r: Option<TrRec> = self
+            .first(
                 "SELECT post_id, lang, status, title, summary, body_md, updated_at \
-                 FROM post_translations WHERE post_id = ?1 AND lang = ?2",
+             FROM post_translations WHERE post_id = ?1 AND lang = ?2",
                 &[int(post_id), s(lang)],
             )
-            .await,
-        );
-        r.map(|t| TranslationRow {
+            .await?;
+        Ok(r.map(|t| TranslationRow {
             post_id: t.post_id,
             lang: t.lang,
             status: t.status,
@@ -229,7 +221,7 @@ impl Store for D1Store {
             summary: t.summary.unwrap_or_default(),
             body_md: t.body_md.unwrap_or_default(),
             updated_at: t.updated_at.unwrap_or_default(),
-        })
+        }))
     }
 
     async fn upsert_translation(&self, t: &TranslationRow) -> Result<(), String> {
@@ -285,20 +277,20 @@ impl Store for D1Store {
             .map_err(|e| err("R2 put", e))
     }
 
-    async fn get_facts(&self, key: &str) -> Option<String> {
-        let obj = match self.facts.get(key).execute().await {
-            Ok(o) => o?,
-            Err(e) => {
-                console_error!("R2 get {key} failed: {e}");
-                return None;
-            }
+    async fn get_facts(&self, key: &str) -> Result<Option<String>, String> {
+        let ctx = format!("R2 get {key}");
+        let Some(obj) = self
+            .facts
+            .get(key)
+            .execute()
+            .await
+            .map_err(|e| err(&ctx, e))?
+        else {
+            return Ok(None);
         };
-        match obj.body()?.text().await {
-            Ok(t) => Some(t),
-            Err(e) => {
-                console_error!("R2 read {key} failed: {e}");
-                None
-            }
-        }
+        let body = obj
+            .body()
+            .ok_or_else(|| format!("{ctx}: object has no body"))?;
+        body.text().await.map(Some).map_err(|e| err(&ctx, e))
     }
 }

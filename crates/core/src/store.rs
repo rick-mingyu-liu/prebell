@@ -51,14 +51,19 @@ pub struct TranslationRow {
 
 #[async_trait(?Send)]
 pub trait Store {
-    async fn get_run(&self, key: &str) -> Option<RunRow>;
+    /// Reads return `Err` on a store failure and `Ok(None)` only when the row is absent.
+    async fn get_run(&self, key: &str) -> Result<Option<RunRow>, String>;
     /// Insert or replace by `run_key`.
     async fn upsert_run(&self, r: &RunRow) -> Result<(), String>;
-    async fn get_post_by_run(&self, run_key: &str) -> Option<PostRow>;
+    async fn get_post_by_run(&self, run_key: &str) -> Result<Option<PostRow>, String>;
     /// Insert or update by `run_key`; returns the existing id when the run
     /// already has a post, so re-runs never create a second post.
     async fn upsert_post(&self, p: &PostRow) -> Result<i64, String>;
-    async fn get_translation(&self, post_id: i64, lang: &str) -> Option<TranslationRow>;
+    async fn get_translation(
+        &self,
+        post_id: i64,
+        lang: &str,
+    ) -> Result<Option<TranslationRow>, String>;
     /// Insert or replace by `(post_id, lang)`.
     async fn upsert_translation(&self, t: &TranslationRow) -> Result<(), String>;
     /// Replaces the post's sources with `s` (idempotent per post).
@@ -66,7 +71,7 @@ pub trait Store {
     async fn add_alert(&self, run_key: &str, level: &str, msg: &str) -> Result<(), String>;
     /// Stores the facts JSON (R2 in production) under `key`.
     async fn put_facts(&self, key: &str, json: &str) -> Result<(), String>;
-    async fn get_facts(&self, key: &str) -> Option<String>;
+    async fn get_facts(&self, key: &str) -> Result<Option<String>, String>;
 }
 
 /// In-memory `Store` for tests.
@@ -83,19 +88,20 @@ pub struct MemStore {
 
 #[async_trait(?Send)]
 impl Store for MemStore {
-    async fn get_run(&self, key: &str) -> Option<RunRow> {
-        self.runs.borrow().get(key).cloned()
+    async fn get_run(&self, key: &str) -> Result<Option<RunRow>, String> {
+        Ok(self.runs.borrow().get(key).cloned())
     }
     async fn upsert_run(&self, r: &RunRow) -> Result<(), String> {
         self.runs.borrow_mut().insert(r.run_key.clone(), r.clone());
         Ok(())
     }
-    async fn get_post_by_run(&self, run_key: &str) -> Option<PostRow> {
-        self.posts
+    async fn get_post_by_run(&self, run_key: &str) -> Result<Option<PostRow>, String> {
+        Ok(self
+            .posts
             .borrow()
             .iter()
             .find(|p| p.run_key == run_key)
-            .cloned()
+            .cloned())
     }
     async fn upsert_post(&self, p: &PostRow) -> Result<i64, String> {
         let mut posts = self.posts.borrow_mut();
@@ -111,11 +117,16 @@ impl Store for MemStore {
         });
         Ok(id)
     }
-    async fn get_translation(&self, post_id: i64, lang: &str) -> Option<TranslationRow> {
-        self.translations
+    async fn get_translation(
+        &self,
+        post_id: i64,
+        lang: &str,
+    ) -> Result<Option<TranslationRow>, String> {
+        Ok(self
+            .translations
             .borrow()
             .get(&(post_id, lang.to_string()))
-            .cloned()
+            .cloned())
     }
     async fn upsert_translation(&self, t: &TranslationRow) -> Result<(), String> {
         self.translations
@@ -137,7 +148,7 @@ impl Store for MemStore {
         self.facts.borrow_mut().insert(key.into(), json.into());
         Ok(())
     }
-    async fn get_facts(&self, key: &str) -> Option<String> {
-        self.facts.borrow().get(key).cloned()
+    async fn get_facts(&self, key: &str) -> Result<Option<String>, String> {
+        Ok(self.facts.borrow().get(key).cloned())
     }
 }
