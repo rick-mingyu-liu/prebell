@@ -123,8 +123,8 @@ pub fn render_markdown(d: &Draft, f: &RecapFacts) -> String {
 /// Drafts one language from the facts (one retry, as for the premarket
 /// brief), then checks every number in the rendered body, tables included.
 /// Source link titles are verbatim citations and are not checked. Company
-/// names come from the universe file, so their digits ("3M") are allowed in
-/// the rendered check only.
+/// names come from the universe file, so their digits ("3M", "Phillips 66")
+/// are allowed.
 pub async fn write(
     llm: &dyn LlmProvider,
     f: &RecapFacts,
@@ -132,7 +132,10 @@ pub async fn write(
 ) -> Result<(Draft, String), Vec<String>> {
     let facts_json =
         serde_json::to_string_pretty(f).map_err(|e| vec![format!("draft: facts json: {e}")])?;
-    let allowed = numbers_in_facts(f);
+    let mut allowed = numbers_in_facts(f);
+    for m in f.gainers.iter().chain(&f.losers) {
+        allowed.extend(extract(&m.name, Lang::En).into_iter().map(|n| n.value));
+    }
     let (d, md) = write_with(
         llm,
         prompt(lang),
@@ -143,16 +146,31 @@ pub async fn write(
         |d| render_markdown(d, f),
     )
     .await?;
-    let mut rendered_allowed = allowed;
-    for m in f.gainers.iter().chain(&f.losers) {
-        rendered_allowed.extend(extract(&m.name, Lang::En).into_iter().map(|n| n.value));
-    }
-    check(&render_body(&d, f), lang, &rendered_allowed).map_err(|bad| {
+    allowed.extend(table_values(f));
+    check(&render_body(&d, f), lang, &allowed).map_err(|bad| {
         bad.into_iter()
             .map(|n| format!("rendered: {n}"))
             .collect::<Vec<_>>()
     })?;
     Ok((d, md))
+}
+
+/// The table cells exactly as printed. `format!` rounds ties half-to-even on
+/// the binary value while the checker rounds half away from zero, so a fact
+/// like 2230.125 prints as "2,230.12"; the printed value is still the fact.
+fn table_values(f: &RecapFacts) -> Vec<f64> {
+    let quotes = f
+        .indexes
+        .iter()
+        .filter_map(|(_, fq)| match fq {
+            Field::Value(q) => Some(q),
+            Field::Missing { .. } => None,
+        })
+        .chain(f.gainers.iter().chain(&f.losers).map(|m| &m.quote));
+    quotes
+        .flat_map(|q| [format!("{:.2}", q.last), format!("{:.2}", q.change_pct)])
+        .filter_map(|s| s.parse().ok())
+        .collect()
 }
 
 #[cfg(test)]
@@ -360,5 +378,30 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(err, vec!["rendered: 44%"]);
+    }
+
+    #[tokio::test]
+    async fn names_with_digits_pass_in_prose() {
+        let mut f = facts();
+        f.losers = vec![Mover {
+            quote: quote("PSX", 130.0, -2.5),
+            name: "Phillips 66".into(),
+            reasons: vec![],
+        }];
+        let l = llm(vec![reply(Lang::En, "Phillips 66 fell 2.5%.")]);
+        assert!(write(&l, &f, Lang::En).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn half_way_values_render_and_pass() {
+        let mut f = facts();
+        if let Field::Value(q) = &mut f.indexes[3].1 {
+            q.last = 2230.125;
+            q.change_pct = 0.015;
+        }
+        let (_, md) = write(&llm(vec![clean(Lang::En)]), &f, Lang::En)
+            .await
+            .unwrap();
+        assert!(md.contains("| Russell 2000 | 2,230.12 | +0.01% |"), "{md}");
     }
 }
