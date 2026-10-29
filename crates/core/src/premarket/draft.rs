@@ -300,11 +300,28 @@ fn parse(v: &Value, lang: Lang, want: &[&str]) -> Result<Draft, String> {
     })
 }
 
+/// `text` with each whole-word occurrence of `names` replaced by a space, so
+/// digits that belong to a known name ("3M", "Phillips 66") are not checked
+/// as figures, without allowing those digits anywhere else.
+pub(crate) fn blank_names(text: &str, names: &[&str]) -> String {
+    let mut out = text.to_string();
+    for name in names.iter().filter(|n| !n.is_empty()) {
+        let re = Regex::new(&format!(r"(^|[^\w.$]){}($|[^\w])", regex::escape(name)))
+            .expect("escaped name is a valid regex");
+        // Twice, since adjacent matches share their boundary character.
+        for _ in 0..2 {
+            out = re.replace_all(&out, "${1} ${2}").into_owned();
+        }
+    }
+    out
+}
+
 fn attempt(
     v: Result<Value, ProviderError>,
     lang: Lang,
     want: &[&str],
     allowed: &[f64],
+    names: &[&str],
 ) -> Result<Draft, Problem> {
     let v = v.map_err(Problem::Llm)?;
     let d = parse(&v, lang, want).map_err(Problem::Malformed)?;
@@ -312,7 +329,7 @@ fn attempt(
     for (h, m) in &d.sections {
         text.push_str(&format!("\n{h}\n{m}"));
     }
-    check(&text, lang, allowed).map_err(|bad| {
+    check(&blank_names(&text, names), lang, allowed).map_err(|bad| {
         let mut seen = HashSet::new();
         Problem::Numbers(bad.into_iter().filter(|n| seen.insert(n.clone())).collect())
     })?;
@@ -351,6 +368,7 @@ pub async fn write(
         prompt(lang),
         &facts_json,
         &numbers_in_facts(f),
+        &[],
         &headings(lang),
         lang,
         |d| render_markdown(d, f),
@@ -360,13 +378,16 @@ pub async fn write(
 
 /// The drafting loop shared by every content type: ask `llm` with `system`
 /// and the facts JSON, require exactly `headings`, reject markup, check every
-/// number against `allowed`, and retry once with the problems appended. On
-/// success returns the draft and `render(draft)`.
+/// number against `allowed` (ignoring the digits of known `names`), and
+/// retry once with the problems appended. On success returns the draft and
+/// `render(draft)`.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn write_with(
     llm: &dyn LlmProvider,
     system: &str,
     facts_json: &str,
     allowed: &[f64],
+    names: &[&str],
     headings: &[&str],
     lang: Lang,
     render: impl Fn(&Draft) -> String,
@@ -379,6 +400,7 @@ pub(crate) async fn write_with(
             lang,
             headings,
             allowed,
+            names,
         ) {
             Ok(d) => {
                 let md = render(&d);
@@ -766,6 +788,7 @@ mod tests {
             "SYS",
             "{}",
             &[0.45],
+            &[],
             &["A", "B"],
             Lang::En,
             |d: &Draft| format!("rendered {}", d.sections.len()),
@@ -778,5 +801,14 @@ mod tests {
         assert_eq!(p.len(), 2);
         assert_eq!(p[0], ("SYS".to_string(), "{}".to_string()));
         assert!(p[1].1.starts_with("{}") && p[1].1.contains("Your reply was invalid"));
+    }
+
+    #[test]
+    fn blank_names_only_whole_names() {
+        let t = "3M fell; 3M's peer rose 33M and $3M; Phillips 66 gained 66%.";
+        assert_eq!(
+            blank_names(t, &["3M", "Phillips 66"]),
+            "  fell;  's peer rose 33M and $3M;   gained 66%."
+        );
     }
 }

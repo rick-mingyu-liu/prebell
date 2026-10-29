@@ -3,8 +3,10 @@
 //! the tables from the facts, and the rendered body is number-checked too.
 
 use crate::facts::{Field, Mover, NewsReason};
-use crate::numbers::{check, extract, Lang};
-use crate::premarket::draft::{cell, fmt_num, fmt_pct, na, render_sources, write_with, Draft};
+use crate::numbers::{check, Lang};
+use crate::premarket::draft::{
+    blank_names, cell, fmt_num, fmt_pct, na, render_sources, write_with, Draft,
+};
 use crate::providers::LlmProvider;
 use crate::recap::{numbers_in_facts, RecapFacts};
 
@@ -31,6 +33,17 @@ fn prompt(lang: Lang) -> &'static str {
     match lang {
         Lang::En => PROMPT_EN,
         Lang::Zh => PROMPT_ZH,
+    }
+}
+
+/// Chinese index names for the ZH table; facts keep the English labels.
+fn index_label(label: &str, lang: Lang) -> &str {
+    match (lang, label) {
+        (Lang::Zh, "S&P 500") => "标普500",
+        (Lang::Zh, "Nasdaq 100") => "纳斯达克100",
+        (Lang::Zh, "Dow Jones") => "道琼斯",
+        (Lang::Zh, "Russell 2000") => "罗素2000",
+        _ => label,
     }
 }
 
@@ -74,7 +87,10 @@ fn render_body(d: &Draft, f: &RecapFacts) -> String {
             Field::Value(q) => (fmt_num(q.last), fmt_pct(q.change_pct)),
             Field::Missing { .. } => (na(lang).to_string(), na(lang).to_string()),
         };
-        out.push_str(&format!("| {} | {last} | {chg} |\n", cell(label)));
+        out.push_str(&format!(
+            "| {} | {last} | {chg} |\n",
+            cell(index_label(label, lang))
+        ));
     }
     out.push('\n');
 
@@ -125,7 +141,7 @@ pub fn render_markdown(d: &Draft, f: &RecapFacts) -> String {
 /// brief), then checks every number in the rendered body, tables included.
 /// Source link titles are verbatim citations and are not checked. Company
 /// names come from the universe file, so their digits ("3M", "Phillips 66")
-/// are allowed.
+/// are not read as figures.
 pub async fn write(
     llm: &dyn LlmProvider,
     f: &RecapFacts,
@@ -134,21 +150,25 @@ pub async fn write(
     let facts_json =
         serde_json::to_string_pretty(f).map_err(|e| vec![format!("draft: facts json: {e}")])?;
     let mut allowed = numbers_in_facts(f);
-    for m in f.gainers.iter().chain(&f.losers) {
-        allowed.extend(extract(&m.name, Lang::En).into_iter().map(|n| n.value));
-    }
+    let names: Vec<&str> = f
+        .gainers
+        .iter()
+        .chain(&f.losers)
+        .map(|m| m.name.as_str())
+        .collect();
     let (d, md) = write_with(
         llm,
         prompt(lang),
         &facts_json,
         &allowed,
+        &names,
         &headings(lang),
         lang,
         |d| render_markdown(d, f),
     )
     .await?;
     allowed.extend(table_values(f));
-    check(&render_body(&d, f), lang, &allowed).map_err(|bad| {
+    check(&blank_names(&render_body(&d, f), &names), lang, &allowed).map_err(|bad| {
         bad.into_iter()
             .map(|n| format!("rendered: {n}"))
             .collect::<Vec<_>>()
@@ -347,7 +367,12 @@ mod tests {
             summary: "S".into(),
             sections: vec![],
         };
-        assert!(render_markdown(&d, &f).contains("| Nasdaq 100 | 暂缺 | 暂缺 |"));
+        let md = render_markdown(&d, &f);
+        assert!(md.contains("| 纳斯达克100 | 暂缺 | 暂缺 |"), "{md}");
+        assert!(
+            md.contains("| 标普500 | 5,850.12 | +0.51% |") && md.contains("| 罗素2000 |"),
+            "{md}"
+        );
     }
 
     #[tokio::test]
@@ -403,5 +428,18 @@ mod tests {
             .await
             .unwrap();
         assert!(md.contains("| Russell 2000 | 2,230.12 | +0.01% |"), "{md}");
+    }
+
+    #[tokio::test]
+    async fn name_digits_do_not_back_other_numbers() {
+        let mut f = facts();
+        f.losers = vec![Mover {
+            quote: quote("MMM", 130.0, -2.5),
+            name: "3M".into(),
+            reasons: vec![],
+        }];
+        let bad = || reply(Lang::En, "3M fell; Apple rose 9%.");
+        let l = llm(vec![bad(), bad()]);
+        assert_eq!(write(&l, &f, Lang::En).await.unwrap_err(), vec!["9%"]);
     }
 }

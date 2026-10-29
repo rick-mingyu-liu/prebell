@@ -29,6 +29,9 @@ queue = "prebell-jobs"
 
 [[queues.consumers]]
 queue = "prebell-jobs"
+# One job per invocation: a recap build makes ~520 subrequests, so it never
+# shares an invocation's budget with another job.
+max_batch_size = 1
 
 [vars]
 LLM_PROVIDER = "deepseek"
