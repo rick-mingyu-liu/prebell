@@ -5,8 +5,8 @@
 # REFRESH THIS FILE when the index changes (S&P rebalances quarterly) and check
 # every CIK against https://www.sec.gov/files/company_tickers.json. The poller
 # also skips (and logs) any entry whose EDGAR submissions do not list its ticker.
-# Membership as of 2026-10 from the builder's knowledge; not yet verified
-# against SEC data (data.sec.gov was unreachable from the build sandbox).
+# Membership as of 2026-10 from the builder's knowledge. Every row's ticker
+# and CIK were checked against company_tickers.json on 2026-10-29.
 #
 # Columns (tab-separated): ticker, CIK, filer (domestic | foreign), company
 # name, company web domains (comma-separated; subdomains match) used to accept
@@ -25,7 +25,7 @@ AVGO	1730168	domestic	Broadcom	broadcom.com
 AXP	4962	domestic	American Express	americanexpress.com
 BA	12927	domestic	Boeing	boeing.com
 BAC	70858	domestic	Bank of America	bankofamerica.com
-BK	1390777	domestic	BNY	bny.com,bnymellon.com
+BNY	1390777	domestic	BNY	bny.com,bnymellon.com
 BKNG	1075531	domestic	Booking Holdings	bookingholdings.com
 BLK	2012383	domestic	BlackRock	blackrock.com
 BMY	14272	domestic	Bristol-Myers Squibb	bms.com
@@ -112,7 +112,7 @@ V	1403161	domestic	Visa	visa.com
 VZ	732712	domestic	Verizon	verizon.com
 WFC	72971	domestic	Wells Fargo	wellsfargo.com
 WMT	104169	domestic	Walmart	walmart.com
-XOM	34088	domestic	Exxon Mobil	exxonmobil.com
+XOM	2115436	domestic	ExxonMobil	exxonmobil.com,corporate.exxonmobil.com
 ASML	937966	foreign	ASML Holding	asml.com
 BCS	312069	foreign	Barclays	home.barclays
 NVO	353278	foreign	Novo Nordisk	novonordisk.com

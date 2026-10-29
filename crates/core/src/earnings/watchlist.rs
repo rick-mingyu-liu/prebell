@@ -138,6 +138,18 @@ mod tests {
     }
 
     #[test]
+    fn ciks_match_sec_company_tickers() {
+        // Checked against https://www.sec.gov/files/company_tickers.json on
+        // 2026-10-29: BNY trades as BNY (was BK); XOM's filer is the new
+        // holding company.
+        assert!(find("BK").is_none());
+        assert_eq!(find("BNY").unwrap().cik, 1390777);
+        let xom = find("XOM").unwrap();
+        assert_eq!((xom.cik, xom.name), (2115436, "ExxonMobil"));
+        assert!(by_cik(34088).is_none());
+    }
+
+    #[test]
     fn every_row_parses_and_fits_the_poll_cycle() {
         assert_eq!(data_lines().count(), watchlist().len());
         let domestic = watchlist()
