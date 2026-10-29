@@ -1,0 +1,181 @@
+//! Persistence for earnings beyond Plan 1's `Store`: detected filings (the
+//! build queue), post charts, the earnings calendar and small generator
+//! state. Rows mirror `migrations/0003_earnings.sql` column for column.
+//! The generator implements this on D1; `MemEarningsStore` serves tests.
+
+use std::cell::RefCell;
+use std::collections::BTreeMap;
+use std::rc::Rc;
+
+use async_trait::async_trait;
+
+use crate::store::MemStore;
+
+/// `earnings_filings` row. `state`: open | done.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FilingRow {
+    pub accession: String,
+    pub cik: u64,
+    pub ticker: String,
+    pub form: String,
+    pub items: String,
+    pub filing_date: String,
+    pub report_date: String,
+    /// UTC ISO 8601 with `Z`.
+    pub accepted_at: String,
+    pub primary_doc: String,
+    pub run_key: String,
+    pub state: String,
+    pub detected_at: String,
+}
+
+/// `post_charts` row.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ChartRow {
+    pub post_id: i64,
+    pub name: String,
+    pub r2_key: String,
+    pub alt_en: String,
+    pub alt_zh: String,
+    pub sort: i64,
+}
+
+/// `earnings_calendar` row. `time_slot`: bmo | amc | unknown; `status`:
+/// unconfirmed | confirmed | reported | quarantined; `source`: yahoo | ir | edgar.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CalendarRow {
+    pub ticker: String,
+    /// ET `YYYY-MM-DD`.
+    pub report_date: String,
+    pub time_slot: String,
+    pub status: String,
+    pub source: String,
+    pub proof_url: Option<String>,
+    pub proof_quote: Option<String>,
+    pub conflict_reason: Option<String>,
+    pub first_seen_at: String,
+    pub checked_at: String,
+    pub next_check_at: Option<String>,
+    pub updated_at: String,
+}
+
+#[async_trait(?Send)]
+pub trait EarningsStore {
+    /// Inserts unless the accession exists; true when a row was inserted.
+    async fn insert_filing(&self, f: &FilingRow) -> Result<bool, String>;
+    /// `state = 'open'`, oldest acceptance first.
+    async fn open_filings(&self) -> Result<Vec<FilingRow>, String>;
+    async fn set_filing_state(&self, accession: &str, state: &str) -> Result<(), String>;
+    /// The run that owns the post with this slug, if any.
+    async fn slug_owner(&self, slug: &str) -> Result<Option<String>, String>;
+    /// Replaces the post's charts.
+    async fn set_charts(&self, post_id: i64, charts: &[ChartRow]) -> Result<(), String>;
+    async fn calendar_for(&self, ticker: &str) -> Result<Vec<CalendarRow>, String>;
+    /// Rows with `from <= report_date <= to`, by date then ticker.
+    async fn calendar_between(&self, from: &str, to: &str) -> Result<Vec<CalendarRow>, String>;
+    /// Insert or replace by `(ticker, report_date)`.
+    async fn upsert_calendar(&self, r: &CalendarRow) -> Result<(), String>;
+    async fn delete_calendar(&self, ticker: &str, report_date: &str) -> Result<(), String>;
+    async fn kv_get(&self, key: &str) -> Result<Option<String>, String>;
+    async fn kv_set(&self, key: &str, value: &str, now: &str) -> Result<(), String>;
+}
+
+/// In-memory `EarningsStore` for tests; reads post slugs from the shared `MemStore`.
+#[derive(Default)]
+pub struct MemEarningsStore {
+    pub base: Rc<MemStore>,
+    pub filings: RefCell<BTreeMap<String, FilingRow>>,
+    pub charts: RefCell<BTreeMap<i64, Vec<ChartRow>>>,
+    pub calendar: RefCell<BTreeMap<(String, String), CalendarRow>>,
+    pub kv: RefCell<BTreeMap<String, String>>,
+}
+
+impl MemEarningsStore {
+    pub fn new(base: Rc<MemStore>) -> Self {
+        Self {
+            base,
+            ..Default::default()
+        }
+    }
+}
+
+#[async_trait(?Send)]
+impl EarningsStore for MemEarningsStore {
+    async fn insert_filing(&self, f: &FilingRow) -> Result<bool, String> {
+        let mut m = self.filings.borrow_mut();
+        if m.contains_key(&f.accession) {
+            return Ok(false);
+        }
+        m.insert(f.accession.clone(), f.clone());
+        Ok(true)
+    }
+    async fn open_filings(&self) -> Result<Vec<FilingRow>, String> {
+        let mut v: Vec<FilingRow> = self
+            .filings
+            .borrow()
+            .values()
+            .filter(|f| f.state == "open")
+            .cloned()
+            .collect();
+        v.sort_by(|a, b| a.accepted_at.cmp(&b.accepted_at));
+        Ok(v)
+    }
+    async fn set_filing_state(&self, accession: &str, state: &str) -> Result<(), String> {
+        let mut m = self.filings.borrow_mut();
+        let f = m.get_mut(accession).ok_or("no such filing")?;
+        f.state = state.into();
+        Ok(())
+    }
+    async fn slug_owner(&self, slug: &str) -> Result<Option<String>, String> {
+        Ok(self
+            .base
+            .posts
+            .borrow()
+            .iter()
+            .find(|p| p.slug == slug)
+            .map(|p| p.run_key.clone()))
+    }
+    async fn set_charts(&self, post_id: i64, charts: &[ChartRow]) -> Result<(), String> {
+        self.charts.borrow_mut().insert(post_id, charts.to_vec());
+        Ok(())
+    }
+    async fn calendar_for(&self, ticker: &str) -> Result<Vec<CalendarRow>, String> {
+        Ok(self
+            .calendar
+            .borrow()
+            .values()
+            .filter(|r| r.ticker == ticker)
+            .cloned()
+            .collect())
+    }
+    async fn calendar_between(&self, from: &str, to: &str) -> Result<Vec<CalendarRow>, String> {
+        let mut v: Vec<CalendarRow> = self
+            .calendar
+            .borrow()
+            .values()
+            .filter(|r| r.report_date.as_str() >= from && r.report_date.as_str() <= to)
+            .cloned()
+            .collect();
+        v.sort_by(|a, b| (&a.report_date, &a.ticker).cmp(&(&b.report_date, &b.ticker)));
+        Ok(v)
+    }
+    async fn upsert_calendar(&self, r: &CalendarRow) -> Result<(), String> {
+        self.calendar
+            .borrow_mut()
+            .insert((r.ticker.clone(), r.report_date.clone()), r.clone());
+        Ok(())
+    }
+    async fn delete_calendar(&self, ticker: &str, report_date: &str) -> Result<(), String> {
+        self.calendar
+            .borrow_mut()
+            .remove(&(ticker.to_string(), report_date.to_string()));
+        Ok(())
+    }
+    async fn kv_get(&self, key: &str) -> Result<Option<String>, String> {
+        Ok(self.kv.borrow().get(key).cloned())
+    }
+    async fn kv_set(&self, key: &str, value: &str, _now: &str) -> Result<(), String> {
+        self.kv.borrow_mut().insert(key.into(), value.into());
+        Ok(())
+    }
+}

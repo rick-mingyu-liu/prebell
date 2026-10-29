@@ -3,11 +3,14 @@
 //! history from XBRL, chart it, and publish EN + ZH posts. Plus the earnings
 //! calendar.
 
+pub mod calendar;
 pub mod charts;
 pub mod detect;
 pub mod draft;
 pub mod extract;
 pub mod facts;
+pub mod run;
+pub mod store;
 pub mod watchlist;
 pub mod xbrl;
 
