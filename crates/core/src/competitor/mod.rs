@@ -231,10 +231,12 @@ async fn step(
     let ours = store.our_posts_between(&s, &e).await?;
     let report = build_report(report_date, start, now, &theirs, &ours);
     let text = digest(&report);
-    store.put_report(&report, &text, &iso(now)).await?;
+    // Queue the digest first: it is the deliverable, and once the report
+    // row exists later firings are no-ops.
     store
         .add_alert(&run_key(report_date), "info", &text)
         .await?;
+    store.put_report(&report, &text, &iso(now)).await?;
     Ok(CompetitorOutcome::Reported {
         items: report.their_item_count,
         uncovered: report.uncovered.len(),

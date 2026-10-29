@@ -10,7 +10,9 @@ const STOPWORDS: &[&str] = &[
     "MOM", "ATH", "FY", "TTM", "USD", "EUR", "JPY", "CNY", "RMB", "TWD", "HKD", "GBP", "EV", "EVS",
     "GPU", "GPUS", "CPU", "HBM", "LLM", "API", "AR", "VR", "IT", "TV", "OK", "VS", "NEW", "TOP",
     "WHY", "HOW", "WHAT", "BIG", "HOT", "LIVE", "NEWS", "ALERT", "UPDATE", "FAQ", "II", "III",
-    "IV", "ESG", "ROE", "ROI", "PE", "EBIT", "GAAP", "REIT", "ADR",
+    "IV", "ESG", "ROE", "ROI", "PE", "EBIT", "GAAP", "REIT", "ADR", "AND", "THE", "FOR", "OF",
+    "TO", "IN", "ON", "AT", "BY", "IS", "ARE", "WITH", "FROM", "NOT", "BUT", "OR", "INTO", "OVER",
+    "AFTER", "AHEAD", "AS", "DRAM", "NAND", "CHIPS", "CHIP", "TSMC", "SOX", "SPX", "NDX", "VIX",
 ];
 const EXCHANGES: &[&str] = &["NASDAQ", "NYSE", "AMEX", "NYSEARCA", "OTC"];
 
@@ -74,12 +76,18 @@ pub fn tickers_in(text: &str) -> Vec<String> {
         } else {
             // A bare word right before a parenthesized ticker, as in
             // `KLA (KLAC)`, is the company name.
-            let named = toks.get(k + 1).is_some_and(|&(ns, ne)| {
-                is_open(after(e))
-                    && is_open(before(ns))
-                    && is_close(after(ne))
-                    && is_symbol(&text[ns..ne], 1)
-            });
+            // Also `KLA (NASDAQ: KLAC)`.
+            let named = is_open(after(e))
+                && toks.get(k + 1).is_some_and(|&(ns, ne)| {
+                    let next = &text[ns..ne];
+                    let direct = is_open(before(ns)) && is_close(after(ne)) && is_symbol(next, 1);
+                    let listed = EXCHANGES.contains(&next)
+                        && after(ne) == Some(':')
+                        && toks.get(k + 2).is_some_and(|&(ts, te)| {
+                            is_close(after(te)) && is_symbol(&text[ts..te], 1)
+                        });
+                    direct || listed
+                });
             is_symbol(tok, 2) && !stop && !named
         };
         if ticker && !out.iter().any(|t| t == tok) {
@@ -102,6 +110,7 @@ mod tests {
         assert_eq!(t("Why MSFT and $NVDA moved"), ["MSFT", "NVDA"]);
         assert_eq!(t("KLA (KLAC) beats"), ["KLAC"]);
         assert_eq!(t("AMD (+5%) and INTC"), ["AMD", "INTC"]);
+        assert_eq!(t("KLA (NASDAQ: KLAC) AND THE CHIPS"), ["KLAC"]);
         assert_eq!(t("(NASDAQ: AAPL) and (NYSE:IBM)"), ["AAPL", "IBM"]);
         assert_eq!(t("Ford ($F) and (T)"), ["F", "T"]);
     }

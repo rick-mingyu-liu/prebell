@@ -44,9 +44,12 @@ fn item(inner: &str) -> Option<FeedItem> {
             .map(|(_, v)| text(v))
     };
     let title = first("title").filter(|t| !t.is_empty())?;
+    // Only http(s) links: they become hrefs on the admin page. A `guid`
+    // permalink stands in when `<link>` is missing.
+    let web = |u: &String| u.starts_with("https://") || u.starts_with("http://");
     let link = first("link")
-        .filter(|l| !l.is_empty())
-        .or_else(|| first("guid").filter(|g| g.starts_with("http")))?;
+        .filter(web)
+        .or_else(|| first("guid").filter(web))?;
     let published = first("pubDate").and_then(|d| rfc2822(&d));
     let categories = fields
         .iter()
@@ -195,7 +198,10 @@ fn decode_entities(s: &str) -> String {
     while let Some(amp) = rest.find('&') {
         out.push_str(&rest[..amp]);
         let tail = &rest[amp..];
-        let decoded = tail.find(';').filter(|&semi| semi <= 10).and_then(|semi| {
+        // Entities are short; look for `;` only nearby so a long run of bare
+        // `&` stays linear.
+        let near = &tail[..tail.len().min(12)];
+        let decoded = near.find(';').and_then(|semi| {
             let ent = &tail[1..semi];
             let ch = match ent {
                 "amp" => Some('&'),
@@ -208,7 +214,8 @@ fn decode_entities(s: &str) -> String {
                     .or_else(|| ent.strip_prefix("#X"))
                     .and_then(|h| u32::from_str_radix(h, 16).ok())
                     .or_else(|| ent.strip_prefix('#').and_then(|d| d.parse().ok()))
-                    .and_then(char::from_u32),
+                    .and_then(char::from_u32)
+                    .filter(|&c| c != '\0'),
             };
             ch.map(|c| (c, semi + 1))
         });
@@ -312,8 +319,19 @@ mod tests {
     }
 
     #[test]
+    fn non_web_links_are_dropped() {
+        let xml = "<rss><channel><item><title>T</title><link>javascript:alert(1)</link></item>\
+                   <item><title>U</title><link>http://x.test/u</link></item></channel></rss>";
+        let items = parse_feed(xml).unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].link, "http://x.test/u");
+    }
+
+    #[test]
     fn numeric_entities() {
         assert_eq!(text("A&#38;B &#x4E2D; &bogus; & x"), "A&B 中 &bogus; & x");
+        assert_eq!(text("a&#0;b"), "a&#0;b");
+        assert_eq!(text(&"& ".repeat(50_000)).len(), 99_999);
     }
 
     #[test]

@@ -1,12 +1,11 @@
 //! The daily gap report: tickers and topics the competitor covered in the
 //! window that we did not, and its webhook digest.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 use chrono::{DateTime, NaiveDate, SecondsFormat, Utc};
 use serde::{Deserialize, Serialize};
 
-use super::tickers::tickers_in;
 use crate::clock::et;
 
 /// `alerts::deliver` caps a webhook message at 1900 chars including its
@@ -94,7 +93,9 @@ pub fn build_report(
     let mut theirs: Vec<&StoredItem> = theirs.iter().filter(in_window).collect();
     theirs.sort_by(|a, b| b.published_at.cmp(&a.published_at));
 
-    let our_tickers: BTreeSet<String> = ours.iter().flat_map(|p| tickers_in(&p.text)).collect();
+    // Their tickers are matched as whole words in our text, so our `| F |`
+    // table cell covers their `$F` even though a bare `F` is not a ticker.
+    let ours_mention = |t: &str| ours.iter().any(|p| mentions(&p.text, t));
 
     let mut by_ticker: BTreeMap<&str, Vec<ItemRef>> = BTreeMap::new();
     let mut topics = Vec::new();
@@ -108,12 +109,12 @@ pub fn build_report(
     }
     let covered: Vec<String> = by_ticker
         .keys()
-        .filter(|t| our_tickers.contains(**t))
+        .filter(|t| ours_mention(t))
         .map(|t| t.to_string())
         .collect();
     let mut uncovered: Vec<TickerGap> = by_ticker
         .into_iter()
-        .filter(|(t, _)| !our_tickers.contains(*t))
+        .filter(|(t, _)| !ours_mention(t))
         .map(|(t, items)| TickerGap {
             ticker: t.to_string(),
             items,
@@ -133,6 +134,20 @@ pub fn build_report(
         covered,
         topics,
     }
+}
+
+/// `ticker` appears in `text` with no `[A-Za-z0-9.]` on either side.
+fn mentions(text: &str, ticker: &str) -> bool {
+    let word = |c: char| c.is_ascii_alphanumeric() || c == '.';
+    text.match_indices(ticker).any(|(i, _)| {
+        let before = text[..i].chars().next_back();
+        // A trailing sentence dot (`… NVDA.`) still ends the word.
+        let after = text[i + ticker.len()..]
+            .trim_start_matches('.')
+            .chars()
+            .next();
+        !before.is_some_and(word) && !after.is_some_and(word)
+    })
 }
 
 /// At most `max` characters, with `…` when cut. `@` gets a zero-width space
@@ -167,8 +182,10 @@ pub fn digest(r: &Report) -> String {
         );
     }
     let header = format!(
-        "Competitor watch {} (24h to {end_et}): {} items from them, {ours}.",
-        r.report_date, r.their_item_count
+        "Competitor watch {} (24h to {end_et}): {} item{} from them, {ours}.",
+        r.report_date,
+        r.their_item_count,
+        if r.their_item_count == 1 { "" } else { "s" }
     );
 
     // (line, is an entry counted by "…and N more")
@@ -181,7 +198,9 @@ pub fn digest(r: &Report) -> String {
             } else {
                 String::new()
             };
-            let first = &g.items[0];
+            let Some(first) = g.items.first() else {
+                continue;
+            };
             lines.push((
                 format!(
                     "- {}{n}: {} <{}>",
@@ -202,7 +221,7 @@ pub fn digest(r: &Report) -> String {
             let cat = if t.category.is_empty() {
                 String::new()
             } else {
-                format!("[{}] ", t.category)
+                format!("[{}] ", cut(&t.category, 40))
             };
             lines.push((format!("- {cat}{} <{}>", cut(&t.title, 80), t.link), true));
         }
@@ -241,10 +260,14 @@ pub fn digest(r: &Report) -> String {
         shown += usize::from(*entry);
     }
     let entries = lines.iter().filter(|(_, e)| *e).count();
-    out.push_str(&format!(
-        "\n…and {} more (see /admin/competitor)",
-        entries - shown
-    ));
+    if entries > shown {
+        out.push_str(&format!(
+            "\n…and {} more (see /admin/competitor)",
+            entries - shown
+        ));
+    } else {
+        out.push_str("\n…(cut; see /admin/competitor)");
+    }
     out
 }
 
@@ -360,11 +383,35 @@ mod tests {
     }
 
     #[test]
+    fn whole_word_coverage() {
+        assert!(mentions("| F | Ford |", "F"));
+        assert!(mentions("Shares of NVDA.", "NVDA"));
+        assert!(mentions("BRK.B rose", "BRK.B"));
+        assert!(!mentions("FORD", "F"));
+        assert!(!mentions("BRK.B", "BRK"));
+        assert!(!mentions("NVDAX", "NVDA"));
+        let r = report(&[item(1, &["F", "IT"], "2026-10-29T20:00:00Z")]);
+        assert!(r.covered.is_empty());
+        let r = build_report(
+            NaiveDate::from_ymd_opt(2026, 10, 30).unwrap(),
+            utc("2026-10-29T11:30:00Z"),
+            utc("2026-10-30T11:30:00Z"),
+            &[item(1, &["F", "IT"], "2026-10-29T20:00:00Z")],
+            &[OurPost {
+                slug: "s".into(),
+                text: "| F | Ford |\n| IT | Gartner |".into(),
+            }],
+        );
+        assert_eq!(r.covered, ["F", "IT"]);
+    }
+
+    #[test]
     fn mentions_are_defused() {
         let mut it = item(1, &[], "2026-10-29T20:00:00Z");
         it.title = "Hi @everyone".into();
+        it.category = "@here".into();
         let d = digest(&report(&[it]));
-        assert!(!d.contains("@everyone"), "{d}");
+        assert!(!d.contains("@everyone") && !d.contains("@here"), "{d}");
     }
 
     #[test]
