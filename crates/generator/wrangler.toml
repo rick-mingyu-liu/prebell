@@ -6,13 +6,14 @@ compatibility_date = "2025-01-01"
 command = "worker-build --release"
 
 [triggers]
-# Every 5 min across both DST offsets of the 8:30-9:25 ET window; hourly afterwards for ZH retries.
-# `clock` decides what each firing means.
-# "31 11 * * *" and "31 12 * * *" are the daily competitor watch: 07:31 ET in either offset, and
-# minute 31 so no other cron fires with it. Two crons because the schedule parser can't read
-# comma lists. Must match COMPETITOR_CRONS in src/lib.rs; `core::competitor` picks the firing
-# that counts. Named days: Cloudflare numbers 1 = Sunday.
-crons = ["*/5 12-14 * * MON-FRI", "0 15-23 * * MON-FRI", "31 11 * * *", "31 12 * * *"]
+# UTC. Each cron maps to its jobs in crates/core/src/schedule.rs (a test keeps
+# the two in sync); `clock` and `core::competitor` decide what each firing means in ET.
+# Three crons: the Free Workers plan allows 5 per account. Day names, not numbers
+# (Cloudflare numbers weekdays 1-7 starting on Sunday), and no comma lists.
+# - "*/5 12-23 * * MON-FRI": premarket and recap (both windows, ZH retries)
+# - "*/5 0-3 * * TUE-SAT": the EST recap tail to 19:00 ET and recap ZH retries to 22:00 ET
+# - "31 11-12 * * *": competitor at 07:31 ET in either offset
+crons = ["*/5 12-23 * * MON-FRI", "*/5 0-3 * * TUE-SAT", "31 11-12 * * *"]
 
 [[d1_databases]]
 binding = "DB"
@@ -30,6 +31,9 @@ queue = "prebell-jobs"
 
 [[queues.consumers]]
 queue = "prebell-jobs"
+# One job per invocation, so a build never shares an invocation's subrequest
+# budget with another job.
+max_batch_size = 1
 
 [vars]
 # LLM_PROVIDER: "claude" (default; secret ANTHROPIC_API_KEY) or "deepseek" (fallback; secret DEEPSEEK_API_KEY).

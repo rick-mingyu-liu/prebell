@@ -1,5 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { getLatestPremarket, getPostBySlug, listPosts, PAGE_SIZE } from "../src/lib/posts";
+import {
+  getLatestPost,
+  getLatestPremarket,
+  getPostBySlug,
+  listPosts,
+  PAGE_SIZE,
+  parseContentType,
+} from "../src/lib/posts";
 import { memoryD1 } from "./d1";
 
 /** One post per trading date; `en`/`zh` give each translation's status, or null for no row. */
@@ -123,5 +130,49 @@ describe("getLatestPremarket", () => {
 
   it("returns null when there is nothing", async () => {
     expect(await getLatestPremarket(memoryD1(""), "en")).toBeNull();
+  });
+});
+
+describe("content types", () => {
+  const mixed =
+    post(1, "2026-10-28", "published", "published") +
+    post(2, "2026-10-28", "published", "published", "recap") +
+    post(3, "2026-10-29", "published", "pending") +
+    post(4, "2026-10-27", "published", "pending", "recap");
+
+  it("getLatestPost returns the newest of the type and never another type", async () => {
+    const db = memoryD1(mixed);
+    const r = await getLatestPost(db, "en", "recap");
+    expect(r).toMatchObject({ slug: "recap-2026-10-28", contentType: "recap", status: "published" });
+    const p = await getLatestPost(db, "en", "premarket");
+    expect(p).toMatchObject({ slug: "premarket-2026-10-29", contentType: "premarket" });
+    expect(await getLatestPost(memoryD1(post(1, "2026-10-28", "published", null)), "en", "recap")).toBeNull();
+  });
+
+  it("listPosts filters by type and lists both without one", async () => {
+    const db = memoryD1(mixed);
+    expect((await listPosts(db, "en", 1, "recap")).map((i) => i.slug)).toEqual([
+      "recap-2026-10-28",
+      "recap-2026-10-27",
+    ]);
+    expect((await listPosts(db, "zh", 1, "premarket")).map((i) => i.slug)).toEqual(["premarket-2026-10-28"]);
+    const all = await listPosts(db, "en", 1);
+    expect(all.map((i) => i.contentType).sort()).toEqual(["premarket", "premarket", "recap", "recap"]);
+  });
+
+  it("getPostBySlug carries the content type", async () => {
+    const db = memoryD1(mixed);
+    expect((await getPostBySlug(db, "recap-2026-10-27", "zh"))!).toMatchObject({
+      contentType: "recap",
+      status: "pending",
+    });
+  });
+
+  it("parseContentType accepts only known types", () => {
+    expect(parseContentType("recap")).toBe("recap");
+    expect(parseContentType("premarket")).toBe("premarket");
+    expect(parseContentType(["recap", "x"])).toBe("recap");
+    expect(parseContentType("earnings")).toBeNull();
+    expect(parseContentType(undefined)).toBeNull();
   });
 });

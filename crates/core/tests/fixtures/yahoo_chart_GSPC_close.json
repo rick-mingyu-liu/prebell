@@ -1,0 +1,30 @@
+{
+ "chart": {
+  "result": [
+   {
+    "meta": {
+     "currency": "USD",
+     "symbol": "^GSPC",
+     "exchangeName": "SNP",
+     "instrumentType": "INDEX",
+     "exchangeTimezoneName": "America/New_York",
+     "regularMarketPrice": 5850.12,
+     "regularMarketTime": 1793304000,
+     "regularMarketVolume": 2950000000,
+     "chartPreviousClose": 5820.4,
+     "previousClose": 5820.4
+    },
+    "timestamp": [1793280600, 1793303940],
+    "indicators": {
+     "quote": [
+      {
+       "close": [5825.3, 5849.8],
+       "volume": [12000000, 30000000]
+      }
+     ]
+    }
+   }
+  ],
+  "error": null
+ }
+}

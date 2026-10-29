@@ -12,9 +12,9 @@ Every LLM call goes through one provider: reason extraction while building facts
 | `deepseek` (fallback) | `https://api.deepseek.com/chat/completions` | `DEEPSEEK_API_KEY` | `deepseek-chat` |
 
 - `LLM_PROVIDER`, the optional `LLM_MODEL` and `LLM_EFFORT` are plain vars in `crates/generator/wrangler.toml` under `[vars]`. If `LLM_MODEL` is unset or empty, the provider's default model is used. If `LLM_PROVIDER` is unset, it is `claude`.
-- `LLM_EFFORT` (Claude only) sets `output_config.effort` on every request: `low` (default), `medium` or `high`. `none` leaves the field out; use it for a model that does not support effort. Any other value makes the queue handler fail at start with `parse error: unknown LLM_EFFORT: <value> ...`. DeepSeek ignores it.
+- `LLM_EFFORT` (Claude only) sets `output_config.effort` on every request: `low` (default), `medium` or `high`. `none` leaves the field out; use it for a model that does not support effort. Any other value is a config error: see the next point. DeepSeek ignores it.
 - The secrets are set only with `wrangler secret put` (production) or in `crates/generator/.dev.vars` (local, git-ignored). They are never committed.
-- Any other `LLM_PROVIDER` value makes the queue handler fail with `parse error: unknown LLM provider: <value>` before it does any work. No run row and no alert are written, so this shows only in `wrangler tail`.
+- An unknown `LLM_PROVIDER` or `LLM_EFFORT` is a config error. The premarket and recap jobs then never run, and each one raises one `error` alert per ET day, keyed `config:<job>:<date>`. The alert reads like `premarket: config error: parse error: unknown LLM_EFFORT: hgih (use low, medium, high or none)`. It names the variable and its value, never a key. The competitor job does not use the LLM and keeps running. Fix the var and deploy.
 - The number check (`numbers::check`) and quote anchoring run the same way whichever provider is used. Switching provider does not loosen them.
 
 ## Claude (default)
@@ -74,3 +74,28 @@ The `<error>` part:
 | `parse error: refusal: <category>` | The model declined the request. Facts are only saved after a successful EN draft, so a refused build leaves nothing in R2 to inspect; tell the developer the date and category. |
 | `parse error: stop_reason: <x>` | The turn ended unfinished in some other way. It is never used. |
 | `parse error: ...` (other) | The reply was not a JSON object. |
+
+## Free plan
+
+The generator runs on the Workers Free plan for now. The limits that matter:
+
+| Limit (Free) | Value | Where it bites |
+|---|---|---|
+| Cron triggers per account | 5 | `crates/generator/wrangler.toml` uses 3 (a test in `schedule.rs` keeps it at 3). |
+| CPU time per invocation | 10 ms | Each queue message is its own invocation (`max_batch_size = 1`). Waiting on the network is not CPU time; JSON parsing and drafting checks are. |
+| Fetch subrequests per invocation | 50 | Yahoo, Tavily, the LLM, the competitor feed and the alert webhook. |
+| Subrequests to internal services | 1,000 | D1 and R2 binding calls. The [limits page](https://developers.cloudflare.com/workers/platform/limits/) counts calls to R2, KV and D1 as subrequests and gives Free a separate 1,000 row for internal services, so they are not counted in `subrequests=`. |
+| Queue operations per day | 10,000 | About 340 messages on a weekday, at about 3 operations each. |
+
+### Reading `subrequests=`
+
+After each queue message, `pnpm exec wrangler tail` in `crates/generator` shows one line like `subrequests=27 job=premarket`. Alert delivery logs its own line, `subrequests=N job=alerts`. Add the two lines to get the invocation's total. Most firings show `subrequests=0`: the clock decides nothing is due, and only D1 is read.
+
+- A premarket build is about 1 Yahoo cookie, 1 crumb, 11 v7 batches and 4 futures charts, plus 1 Tavily search and 1 LLM call per mover, 1 macro search and its LLM call, and 2-4 draft calls.
+- A recap build is 4 index charts, the cookie, the crumb and 11 v7 batches, plus the same news and LLM work.
+- When a run retries, `runs.last_error` ends with `subrequests=N`: the count when the facts were built, before the drafts. Read it with `pnpm exec wrangler d1 execute prebell --remote --command "select run_key,last_error from runs order by updated_at desc limit 3"`.
+- Redirect hops count toward the 50 but are not visible here, so treat 45 or more as at the limit. Past 50, fetches fail with a network error, and the build shows them as `net=` or `search_err=` in its diagnostics.
+
+### CPU overruns
+
+An invocation over 10 ms of CPU is killed. In `wrangler tail` it shows with outcome `exceededCpu`. If that happens, or if `subrequests=` gets near 50, the fix is Workers Paid ($5/month): 5 minutes of CPU (30 seconds by default) and 10,000 subrequests per invocation. No code change is needed.

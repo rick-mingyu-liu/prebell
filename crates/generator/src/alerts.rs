@@ -3,7 +3,6 @@
 use prebell_core::providers::Http;
 use worker::{console_error, console_warn};
 
-use crate::http::WorkerHttp;
 use crate::store::D1Store;
 
 /// Discord rejects `content` over 2000 characters; keep a margin.
@@ -29,7 +28,7 @@ fn payload(content: &str) -> serde_json::Value {
 
 /// Posts each unsent alert; marks it sent only on a 2xx response.
 /// Without a webhook URL alerts stay unsent in D1.
-pub async fn deliver(store: &D1Store, http: &WorkerHttp, webhook: Option<&str>) {
+pub async fn deliver(store: &D1Store, http: &dyn Http, webhook: Option<&str>) {
     let Some(url) = webhook.filter(|u| !u.is_empty()) else {
         return;
     };
