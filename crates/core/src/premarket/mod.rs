@@ -33,7 +33,7 @@ const MACRO_HITS: usize = 5;
 const MACRO_ITEMS: usize = 3;
 const MAX_CONTENT_CHARS: usize = 6_000;
 
-fn system_prompt(task: &str, max: usize) -> String {
+pub(crate) fn system_prompt(task: &str, max: usize) -> String {
     format!(
         "You {task}. Use ONLY the provided articles; never use outside knowledge. \
          Return JSON of the form {{\"reasons\":[{{\"url\",\"title\",\"quote\",\"summary_en\"}}]}} \
@@ -47,7 +47,7 @@ fn system_prompt(task: &str, max: usize) -> String {
     )
 }
 
-fn articles_prompt(header: &str, hits: &[SearchHit]) -> String {
+pub(crate) fn articles_prompt(header: &str, hits: &[SearchHit]) -> String {
     let mut out = format!("{header}\n\nArticles:\n");
     for (i, h) in hits.iter().enumerate() {
         let content: String = h.content.chars().take(MAX_CONTENT_CHARS).collect();
@@ -71,7 +71,7 @@ fn unclose(s: &str) -> String {
 }
 
 /// Ask the LLM for reasons and keep only those anchored in a fetched hit.
-async fn extract(
+pub(crate) async fn extract(
     llm: &dyn LlmProvider,
     system: &str,
     user: &str,
