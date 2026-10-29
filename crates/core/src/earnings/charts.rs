@@ -11,6 +11,7 @@ use plotters::prelude::*;
 use plotters::style::text_anchor::{HPos, Pos, VPos};
 
 use crate::earnings::facts::{numbers_in_facts, EarningsFacts, Metric, QuarterPoint};
+use crate::earnings::xbrl::release_already_in_trend;
 use crate::facts::Field;
 use crate::numbers::{check, Lang};
 
@@ -26,6 +27,11 @@ const INK: RGBColor = RGBColor(0x80, 0x80, 0x80);
 /// Fewer points than this is not a trend.
 const MIN_BARS: usize = 2;
 const RELEASE_LABEL: &str = "8-K";
+/// Period ends further apart than one quarter (plus 52/53-week slack) mean
+/// quarters in between are missing.
+const QUARTER_DAYS: i64 = 100;
+/// Typical days from a quarter's end to its earnings release.
+const RELEASE_LAG_DAYS: i64 = 45;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Chart {
@@ -66,26 +72,47 @@ fn value_label(name: &str, v: f64) -> String {
     }
 }
 
-fn bars(points: &[QuarterPoint], release: Option<f64>) -> Vec<Bar> {
-    let mut out: Vec<Bar> = points.iter().map(quarter_bar).collect();
+/// Bars in time order; `None` is an empty slot where a quarter is missing
+/// (consecutive period ends more than `GAP_DAYS` apart), so a missing fiscal
+/// Q4 shows as a gap instead of Q3 sitting next to Q1.
+fn bars(points: &[QuarterPoint], release: Option<f64>, filing_date: NaiveDate) -> Vec<Option<Bar>> {
+    let mut out: Vec<Option<Bar>> = Vec::new();
+    let mut prev: Option<NaiveDate> = None;
+    for p in points {
+        if let Some(prev) = prev {
+            let missing = ((p.period_end - prev).num_days() - 1) / QUARTER_DAYS;
+            out.extend(std::iter::repeat_n(None, missing.clamp(0, 3) as usize));
+        }
+        out.push(Some(quarter_bar(p)));
+        prev = Some(p.period_end);
+    }
     if let Some(v) = release {
-        out.push(Bar {
+        // The release quarter ended roughly `RELEASE_LAG_DAYS` before the filing.
+        if let Some(prev) = prev {
+            let release_end = filing_date - chrono::Duration::days(RELEASE_LAG_DAYS);
+            let missing = ((release_end - prev).num_days() - 1) / QUARTER_DAYS;
+            out.extend(std::iter::repeat_n(None, missing.clamp(0, 3) as usize));
+        }
+        out.push(Some(Bar {
             label: RELEASE_LABEL.into(),
             value: v,
-        });
+        }));
     }
     out
 }
 
-fn draw(bars: &[Bar], labels: &[(usize, String)]) -> Result<String, String> {
+fn draw(bars: &[Option<Bar>], labels: &[(usize, String)]) -> Result<String, String> {
     let mut svg = String::new();
     {
         let root = SVGBackend::with_string(&mut svg, (W as u32, H as u32)).into_drawing_area();
         let err = |e: DrawingAreaErrorKind<_>| format!("chart: {e:?}");
-        let max = bars.iter().map(|b| b.value).fold(0.0_f64, f64::max);
-        let min = bars.iter().map(|b| b.value).fold(0.0_f64, f64::min);
+        let values = || bars.iter().flatten().map(|b| b.value);
+        let max = values().fold(0.0_f64, f64::max);
+        let min = values().fold(0.0_f64, f64::min);
         let span = (max - min).max(f64::MIN_POSITIVE);
-        let plot_h = f64::from(H - TOP - BOTTOM);
+        // Room under the lowest bar for a negative value label.
+        let below = if min < 0.0 { 18 } else { 0 };
+        let plot_h = f64::from(H - TOP - BOTTOM - below);
         let y = |v: f64| TOP + ((max - v) / span * plot_h).round() as i32;
         let zero = y(0.0);
         let slot = (W - 2 * SIDE) / bars.len() as i32;
@@ -97,6 +124,7 @@ fn draw(bars: &[Bar], labels: &[(usize, String)]) -> Result<String, String> {
                 .pos(Pos::new(h, v))
         };
         for (i, b) in bars.iter().enumerate() {
+            let Some(b) = b else { continue };
             let x0 = SIDE + i as i32 * slot + gap / 2;
             let x1 = x0 + slot - gap;
             let (top, bottom) = if b.value >= 0.0 {
@@ -140,11 +168,16 @@ fn draw(bars: &[Bar], labels: &[(usize, String)]) -> Result<String, String> {
     Ok(svg)
 }
 
-fn release_value(f: &EarningsFacts, m: Metric) -> Option<f64> {
-    if f.release_in_trend {
+/// The press release's GAAP figure for a series, unless that series'
+/// latest XBRL quarter already is this release's quarter.
+fn release_value(f: &EarningsFacts, m: Metric, points: &[QuarterPoint]) -> Option<f64> {
+    if release_already_in_trend(points, f.filing_date) {
         return None;
     }
-    f.metrics.value(m).map(|fig| fig.value)
+    f.metrics
+        .value(m)
+        .map(|fig| fig.value)
+        .filter(|v| v.is_finite())
 }
 
 /// One chart per series with at least two GAAP points. Value labels go on
@@ -159,28 +192,28 @@ pub fn charts(f: &EarningsFacts) -> Vec<Chart> {
         (
             "revenue",
             &trend.revenue,
-            release_value(f, Metric::Revenue),
+            release_value(f, Metric::Revenue, &trend.revenue),
             "quarterly revenue (GAAP)",
             "季度营收（GAAP）",
         ),
         (
             "eps",
             &trend.eps_diluted,
-            release_value(f, Metric::EpsGaap),
+            release_value(f, Metric::EpsGaap, &trend.eps_diluted),
             "quarterly diluted EPS (GAAP)",
             "季度摊薄每股收益（GAAP）",
         ),
     ];
     let mut out = Vec::new();
     for (name, points, release, what_en, what_zh) in series {
-        let b = bars(points, release);
-        if b.len() < MIN_BARS {
+        let b = bars(points, release, f.filing_date);
+        if b.iter().flatten().count() < MIN_BARS {
             continue;
         }
-        let ends = [0, b.len() - 1];
-        let labels: Vec<(usize, String)> = ends
+        // The first and last slots always hold bars.
+        let labels: Vec<(usize, String)> = [0, b.len() - 1]
             .iter()
-            .map(|&i| (i, value_label(name, b[i].value)))
+            .filter_map(|&i| b[i].as_ref().map(|bar| (i, value_label(name, bar.value))))
             .collect();
         if labels
             .iter()
@@ -251,7 +284,8 @@ mod tests {
     #[test]
     fn release_in_trend_is_not_added_twice() {
         let mut f = facts();
-        f.release_in_trend = true;
+        // The 10-Q for the release quarter was filed with the 8-K.
+        f.filing_date = "2026-07-31".parse().unwrap();
         let c = charts(&f);
         assert!(!c[0].svg.contains("8-K"));
         assert_eq!(c[0].svg.matches("<rect").count(), 2);
@@ -277,7 +311,7 @@ mod tests {
     #[test]
     fn too_few_points_no_chart() {
         let mut f = facts();
-        f.release_in_trend = true;
+        f.metrics.revenue = Field::Missing { reason: "x".into() };
         if let Field::Value(t) = &mut f.trend {
             t.revenue.truncate(1);
         }
@@ -300,6 +334,7 @@ mod tests {
                 value: -0.5,
             },
         ];
+        let b: Vec<Option<Bar>> = b.into_iter().map(Some).collect();
         let svg = draw(&b, &[(1, "-$0.50".into())]).unwrap();
         assert_eq!(svg.matches("<rect").count(), 2);
         assert!(svg.contains("-$0.50"));
@@ -317,8 +352,57 @@ mod tests {
                 value: 2.0,
             },
         ];
+        let b: Vec<Option<Bar>> = b.into_iter().map(Some).collect();
         let svg = draw(&b, &[]).unwrap();
         assert!(svg.contains("&lt;b&gt;&amp;") && !svg.contains("<b>"));
+    }
+
+    #[test]
+    fn missing_quarters_are_gaps() {
+        let qp = |end: &str, v: f64| QuarterPoint {
+            period_end: end.parse().unwrap(),
+            value: v,
+            form: "10-Q".into(),
+            filed: "2026-08-01".parse().unwrap(),
+        };
+        // Q3 (Jun) then Q1 (Dec): the Sep quarter is missing.
+        let pts = [
+            qp("2025-06-28", 1.0),
+            qp("2025-12-27", 2.0),
+            qp("2026-03-28", 3.0),
+        ];
+        let b = bars(&pts, Some(4.0), "2026-07-30".parse().unwrap());
+        let shape: Vec<bool> = b.iter().map(Option::is_some).collect();
+        assert_eq!(shape, [true, false, true, true, true]);
+        // A release long after the last XBRL quarter leaves a gap before it.
+        let b = bars(&pts[..1], Some(4.0), "2026-04-30".parse().unwrap());
+        assert_eq!(b.iter().filter(|x| x.is_none()).count(), 2);
+    }
+
+    #[test]
+    fn eps_series_checked_on_its_own() {
+        // Revenue history is missing (e.g. a bank); EPS has the release quarter already.
+        let mut f = facts();
+        f.filing_date = "2026-07-31".parse().unwrap();
+        if let Field::Value(t) = &mut f.trend {
+            t.revenue.clear();
+        }
+        let c = charts(&f);
+        let eps = c.iter().find(|c| c.name == "eps").unwrap();
+        assert!(!eps.svg.contains("8-K"));
+    }
+
+    #[test]
+    fn non_finite_release_is_ignored() {
+        let mut f = facts();
+        if let Field::Value(fig) = &mut f.metrics.revenue {
+            fig.value = f64::INFINITY;
+        }
+        let rev = charts(&f)
+            .into_iter()
+            .find(|c| c.name == "revenue")
+            .unwrap();
+        assert!(!rev.svg.contains("8-K"));
     }
 
     #[test]

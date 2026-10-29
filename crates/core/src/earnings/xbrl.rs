@@ -12,6 +12,8 @@ use crate::edgar::{CompanyFacts, Concept, FactEntry};
 
 /// Quarters kept per series.
 pub const QUARTERS: usize = 8;
+/// A release is filed within ~10 weeks of its quarter's end.
+const RELEASE_QUARTER_MAX_DAYS: i64 = 75;
 
 fn date(s: &str) -> Option<NaiveDate> {
     NaiveDate::parse_from_str(s, "%Y-%m-%d").ok()
@@ -23,7 +25,7 @@ fn is_periodic_report(form: &str) -> bool {
 
 /// Discrete quarters (80-100 day durations) from periodic reports, one per
 /// period end (the latest `filed` wins, so restatements replace originals),
-/// the last `QUARTERS`, oldest first.
+/// oldest first.
 fn quarters(entries: &[FactEntry]) -> Vec<QuarterPoint> {
     let mut by_end: BTreeMap<NaiveDate, QuarterPoint> = BTreeMap::new();
     for e in entries.iter().filter(|e| is_periodic_report(&e.form)) {
@@ -51,49 +53,58 @@ fn quarters(entries: &[FactEntry]) -> Vec<QuarterPoint> {
             }
         }
     }
-    let all: Vec<QuarterPoint> = by_end.into_values().collect();
+    by_end.into_values().collect()
+}
+
+fn last_n(all: Vec<QuarterPoint>) -> Vec<QuarterPoint> {
     let skip = all.len().saturating_sub(QUARTERS);
     all.into_iter().skip(skip).collect()
 }
 
-fn usd(c: &Option<Concept>) -> Vec<QuarterPoint> {
+fn all_quarters(c: &Option<Concept>) -> Vec<QuarterPoint> {
     c.as_ref()
         .map(|c| quarters(&c.units.usd))
         .unwrap_or_default()
 }
 
-/// Revenue, diluted EPS and net income series. Revenue uses the candidate
-/// concept with the most recent quarter (companies switch tags over time).
+/// Revenue, diluted EPS and net income series, the last `QUARTERS` each.
 pub fn trend(cf: &CompanyFacts) -> Trend {
     let g = &cf.facts.us_gaap;
-    let revenue = [
+    // Companies switch revenue tags over time: merge the candidates by
+    // period end, the first-listed tag winning a quarter both report.
+    let mut merged: BTreeMap<NaiveDate, QuarterPoint> = BTreeMap::new();
+    for c in [
         &g.revenues,
         &g.revenue_from_contracts,
         &g.revenues_net_of_interest,
         &g.sales_revenue_net,
-    ]
-    .into_iter()
-    .map(usd)
-    .filter(|q| !q.is_empty())
-    // `max_by_key` keeps the last maximum; reverse so the first-listed concept wins ties.
-    .rev()
-    .max_by_key(|q| q.last().map(|p| p.period_end))
-    .unwrap_or_default();
+    ] {
+        for p in all_quarters(c) {
+            merged.entry(p.period_end).or_insert(p);
+        }
+    }
+    let revenue = last_n(merged.into_values().collect());
     Trend {
         revenue,
-        eps_diluted: g
-            .eps_diluted
-            .as_ref()
-            .map(|c| quarters(&c.units.usd_per_share))
-            .unwrap_or_default(),
-        net_income: usd(&g.net_income),
+        eps_diluted: last_n(
+            g.eps_diluted
+                .as_ref()
+                .map(|c| quarters(&c.units.usd_per_share))
+                .unwrap_or_default(),
+        ),
+        net_income: last_n(all_quarters(&g.net_income)),
     }
 }
 
-/// The company filed its 10-Q/10-K no earlier than the 8-K, so the latest
-/// XBRL quarter is the quarter this press release reports.
-pub fn release_already_in_trend(t: &Trend, filing_date: NaiveDate) -> bool {
-    t.revenue.last().is_some_and(|p| p.filed >= filing_date)
+/// The series' latest XBRL quarter is the quarter this press release
+/// reports: its 10-Q/10-K was filed no earlier than the 8-K, and the quarter
+/// ended recently enough to be the release quarter (a late amendment of an
+/// older quarter does not count).
+pub fn release_already_in_trend(points: &[QuarterPoint], filing_date: NaiveDate) -> bool {
+    points.last().is_some_and(|p| {
+        p.filed >= filing_date
+            && (filing_date - p.period_end).num_days() <= RELEASE_QUARTER_MAX_DAYS
+    })
 }
 
 #[cfg(test)]
@@ -184,7 +195,7 @@ mod tests {
     }
 
     #[test]
-    fn revenue_concept_with_latest_quarter_wins() {
+    fn revenue_tags_are_merged() {
         let old = vec![entry("2019-01-01", "2019-03-31", 5.0, "10-Q", "2019-05-01")];
         let new = vec![entry("2026-04-01", "2026-06-30", 9.0, "10-Q", "2026-08-01")];
         let cf = CompanyFacts {
@@ -196,17 +207,20 @@ mod tests {
                 },
             },
         };
-        assert_eq!(trend(&cf).revenue[0].value, 9.0);
+        let r = trend(&cf).revenue;
+        assert_eq!(r.iter().map(|p| p.value).collect::<Vec<_>>(), [5.0, 9.0]);
     }
 
     #[test]
     fn same_day_periodic_report() {
         let t = trend(&fixture());
-        assert!(!release_already_in_trend(&t, d("2026-10-30")));
-        assert!(release_already_in_trend(&t, d("2026-07-31")));
-        assert!(!release_already_in_trend(
-            &Trend::default(),
-            d("2026-07-31")
-        ));
+        // Q3 ended 2026-06-27; its 10-Q was filed 2026-07-31.
+        assert!(!release_already_in_trend(&t.revenue, d("2026-10-30")));
+        assert!(release_already_in_trend(&t.revenue, d("2026-07-31")));
+        assert!(!release_already_in_trend(&[], d("2026-07-31")));
+        // A 10-Q/A for an old quarter filed on the 8-K date is not the release quarter.
+        let mut late = t.revenue.clone();
+        late.last_mut().unwrap().filed = d("2026-12-01");
+        assert!(!release_already_in_trend(&late, d("2026-12-01")));
     }
 }

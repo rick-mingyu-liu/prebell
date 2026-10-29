@@ -215,9 +215,6 @@ pub struct EarningsFacts {
     pub guidance: Field<Vec<Note>>,
     pub highlights: Field<Vec<Note>>,
     pub trend: Field<Trend>,
-    /// The latest XBRL quarter is this release's quarter (10-Q filed with the
-    /// 8-K), so charts must not add the press-release point again.
-    pub release_in_trend: bool,
 }
 
 /// Names of required sections that are unavailable. Empty means publishable.
@@ -343,7 +340,6 @@ pub(crate) mod tests {
                 eps_diluted: vec![qp("2026-03-28", 1.80), qp("2026-06-27", 1.71)],
                 net_income: vec![],
             }),
-            release_in_trend: false,
         }
     }
 

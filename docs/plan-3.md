@@ -24,7 +24,7 @@
 - **Charts never measure text:** `plotters` on `wasm32-unknown-unknown` measures text through `web_sys::window()`, which does not exist in a Worker. Charts use only `SVGBackend` + `DrawingArea` primitives (`Rectangle`, `PathElement`, `Text` with explicit anchors). No `ChartBuilder`, `configure_mesh`, `titled` or `estimate_text_size`.
 - **Required sections (earnings check):** revenue, at least one EPS figure (GAAP or non-GAAP), and a filing link. Optional: net income, margins, cash flow, guidance, highlights → "n/a" / "暂缺".
 - **Late, not thin:** a filing whose required figures are missing retries every 5 min until **6 h** after acceptance, then the run is `failed` with one `error` alert. ZH retries continue until **24 h** after acceptance, then ZH is `failed` with one `warn` alert.
-- Post: template `earnings:v1`, `content_type = 'earnings'`, run key `earnings:{TICKER}:{accession}`, slug `{ticker}-{fiscal-period}-earnings` (e.g. `aapl-q4-fy2026-earnings`, `brk-b-q3-2026-earnings`); when the fiscal period is not verified the slug uses the ET filing date (`aapl-2026-10-30-earnings`); a slug already owned by another run gets `-{last 6 digits of accession}`.
+- Post: template `earnings:v1`, `content_type = 'earnings'`, run key `earnings:{TICKER}:{accession}`, slug `{ticker}-{fiscal-period}-earnings` (e.g. `aapl-q4-fy2026-earnings`, `brk-b-fy2026-earnings` for a full-year release); when the fiscal period is not verified the slug uses the ET filing date (`aapl-2026-10-30-earnings`); a slug already owned by another run gets `-{last 6 digits of accession}`.
 - Every number an article publishes passes `numbers::check`: LLM text against the facts (with one retry), and the final rendered markdown (code tables included, link targets excluded) against the same allow-list as a guard. Chart label strings are checked the same way.
 - Calendar: seeded from Yahoo's earnings calendar (behind `CalendarSource`); `confirmed` only with primary proof — an EDGAR 8-K Item 2.02 (`reported`) or a quote-anchored company announcement whose URL host is the company's own domain or a major press-release wire; conflicting dates go to `quarantined` with a reason, `checked_at` and `next_check_at`, and are not shown publicly.
 - Schema changes only in `migrations/0003_earnings.sql`. Never edit `0001`.
@@ -161,7 +161,7 @@ apps/web/
 - `struct Note { quote: String, summary_en: String }` (guidance, highlights)
 - `struct FiscalPeriod { quarter: Option<u8>, fiscal_year: i32, quote: String }`
 - `struct QuarterPoint { period_end: NaiveDate, value: f64, form: String, filed: NaiveDate }`; `struct Trend { revenue: Vec<QuarterPoint>, eps_diluted: Vec<QuarterPoint>, net_income: Vec<QuarterPoint> }`
-- `struct EarningsFacts { ticker, company, cik: u64, accession, filing_date: NaiveDate, accepted_at: DateTime<Utc>, filing_url, exhibit_url: Field<String>, fiscal_period: Field<FiscalPeriod>, metrics: Metrics, guidance: Field<Vec<Note>>, highlights: Field<Vec<Note>>, trend: Field<Trend>, release_in_trend: bool }`
+- `struct EarningsFacts { ticker, company, cik: u64, accession, filing_date: NaiveDate, accepted_at: DateTime<Utc>, filing_url, exhibit_url: Field<String>, fiscal_period: Field<FiscalPeriod>, metrics: Metrics, guidance: Field<Vec<Note>>, highlights: Field<Vec<Note>>, trend: Field<Trend> }`
 - `fn missing_required(f: &EarningsFacts) -> Vec<&'static str>` → `"revenue"`, `"eps"`, `"filing"`.
 - `fn numbers_in_facts(f: &EarningsFacts) -> Vec<f64>` — figure values, every number in kept quotes (both signs when unsigned), trend values, the fiscal year and filing year ± 1.
 - `async fn extract(llm: &dyn LlmProvider, exhibit_text: &str, company: &str, ticker: &str) -> Extracted` where `Extracted { fiscal_period, metrics, guidance, highlights }`; LLM errors → every field `Missing`.
@@ -211,7 +211,7 @@ apps/web/
 
 **Interfaces:**
 - `fn trend(cf: &CompanyFacts) -> Trend` — revenue from the first of `Revenues`, `RevenueFromContractWithCustomerExcludingAssessedTax`, `RevenuesNetOfInterestExpense`, `SalesRevenueNet` with ≥ 1 discrete quarter (most recent period end wins ties); EPS from `EarningsPerShareDiluted` (`USD/shares`); net income from `NetIncomeLoss`. Discrete quarter = `start`..`end` of 80–100 days, form `10-Q` or `10-K`(/A); per `end` keep the latest `filed`. Last 8 quarters, ascending.
-- `fn release_already_in_trend(t: &Trend, filing_date: NaiveDate) -> bool` — latest revenue point `filed ≥ filing_date`.
+- `fn release_already_in_trend(points: &[QuarterPoint], filing_date: NaiveDate) -> bool` — per series: the latest point was `filed ≥ filing_date` and ended ≤ 75 days before it (a late amendment of an older quarter does not count). Revenue merges the candidate tags by period end (first-listed tag wins a quarter both report).
 
 - [ ] **Step 1: Failing tests:** 9-month YTD and annual facts are ignored; a restated quarter keeps the latest `filed`; no Q4 is derived; a company with only `RevenueFromContract…` uses it; same-day 10-Q ⇒ `release_already_in_trend == true`.
 - [ ] **Step 2–4:** FAIL → implement → PASS. **Step 5: Commit** `feat(core): GAAP quarterly trend from companyfacts`.
@@ -224,10 +224,10 @@ apps/web/
 
 **Interfaces:**
 - `struct Chart { name: &'static str /* "revenue" | "eps" */, svg: String, alt_en: String, alt_zh: String, labels: Vec<String> }`
-- `fn charts(f: &EarningsFacts) -> Vec<Chart>` — bars per quarter (XBRL), plus the press-release GAAP value as the last bar labelled "This release"/"本次" unless `release_in_trend`; a chart needs ≥ 2 bars; revenue in $B with one decimal, EPS in $ with two decimals; negative bars drawn below a zero line. Labels are code-formatted from facts values and checked with `numbers::check` against `numbers_in_facts` (a failing chart is dropped, never published).
+- `fn charts(f: &EarningsFacts) -> Vec<Chart>` — bars per quarter (XBRL, x label `YYYY-MM` of the period end; one language-neutral SVG serves EN and ZH), plus the press-release GAAP value as the last bar labelled `8-K` unless that series' latest XBRL quarter already is the release quarter; a missing quarter is an empty slot; a chart needs ≥ 2 bars; value labels on the first and last bar only; transparent background; revenue in $B with one decimal, EPS in $ with two decimals; negative bars drawn below a zero line. Labels are code-formatted from facts values and checked with `numbers::check` against `numbers_in_facts` (a failing chart is dropped, never published).
 - R2 key: `charts/earnings/{ticker}/{accession}/{name}.svg`.
 
-- [ ] **Step 1: Failing tests:** output starts with `<svg`, contains one `<rect` per bar plus background, contains "This release" only when not `release_in_trend`; non-GAAP EPS never appears; < 2 points ⇒ no chart; every label passes `numbers::check`; text is XML-escaped.
+- [ ] **Step 1: Failing tests:** output starts with `<svg`, contains one `<rect` per bar, contains `8-K` only when the release quarter is not already in the series; gaps for missing quarters; non-GAAP EPS never appears; < 2 points ⇒ no chart; every label passes `numbers::check`; text is XML-escaped.
 - [ ] **Step 2–4:** FAIL → implement → PASS; `cargo build -p prebell-core --target wasm32-unknown-unknown` PASS.
 - [ ] **Step 5: Commit** `feat(core): GAAP-only SVG earnings charts`.
 
