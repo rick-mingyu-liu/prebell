@@ -63,7 +63,10 @@ impl<H: Http> LlmProvider for Claude<H> {
                     .unwrap_or("unspecified");
                 return Err(ProviderError::Parse(format!("refusal: {category}")));
             }
-            _ => {}
+            // No tools are sent, so anything else (`tool_use`, `pause_turn`, ...) is an
+            // unfinished turn that must not reach the drafter.
+            Some("end_turn") | Some("stop_sequence") | None => {}
+            Some(other) => return Err(ProviderError::Parse(format!("stop_reason: {other}"))),
         }
         // Responses may start with `thinking` blocks: read by type, not position.
         let text = v
@@ -211,6 +214,24 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn refusal_without_category_and_other_stop_reasons() {
+        let b = json!({"content": [], "stop_reason": "refusal", "stop_details": null}).to_string();
+        let r = cl(fake(200, &b)).complete_json("s", "u").await;
+        assert_eq!(r, Err(ProviderError::Parse("refusal: unspecified".into())));
+        let r = cl(fake(200, &wrap("{\"a\":1}", "pause_turn")))
+            .complete_json("s", "u")
+            .await;
+        assert_eq!(
+            r,
+            Err(ProviderError::Parse("stop_reason: pause_turn".into()))
+        );
+        let r = cl(fake(200, &wrap("{\"a\":1}", "stop_sequence")))
+            .complete_json("s", "u")
+            .await;
+        assert_eq!(r.unwrap()["a"], 1);
+    }
+
+    #[tokio::test]
     async fn no_text_block_and_http_error() {
         let r = cl(fake(200, "{\"content\":[],\"stop_reason\":\"end_turn\"}"))
             .complete_json("s", "u")
@@ -251,6 +272,13 @@ mod tests {
             body["messages"],
             json!([{"role": "user", "content": "usr"}])
         );
-        assert!(body.get("temperature").is_none());
+        let mut keys: Vec<&str> = body
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        keys.sort_unstable();
+        assert_eq!(keys, ["max_tokens", "messages", "model", "system"]);
     }
 }
