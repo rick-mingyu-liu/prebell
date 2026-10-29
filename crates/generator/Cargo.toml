@@ -1,5 +1,5 @@
 [package]
-name = "marketsite-generator"
+name = "prebell-generator"
 version = "0.1.0"
 edition = "2021"
 
@@ -8,7 +8,7 @@ crate-type = ["cdylib"]
 
 [dependencies]
 worker = { version = "0.8.7", features = ["d1", "queue"] }
-marketsite-core = { path = "../core" }
+prebell-core = { path = "../core" }
 async-trait = "0.1"
 chrono = { version = "0.4", default-features = false, features = ["std"] }
 serde = { version = "1", features = ["derive"] }

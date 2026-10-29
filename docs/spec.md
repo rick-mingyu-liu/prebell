@@ -1,7 +1,7 @@
 # Bilingual daily market site — design
 
 Date: 2026-10-29. Status: draft for owner review.
-Working name: **TBD** (placeholder `marketsite` below; owner to choose name and domain).
+Name: PreBell (盘前铃), domain prebell.ai
 
 ## 1. Intent
 
@@ -130,7 +130,7 @@ EDGAR poller (every 2–5 min, market hours) ─┤
 
 ## 12. Open for the owner
 
-- Site name and domain: **decide later** (owner). Use the placeholder `marketsite` and a config value for the EDGAR User-Agent contact email until chosen.
+- Site name and domain: PreBell (盘前铃), prebell.ai (domain not yet bought). Use a config value for the EDGAR User-Agent contact email.
 - Whether premarket/recap pages are indexed by search engines (AlphaLab hides its digests with `noindex`). Designer's default: index them.
 
 ## 13. Build approach (owner)

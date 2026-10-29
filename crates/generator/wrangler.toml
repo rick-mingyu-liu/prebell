@@ -1,4 +1,4 @@
-name = "marketsite-generator"
+name = "prebell-generator"
 main = "build/worker/shim.mjs"
 compatibility_date = "2025-01-01"
 
@@ -12,20 +12,20 @@ crons = ["*/5 12-14 * * 1-5", "0 15-23 * * 1-5"]
 
 [[d1_databases]]
 binding = "DB"
-database_name = "marketsite"
-database_id = "d44fa779-4253-41c6-ab8c-1ef478cfc984"
+database_name = "prebell"
+database_id = "eb17fcaf-48fd-4956-88c6-d5ef18ac2662"
 migrations_dir = "../../migrations"
 
 [[r2_buckets]]
 binding = "FACTS"
-bucket_name = "marketsite-facts"
+bucket_name = "prebell-facts"
 
 [[queues.producers]]
 binding = "JOBS"
-queue = "marketsite-jobs"
+queue = "prebell-jobs"
 
 [[queues.consumers]]
-queue = "marketsite-jobs"
+queue = "prebell-jobs"
 
 [vars]
 LLM_PROVIDER = "deepseek"

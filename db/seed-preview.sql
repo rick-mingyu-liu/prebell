@@ -1,5 +1,5 @@
 -- Preview data for apps/web (local D1 only). Re-runnable.
--- Apply: cd crates/generator && pnpm exec wrangler d1 execute marketsite --local --file ../../db/seed-preview.sql
+-- Apply: cd crates/generator && pnpm exec wrangler d1 execute prebell --local --file ../../db/seed-preview.sql
 --   premarket-2026-10-27: EN published + ZH published (hreflang pair)
 --   premarket-2026-10-28: EN published + ZH pending (ZH page shows the pending notice, noindex)
 

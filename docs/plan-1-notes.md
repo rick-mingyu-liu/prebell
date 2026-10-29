@@ -22,10 +22,10 @@ cron */5 12-14 * * 1-5: queued premarket job
 ▲ [WARNING] secret TAVILY_API_KEY is not set; provider calls will fail
 ▲ [WARNING] secret DEEPSEEK_API_KEY is not set; provider calls will fail
 job {}: Retrying("movers")
-[wrangler:info] QUEUE marketsite-jobs 1/1 (5103ms)
+[wrangler:info] QUEUE prebell-jobs 1/1 (5103ms)
 ```
 
-`wrangler d1 execute marketsite --local --command "select run_key,status,attempts,last_error from runs"`:
+`wrangler d1 execute prebell --local --command "select run_key,status,attempts,last_error from runs"`:
 `premarket:2026-10-29 | pending | 1 | movers`. Yahoo returned no usable
 movers from this machine, so the required `movers` field was missing and the
 run stayed pending for a retry. Core does not record the Yahoo HTTP status.
@@ -41,7 +41,7 @@ arrived empty. The body is now a `Job { job }` struct, and run 2 logs `job prema
 ```
 cron */5 12-14 * * 1-5: queued premarket job
 job premarket: Skipped
-[wrangler:info] QUEUE marketsite-jobs 1/1 (34ms)
+[wrangler:info] QUEUE prebell-jobs 1/1 (34ms)
 stub received: application/json {"content":"error: premarket:2026-10-29: premarket brief skipped for 2026-10-29: not ready by 09:25 ET (movers)"}
 ```
 

@@ -3,8 +3,8 @@
 //! failures are returned as `Err`, never as a missing row.
 
 use async_trait::async_trait;
-use marketsite_core::facts::NewsReason;
-use marketsite_core::store::{PostRow, RunRow, Store, TranslationRow};
+use prebell_core::facts::NewsReason;
+use prebell_core::store::{PostRow, RunRow, Store, TranslationRow};
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use worker::wasm_bindgen::JsValue;

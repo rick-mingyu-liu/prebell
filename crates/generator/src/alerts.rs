@@ -1,6 +1,6 @@
 //! Deliver unsent `alerts` rows to a Discord-compatible webhook.
 
-use marketsite_core::providers::Http;
+use prebell_core::providers::Http;
 use worker::{console_error, console_warn};
 
 use crate::http::WorkerHttp;

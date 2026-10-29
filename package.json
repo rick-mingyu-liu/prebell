@@ -1,5 +1,5 @@
 {
-  "name": "marketsite",
+  "name": "prebell",
   "private": true,
   "devDependencies": {
     "wrangler": "^4.154.0"

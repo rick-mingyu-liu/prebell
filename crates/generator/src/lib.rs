@@ -5,10 +5,10 @@ mod http;
 mod store;
 
 use chrono::{DateTime, Utc};
-use marketsite_core::deepseek::llm_from_env;
-use marketsite_core::run::tick;
-use marketsite_core::tavily::Tavily;
-use marketsite_core::yahoo::Yahoo;
+use prebell_core::deepseek::llm_from_env;
+use prebell_core::run::tick;
+use prebell_core::tavily::Tavily;
+use prebell_core::yahoo::Yahoo;
 use serde::{Deserialize, Serialize};
 use worker::*;
 

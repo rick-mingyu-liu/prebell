@@ -386,33 +386,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f9f8bd3e56ce4dfc153cf470fffbfa98c7620958b312ca5c3a4b8d5181fd13c6"
 
 [[package]]
-name = "marketsite-core"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "chrono",
- "chrono-tz",
- "futures",
- "regex",
- "serde",
- "serde_json",
- "thiserror",
- "tokio",
-]
-
-[[package]]
-name = "marketsite-generator"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "chrono",
- "marketsite-core",
- "serde",
- "serde_json",
- "worker",
-]
-
-[[package]]
 name = "matchit"
 version = "0.7.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -496,6 +469,33 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d83eb9bc6d8e5cf568e7a1101d60ee05e81ed50ea106026f3d18deeb046d7661"
 dependencies = [
  "zerovec",
+]
+
+[[package]]
+name = "prebell-core"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "chrono-tz",
+ "futures",
+ "regex",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+]
+
+[[package]]
+name = "prebell-generator"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "prebell-core",
+ "serde",
+ "serde_json",
+ "worker",
 ]
 
 [[package]]

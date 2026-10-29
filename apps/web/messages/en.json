@@ -1,6 +1,6 @@
 {
   "site": {
-    "name": "marketsite",
+    "name": "PreBell",
     "tagline": "Premarket briefs for North American markets",
     "home": "Home",
     "archive": "Archive",
@@ -30,7 +30,7 @@
   },
   "about": {
     "title": "About",
-    "p1": "marketsite publishes a short premarket brief every US trading day before the open: index futures, the biggest premarket movers and why they moved, and what to watch.",
+    "p1": "PreBell publishes a short premarket brief every US trading day before the open: index futures, the biggest premarket movers and why they moved, and what to watch.",
     "p2": "Every brief is generated automatically from public market data and news. Numbers are checked against the source data before publishing, and each brief lists its sources. Times are US Eastern.",
     "p3": "English is published first; the Chinese version follows."
   },

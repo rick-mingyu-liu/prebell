@@ -1,7 +1,7 @@
 //! `Http` over the Workers `fetch` API.
 
 use async_trait::async_trait;
-use marketsite_core::providers::{Http, HttpResp, ProviderError};
+use prebell_core::providers::{Http, HttpResp, ProviderError};
 use worker::{wasm_bindgen::JsValue, Fetch, Headers, Method, Request, RequestInit};
 
 #[derive(Clone, Copy, Default)]

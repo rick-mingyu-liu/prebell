@@ -1,6 +1,6 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
-  "name": "marketsite-web",
+  "name": "prebell-web",
   "main": ".open-next/worker.js",
   "compatibility_date": "2026-10-01",
   "compatibility_flags": ["nodejs_compat", "global_fetch_strictly_public"],
@@ -12,13 +12,13 @@
     {
       // Same database as crates/generator/wrangler.toml; real id set in Task 13.
       "binding": "DB",
-      "database_name": "marketsite",
-      "database_id": "d44fa779-4253-41c6-ab8c-1ef478cfc984"
+      "database_name": "prebell",
+      "database_id": "eb17fcaf-48fd-4956-88c6-d5ef18ac2662"
     }
   ],
   "vars": {
-    // Origin for canonical and hreflang URLs; placeholder until the domain is chosen.
-    "SITE_URL": "https://marketsite-web.workers.dev"
+    // Origin for canonical and hreflang URLs; https://prebell.ai is a placeholder until the domain is bought.
+    "SITE_URL": "https://prebell.ai"
     // CF_BEACON_TOKEN (Cloudflare Web Analytics) is optional; set it as a var to enable the beacon.
   }
 }

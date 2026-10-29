@@ -1,10 +1,10 @@
 [package]
-name = "marketsite-core"
+name = "prebell-core"
 version = "0.1.0"
 edition = "2021"
 
 [lib]
-name = "marketsite_core"
+name = "prebell_core"
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
