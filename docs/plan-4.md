@@ -138,7 +138,7 @@ apps/web/tests/competitor.test.ts
 - Produces:
   - `const FEED_URL: &str`, `fn run_key(d: NaiveDate) -> String` = `"competitor:YYYY-MM-DD"`.
   - `enum CompetitorDecision { NotNow, Due { report_date: NaiveDate } }`, `fn competitor_decision(now: DateTime<Utc>) -> CompetitorDecision` — due iff ET time in `[07:30, 08:00)`, any day of the week.
-  - `trait CompetitorStore` (`async_trait(?Send)`, `Result<_, String>`): `has_report(date) -> bool`, `upsert_items(items: &[FeedItem], tickers: &[Vec<String>], seen_at: &str)`, `items_between(start, end) -> Vec<StoredItem>`, `our_posts_between(start, end) -> Vec<OurPost>`, `put_report(report: &Report, digest: &str, created_at: &str)`, `add_alert(run_key, level, msg)`. `struct MemCompetitorStore` for tests.
+  - `trait CompetitorStore` (`async_trait(?Send)`, `Result<_, String>`): `has_report(date) -> bool`, `upsert_items(items: &[NewItem], seen_at: &str)` (`NewItem { link, title, published_at: Option<String>, category, tickers }`), `items_between(start, end) -> Vec<StoredItem>`, `our_posts_between(start, end) -> Vec<OurPost>`, `put_report(report: &Report, digest: &str, created_at: &str)`, `add_alert(run_key, level, msg)`. `struct MemCompetitorStore` for tests.
   - `enum CompetitorOutcome { Nothing, AlreadyDone, Reported { items: usize, uncovered: usize }, Failed(String) }`
   - `async fn run_competitor(now, http: &dyn Http, store: &dyn CompetitorStore, contact: &str) -> CompetitorOutcome` — GET `FEED_URL` with `User-Agent: PreBell competitor-watch (+contact)`; on non-2xx / network / `NotRss` / store error: `error` alert, `Failed`; else upsert items (≤ 200), read the 24h window back from the store, build report, `put_report`, `info` alert with the digest, `Reported`.
 
