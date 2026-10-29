@@ -121,9 +121,7 @@ async fn queue(batch: MessageBatch<Job>, env: Env, _ctx: Context) -> Result<()> 
     for msg in batch.messages()? {
         let job = msg.body().job.as_str();
         if job == "competitor" {
-            let contact = text(&env, "SEC_CONTACT").unwrap_or_default();
-            let outcome =
-                run_competitor(now(&env), &WorkerHttp, &WorkerTimer, &store, &contact).await;
+            let outcome = run_competitor(now(&env), &WorkerHttp, &WorkerTimer, &store).await;
             console_log!("job {job}: {outcome:?}");
         } else {
             premarket(&env, &store, job).await?;

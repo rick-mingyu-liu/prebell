@@ -23,6 +23,8 @@ use report::{build_report, digest, OurPost, Report, StoredItem};
 use tickers::tickers_in;
 
 pub const FEED_URL: &str = "https://www.alphalab.site/feed.xml";
+/// Neutral: no job label and no email address (owner's ruling).
+const USER_AGENT: &str = "PreBell (+https://prebell.ai)";
 /// Items stored per run; the feed is far smaller, this bounds a bad response.
 const MAX_ITEMS: usize = 200;
 /// The feed fetch, body included, gives up after this.
@@ -204,13 +206,12 @@ pub async fn run_competitor(
     http: &dyn Http,
     timer: &dyn Timer,
     store: &dyn CompetitorStore,
-    contact: &str,
 ) -> CompetitorOutcome {
     let CompetitorDecision::Due { report_date } = competitor_decision(now) else {
         return CompetitorOutcome::Nothing;
     };
     let key = run_key(report_date);
-    match step(now, report_date, http, timer, store, contact).await {
+    match step(now, report_date, http, timer, store).await {
         Ok(outcome) => outcome,
         Err(e) => {
             let msg = format!("competitor watch failed for {report_date}: {e}");
@@ -227,16 +228,14 @@ async fn step(
     http: &dyn Http,
     timer: &dyn Timer,
     store: &dyn CompetitorStore,
-    contact: &str,
 ) -> Result<CompetitorOutcome, String> {
     let date = report_date.format("%Y-%m-%d").to_string();
     if store.has_report(&date).await? {
         return Ok(CompetitorOutcome::AlreadyDone);
     }
 
-    let ua = format!("PreBell competitor-watch (+{contact})");
     let headers = [
-        ("User-Agent", ua.as_str()),
+        ("User-Agent", USER_AGENT),
         ("Accept", "application/rss+xml, application/xml;q=0.9"),
     ];
     // Losing the race drops the fetch, which aborts it on Workers.
@@ -436,7 +435,7 @@ mod tests {
             },
         ));
         // Mon 2026-11-02 07:31 EST; Friday's post is 72h old.
-        run_competitor(utc("2026-11-02T12:31:00Z"), &http, &NoDeadline, &store, "x").await;
+        run_competitor(utc("2026-11-02T12:31:00Z"), &http, &NoDeadline, &store).await;
         let r = store.reports.borrow()[0].0.clone();
         assert_eq!(r.our_slugs, ["premarket-2026-10-30"]);
         assert_eq!(r.our_window_start, "2026-10-30T04:00:00Z");
@@ -454,7 +453,7 @@ mod tests {
             },
         ));
 
-        let out = run_competitor(utc(NOW), &http, &NoDeadline, &store, "ops@prebell.test").await;
+        let out = run_competitor(utc(NOW), &http, &NoDeadline, &store).await;
         // In the 24h window: MSFT/NVDA (10-29 11:05Z) and KLAC (10-29 02:30Z);
         // the macro item (10-28 23:00Z) has no ticker.
         assert_eq!(
@@ -467,9 +466,12 @@ mod tests {
 
         let (url, headers) = http.seen.borrow()[0].clone();
         assert_eq!(url, FEED_URL);
-        assert!(headers
+        let ua: Vec<&str> = headers
             .iter()
-            .any(|(k, v)| k == "User-Agent" && v.contains("ops@prebell.test")));
+            .filter(|(k, _)| k == "User-Agent")
+            .map(|(_, v)| v.as_str())
+            .collect();
+        assert_eq!(ua, ["PreBell (+https://prebell.ai)"]);
 
         let items = store.items.borrow().clone();
         assert_eq!(items.len(), 5);
@@ -497,8 +499,7 @@ mod tests {
         assert!(alerts[0].2.chars().count() <= DIGEST_MAX_CHARS);
 
         // A second firing the same ET day does nothing.
-        let again =
-            run_competitor(utc("2026-10-29T11:35:00Z"), &http, &NoDeadline, &store, "x").await;
+        let again = run_competitor(utc("2026-10-29T11:35:00Z"), &http, &NoDeadline, &store).await;
         assert_eq!(again, CompetitorOutcome::AlreadyDone);
         assert_eq!(http.seen.borrow().len(), 1);
         assert_eq!(store.reports.borrow().len(), 1);
@@ -509,8 +510,8 @@ mod tests {
     async fn refetch_keeps_first_seen() {
         let http = FakeHttp::new(200, FIXTURE);
         let store = MemCompetitorStore::default();
-        run_competitor(utc(NOW), &http, &NoDeadline, &store, "x").await;
-        run_competitor(utc("2026-10-30T11:30:00Z"), &http, &NoDeadline, &store, "x").await;
+        run_competitor(utc(NOW), &http, &NoDeadline, &store).await;
+        run_competitor(utc("2026-10-30T11:30:00Z"), &http, &NoDeadline, &store).await;
         let items = store.items.borrow();
         assert_eq!(items.len(), 5);
         let (_, first, last) = &items["https://www.alphalab.site/posts/fixture-klac"];
@@ -522,8 +523,7 @@ mod tests {
     async fn not_due_does_nothing() {
         let http = FakeHttp::new(200, FIXTURE);
         let store = MemCompetitorStore::default();
-        let out =
-            run_competitor(utc("2026-10-29T12:30:00Z"), &http, &NoDeadline, &store, "x").await;
+        let out = run_competitor(utc("2026-10-29T12:30:00Z"), &http, &NoDeadline, &store).await;
         assert_eq!(out, CompetitorOutcome::Nothing);
         assert!(http.seen.borrow().is_empty());
     }
@@ -532,7 +532,7 @@ mod tests {
     async fn http_error_alerts_without_report() {
         let http = FakeHttp::new(503, "busy");
         let store = MemCompetitorStore::default();
-        let out = run_competitor(utc(NOW), &http, &NoDeadline, &store, "x").await;
+        let out = run_competitor(utc(NOW), &http, &NoDeadline, &store).await;
         assert!(
             matches!(out, CompetitorOutcome::Failed(ref e) if e.contains("503")),
             "{out:?}"
@@ -552,7 +552,7 @@ mod tests {
         };
         let timer = Expired::default();
         let store = MemCompetitorStore::default();
-        let out = run_competitor(utc(NOW), &http, &timer, &store, "x").await;
+        let out = run_competitor(utc(NOW), &http, &timer, &store).await;
         assert!(
             matches!(out, CompetitorOutcome::Failed(ref e) if e.contains("timed out")),
             "{out:?}"
@@ -570,7 +570,7 @@ mod tests {
     async fn html_body_fails() {
         let http = FakeHttp::new(200, "<html><body>Just a moment...</body></html>");
         let store = MemCompetitorStore::default();
-        let out = run_competitor(utc(NOW), &http, &NoDeadline, &store, "x").await;
+        let out = run_competitor(utc(NOW), &http, &NoDeadline, &store).await;
         assert!(matches!(out, CompetitorOutcome::Failed(_)), "{out:?}");
         assert!(store.reports.borrow().is_empty());
         assert_eq!(store.alerts.borrow()[0].1, "error");
@@ -598,7 +598,7 @@ mod tests {
         );
         let http = FakeHttp::new(200, &feed);
         let store = MemCompetitorStore::default();
-        run_competitor(utc(NOW), &http, &NoDeadline, &store, "x").await;
+        run_competitor(utc(NOW), &http, &NoDeadline, &store).await;
         let items = store.items.borrow();
         let row = &items["https://www.alphalab.site/posts/long"].0;
         assert_eq!(row.title.chars().count(), MAX_TITLE_CHARS);
@@ -614,7 +614,7 @@ mod tests {
         let feed = one_item_feed("MSFT outlook", &long, &["Tech"]);
         let http = FakeHttp::new(200, &feed);
         let store = MemCompetitorStore::default();
-        let out = run_competitor(utc(NOW), &http, &NoDeadline, &store, "x").await;
+        let out = run_competitor(utc(NOW), &http, &NoDeadline, &store).await;
         assert!(matches!(out, CompetitorOutcome::Reported { .. }), "{out:?}");
         assert!(store.items.borrow().is_empty());
 
@@ -626,7 +626,7 @@ mod tests {
         assert_eq!(edge.chars().count(), MAX_LINK_CHARS);
         let http = FakeHttp::new(200, &one_item_feed("MSFT outlook", &edge, &["Tech"]));
         let store = MemCompetitorStore::default();
-        run_competitor(utc(NOW), &http, &NoDeadline, &store, "x").await;
+        run_competitor(utc(NOW), &http, &NoDeadline, &store).await;
         assert!(store.items.borrow().contains_key(&edge));
     }
 
@@ -640,7 +640,7 @@ mod tests {
         );
         let http = FakeHttp::new(200, &padded);
         let store = MemCompetitorStore::default();
-        let out = run_competitor(utc(NOW), &http, &NoDeadline, &store, "x").await;
+        let out = run_competitor(utc(NOW), &http, &NoDeadline, &store).await;
         assert!(
             matches!(out, CompetitorOutcome::Failed(ref e) if e.contains("too large")),
             "{out:?}"
