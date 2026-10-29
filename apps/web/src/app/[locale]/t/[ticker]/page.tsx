@@ -29,7 +29,7 @@ export default async function TickerArchive({ params }: PageProps<"/[locale]/t/[
   const db = getDb();
   if (!ticker || !(await tickerKnown(db, ticker))) notFound();
   const t = await getTranslations("earnings");
-  const [posts, dates] = await Promise.all([listTickerPosts(db, ticker, locale), listTickerCalendar(db, ticker)]);
+  const [posts, dates] = await Promise.all([listTickerPosts(db, ticker, locale), listTickerCalendar(db, ticker, locale)]);
   const status: Record<string, string> = {
     unconfirmed: t("unconfirmed"),
     confirmed: t("confirmed"),

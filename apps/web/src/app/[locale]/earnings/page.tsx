@@ -5,7 +5,7 @@ import CalendarWeek from "@/components/CalendarWeek";
 import LangSwitch from "@/components/LangSwitch";
 import type { Locale } from "@/i18n/routing";
 import { getDb } from "@/lib/db";
-import { addDays, isDate, listCalendarWeek, todayEt, weekStart } from "@/lib/earnings";
+import { addDays, INDEXED_WEEKS, isDate, listCalendarWeek, todayEt, weekStart } from "@/lib/earnings";
 import { pairedAlternates } from "@/lib/seo";
 import { formatDate } from "@/lib/time";
 
@@ -18,8 +18,15 @@ export async function generateMetadata({ params, searchParams }: PageProps<"/[lo
   const { locale } = await params;
   const week = (await searchParams).week;
   const t = await getTranslations({ locale, namespace: "earnings" });
-  const query = isDate(Array.isArray(week) ? week[0] : week) ? `?week=${monday(week)}` : "";
-  return { title: t("calendarTitle"), alternates: pairedAlternates(locale, `/earnings${query}`) };
+  const start = monday(week);
+  const query = isDate(Array.isArray(week) ? week[0] : week) ? `?week=${start}` : "";
+  // The week links go on forever; only weeks near today are worth indexing.
+  const distance = Math.abs(Date.parse(start) - Date.parse(weekStart(todayEt()))) / (7 * 86_400_000);
+  return {
+    title: t("calendarTitle"),
+    alternates: pairedAlternates(locale, `/earnings${query}`),
+    ...(distance > INDEXED_WEEKS ? { robots: { index: false } } : {}),
+  };
 }
 
 export default async function EarningsCalendar({ params, searchParams }: PageProps<"/[locale]/earnings">) {
@@ -27,7 +34,7 @@ export default async function EarningsCalendar({ params, searchParams }: PagePro
   setRequestLocale(locale);
   const start = monday((await searchParams).week);
   const t = await getTranslations("earnings");
-  const days = await listCalendarWeek(getDb(), start);
+  const days = await listCalendarWeek(getDb(), start, locale);
   const href = (d: string) => `/${locale}/earnings?week=${d}`;
 
   return (

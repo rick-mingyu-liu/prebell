@@ -15,7 +15,8 @@
     "empty": "No briefs have been published yet.",
     "allBriefs": "All briefs",
     "latestEarnings": "Latest earnings checks",
-    "calendar": "Earnings calendar"
+    "calendar": "Earnings calendar",
+    "noEarnings": "No earnings checks yet."
   },
   "post": {
     "permalink": "Permalink",

@@ -5,6 +5,7 @@ import {
   isDate,
   listCalendarWeek,
   listLatestEarnings,
+  listRecentBriefs,
   listTickerCalendar,
   listTickerPosts,
   normalizeTicker,
@@ -68,12 +69,14 @@ describe("dates", () => {
     expect(normalizeTicker("aapl")).toBe("AAPL");
     expect(normalizeTicker("../x")).toBeNull();
     expect(normalizeTicker("<script>")).toBeNull();
+    expect(normalizeTicker("%")).toBeNull();
+    expect(normalizeTicker("%41")).toBeNull();
   });
 });
 
 describe("listCalendarWeek", () => {
   it("hides quarantined dates and links reported ones to their post", async () => {
-    const days = await listCalendarWeek(memoryD1(seed), "2026-10-26");
+    const days = await listCalendarWeek(memoryD1(seed), "2026-10-26", "en");
     expect(days.map((d) => d.date)).toEqual(["2026-10-26", "2026-10-27", "2026-10-28", "2026-10-29", "2026-10-30"]);
     expect(days[3].entries).toEqual([]); // TSLA is quarantined
     expect(days[4].entries.map((e) => [e.ticker, e.status, e.slot, e.postSlug])).toEqual([
@@ -81,8 +84,14 @@ describe("listCalendarWeek", () => {
       ["XOM", "unconfirmed", "bmo", null],
       ["AAPL", "reported", "amc", "aapl-2026-10-30-earnings"],
     ]);
-    // MSFT's post links even while its Chinese text is pending (the post page shows the notice).
     expect(days[2].entries[0].postSlug).toBe("msft-2026-10-28-earnings");
+  });
+
+  it("in Chinese, links pending posts (the page shows the notice) but not failed ones", async () => {
+    const db = memoryD1(seed + earnings(3, "NVDA", "0001045810-26-000010", "2026-10-29", "failed") + cal("NVDA", "2026-10-29", "reported"));
+    const days = await listCalendarWeek(db, "2026-10-26", "zh");
+    expect(days[2].entries[0].postSlug).toBe("msft-2026-10-28-earnings");
+    expect(days[3].entries.map((e) => [e.ticker, e.postSlug])).toEqual([["NVDA", null]]);
   });
 });
 
@@ -92,7 +101,7 @@ describe("ticker archive", () => {
     expect((await listTickerPosts(db, "AAPL", "zh")).map((p) => p.slug)).toEqual(["aapl-2026-10-30-earnings"]);
     expect(await listTickerPosts(db, "MSFT", "zh")).toEqual([]);
     expect((await listTickerPosts(db, "MSFT", "en"))[0].title).toBe("EN MSFT");
-    expect((await listTickerCalendar(db, "AAPL"))[0].status).toBe("reported");
+    expect((await listTickerCalendar(db, "AAPL", "zh"))[0].status).toBe("reported");
   });
   it("knows which tickers exist", async () => {
     const db = memoryD1(seed);
@@ -101,6 +110,16 @@ describe("ticker archive", () => {
     expect(await tickerKnown(db, "TSLA")).toBe(false);
     expect(await tickerKnown(db, "ZZZ")).toBe(false);
   });
+  it("recent briefs leave earnings out, however many there are", async () => {
+    let many = seed;
+    for (let i = 0; i < 25; i++) many += earnings(100 + i, `T${i}`, `0000000001-26-${String(i).padStart(6, "0")}`, "2026-10-31", "published");
+    many += `INSERT INTO runs VALUES ('premarket:2026-10-27','premarket','2026-10-27','published',1,NULL,'t','t');
+INSERT INTO posts (id, run_key, content_type, template_id, trading_date, slug, facts_r2_key, published_at)
+VALUES (500,'premarket:2026-10-27','premarket','premarket:v1','2026-10-27','premarket-2026-10-27',NULL,'2026-10-27T12:34:00Z');
+INSERT INTO post_translations VALUES (500,'en','published','Brief','s','# b','t');`;
+    expect((await listRecentBriefs(memoryD1(many), "en", 10)).map((p) => p.slug)).toEqual(["premarket-2026-10-27"]);
+  });
+
   it("latest earnings, newest first", async () => {
     const db = memoryD1(seed);
     expect((await listLatestEarnings(db, "en", 5)).map((p) => p.slug)).toEqual([

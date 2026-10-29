@@ -279,9 +279,9 @@ apps/web/
 **Files:** Create `apps/web/src/lib/earnings.ts`, `src/app/charts/[...key]/route.ts`, `src/app/[locale]/earnings/page.tsx`, `src/app/[locale]/t/[ticker]/page.tsx`, `src/components/Charts.tsx`, `src/components/CalendarWeek.tsx`, `tests/earnings.test.ts`; modify `tests/d1.ts`, layout nav, post page, home page, `messages/*.json`, `wrangler.jsonc`, `cloudflare-env.d.ts`, `globals.css`.
 
 **Interfaces:**
-- `weekStart(date: string): string` (Monday, YYYY-MM-DD); `listCalendarWeek(db, monday): Promise<CalendarDay[]>` — 5 weekdays, entries with `status ∈ {unconfirmed, confirmed, reported}` (quarantined hidden), each `{ ticker, slot, status, postSlug | null }`.
-- `getPostCharts(db, slug): Promise<{ name, src, altEn, altZh }[]>` (`src = /charts/<r2 key without "charts/">`).
-- `listTickerPosts(db, ticker, lang)`, `listTickerCalendar(db, ticker)`, `listLatestEarnings(db, lang, n)`.
+- `weekStart(date: string): string` (Monday, YYYY-MM-DD); `listCalendarWeek(db, monday, lang): Promise<CalendarDay[]>` — 5 weekdays, entries with `status ∈ {unconfirmed, confirmed, reported}` (quarantined hidden), each `{ ticker, slot, status, postSlug | null }`.
+- `getPostCharts(db, slug, lang): Promise<{ name, src, alt }[]>` (`src = /charts/<r2 key without "charts/">`).
+- `listTickerPosts(db, ticker, lang)`, `listTickerCalendar(db, ticker, lang)`, `listLatestEarnings(db, lang, n)`, `listRecentBriefs(db, lang, n)` (home lists briefs and earnings separately). Calendar entries link a post only when the post page shows it in that language. Weeks more than 8 from today are `noindex`.
 - `GET /charts/[...key]`: only keys matching `earnings/[A-Z0-9-]+/[0-9-]+/(revenue|eps).svg`; served from R2 `FACTS` at `charts/<key>` with `Content-Type: image/svg+xml`, `Content-Security-Policy: default-src 'none'; style-src 'unsafe-inline'`, `X-Content-Type-Options: nosniff`, long cache; anything else 404.
 - `/[locale]/earnings?week=YYYY-MM-DD`: week view, previous/next week links, confirmed vs unconfirmed vs reported marked, times as "Before open / After close / Time n/a".
 - `/[locale]/t/[ticker]`: earnings posts for the ticker + its calendar rows; unknown ticker (not in a filing or calendar row) → 404.

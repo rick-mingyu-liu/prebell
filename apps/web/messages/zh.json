@@ -15,7 +15,8 @@
     "empty": "暂无已发布的简报。",
     "allBriefs": "全部简报",
     "latestEarnings": "最新财报速评",
-    "calendar": "财报日历"
+    "calendar": "财报日历",
+    "noEarnings": "暂无财报速评。"
   },
   "post": {
     "permalink": "本文链接",

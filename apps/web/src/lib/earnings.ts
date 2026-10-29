@@ -39,7 +39,8 @@ export function isDate(s: string | undefined | null): s is string {
 
 /** A URL ticker in display form (`brk.b` -> `BRK.B`), or null if it cannot be one. */
 export function normalizeTicker(raw: string): string | null {
-  const t = decodeURIComponent(raw).toUpperCase();
+  // Next has already decoded the route param.
+  const t = raw.toUpperCase();
   return TICKER.test(t) ? t : null;
 }
 
@@ -68,11 +69,14 @@ interface CalRow {
   post_slug: string | null;
 }
 
-// Earnings posts whose English text is published, by ticker and ET date.
+// Earnings posts the post page shows in `lang` (a pending ZH page shows the
+// "coming soon" notice), by ticker and ET date. Binds `lang` once.
 const POSTS_BY_TICKER_DATE = `SELECT f.ticker, p.trading_date, MIN(p.slug) AS slug
   FROM earnings_filings f
   JOIN posts p ON p.run_key = f.run_key
-  JOIN post_translations t ON t.post_id = p.id AND t.lang = 'en' AND t.status = 'published'
+  JOIN post_translations en ON en.post_id = p.id AND en.lang = 'en' AND en.status = 'published'
+  JOIN post_translations t ON t.post_id = p.id AND t.lang = ?
+    AND (t.status = 'published' OR (t.lang = 'zh' AND t.status = 'pending'))
   GROUP BY f.ticker, p.trading_date`;
 
 const toEntry = (r: CalRow): CalendarEntry => ({
@@ -84,7 +88,7 @@ const toEntry = (r: CalRow): CalendarEntry => ({
 });
 
 /** Monday-Friday of the week starting `monday`; quarantined dates are not shown. */
-export async function listCalendarWeek(db: D1Like, monday: string): Promise<CalendarDay[]> {
+export async function listCalendarWeek(db: D1Like, monday: string, lang: Lang): Promise<CalendarDay[]> {
   const friday = addDays(monday, 4);
   const { results } = await db
     .prepare(
@@ -94,7 +98,7 @@ export async function listCalendarWeek(db: D1Like, monday: string): Promise<Cale
        WHERE c.report_date BETWEEN ? AND ? AND c.status IN ('unconfirmed','confirmed','reported')
        ORDER BY c.report_date, CASE c.time_slot WHEN 'bmo' THEN 0 WHEN 'amc' THEN 1 ELSE 2 END, c.ticker`,
     )
-    .bind(monday, friday)
+    .bind(lang, monday, friday)
     .all<CalRow>();
   return [0, 1, 2, 3, 4].map((i) => {
     const date = addDays(monday, i);
@@ -103,7 +107,7 @@ export async function listCalendarWeek(db: D1Like, monday: string): Promise<Cale
 }
 
 /** A ticker's calendar rows (newest first), quarantined ones hidden. */
-export async function listTickerCalendar(db: D1Like, ticker: string): Promise<CalendarEntry[]> {
+export async function listTickerCalendar(db: D1Like, ticker: string, lang: Lang): Promise<CalendarEntry[]> {
   const { results } = await db
     .prepare(
       `SELECT c.ticker, c.report_date, c.time_slot, c.status, x.slug AS post_slug
@@ -112,7 +116,7 @@ export async function listTickerCalendar(db: D1Like, ticker: string): Promise<Ca
        WHERE c.ticker = ? AND c.status IN ('unconfirmed','confirmed','reported')
        ORDER BY c.report_date DESC LIMIT 12`,
     )
-    .bind(ticker)
+    .bind(lang, ticker)
     .all<CalRow>();
   return results.map(toEntry);
 }
@@ -158,6 +162,23 @@ export async function listLatestEarnings(db: D1Like, lang: Lang, n: number): Pro
     .all<ListRow>();
   return results.map(toItem);
 }
+
+/** The newest published non-earnings posts (briefs, recaps) in `lang`. */
+export async function listRecentBriefs(db: D1Like, lang: Lang, n: number): Promise<PostListItem[]> {
+  const { results } = await db
+    .prepare(
+      `SELECT p.slug, p.content_type, p.trading_date, p.published_at, t.title, t.summary
+       FROM posts p JOIN post_translations t ON t.post_id = p.id AND t.lang = ?
+       WHERE t.status = 'published' AND p.content_type <> 'earnings'
+       ORDER BY p.trading_date DESC, p.published_at DESC, p.id DESC LIMIT ?`,
+    )
+    .bind(lang, n)
+    .all<ListRow>();
+  return results.map(toItem);
+}
+
+/** Weeks this far from today are not indexed (the week links go on forever). */
+export const INDEXED_WEEKS = 8;
 
 /** True when the ticker has an earnings filing or a calendar row. */
 export async function tickerKnown(db: D1Like, ticker: string): Promise<boolean> {

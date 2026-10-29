@@ -7,8 +7,8 @@ import PostBody from "@/components/PostBody";
 import PostList from "@/components/PostList";
 import type { Locale } from "@/i18n/routing";
 import { getDb } from "@/lib/db";
-import { listLatestEarnings } from "@/lib/earnings";
-import { getLatestPremarket, listPosts } from "@/lib/posts";
+import { listLatestEarnings, listRecentBriefs } from "@/lib/earnings";
+import { getLatestPremarket } from "@/lib/posts";
 import { pairedAlternates } from "@/lib/seo";
 import { formatDate, formatEt } from "@/lib/time";
 
@@ -22,14 +22,14 @@ export default async function Home({ params }: PageProps<"/[locale]">) {
   setRequestLocale(locale);
   const t = await getTranslations();
   const db = getDb();
+  // Briefs and earnings checks are listed separately, so a busy earnings
+  // season never pushes the briefs off the home page.
   const [latest, recent, earnings] = await Promise.all([
     getLatestPremarket(db, locale),
-    listPosts(db, locale, 1),
+    listRecentBriefs(db, locale, 11),
     listLatestEarnings(db, locale, 5),
   ]);
-  const others = recent
-    .filter((p) => p.slug !== latest?.slug && p.contentType !== "earnings")
-    .slice(0, 10);
+  const others = recent.filter((p) => p.slug !== latest?.slug).slice(0, 10);
 
   return (
     <>
@@ -62,7 +62,11 @@ export default async function Home({ params }: PageProps<"/[locale]">) {
       </section>
       <section aria-labelledby="earnings">
         <h2 id="earnings">{t("home.latestEarnings")}</h2>
-        {earnings.length > 0 && <PostList locale={locale} items={earnings} />}
+        {earnings.length > 0 ? (
+          <PostList locale={locale} items={earnings} />
+        ) : (
+          <p className="muted">{t("home.noEarnings")}</p>
+        )}
         <p>
           <Link href={`/${locale}/earnings`}>{t("home.calendar")} →</Link>
         </p>
