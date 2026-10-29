@@ -147,8 +147,13 @@ pub async fn write(
     f: &RecapFacts,
     lang: Lang,
 ) -> Result<(Draft, String), Vec<String>> {
-    let facts_json =
-        serde_json::to_string_pretty(f).map_err(|e| vec![format!("draft: facts json: {e}")])?;
+    // Diagnostics are operational counters, not facts the recap may cite.
+    let for_llm = RecapFacts {
+        diagnostics: vec![],
+        ..f.clone()
+    };
+    let facts_json = serde_json::to_string_pretty(&for_llm)
+        .map_err(|e| vec![format!("draft: facts json: {e}")])?;
     let mut allowed = numbers_in_facts(f);
     let names: Vec<&str> = f
         .gainers
@@ -264,6 +269,7 @@ mod tests {
             after_hours: Field::Missing {
                 reason: "empty result".into(),
             },
+            diagnostics: vec![],
         }
     }
 
@@ -279,6 +285,19 @@ mod tests {
     }
     fn bad(lang: Lang) -> Result<Value, ProviderError> {
         reply(lang, "The Nasdaq 100 rose 7.5%.")
+    }
+
+    #[tokio::test]
+    async fn diagnostics_are_not_sent_to_the_llm() {
+        let l = llm(vec![clean(Lang::En)]);
+        let mut f = facts();
+        f.diagnostics = vec!["quotes ok=480 http429=0".into()];
+        write(&l, &f, Lang::En).await.unwrap();
+        let user = &l.prompts.borrow()[0].1;
+        assert!(
+            !user.contains("diagnostics") && !user.contains("http429"),
+            "{user}"
+        );
     }
 
     #[tokio::test]

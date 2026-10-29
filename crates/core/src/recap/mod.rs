@@ -12,7 +12,7 @@ use crate::facts::{quote_numbers, Field, Mover, NewsReason, Quote};
 use crate::numbers::Lang;
 use crate::premarket::draft::Draft;
 use crate::premarket::{
-    articles_prompt, company_name, extract, system_prompt, universe, yahoo_symbol,
+    articles_prompt, company_name, extract, system_prompt, universe, yahoo_symbol, Diag,
 };
 use crate::providers::{LlmProvider, MarketData, NewsSearch};
 use crate::run::{tick_content, Content, TickOutcome};
@@ -47,6 +47,10 @@ pub struct RecapFacts {
     pub losers: Vec<Mover>,
     /// Companies the news says report after today's close.
     pub after_hours: Field<Vec<NewsReason>>,
+    /// Short counters from the build, for logs and `last_error`. Never sent
+    /// to the LLM.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub diagnostics: Vec<String>,
 }
 
 /// Names of required sections that are unavailable. Empty means publishable.
@@ -98,7 +102,7 @@ fn long_date(d: NaiveDate) -> String {
     d.format("%B %-d, %Y").to_string()
 }
 
-async fn mover(ns: &dyn NewsSearch, llm: &dyn LlmProvider, quote: Quote) -> Mover {
+async fn mover(ns: &dyn NewsSearch, llm: &dyn LlmProvider, quote: Quote, d: &mut Diag) -> Mover {
     let name = company_name(&quote.symbol)
         .unwrap_or(&quote.symbol)
         .to_string();
@@ -122,11 +126,15 @@ async fn mover(ns: &dyn NewsSearch, llm: &dyn LlmProvider, quote: Quote) -> Move
                 &articles_prompt(&header, &hits),
                 &hits,
                 MOVER_REASONS,
+                d,
             )
             .await
             .unwrap_or_default()
         }
-        Err(_) => vec![],
+        Err(_) => {
+            d.search_err += 1;
+            vec![]
+        }
     };
     Mover {
         quote,
@@ -139,6 +147,7 @@ async fn after_hours(
     ns: &dyn NewsSearch,
     llm: &dyn LlmProvider,
     date: NaiveDate,
+    d: &mut Diag,
 ) -> Field<Vec<NewsReason>> {
     let day = long_date(date);
     let hits = match ns
@@ -147,9 +156,10 @@ async fn after_hours(
     {
         Ok(h) => h,
         Err(e) => {
+            d.search_err += 1;
             return Field::Missing {
                 reason: e.to_string(),
-            }
+            };
         }
     };
     let system = system_prompt(
@@ -166,6 +176,7 @@ async fn after_hours(
         &articles_prompt(&header, &hits),
         &hits,
         AFTER_HOURS_ITEMS,
+        d,
     )
     .await
     {
@@ -177,12 +188,14 @@ async fn after_hours(
 }
 
 /// Universe closes passing the price/volume filters, `symbol` set to the universe ticker.
-async fn liquid_closes(md: &dyn MarketData, date: NaiveDate) -> Vec<Quote> {
+async fn liquid_closes(md: &dyn MarketData, date: NaiveDate, d: &mut Diag) -> Vec<Quote> {
     let tickers = universe();
     let symbols: Vec<String> = tickers.iter().map(|t| yahoo_symbol(t)).collect();
-    md.close_quotes(&symbols, date)
-        .await
+    let quotes = md.close_quotes(&symbols, date).await;
+    d.market = md.diagnostics();
+    let liquid: Vec<Quote> = quotes
         .into_iter()
+        .inspect(|(_, r)| d.quote(r))
         .filter_map(|(sym, r)| {
             let mut q = r.ok()?;
             let i = symbols.iter().position(|s| *s == sym)?;
@@ -190,7 +203,9 @@ async fn liquid_closes(md: &dyn MarketData, date: NaiveDate) -> Vec<Quote> {
             Some(q)
         })
         .filter(|q| q.last >= MIN_PRICE && q.volume.is_some_and(|v| v >= MIN_VOLUME))
-        .collect()
+        .collect();
+    d.liquid = liquid.len();
+    liquid
 }
 
 pub async fn build_facts(
@@ -200,6 +215,7 @@ pub async fn build_facts(
     trading_date: NaiveDate,
     now: DateTime<Utc>,
 ) -> RecapFacts {
+    let mut d = Diag::default();
     let symbols: Vec<String> = INDEXES.iter().map(|(_, s)| s.to_string()).collect();
     let mut closes = md.close_quotes(&symbols, trading_date).await;
     let indexes: Vec<(String, Field<Quote>)> = INDEXES
@@ -207,14 +223,23 @@ pub async fn build_facts(
         .map(|(label, sym)| {
             let f = match closes.iter().position(|(s, _)| s == sym) {
                 Some(i) => match closes.swap_remove(i).1 {
-                    Ok(q) => Field::Value(q),
-                    Err(e) => Field::Missing {
-                        reason: e.to_string(),
-                    },
+                    Ok(q) => {
+                        d.futures_ok += 1;
+                        Field::Value(q)
+                    }
+                    Err(e) => {
+                        d.futures_err += 1;
+                        Field::Missing {
+                            reason: e.to_string(),
+                        }
+                    }
                 },
-                None => Field::Missing {
-                    reason: "no quote returned".into(),
-                },
+                None => {
+                    d.futures_err += 1;
+                    Field::Missing {
+                        reason: "no quote returned".into(),
+                    }
+                }
             };
             (label.to_string(), f)
         })
@@ -237,10 +262,11 @@ pub async fn build_facts(
             after_hours: Field::Missing {
                 reason: "not gathered: index closes unavailable".into(),
             },
+            diagnostics: d.lines_as("indexes"),
         };
     }
 
-    let quotes = liquid_closes(md, trading_date).await;
+    let quotes = liquid_closes(md, trading_date, &mut d).await;
     let mut up: Vec<Quote> = quotes
         .iter()
         .filter(|q| q.change_pct > 0.0)
@@ -251,14 +277,16 @@ pub async fn build_facts(
     let mut down: Vec<Quote> = quotes.into_iter().filter(|q| q.change_pct < 0.0).collect();
     down.sort_by(|a, b| a.change_pct.total_cmp(&b.change_pct));
     down.truncate(MOVERS_PER_SIDE);
+    d.gainers = up.len();
+    d.losers = down.len();
 
     let mut gainers = Vec::with_capacity(up.len());
     for q in up {
-        gainers.push(mover(ns, llm, q).await);
+        gainers.push(mover(ns, llm, q, &mut d).await);
     }
     let mut losers = Vec::with_capacity(down.len());
     for q in down {
-        losers.push(mover(ns, llm, q).await);
+        losers.push(mover(ns, llm, q, &mut d).await);
     }
 
     RecapFacts {
@@ -268,7 +296,8 @@ pub async fn build_facts(
         indexes,
         gainers,
         losers,
-        after_hours: after_hours(ns, llm, trading_date).await,
+        after_hours: after_hours(ns, llm, trading_date, &mut d).await,
+        diagnostics: d.lines_as("indexes"),
     }
 }
 
@@ -304,6 +333,9 @@ impl Content for Recap<'_> {
     fn missing_required(&self, f: &RecapFacts) -> Vec<&'static str> {
         missing_required(f)
     }
+    fn diagnostics(&self, f: &RecapFacts) -> Vec<String> {
+        f.diagnostics.clone()
+    }
     async fn write(&self, f: &RecapFacts, lang: Lang) -> Result<(Draft, String), Vec<String>> {
         draft::write(self.llm, f, lang).await
     }
@@ -337,7 +369,19 @@ pub async fn tick(
     ns: &dyn NewsSearch,
     llm: &dyn LlmProvider,
 ) -> TickOutcome {
-    tick_content(now, store, &Recap { md, ns, llm }).await
+    tick_with_log(now, store, md, ns, llm, &|_| {}).await
+}
+
+/// `tick`, passing the build's diagnostics line to `log` once when it builds.
+pub async fn tick_with_log(
+    now: DateTime<Utc>,
+    store: &dyn Store,
+    md: &dyn MarketData,
+    ns: &dyn NewsSearch,
+    llm: &dyn LlmProvider,
+    log: &dyn Fn(&str),
+) -> TickOutcome {
+    tick_content(now, store, &Recap { md, ns, llm }, log).await
 }
 
 #[cfg(test)]
@@ -383,6 +427,7 @@ mod tests {
         async fn premarket_quotes(
             &self,
             _symbols: &[String],
+            _now: DateTime<Utc>,
         ) -> Vec<(String, Result<Quote, ProviderError>)> {
             panic!("recap must not use premarket quotes")
         }
@@ -761,6 +806,7 @@ mod run_tests {
         async fn premarket_quotes(
             &self,
             _symbols: &[String],
+            _now: DateTime<Utc>,
         ) -> Vec<(String, Result<Quote, ProviderError>)> {
             vec![]
         }
@@ -886,17 +932,63 @@ mod run_tests {
     }
 
     #[tokio::test]
+    async fn build_logs_diagnostics_once() {
+        let s = MemStore::default();
+        let (m, l) = (md(true), llm(true, true));
+        let logs = std::cell::RefCell::new(Vec::<String>::new());
+        let log = |m: &str| logs.borrow_mut().push(m.to_string());
+        let now = utc("2026-10-29T20:45:00Z");
+        assert_eq!(
+            tick_with_log(now, &s, &m, &FakeNs, &l, &log).await,
+            TickOutcome::Published
+        );
+        {
+            let logs = logs.borrow();
+            assert_eq!(logs.len(), 1, "{logs:?}");
+            let n = crate::premarket::universe().len();
+            assert!(
+                logs[0].starts_with(&format!(
+                    "diagnostics: quotes ok=1 http429=0 http_other={} ",
+                    n - 1
+                )),
+                "{logs:?}"
+            );
+            assert!(
+                logs[0]
+                    .contains("; movers liquid=1 gainers=1 losers=0; reasons proposed=1 kept=1;"),
+                "{logs:?}"
+            );
+            assert!(logs[0].ends_with("; indexes ok=4 err=0"), "{logs:?}");
+        }
+        // No build, no diagnostics line.
+        tick_with_log(now, &s, &m, &FakeNs, &l, &log).await;
+        assert_eq!(logs.borrow().len(), 1);
+        // Diagnostics are stored with the facts.
+        let facts: RecapFacts =
+            serde_json::from_str(&s.facts.borrow()["recap/2026-10-29.json"]).unwrap();
+        assert!(facts
+            .diagnostics
+            .last()
+            .unwrap()
+            .starts_with("indexes ok=4"));
+    }
+
+    #[tokio::test]
     async fn missing_index_retries_then_skips_at_7pm_est() {
         // Fri 2026-11-06 (EST): 16:45 ET = 21:45Z, 19:00 ET = Sat 00:00Z.
         let key = "recap:2026-11-06";
         let s = MemStore::default();
         let (m, l) = (md(false), llm(true, true));
+        let want = "indexes | quotes ok=0 http429=0 http_other=0 empty=0 stale=0 parse=0 net=0 \
+                    skipped=0; movers liquid=0 gainers=0 losers=0; reasons proposed=0 kept=0; \
+                    search_err=0 llm_err=0; indexes ok=3 err=1";
         for t in ["2026-11-06T21:45:00Z", "2026-11-06T23:55:00Z"] {
             assert_eq!(
                 tick(utc(t), &s, &m, &FakeNs, &l).await,
-                TickOutcome::Retrying("indexes".into())
+                TickOutcome::Retrying(want.into())
             );
             assert_eq!(status(&s, key), "pending");
+            assert_eq!(s.runs.borrow()[key].last_error.as_deref(), Some(want));
         }
         assert_eq!(
             tick(utc("2026-11-07T00:00:00Z"), &s, &m, &FakeNs, &l).await,
@@ -910,7 +1002,7 @@ mod run_tests {
             assert_eq!((alerts[0].0.as_str(), alerts[0].1.as_str()), (key, "error"));
             assert_eq!(
                 alerts[0].2,
-                "after-close recap skipped for 2026-11-06: not ready by 19:00 ET (indexes)"
+                format!("after-close recap skipped for 2026-11-06: not ready by 19:00 ET ({want})")
             );
         }
         // Data arriving after the deadline changes nothing.

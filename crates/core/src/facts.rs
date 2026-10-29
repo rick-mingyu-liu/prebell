@@ -47,6 +47,10 @@ pub struct PremarketFacts {
     pub losers: Vec<Mover>,
     pub macro_items: Field<Vec<NewsReason>>,
     pub watch_list: Field<Vec<String>>,
+    /// Short counters from the build ("quotes ok=480 http429=0 ..."), for
+    /// logs and `last_error`. Never sent to the LLM.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub diagnostics: Vec<String>,
 }
 
 /// Names of required sections that are unavailable. Empty means publishable.
@@ -165,6 +169,7 @@ mod tests {
             watch_list: Field::Missing {
                 reason: "none".into(),
             },
+            diagnostics: vec![],
         }
     }
 
@@ -196,6 +201,19 @@ mod tests {
         let f = facts();
         let s = serde_json::to_string(&f).unwrap();
         assert_eq!(serde_json::from_str::<PremarketFacts>(&s).unwrap(), f);
+    }
+
+    #[test]
+    fn diagnostics_round_trip_and_default_when_absent() {
+        let mut f = facts();
+        f.diagnostics = vec!["quotes ok=1".into()];
+        let s = serde_json::to_string(&f).unwrap();
+        assert_eq!(serde_json::from_str::<PremarketFacts>(&s).unwrap(), f);
+        // Facts stored before this field existed still parse.
+        let mut v: serde_json::Value = serde_json::to_value(&f).unwrap();
+        v.as_object_mut().unwrap().remove("diagnostics");
+        let old: PremarketFacts = serde_json::from_value(v).unwrap();
+        assert!(old.diagnostics.is_empty());
     }
 
     #[test]

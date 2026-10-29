@@ -1,11 +1,13 @@
 use crate::facts::Quote;
 use async_trait::async_trait;
-use chrono::NaiveDate;
+use chrono::{DateTime, NaiveDate, Utc};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct HttpResp {
     pub status: u16,
     pub body: String,
+    /// The response's `Set-Cookie` header, if any. Several are joined by ", ".
+    pub set_cookie: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
@@ -18,6 +20,16 @@ pub enum ProviderError {
     Parse(String),
     #[error("empty result")]
     Empty,
+    /// The quote's premarket fields disagree with its previous close: likely
+    /// left over from an earlier session.
+    #[error("stale premarket quote")]
+    Stale,
+    /// Not requested, because an earlier request in the run was throttled.
+    #[error("not requested after HTTP 429")]
+    Skipped,
+    /// The response body passed the caller's byte cap.
+    #[error("response too large: over {0} bytes")]
+    TooLarge(usize),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -36,14 +48,37 @@ pub trait Http {
         headers: &[(&str, &str)],
         body: &serde_json::Value,
     ) -> Result<HttpResp, ProviderError>;
+    /// `get` that fails with `TooLarge` when the body is over `max_bytes`.
+    /// Real clients should stop reading at the cap; this default checks
+    /// only after the whole body is in memory.
+    async fn get_capped(
+        &self,
+        url: &str,
+        headers: &[(&str, &str)],
+        max_bytes: usize,
+    ) -> Result<HttpResp, ProviderError> {
+        let resp = self.get(url, headers).await?;
+        if resp.body.len() > max_bytes {
+            return Err(ProviderError::TooLarge(max_bytes));
+        }
+        Ok(resp)
+    }
+}
+
+/// Waits, so a caller can put a deadline on a request (`worker::Delay` on Workers).
+#[async_trait(?Send)]
+pub trait Timer {
+    async fn sleep(&self, d: std::time::Duration);
 }
 
 #[async_trait(?Send)]
 pub trait MarketData {
     async fn quote(&self, symbol: &str) -> Result<Quote, ProviderError>;
+    /// Premarket quotes for the ET trading date of `now`.
     async fn premarket_quotes(
         &self,
         symbols: &[String],
+        now: DateTime<Utc>,
     ) -> Vec<(String, Result<Quote, ProviderError>)>;
     /// Regular-session close for the ET date `session`: `last` is the close,
     /// `prev_close` the prior session's close, `volume` the session volume.
@@ -68,6 +103,10 @@ pub trait MarketData {
             out.push((s.clone(), self.close_quote(s, session).await));
         }
         out
+    }
+    /// Short provider-specific diagnostic lines about the last calls.
+    fn diagnostics(&self) -> Vec<String> {
+        Vec::new()
     }
 }
 
@@ -99,6 +138,7 @@ mod tests {
         async fn premarket_quotes(
             &self,
             _symbols: &[String],
+            _now: DateTime<Utc>,
         ) -> Vec<(String, Result<Quote, ProviderError>)> {
             vec![]
         }

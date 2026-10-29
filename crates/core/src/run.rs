@@ -37,6 +37,8 @@ pub trait Content {
     async fn write(&self, f: &Self::Facts, lang: Lang) -> Result<(Draft, String), Vec<String>>;
     /// The post's sources, one per url.
     fn sources(&self, f: &Self::Facts) -> Vec<NewsReason>;
+    /// Build counters carried in the facts, for the log and `last_error`.
+    fn diagnostics(&self, f: &Self::Facts) -> Vec<String>;
 
     fn run_key(&self, date: NaiveDate) -> String {
         format!("{}:{}", self.content_type(), date.format("%Y-%m-%d"))
@@ -86,6 +88,9 @@ impl Content for Premarket<'_> {
     fn sources(&self, f: &PremarketFacts) -> Vec<NewsReason> {
         sources(f)
     }
+    fn diagnostics(&self, f: &PremarketFacts) -> Vec<String> {
+        f.diagnostics.clone()
+    }
 }
 /// A `building` run younger than this is assumed to be in flight. A build
 /// takes 3-8 minutes and the cron fires every 5, so this must cover several
@@ -118,12 +123,30 @@ pub async fn tick(
     ns: &dyn NewsSearch,
     llm: &dyn LlmProvider,
 ) -> TickOutcome {
-    tick_content(now, store, &Premarket { md, ns, llm }).await
+    tick_with_log(now, store, md, ns, llm, &|_| {}).await
 }
 
-/// One cron firing for content type `c`. A store error is reported as `Retrying`.
-pub async fn tick_content<C: Content>(now: DateTime<Utc>, store: &dyn Store, c: &C) -> TickOutcome {
-    step(now, store, c)
+/// `tick`, passing the build's diagnostics line to `log` once when it builds.
+pub async fn tick_with_log(
+    now: DateTime<Utc>,
+    store: &dyn Store,
+    md: &dyn MarketData,
+    ns: &dyn NewsSearch,
+    llm: &dyn LlmProvider,
+    log: &dyn Fn(&str),
+) -> TickOutcome {
+    tick_content(now, store, &Premarket { md, ns, llm }, log).await
+}
+
+/// One cron firing for content type `c`, passing the build's diagnostics
+/// line to `log` once when it builds. A store error is reported as `Retrying`.
+pub async fn tick_content<C: Content>(
+    now: DateTime<Utc>,
+    store: &dyn Store,
+    c: &C,
+    log: &dyn Fn(&str),
+) -> TickOutcome {
+    step(now, store, c, log)
         .await
         .unwrap_or_else(TickOutcome::Retrying)
 }
@@ -132,6 +155,7 @@ async fn step<C: Content>(
     now: DateTime<Utc>,
     store: &dyn Store,
     c: &C,
+    log: &dyn Fn(&str),
 ) -> Result<TickOutcome, String> {
     let decision = decide(now, |d| c.window(d));
     let date = match decision {
@@ -163,7 +187,7 @@ async fn step<C: Content>(
 
     match decision {
         SlotDecision::InWindow { .. } if in_flight => Ok(TickOutcome::Nothing),
-        SlotDecision::InWindow { .. } => build(now, store, c, date, run).await,
+        SlotDecision::InWindow { .. } => build(now, store, c, log, date, run).await,
         // Let an in-flight build finish; once its lease expires it is skipped.
         SlotDecision::PastDeadline { .. } if in_flight => Ok(TickOutcome::Nothing),
         SlotDecision::PastDeadline { .. } => skip(now, store, c, date, run).await,
@@ -273,6 +297,7 @@ async fn build<C: Content>(
     now: DateTime<Utc>,
     store: &dyn Store,
     c: &C,
+    log: &dyn Fn(&str),
     date: NaiveDate,
     run: Option<RunRow>,
 ) -> Result<TickOutcome, String> {
@@ -284,9 +309,15 @@ async fn build<C: Content>(
     store.upsert_run(&row).await?;
 
     let facts = c.build_facts(date, now).await;
+    let diagnostics = c.diagnostics(&facts).join("; ");
+    log(&format!("diagnostics: {diagnostics}"));
     let missing = c.missing_required(&facts);
     if !missing.is_empty() {
-        return retry_later(store, row, missing.join(", ")).await;
+        let mut err = missing.join(", ");
+        if !diagnostics.is_empty() {
+            err = format!("{err} | {diagnostics}");
+        }
+        return retry_later(store, row, err).await;
     }
 
     let (en, en_md) = match c.write(&facts, Lang::En).await {
@@ -537,6 +568,7 @@ mod tests {
         async fn premarket_quotes(
             &self,
             symbols: &[String],
+            _now: DateTime<Utc>,
         ) -> Vec<(String, Result<Quote, ProviderError>)> {
             self.calls.set(self.calls.get() + 1);
             symbols
@@ -741,16 +773,20 @@ mod tests {
     async fn all_429_retries_then_skips_once() {
         let s = MemStore::default();
         let (m, l) = (md(false), llm(true, true));
+        let n = crate::premarket::universe().len();
+        let want = format!(
+            "futures, movers | quotes ok=0 http429={n} http_other=0 empty=0 stale=0 parse=0 net=0 \
+             skipped=0; \
+             movers liquid=0 gainers=0 losers=0; reasons proposed=0 kept=0; \
+             search_err=1 llm_err=0; futures ok=0 err=4"
+        );
         for t in ["2026-10-29T12:30:00Z", "2026-10-29T12:35:00Z"] {
             match tick(utc(t), &s, &m, &FakeNs, &l).await {
-                TickOutcome::Retrying(e) => assert_eq!(e, "futures, movers"),
+                TickOutcome::Retrying(e) => assert_eq!(e, want),
                 o => panic!("{o:?}"),
             }
             assert_eq!(run_status(&s), "pending");
-            assert_eq!(
-                s.runs.borrow()[KEY].last_error.as_deref(),
-                Some("futures, movers")
-            );
+            assert_eq!(s.runs.borrow()[KEY].last_error.as_deref(), Some(&*want));
         }
         assert_eq!(s.runs.borrow()[KEY].attempts, 2);
         assert_eq!(
@@ -770,6 +806,31 @@ mod tests {
         );
         assert_eq!(s.alerts.borrow().len(), 1);
         assert!(s.posts.borrow().is_empty());
+    }
+
+    #[tokio::test]
+    async fn build_logs_diagnostics_once() {
+        let s = MemStore::default();
+        let (m, l) = (md(true), llm(true, true));
+        let logs = std::cell::RefCell::new(Vec::<String>::new());
+        let log = |m: &str| logs.borrow_mut().push(m.to_string());
+        let now = utc("2026-10-29T12:30:00Z");
+        assert_eq!(
+            tick_with_log(now, &s, &m, &FakeNs, &l, &log).await,
+            TickOutcome::Published
+        );
+        {
+            let logs = logs.borrow();
+            assert_eq!(logs.len(), 1, "{logs:?}");
+            assert!(logs[0].starts_with("diagnostics: quotes ok=1 "), "{logs:?}");
+            assert!(
+                logs[0].contains("; movers liquid=1 gainers=1 losers=0"),
+                "{logs:?}"
+            );
+        }
+        // No build, no diagnostics line.
+        tick_with_log(now, &s, &m, &FakeNs, &l, &log).await;
+        assert_eq!(logs.borrow().len(), 1);
     }
 
     #[tokio::test]

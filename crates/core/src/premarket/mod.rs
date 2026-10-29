@@ -33,6 +33,77 @@ const MACRO_HITS: usize = 5;
 const MACRO_ITEMS: usize = 3;
 const MAX_CONTENT_CHARS: usize = 6_000;
 
+/// Counters behind `PremarketFacts::diagnostics` (and the recap's, which
+/// counts index closes in `futures_*`).
+#[derive(Default)]
+pub(crate) struct Diag {
+    pub(crate) ok: usize,
+    pub(crate) http429: usize,
+    pub(crate) http_other: usize,
+    pub(crate) empty: usize,
+    pub(crate) stale: usize,
+    pub(crate) parse: usize,
+    pub(crate) net: usize,
+    pub(crate) skipped: usize,
+    /// `MarketData::diagnostics`, listed right after the quote counts.
+    pub(crate) market: Vec<String>,
+    pub(crate) liquid: usize,
+    pub(crate) gainers: usize,
+    pub(crate) losers: usize,
+    pub(crate) proposed: usize,
+    pub(crate) kept: usize,
+    pub(crate) search_err: usize,
+    pub(crate) llm_err: usize,
+    pub(crate) futures_ok: usize,
+    pub(crate) futures_err: usize,
+}
+
+impl Diag {
+    pub(crate) fn quote(&mut self, r: &Result<Quote, ProviderError>) {
+        let n = match r {
+            Ok(_) => &mut self.ok,
+            Err(ProviderError::Http(429)) => &mut self.http429,
+            Err(ProviderError::Http(_)) => &mut self.http_other,
+            Err(ProviderError::Empty) => &mut self.empty,
+            Err(ProviderError::Parse(_)) => &mut self.parse,
+            Err(ProviderError::Network(_) | ProviderError::TooLarge(_)) => &mut self.net,
+            Err(ProviderError::Stale) => &mut self.stale,
+            Err(ProviderError::Skipped) => &mut self.skipped,
+        };
+        *n += 1;
+    }
+
+    fn lines(self) -> Vec<String> {
+        self.lines_as("futures")
+    }
+
+    /// The diagnostics lines, naming the required-quote counts `head`.
+    pub(crate) fn lines_as(self, head: &str) -> Vec<String> {
+        let mut out = vec![format!(
+            "quotes ok={} http429={} http_other={} empty={} stale={} parse={} net={} skipped={}",
+            self.ok,
+            self.http429,
+            self.http_other,
+            self.empty,
+            self.stale,
+            self.parse,
+            self.net,
+            self.skipped
+        )];
+        out.extend(self.market);
+        out.extend([
+            format!(
+                "movers liquid={} gainers={} losers={}",
+                self.liquid, self.gainers, self.losers
+            ),
+            format!("reasons proposed={} kept={}", self.proposed, self.kept),
+            format!("search_err={} llm_err={}", self.search_err, self.llm_err),
+            format!("{head} ok={} err={}", self.futures_ok, self.futures_err),
+        ]);
+        out
+    }
+}
+
 pub(crate) fn system_prompt(task: &str, max: usize) -> String {
     format!(
         "You {task}. Use ONLY the provided articles; never use outside knowledge. \
@@ -77,14 +148,19 @@ pub(crate) async fn extract(
     user: &str,
     hits: &[SearchHit],
     max: usize,
+    d: &mut Diag,
 ) -> Result<Vec<NewsReason>, ProviderError> {
-    let v = llm.complete_json(system, user).await?;
+    let v = llm
+        .complete_json(system, user)
+        .await
+        .inspect_err(|_| d.llm_err += 1)?;
     let items = v
         .get("reasons")
         .and_then(Value::as_array)
         .cloned()
         .unwrap_or_default();
-    Ok(items
+    d.proposed += items.len();
+    let kept: Vec<NewsReason> = items
         .into_iter()
         .filter_map(|it| serde_json::from_value::<NewsReason>(it).ok())
         // `summary_en` is rendered into the EN movers table.
@@ -101,7 +177,9 @@ pub(crate) async fn extract(
             })
         })
         .take(max)
-        .collect())
+        .collect();
+    d.kept += kept.len();
+    Ok(kept)
 }
 
 async fn mover_reasons(
@@ -110,11 +188,13 @@ async fn mover_reasons(
     ticker: &str,
     name: &str,
     change_pct: f64,
+    d: &mut Diag,
 ) -> Vec<NewsReason> {
     let Ok(hits) = ns
         .search(&format!("{name} ({ticker}) stock"), HITS_PER_MOVER)
         .await
     else {
+        d.search_err += 1;
         return vec![];
     };
     let system = system_prompt(
@@ -128,18 +208,24 @@ async fn mover_reasons(
         &articles_prompt(&header, &hits),
         &hits,
         MOVER_REASONS,
+        d,
     )
     .await
     .unwrap_or_default()
 }
 
-async fn macro_items(ns: &dyn NewsSearch, llm: &dyn LlmProvider) -> Field<Vec<NewsReason>> {
+async fn macro_items(
+    ns: &dyn NewsSearch,
+    llm: &dyn LlmProvider,
+    d: &mut Diag,
+) -> Field<Vec<NewsReason>> {
     let hits = match ns.search(MACRO_QUERY, MACRO_HITS).await {
         Ok(h) => h,
         Err(e) => {
+            d.search_err += 1;
             return Field::Missing {
                 reason: e.to_string(),
-            }
+            };
         }
     };
     let system = system_prompt(
@@ -153,6 +239,7 @@ async fn macro_items(ns: &dyn NewsSearch, llm: &dyn LlmProvider) -> Field<Vec<Ne
         &articles_prompt(header, &hits),
         &hits,
         MACRO_ITEMS,
+        d,
     )
     .await
     {
@@ -164,20 +251,28 @@ async fn macro_items(ns: &dyn NewsSearch, llm: &dyn LlmProvider) -> Field<Vec<Ne
 }
 
 /// Universe quotes passing the price/volume filters, with `symbol` set to the universe ticker.
-async fn liquid_quotes(md: &dyn MarketData) -> Vec<Quote> {
+async fn liquid_quotes(md: &dyn MarketData, now: DateTime<Utc>, d: &mut Diag) -> Vec<Quote> {
     let tickers = universe();
     let symbols: Vec<String> = tickers.iter().map(|t| yahoo_symbol(t)).collect();
-    md.premarket_quotes(&symbols)
-        .await
+    let quotes = md.premarket_quotes(&symbols, now).await;
+    d.market = md.diagnostics();
+    let liquid: Vec<Quote> = quotes
         .into_iter()
+        .inspect(|(_, r)| d.quote(r))
         .filter_map(|(sym, r)| {
             let mut q = r.ok()?;
             let i = symbols.iter().position(|s| *s == sym)?;
             q.symbol = tickers[i].clone();
             Some(q)
         })
-        .filter(|q| q.last >= MIN_PRICE && q.volume.is_some_and(|v| v >= MIN_VOLUME))
-        .collect()
+        // Ruling (plan 1): Yahoo's v7 quote has no premarket volume, so
+        // `volume` is `None` for every mover candidate. The volume test is then
+        // skipped: the universe is S&P 500 and Nasdaq-100 large caps, which
+        // are liquid. The $5 price floor always applies.
+        .filter(|q| q.last >= MIN_PRICE && q.volume.is_none_or(|v| v >= MIN_VOLUME))
+        .collect();
+    d.liquid = liquid.len();
+    liquid
 }
 
 pub async fn build_facts(
@@ -187,18 +282,25 @@ pub async fn build_facts(
     trading_date: NaiveDate,
     now: DateTime<Utc>,
 ) -> PremarketFacts {
+    let mut d = Diag::default();
     let mut futures = Vec::with_capacity(FUTURES.len());
     for (label, sym) in FUTURES {
         let f = match md.quote(sym).await {
-            Ok(q) => Field::Value(q),
-            Err(e) => Field::Missing {
-                reason: e.to_string(),
-            },
+            Ok(q) => {
+                d.futures_ok += 1;
+                Field::Value(q)
+            }
+            Err(e) => {
+                d.futures_err += 1;
+                Field::Missing {
+                    reason: e.to_string(),
+                }
+            }
         };
         futures.push((label.to_string(), f));
     }
 
-    let quotes = liquid_quotes(md).await;
+    let quotes = liquid_quotes(md, now, &mut d).await;
     let mut up: Vec<Quote> = quotes
         .iter()
         .filter(|q| q.change_pct > 0.0)
@@ -210,14 +312,18 @@ pub async fn build_facts(
     down.sort_by(|a, b| a.change_pct.total_cmp(&b.change_pct));
     down.truncate(MOVERS_PER_SIDE);
 
+    d.gainers = up.len();
+    d.losers = down.len();
+
     let mut gainers = Vec::with_capacity(up.len());
     for q in up {
-        gainers.push(to_mover(ns, llm, q).await);
+        gainers.push(to_mover(ns, llm, q, &mut d).await);
     }
     let mut losers = Vec::with_capacity(down.len());
     for q in down {
-        losers.push(to_mover(ns, llm, q).await);
+        losers.push(to_mover(ns, llm, q, &mut d).await);
     }
+    let macro_items = macro_items(ns, llm, &mut d).await;
 
     PremarketFacts {
         trading_date,
@@ -225,18 +331,19 @@ pub async fn build_facts(
         futures,
         gainers,
         losers,
-        macro_items: macro_items(ns, llm).await,
+        macro_items,
         watch_list: Field::Missing {
             reason: "not available in v1".into(),
         },
+        diagnostics: d.lines(),
     }
 }
 
-async fn to_mover(ns: &dyn NewsSearch, llm: &dyn LlmProvider, quote: Quote) -> Mover {
+async fn to_mover(ns: &dyn NewsSearch, llm: &dyn LlmProvider, quote: Quote, d: &mut Diag) -> Mover {
     let name = company_name(&quote.symbol)
         .unwrap_or(&quote.symbol)
         .to_string();
-    let reasons = mover_reasons(ns, llm, &quote.symbol, &name, quote.change_pct).await;
+    let reasons = mover_reasons(ns, llm, &quote.symbol, &name, quote.change_pct, d).await;
     Mover {
         quote,
         name,
@@ -271,6 +378,14 @@ mod tests {
     struct FakeMd {
         futures: Option<Quote>,
         stocks: HashMap<String, Quote>,
+        /// Per-symbol errors; any other symbol not in `stocks` is HTTP 404.
+        errs: HashMap<String, ProviderError>,
+        /// Fails every universe symbol with this error.
+        all_err: Option<ProviderError>,
+        /// Returned by `diagnostics`.
+        diag: Vec<String>,
+        /// The `now` passed to `premarket_quotes`.
+        asked_at: RefCell<Option<DateTime<Utc>>>,
     }
     #[async_trait(?Send)]
     impl MarketData for FakeMd {
@@ -286,16 +401,22 @@ mod tests {
         async fn premarket_quotes(
             &self,
             symbols: &[String],
+            now: DateTime<Utc>,
         ) -> Vec<(String, Result<Quote, ProviderError>)> {
+            *self.asked_at.borrow_mut() = Some(now);
             symbols
                 .iter()
                 .map(|s| {
-                    (
-                        s.clone(),
-                        self.stocks.get(s).cloned().ok_or(ProviderError::Http(404)),
-                    )
+                    let r = match (&self.all_err, self.errs.get(s)) {
+                        (Some(e), _) | (None, Some(e)) => Err(e.clone()),
+                        _ => self.stocks.get(s).cloned().ok_or(ProviderError::Http(404)),
+                    };
+                    (s.clone(), r)
                 })
                 .collect()
+        }
+        fn diagnostics(&self) -> Vec<String> {
+            self.diag.clone()
         }
     }
     fn md(stocks: &[Quote]) -> FakeMd {
@@ -305,6 +426,10 @@ mod tests {
                 .iter()
                 .map(|s| (s.symbol.clone(), s.clone()))
                 .collect(),
+            errs: HashMap::new(),
+            all_err: None,
+            diag: vec![],
+            asked_at: RefCell::new(None),
         }
     }
 
@@ -503,11 +628,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn low_or_unknown_volume_is_excluded() {
+    async fn low_volume_is_excluded_unknown_volume_is_kept() {
         let m = md(&[
             q("AAPL", 230.0, 9.0, Some(49_999)),
-            q("MSFT", 400.0, 9.0, None),
+            q("MSFT", 400.0, 8.0, None),
             q("NVDA", 180.0, 1.0, Some(50_000)),
+            q("F", 4.99, 30.0, None),
         ]);
         let f = build_facts(&m, &ns(vec![]), &llm(vec![]), date(), now()).await;
         assert_eq!(
@@ -515,7 +641,7 @@ mod tests {
                 .iter()
                 .map(|m| m.quote.symbol.as_str())
                 .collect::<Vec<_>>(),
-            vec!["NVDA"]
+            vec!["MSFT", "NVDA"]
         );
     }
 
@@ -656,5 +782,102 @@ mod tests {
         );
         let f = build_facts(&md(&[]), &n, &llm(vec![]), date(), now()).await;
         assert_eq!(f.macro_items, Field::Value(vec![]));
+    }
+
+    fn n_universe() -> usize {
+        universe().len()
+    }
+
+    #[tokio::test]
+    async fn all_429_batch_counts_http429_per_symbol() {
+        let mut m = md(&[]);
+        m.all_err = Some(ProviderError::Http(429));
+        let f = build_facts(&m, &ns(vec![]), &llm(vec![]), date(), now()).await;
+        let n = n_universe();
+        assert!(n > 500, "{n}");
+        assert_eq!(
+            f.diagnostics,
+            vec![
+                format!(
+                    "quotes ok=0 http429={n} http_other=0 empty=0 stale=0 parse=0 net=0 skipped=0"
+                ),
+                "movers liquid=0 gainers=0 losers=0".to_string(),
+                "reasons proposed=0 kept=0".to_string(),
+                "search_err=1 llm_err=0".to_string(),
+                "futures ok=4 err=0".to_string(),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn diagnostics_count_each_quote_outcome() {
+        let mut m = md(&[
+            q("AAPL", 230.0, 8.0, None),
+            q("F", 3.0, 9.0, None),
+            q("MSFT", 400.0, -2.0, None),
+        ]);
+        m.futures = None;
+        m.errs = [
+            ("NVDA", ProviderError::Empty),
+            ("AMZN", ProviderError::Empty),
+            ("META", ProviderError::Parse("x".into())),
+            ("TSLA", ProviderError::Network("x".into())),
+            ("GOOGL", ProviderError::Http(429)),
+            ("NFLX", ProviderError::Stale),
+            ("AVGO", ProviderError::Skipped),
+            ("COST", ProviderError::Skipped),
+        ]
+        .into_iter()
+        .map(|(k, v)| (k.to_string(), v))
+        .collect();
+        let f = build_facts(&m, &ns(vec![]), &llm(vec![]), date(), now()).await;
+        let other = n_universe() - 3 - 8;
+        assert_eq!(
+            f.diagnostics[0],
+            format!(
+                "quotes ok=3 http429=1 http_other={other} empty=2 stale=1 parse=1 net=1 skipped=2"
+            )
+        );
+        assert_eq!(f.diagnostics[1], "movers liquid=2 gainers=1 losers=1");
+        // Two mover searches and the macro search all fail.
+        assert_eq!(f.diagnostics[3], "search_err=3 llm_err=0");
+        assert_eq!(f.diagnostics[4], "futures ok=0 err=4");
+    }
+
+    #[tokio::test]
+    async fn diagnostics_count_reasons_and_llm_errors() {
+        let m = md(&[
+            q("AAPL", 230.0, 8.0, Some(2_000_000)),
+            q("MSFT", 400.0, -6.0, Some(900_000)),
+        ]);
+        let msft_q = "Microsoft (MSFT) stock";
+        let n = ns(vec![
+            (AAPL_Q, Ok(vec![hit(URL, ARTICLE)])),
+            (msft_q, Ok(vec![hit("https://news.test/msft", "text")])),
+        ]);
+        let l = llm(vec![
+            (
+                "AAPL",
+                Ok(json!({"reasons": [
+                    {"url": URL, "title": "T", "quote": QUOTE, "summary_en": "Apple rose."},
+                    {"url": URL, "title": "T", "quote": "Apple announced a surprise buyback", "summary_en": "Buyback."}
+                ]})),
+            ),
+            ("MSFT", Err(ProviderError::Http(500))),
+        ]);
+        let f = build_facts(&m, &n, &l, date(), now()).await;
+        assert_eq!(f.diagnostics[2], "reasons proposed=2 kept=1");
+        assert_eq!(f.diagnostics[3], "search_err=1 llm_err=1");
+    }
+
+    #[tokio::test]
+    async fn market_data_diagnostics_follow_the_quote_counts() {
+        let mut m = md(&[]);
+        m.diag = vec!["yahoo_session=crumb_http429 refreshes=0".into()];
+        let f = build_facts(&m, &ns(vec![]), &llm(vec![]), date(), now()).await;
+        assert!(f.diagnostics[0].starts_with("quotes "));
+        assert_eq!(f.diagnostics[1], "yahoo_session=crumb_http429 refreshes=0");
+        assert!(f.diagnostics[2].starts_with("movers "));
+        assert_eq!(*m.asked_at.borrow(), Some(now()));
     }
 }

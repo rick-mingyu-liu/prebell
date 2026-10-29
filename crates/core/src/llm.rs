@@ -106,6 +106,7 @@ mod tests {
             Ok(HttpResp {
                 status: 200,
                 body: self.body.clone(),
+                set_cookie: None,
             })
         }
     }

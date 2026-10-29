@@ -1,20 +1,22 @@
 //! Generator Worker: cron -> queue -> `tick`, backed by D1 + R2.
 
 mod alerts;
+mod competitor;
 mod http;
 mod store;
 
 use chrono::{DateTime, Utc};
+use prebell_core::competitor::run_competitor;
 use prebell_core::llm::{api_key_var, llm_from_env, unknown_provider};
 use prebell_core::recap;
-use prebell_core::run::{self, TickOutcome};
+use prebell_core::run::{tick_with_log, TickOutcome};
 use prebell_core::schedule::{jobs_for_cron, JOBS};
 use prebell_core::tavily::Tavily;
 use prebell_core::yahoo::Yahoo;
 use serde::{Deserialize, Serialize};
 use worker::*;
 
-use crate::http::WorkerHttp;
+use crate::http::{WorkerHttp, WorkerTimer};
 use crate::store::D1Store;
 
 /// Queue message body. A struct (not `serde_json::Value`) so it crosses the
@@ -93,38 +95,53 @@ async fn scheduled(event: ScheduledEvent, env: Env, _ctx: ScheduleContext) {
     }
 }
 
+/// A premarket or recap tick. Providers are built here, per message, so a bad
+/// LLM config fails only the jobs that need the LLM.
+async fn content(env: &Env, store: &D1Store, job: &str) -> Result<TickOutcome> {
+    let md = Yahoo::new(WorkerHttp);
+    let ns = Tavily::new(WorkerHttp, secret_or_empty(env, "TAVILY_API_KEY"));
+    let provider = text(env, "LLM_PROVIDER").unwrap_or_else(|| "claude".into());
+    let key_var = api_key_var(&provider)
+        .ok_or_else(|| Error::RustError(unknown_provider(&provider).to_string()))?;
+    let llm = llm_from_env(
+        &provider,
+        WorkerHttp,
+        secret_or_empty(env, key_var),
+        text(env, "LLM_MODEL"),
+        text(env, "LLM_EFFORT"),
+        |m| console_warn!("{m}"),
+    )
+    .map_err(|e| Error::RustError(e.to_string()))?;
+    let log = |m: &str| console_log!("{m}");
+    let at = now(env);
+    Ok(if job == "recap" {
+        recap::tick_with_log(at, store, &md, &ns, llm.as_ref(), &log).await
+    } else {
+        tick_with_log(at, store, &md, &ns, llm.as_ref(), &log).await
+    })
+}
+
 #[event(queue)]
 async fn queue(batch: MessageBatch<Job>, env: Env, _ctx: Context) -> Result<()> {
     let store = D1Store {
         db: env.d1("DB")?,
         facts: env.bucket("FACTS")?,
     };
-    let md = Yahoo::new(WorkerHttp);
-    let ns = Tavily::new(WorkerHttp, secret_or_empty(&env, "TAVILY_API_KEY"));
-    let provider = text(&env, "LLM_PROVIDER").unwrap_or_else(|| "claude".into());
-    let key_var = api_key_var(&provider)
-        .ok_or_else(|| Error::RustError(unknown_provider(&provider).to_string()))?;
-    let llm = llm_from_env(
-        &provider,
-        WorkerHttp,
-        secret_or_empty(&env, key_var),
-        text(&env, "LLM_MODEL"),
-        text(&env, "LLM_EFFORT"),
-        |m| console_warn!("{m}"),
-    )
-    .map_err(|e| Error::RustError(e.to_string()))?;
 
     for msg in batch.messages()? {
         let job = msg.body().job.as_str();
-        let at = now(&env);
-        let outcome: Option<TickOutcome> = match job {
-            "premarket" => Some(run::tick(at, &store, &md, &ns, llm.as_ref()).await),
-            "recap" => Some(recap::tick(at, &store, &md, &ns, llm.as_ref()).await),
-            _ => None,
-        };
-        match outcome {
-            Some(o) => console_log!("job {job}: {o:?}"),
-            None => console_error!("job {job}: unknown job, dropped"),
+        match job {
+            "competitor" => {
+                let outcome = run_competitor(now(&env), &WorkerHttp, &WorkerTimer, &store).await;
+                console_log!("job {job}: {outcome:?}");
+            }
+            "premarket" | "recap" => match content(&env, &store, job).await {
+                Ok(o) => console_log!("job {job}: {o:?}"),
+                // Logged, not returned: the error is config, so a queue retry
+                // would fail the same way, and other messages must still run.
+                Err(e) => console_error!("job {job}: {e}"),
+            },
+            _ => console_error!("job {job}: unknown job, dropped"),
         }
         msg.ack();
     }
