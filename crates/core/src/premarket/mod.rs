@@ -40,8 +40,12 @@ struct Diag {
     http429: usize,
     http_other: usize,
     empty: usize,
+    stale: usize,
     parse: usize,
     net: usize,
+    skipped: usize,
+    /// `MarketData::diagnostics`, listed right after the quote counts.
+    market: Vec<String>,
     liquid: usize,
     gainers: usize,
     losers: usize,
@@ -62,16 +66,26 @@ impl Diag {
             Err(ProviderError::Empty) => &mut self.empty,
             Err(ProviderError::Parse(_)) => &mut self.parse,
             Err(ProviderError::Network(_)) => &mut self.net,
+            Err(ProviderError::Stale) => &mut self.stale,
+            Err(ProviderError::Skipped) => &mut self.skipped,
         };
         *n += 1;
     }
 
-    fn lines(&self) -> Vec<String> {
-        vec![
-            format!(
-                "quotes ok={} http429={} http_other={} empty={} parse={} net={}",
-                self.ok, self.http429, self.http_other, self.empty, self.parse, self.net
-            ),
+    fn lines(self) -> Vec<String> {
+        let mut out = vec![format!(
+            "quotes ok={} http429={} http_other={} empty={} stale={} parse={} net={} skipped={}",
+            self.ok,
+            self.http429,
+            self.http_other,
+            self.empty,
+            self.stale,
+            self.parse,
+            self.net,
+            self.skipped
+        )];
+        out.extend(self.market);
+        out.extend([
             format!(
                 "movers liquid={} gainers={} losers={}",
                 self.liquid, self.gainers, self.losers
@@ -79,7 +93,8 @@ impl Diag {
             format!("reasons proposed={} kept={}", self.proposed, self.kept),
             format!("search_err={} llm_err={}", self.search_err, self.llm_err),
             format!("futures ok={} err={}", self.futures_ok, self.futures_err),
-        ]
+        ]);
+        out
     }
 }
 
@@ -230,12 +245,12 @@ async fn macro_items(
 }
 
 /// Universe quotes passing the price/volume filters, with `symbol` set to the universe ticker.
-async fn liquid_quotes(md: &dyn MarketData, d: &mut Diag) -> Vec<Quote> {
+async fn liquid_quotes(md: &dyn MarketData, now: DateTime<Utc>, d: &mut Diag) -> Vec<Quote> {
     let tickers = universe();
     let symbols: Vec<String> = tickers.iter().map(|t| yahoo_symbol(t)).collect();
-    let liquid: Vec<Quote> = md
-        .premarket_quotes(&symbols)
-        .await
+    let quotes = md.premarket_quotes(&symbols, now).await;
+    d.market = md.diagnostics();
+    let liquid: Vec<Quote> = quotes
         .into_iter()
         .inspect(|(_, r)| d.quote(r))
         .filter_map(|(sym, r)| {
@@ -279,7 +294,7 @@ pub async fn build_facts(
         futures.push((label.to_string(), f));
     }
 
-    let quotes = liquid_quotes(md, &mut d).await;
+    let quotes = liquid_quotes(md, now, &mut d).await;
     let mut up: Vec<Quote> = quotes
         .iter()
         .filter(|q| q.change_pct > 0.0)
@@ -361,6 +376,10 @@ mod tests {
         errs: HashMap<String, ProviderError>,
         /// Fails every universe symbol with this error.
         all_err: Option<ProviderError>,
+        /// Returned by `diagnostics`.
+        diag: Vec<String>,
+        /// The `now` passed to `premarket_quotes`.
+        asked_at: RefCell<Option<DateTime<Utc>>>,
     }
     #[async_trait(?Send)]
     impl MarketData for FakeMd {
@@ -376,7 +395,9 @@ mod tests {
         async fn premarket_quotes(
             &self,
             symbols: &[String],
+            now: DateTime<Utc>,
         ) -> Vec<(String, Result<Quote, ProviderError>)> {
+            *self.asked_at.borrow_mut() = Some(now);
             symbols
                 .iter()
                 .map(|s| {
@@ -388,6 +409,9 @@ mod tests {
                 })
                 .collect()
         }
+        fn diagnostics(&self) -> Vec<String> {
+            self.diag.clone()
+        }
     }
     fn md(stocks: &[Quote]) -> FakeMd {
         FakeMd {
@@ -398,6 +422,8 @@ mod tests {
                 .collect(),
             errs: HashMap::new(),
             all_err: None,
+            diag: vec![],
+            asked_at: RefCell::new(None),
         }
     }
 
@@ -766,7 +792,9 @@ mod tests {
         assert_eq!(
             f.diagnostics,
             vec![
-                format!("quotes ok=0 http429={n} http_other=0 empty=0 parse=0 net=0"),
+                format!(
+                    "quotes ok=0 http429={n} http_other=0 empty=0 stale=0 parse=0 net=0 skipped=0"
+                ),
                 "movers liquid=0 gainers=0 losers=0".to_string(),
                 "reasons proposed=0 kept=0".to_string(),
                 "search_err=1 llm_err=0".to_string(),
@@ -789,15 +817,20 @@ mod tests {
             ("META", ProviderError::Parse("x".into())),
             ("TSLA", ProviderError::Network("x".into())),
             ("GOOGL", ProviderError::Http(429)),
+            ("NFLX", ProviderError::Stale),
+            ("AVGO", ProviderError::Skipped),
+            ("COST", ProviderError::Skipped),
         ]
         .into_iter()
         .map(|(k, v)| (k.to_string(), v))
         .collect();
         let f = build_facts(&m, &ns(vec![]), &llm(vec![]), date(), now()).await;
-        let other = n_universe() - 3 - 5;
+        let other = n_universe() - 3 - 8;
         assert_eq!(
             f.diagnostics[0],
-            format!("quotes ok=3 http429=1 http_other={other} empty=2 parse=1 net=1")
+            format!(
+                "quotes ok=3 http429=1 http_other={other} empty=2 stale=1 parse=1 net=1 skipped=2"
+            )
         );
         assert_eq!(f.diagnostics[1], "movers liquid=2 gainers=1 losers=1");
         // Two mover searches and the macro search all fail.
@@ -829,5 +862,16 @@ mod tests {
         let f = build_facts(&m, &n, &l, date(), now()).await;
         assert_eq!(f.diagnostics[2], "reasons proposed=2 kept=1");
         assert_eq!(f.diagnostics[3], "search_err=1 llm_err=1");
+    }
+
+    #[tokio::test]
+    async fn market_data_diagnostics_follow_the_quote_counts() {
+        let mut m = md(&[]);
+        m.diag = vec!["yahoo_session=crumb_http429 refreshes=0".into()];
+        let f = build_facts(&m, &ns(vec![]), &llm(vec![]), date(), now()).await;
+        assert!(f.diagnostics[0].starts_with("quotes "));
+        assert_eq!(f.diagnostics[1], "yahoo_session=crumb_http429 refreshes=0");
+        assert!(f.diagnostics[2].starts_with("movers "));
+        assert_eq!(*m.asked_at.borrow(), Some(now()));
     }
 }

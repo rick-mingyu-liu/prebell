@@ -1,11 +1,11 @@
 use crate::facts::Quote;
 use crate::providers::{Http, HttpResp, MarketData, ProviderError};
 use async_trait::async_trait;
-use chrono::{NaiveTime, TimeZone, Utc};
+use chrono::{DateTime, NaiveDate, NaiveTime, TimeZone, Utc};
 use chrono_tz::Tz;
 use serde::Deserialize;
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 const UA: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0 Safari/537.36";
 
@@ -16,6 +16,9 @@ const CRUMB_URL: &str = "https://query1.finance.yahoo.com/v1/test/getcrumb";
 const QUOTE_URL: &str = "https://query1.finance.yahoo.com/v7/finance/quote";
 /// Symbols per v7 quote request. Requests are sent one after another.
 const QUOTE_BATCH: usize = 50;
+/// `preMarketPrice - preMarketChange` may differ from `regularMarketPrice` by
+/// this fraction of the price before the quote counts as stale.
+const ANCHOR_TOLERANCE: f64 = 0.005;
 
 #[derive(Clone)]
 struct Session {
@@ -28,6 +31,21 @@ pub struct Yahoo<H: Http> {
     /// Cookie and crumb for the v7 quote endpoint, fetched once and kept for
     /// the life of this struct (refreshed once on a 401/403).
     session: RefCell<Option<Session>>,
+    diag: RefCell<Diag>,
+}
+
+/// What `MarketData::diagnostics` reports.
+#[derive(Default)]
+struct Diag {
+    /// `ok`, `cookie_fail`, `cookie_http<code>`, `crumb_fail` or
+    /// `crumb_http<code>`; `None` until a session is fetched.
+    session: Option<String>,
+    refreshes: usize,
+    /// `marketState` counts from the last `premarket_quotes`. Diagnostic only:
+    /// it varies across the PREPRE, PRE and CLOSED windows, so it gates nothing.
+    states: BTreeMap<String, usize>,
+    /// The last batch-level `quoteResponse.error.code`.
+    error: Option<String>,
 }
 
 impl<H: Http> Yahoo<H> {
@@ -35,6 +53,7 @@ impl<H: Http> Yahoo<H> {
         Self {
             http,
             session: RefCell::new(None),
+            diag: RefCell::new(Diag::default()),
         }
     }
 
@@ -43,7 +62,30 @@ impl<H: Http> Yahoo<H> {
         if let (false, Some(s)) = (refresh, cached) {
             return Ok(s);
         }
-        let fc = self.http.get(FC_URL, &[("User-Agent", UA)]).await?;
+        if refresh {
+            self.diag.borrow_mut().refreshes += 1;
+        }
+        let r = self.fetch_session().await;
+        self.diag.borrow_mut().session = Some(match &r {
+            Ok(_) => "ok".into(),
+            Err((_, status)) => status.clone(),
+        });
+        let s = r.map_err(|(e, _)| e)?;
+        *self.session.borrow_mut() = Some(s.clone());
+        Ok(s)
+    }
+
+    /// The cookie from fc.yahoo.com and the crumb for it, or the error and a
+    /// short status naming the failed step.
+    async fn fetch_session(&self) -> Result<Session, (ProviderError, String)> {
+        fn fail(step: &'static str) -> impl Fn(ProviderError) -> (ProviderError, String) {
+            move |e| (e, format!("{step}_fail"))
+        }
+        let fc = self
+            .http
+            .get(FC_URL, &[("User-Agent", UA)])
+            .await
+            .map_err(fail("cookie"))?;
         let cookie = fc
             .set_cookie
             .as_deref()
@@ -51,31 +93,38 @@ impl<H: Http> Yahoo<H> {
             .unwrap_or_default();
         if cookie.is_empty() {
             return Err(if fc.status >= 400 && fc.status != 404 {
-                ProviderError::Http(fc.status)
+                (
+                    ProviderError::Http(fc.status),
+                    format!("cookie_http{}", fc.status),
+                )
             } else {
-                ProviderError::Parse("fc.yahoo.com set no cookie".into())
+                fail("cookie")(ProviderError::Parse("fc.yahoo.com set no cookie".into()))
             });
         }
         let r = self
             .http
             .get(CRUMB_URL, &[("User-Agent", UA), ("Cookie", &cookie)])
-            .await?;
+            .await
+            .map_err(fail("crumb"))?;
         if r.status >= 400 {
-            return Err(ProviderError::Http(r.status));
+            return Err((
+                ProviderError::Http(r.status),
+                format!("crumb_http{}", r.status),
+            ));
         }
         let crumb = r.body.trim();
         if crumb.is_empty()
             || crumb.len() > 64
             || crumb.contains(|c: char| c.is_whitespace() || "<>{}\"".contains(c))
         {
-            return Err(ProviderError::Parse("getcrumb returned no crumb".into()));
+            return Err(fail("crumb")(ProviderError::Parse(
+                "getcrumb returned no crumb".into(),
+            )));
         }
-        let s = Session {
+        Ok(Session {
             cookie,
             crumb: crumb.to_string(),
-        };
-        *self.session.borrow_mut() = Some(s.clone());
-        Ok(s)
+        })
     }
 
     async fn quote_batch(
@@ -117,6 +166,20 @@ fn cookie_header(set_cookie: &str) -> String {
         .join("; ")
 }
 
+/// Keeps `[A-Za-z0-9_-]` of untrusted text (others become `_`), at most 32 chars.
+fn token(s: &str) -> String {
+    s.chars()
+        .take(32)
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
 /// Percent-encodes everything but RFC 3986 unreserved characters.
 fn encode(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
@@ -138,6 +201,7 @@ struct QuoteRoot {
 #[derive(Deserialize)]
 struct QuoteResponse {
     result: Option<Vec<serde_json::Value>>,
+    error: Option<serde_json::Value>,
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -146,17 +210,32 @@ struct V7Quote {
     pre_market_price: Option<f64>,
     pre_market_change: Option<f64>,
     pre_market_change_percent: Option<f64>,
+    /// Epoch seconds of the last premarket trade.
+    pre_market_time: Option<i64>,
     regular_market_price: Option<f64>,
+    market_state: Option<String>,
 }
 
 type Batch = HashMap<String, Result<Quote, ProviderError>>;
 
 /// One v7 quote body, keyed by each item's `symbol` field (never by position).
-fn parse_batch(body: &str) -> Result<Batch, ProviderError> {
+/// `today` is the ET trading date the premarket fields must belong to.
+fn parse_batch(body: &str, today: NaiveDate, d: &mut Diag) -> Result<Batch, ProviderError> {
     let root: QuoteRoot =
         serde_json::from_str(body).map_err(|e| ProviderError::Parse(e.to_string()))?;
+    let QuoteResponse { result, error } = root.quote_response;
+    let items = result.unwrap_or_default();
+    if let (true, Some(err)) = (items.is_empty(), error.filter(|e| !e.is_null())) {
+        let code = token(
+            err.get("code")
+                .and_then(|c| c.as_str())
+                .unwrap_or("unknown"),
+        );
+        d.error = Some(code.clone());
+        return Err(ProviderError::Parse(format!("yahoo error {code}")));
+    }
     let mut out = HashMap::new();
-    for item in root.quote_response.result.unwrap_or_default() {
+    for item in items {
         let Some(sym) = item
             .get("symbol")
             .and_then(|v| v.as_str())
@@ -166,29 +245,49 @@ fn parse_batch(body: &str) -> Result<Batch, ProviderError> {
         };
         let q = serde_json::from_value::<V7Quote>(item)
             .map_err(|e| ProviderError::Parse(e.to_string()))
-            .and_then(v7_quote);
+            .and_then(|v| {
+                if let Some(st) = &v.market_state {
+                    *d.states.entry(token(st)).or_default() += 1;
+                }
+                v7_quote(v, today)
+            });
         out.insert(sym, q);
     }
     Ok(out)
 }
 
-/// Premarket fields of a v7 quote. Before the open (the brief runs around
-/// 8:30 AM ET) `regularMarketPrice` is still the prior session's close, so it
-/// is `prev_close`. It is cross-checked against `preMarketPrice -
-/// preMarketChange`; when they disagree that difference is used instead.
-/// v7 has no premarket volume, so `volume` is `None`.
-fn v7_quote(v: V7Quote) -> Result<Quote, ProviderError> {
+/// Premarket fields of a v7 quote.
+///
+/// - `preMarketTime` must fall on `today` (ET) before 09:30 ET. Otherwise
+///   the fields are left over from an earlier session and the symbol is
+///   `Empty`, the same as a name with no premarket trades.
+/// - Before the open (the brief runs around 8:30 AM ET),
+///   `regularMarketPrice` is still the prior session's close, so it is
+///   `prev_close`. It is cross-checked against `preMarketPrice -
+///   preMarketChange`. If they differ by more than `ANCHOR_TOLERANCE`, the
+///   premarket fields are anchored to another session, and the symbol is
+///   `Stale`.
+/// - v7 has no premarket volume, so `volume` is `None`.
+fn v7_quote(v: V7Quote, today: NaiveDate) -> Result<Quote, ProviderError> {
     // No premarket trades yet.
     let last = v.pre_market_price.ok_or(ProviderError::Empty)?;
-    let derived = v.pre_market_change.map(|c| last - c);
-    let prev_close = match (v.regular_market_price, derived) {
-        (Some(r), Some(d)) if (r - d).abs() > 0.01_f64.max(r.abs() * 1e-4) => d,
-        (Some(r), _) => r,
-        (None, Some(d)) => d,
-        (None, None) => return Err(ProviderError::Empty),
-    };
+    let at = v
+        .pre_market_time
+        .and_then(|t| Utc.timestamp_opt(t, 0).single())
+        .ok_or(ProviderError::Empty)?
+        .with_timezone(&chrono_tz::America::New_York);
+    let open = NaiveTime::from_hms_opt(9, 30, 0).expect("valid time");
+    if at.date_naive() != today || at.time() >= open {
+        return Err(ProviderError::Empty);
+    }
+    let prev_close = v.regular_market_price.ok_or(ProviderError::Empty)?;
     if !last.is_finite() || !prev_close.is_finite() || prev_close <= 0.0 {
         return Err(ProviderError::Empty);
+    }
+    if let Some(change) = v.pre_market_change {
+        if ((last - change) - prev_close).abs() > prev_close * ANCHOR_TOLERANCE {
+            return Err(ProviderError::Stale);
+        }
     }
     Ok(Quote {
         symbol: v.symbol,
@@ -320,11 +419,18 @@ impl<H: Http> MarketData for Yahoo<H> {
 
     /// Batched v7 quotes, `QUOTE_BATCH` symbols per request. A failed cookie
     /// or crumb fetch fails every symbol; after a 429 the remaining chunks are
-    /// not requested and fail with 429 too, so a throttled IP is not hammered.
+    /// not requested and are `Skipped`, so a throttled IP is not hammered.
     async fn premarket_quotes(
         &self,
         symbols: &[String],
+        now: DateTime<Utc>,
     ) -> Vec<(String, Result<Quote, ProviderError>)> {
+        let today = crate::clock::et(now).date_naive();
+        {
+            let mut d = self.diag.borrow_mut();
+            d.states.clear();
+            d.error = None;
+        }
         let fail_all = |e: ProviderError| {
             symbols
                 .iter()
@@ -340,7 +446,7 @@ impl<H: Http> MarketData for Yahoo<H> {
         let mut out = Vec::with_capacity(symbols.len());
         for chunk in symbols.chunks(QUOTE_BATCH) {
             let r = if throttled {
-                Err(ProviderError::Http(429))
+                Err(ProviderError::Skipped)
             } else {
                 let mut r = self.quote_batch(chunk, &session).await;
                 if !refreshed && r.as_ref().is_ok_and(|x| matches!(x.status, 401 | 403)) {
@@ -355,7 +461,7 @@ impl<H: Http> MarketData for Yahoo<H> {
                 }
                 r.and_then(|x| match x.status {
                     s if s >= 400 => Err(ProviderError::Http(s)),
-                    _ => parse_batch(&x.body),
+                    _ => parse_batch(&x.body, today, &mut self.diag.borrow_mut()),
                 })
             };
             throttled |= r.as_ref().err() == Some(&ProviderError::Http(429));
@@ -366,6 +472,23 @@ impl<H: Http> MarketData for Yahoo<H> {
                 })),
                 Err(e) => out.extend(chunk.iter().map(|s| (s.clone(), Err(e.clone())))),
             }
+        }
+        out
+    }
+
+    fn diagnostics(&self) -> Vec<String> {
+        let d = self.diag.borrow();
+        let mut out = vec![format!(
+            "yahoo_session={} refreshes={}",
+            d.session.as_deref().unwrap_or("none"),
+            d.refreshes
+        )];
+        if !d.states.is_empty() {
+            let states: Vec<String> = d.states.iter().map(|(k, n)| format!("{k}={n}")).collect();
+            out.push(format!("market_state {}", states.join(" ")));
+        }
+        if let Some(code) = &d.error {
+            out.push(format!("yahoo_error={code}"));
         }
         out
     }
@@ -471,6 +594,10 @@ mod tests {
             .cloned()
             .collect()
     }
+    /// 08:45 ET on Thursday 2026-10-29, the fixture's trading date.
+    fn now() -> DateTime<Utc> {
+        "2026-10-29T12:45:00Z".parse().unwrap()
+    }
     fn syms(list: &[&str]) -> Vec<String> {
         list.iter().map(|s| s.to_string()).collect()
     }
@@ -496,7 +623,8 @@ mod tests {
             .iter()
             .map(|s| {
                 serde_json::json!({"symbol": s, "marketState": "PRE", "regularMarketPrice": 100.0,
-                    "preMarketPrice": 101.0, "preMarketChange": 1.0, "preMarketChangePercent": 1.0})
+                    "preMarketPrice": 101.0, "preMarketChange": 1.0, "preMarketChangePercent": 1.0,
+                    "preMarketTime": 1793277000_i64})
             })
             .collect();
         serde_json::json!({"quoteResponse": {"result": items, "error": null}}).to_string()
@@ -599,7 +727,7 @@ mod tests {
     #[tokio::test]
     async fn crumb_flow_sends_cookie_and_crumb_and_is_cached() {
         let y = yahoo_v7(|_, _| resp(200, BATCH));
-        let r = y.premarket_quotes(&syms(&["AAPL"])).await;
+        let r = y.premarket_quotes(&syms(&["AAPL"]), now()).await;
         assert!(r[0].1.is_ok(), "{r:?}");
         let crumb = seen(&y, CRUMB_URL);
         assert_eq!(crumb.len(), 1);
@@ -622,7 +750,7 @@ mod tests {
         assert_eq!(quotes[0].header("Cookie"), Some(COOKIE));
 
         // A second call reuses the cached cookie and crumb.
-        y.premarket_quotes(&syms(&["MSFT"])).await;
+        y.premarket_quotes(&syms(&["MSFT"]), now()).await;
         assert_eq!(seen(&y, FC_URL).len(), 1);
         assert_eq!(seen(&y, CRUMB_URL).len(), 1);
         assert_eq!(seen(&y, QUOTE_URL).len(), 2);
@@ -632,7 +760,7 @@ mod tests {
     async fn quotes_are_chunked_by_50_sequentially() {
         let y = yahoo_v7(|r, _| resp(200, &batch_for(&query(&r.url).0)));
         let all: Vec<String> = (0..120).map(|i| format!("S{i:03}")).collect();
-        let r = y.premarket_quotes(&all).await;
+        let r = y.premarket_quotes(&all, now()).await;
         let quotes = seen(&y, QUOTE_URL);
         let sizes: Vec<usize> = quotes.iter().map(|q| query(&q.url).0.len()).collect();
         assert_eq!(sizes, vec![50, 50, 20]);
@@ -646,7 +774,7 @@ mod tests {
     async fn results_map_by_symbol_field_not_position() {
         let y = yahoo_v7(|_, _| resp(200, BATCH));
         let want = syms(&["AAPL", "BRK-B", "MSFT", "NVDA", "TSLA", "ZZZZ"]);
-        let r = y.premarket_quotes(&want).await;
+        let r = y.premarket_quotes(&want, now()).await;
         assert_eq!(r.iter().map(|(s, _)| s.clone()).collect::<Vec<_>>(), want);
         let get = |s: &str| r.iter().find(|(k, _)| k == s).unwrap().1.clone();
 
@@ -667,23 +795,67 @@ mod tests {
     #[tokio::test]
     async fn missing_premarket_price_is_empty() {
         let y = yahoo_v7(|_, _| resp(200, BATCH));
-        let r = y.premarket_quotes(&syms(&["NVDA"])).await;
+        let r = y.premarket_quotes(&syms(&["NVDA"]), now()).await;
         assert_eq!(r[0].1, Err(ProviderError::Empty));
     }
 
     #[tokio::test]
-    async fn prev_close_falls_back_when_regular_price_disagrees() {
+    async fn disagreeing_anchor_is_stale() {
         // TSLA: preMarketPrice 260.4 - preMarketChange 10.4 = 250.0, but regularMarketPrice is 255.0.
         let y = yahoo_v7(|_, _| resp(200, BATCH));
-        let q = y.premarket_quotes(&syms(&["TSLA"])).await[0]
-            .1
-            .clone()
-            .unwrap();
-        assert_eq!(q.last, 260.4);
-        assert!((q.prev_close - 250.0).abs() < 1e-9, "{}", q.prev_close);
-        assert_eq!(q.change_pct, 4.16);
+        let r = y.premarket_quotes(&syms(&["TSLA"]), now()).await;
+        assert_eq!(r[0].1, Err(ProviderError::Stale));
     }
 
+    #[tokio::test]
+    async fn premarket_time_from_an_earlier_day_is_empty() {
+        // INTC carries 2026-10-28's premarket fields.
+        let y = yahoo_v7(|_, _| resp(200, BATCH));
+        let r = y.premarket_quotes(&syms(&["INTC", "AAPL"]), now()).await;
+        assert_eq!(r[0].1, Err(ProviderError::Empty));
+        assert!(r[1].1.is_ok(), "{r:?}");
+    }
+
+    fn v7(time: Option<i64>, rmp: f64) -> V7Quote {
+        V7Quote {
+            symbol: "X".into(),
+            pre_market_price: Some(101.0),
+            pre_market_change: Some(1.0),
+            pre_market_change_percent: Some(1.0),
+            pre_market_time: time,
+            regular_market_price: Some(rmp),
+            market_state: Some("PRE".into()),
+        }
+    }
+
+    #[test]
+    fn premarket_time_must_be_today_before_the_open() {
+        let today = NaiveDate::from_ymd_opt(2026, 10, 29).unwrap();
+        // 08:30 ET today.
+        assert!(v7_quote(v7(Some(1793277000), 100.0), today).is_ok());
+        // 09:30 ET today is the open, not premarket.
+        let open = 1793277000 + 3600;
+        assert_eq!(
+            v7_quote(v7(Some(open), 100.0), today),
+            Err(ProviderError::Empty)
+        );
+        // 23:30 ET the day before.
+        let late = 1793277000 - 9 * 3600;
+        assert_eq!(
+            v7_quote(v7(Some(late), 100.0), today),
+            Err(ProviderError::Empty)
+        );
+        assert_eq!(v7_quote(v7(None, 100.0), today), Err(ProviderError::Empty));
+    }
+
+    #[test]
+    fn anchor_tolerance_is_half_a_percent() {
+        let today = NaiveDate::from_ymd_opt(2026, 10, 29).unwrap();
+        let t = Some(1793277000);
+        // 101 - 1 = 100; 0.4% off is within tolerance, 0.6% is not.
+        assert_eq!(v7_quote(v7(t, 100.4), today).unwrap().prev_close, 100.4);
+        assert_eq!(v7_quote(v7(t, 100.6), today), Err(ProviderError::Stale));
+    }
     #[tokio::test]
     async fn unauthorized_refreshes_crumb_once_then_succeeds() {
         // The first crumb is stale: the quote endpoint rejects it.
@@ -702,7 +874,7 @@ mod tests {
                 resp(401, "")
             }
         });
-        let r = y.premarket_quotes(&syms(&["AAPL"])).await;
+        let r = y.premarket_quotes(&syms(&["AAPL"]), now()).await;
         assert!(r[0].1.is_ok(), "{r:?}");
         assert_eq!(seen(&y, CRUMB_URL).len(), 2);
         assert_eq!(seen(&y, QUOTE_URL).len(), 2);
@@ -712,7 +884,7 @@ mod tests {
     async fn persistent_unauthorized_refreshes_only_once() {
         let y = yahoo_v7(|_, _| resp(403, ""));
         let all: Vec<String> = (0..120).map(|i| format!("S{i:03}")).collect();
-        let r = y.premarket_quotes(&all).await;
+        let r = y.premarket_quotes(&all, now()).await;
         assert!(r.iter().all(|(_, q)| *q == Err(ProviderError::Http(403))));
         assert_eq!(seen(&y, CRUMB_URL).len(), 2);
     }
@@ -721,17 +893,22 @@ mod tests {
     async fn status_429_fails_every_symbol_and_stops_requesting() {
         let y = yahoo_v7(|_, _| resp(429, HTML));
         let all: Vec<String> = (0..120).map(|i| format!("S{i:03}")).collect();
-        let r = y.premarket_quotes(&all).await;
+        let r = y.premarket_quotes(&all, now()).await;
         assert_eq!(r.len(), 120);
-        assert!(r.iter().all(|(_, q)| *q == Err(ProviderError::Http(429))));
+        assert!(r[..50]
+            .iter()
+            .all(|(_, q)| *q == Err(ProviderError::Http(429))));
         // Throttled: the remaining chunks are not requested.
+        assert!(r[50..]
+            .iter()
+            .all(|(_, q)| *q == Err(ProviderError::Skipped)));
         assert_eq!(seen(&y, QUOTE_URL).len(), 1);
     }
 
     #[tokio::test]
     async fn throttled_cookie_or_crumb_fails_every_symbol() {
         let y = fake(|_, _| resp(429, HTML));
-        let r = y.premarket_quotes(&syms(&["AAPL", "MSFT"])).await;
+        let r = y.premarket_quotes(&syms(&["AAPL", "MSFT"]), now()).await;
         assert!(
             r.iter().all(|(_, q)| *q == Err(ProviderError::Http(429))),
             "{r:?}"
@@ -748,15 +925,93 @@ mod tests {
                 resp(429, "Too Many Requests")
             }
         });
-        let r = y.premarket_quotes(&syms(&["AAPL"])).await;
+        let r = y.premarket_quotes(&syms(&["AAPL"]), now()).await;
         assert_eq!(r[0].1, Err(ProviderError::Http(429)));
     }
 
     #[tokio::test]
     async fn html_quote_body_is_parse_error() {
         let y = yahoo_v7(|_, _| resp(200, HTML));
-        let r = y.premarket_quotes(&syms(&["AAPL"])).await;
+        let r = y.premarket_quotes(&syms(&["AAPL"]), now()).await;
         assert!(matches!(r[0].1, Err(ProviderError::Parse(_))), "{r:?}");
+    }
+
+    #[tokio::test]
+    async fn diagnostics_report_session_and_market_state() {
+        let y = yahoo_v7(|_, _| resp(200, BATCH));
+        assert_eq!(y.diagnostics(), vec!["yahoo_session=none refreshes=0"]);
+        y.premarket_quotes(&syms(&["AAPL"]), now()).await;
+        assert_eq!(
+            y.diagnostics(),
+            vec!["yahoo_session=ok refreshes=0", "market_state PRE=6"]
+        );
+    }
+
+    #[tokio::test]
+    async fn session_failures_are_named() {
+        let fc = |status: u16, cookie: bool| HttpResp {
+            set_cookie: cookie.then(|| SET_COOKIE.to_string()),
+            ..resp(status, "")
+        };
+        let cases: Vec<(&str, Route)> = vec![
+            ("cookie_http429", Box::new(move |_, _| fc(429, false))),
+            ("cookie_fail", Box::new(move |_, _| fc(404, false))),
+            (
+                "crumb_http429",
+                Box::new(move |r, _| {
+                    if r.url == FC_URL {
+                        fc(404, true)
+                    } else {
+                        resp(429, "Too Many Requests")
+                    }
+                }),
+            ),
+            (
+                "crumb_fail",
+                Box::new(move |r, _| {
+                    if r.url == FC_URL {
+                        fc(404, true)
+                    } else {
+                        resp(200, "<html>nope</html>")
+                    }
+                }),
+            ),
+        ];
+        for (want, route) in cases {
+            let y = Yahoo::new(FakeHttp {
+                route,
+                seen: RefCell::new(vec![]),
+            });
+            y.premarket_quotes(&syms(&["AAPL"]), now()).await;
+            assert_eq!(
+                y.diagnostics()[0],
+                format!("yahoo_session={want} refreshes=0")
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn result_error_on_200_is_parse_with_code() {
+        let body = r#"{"quoteResponse":{"result":[],"error":{"code":"Bad Request","description":"Missing value for the \"symbols\" argument <x>"}}}"#;
+        let y = yahoo_v7(move |_, _| resp(200, body));
+        let r = y.premarket_quotes(&syms(&["AAPL", "MSFT"]), now()).await;
+        for (_, q) in &r {
+            assert_eq!(
+                *q,
+                Err(ProviderError::Parse("yahoo error Bad_Request".into()))
+            );
+        }
+        assert!(y
+            .diagnostics()
+            .contains(&"yahoo_error=Bad_Request".to_string()));
+        // A null result with an error is the same.
+        let body = r#"{"quoteResponse":{"result":null,"error":{"code":"Unauthorized"}}}"#;
+        let y = yahoo_v7(move |_, _| resp(200, body));
+        let r = y.premarket_quotes(&syms(&["AAPL"]), now()).await;
+        assert_eq!(
+            r[0].1,
+            Err(ProviderError::Parse("yahoo error Unauthorized".into()))
+        );
     }
 
     #[test]

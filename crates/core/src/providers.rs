@@ -1,5 +1,6 @@
 use crate::facts::Quote;
 use async_trait::async_trait;
+use chrono::{DateTime, Utc};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct HttpResp {
@@ -19,6 +20,13 @@ pub enum ProviderError {
     Parse(String),
     #[error("empty result")]
     Empty,
+    /// The quote's premarket fields disagree with its previous close: likely
+    /// left over from an earlier session.
+    #[error("stale premarket quote")]
+    Stale,
+    /// Not requested, because an earlier request in the run was throttled.
+    #[error("not requested after HTTP 429")]
+    Skipped,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -42,10 +50,16 @@ pub trait Http {
 #[async_trait(?Send)]
 pub trait MarketData {
     async fn quote(&self, symbol: &str) -> Result<Quote, ProviderError>;
+    /// Premarket quotes for the ET trading date of `now`.
     async fn premarket_quotes(
         &self,
         symbols: &[String],
+        now: DateTime<Utc>,
     ) -> Vec<(String, Result<Quote, ProviderError>)>;
+    /// Short provider-specific diagnostic lines about the last calls.
+    fn diagnostics(&self) -> Vec<String> {
+        Vec::new()
+    }
 }
 
 #[async_trait(?Send)]

@@ -475,6 +475,7 @@ mod tests {
         async fn premarket_quotes(
             &self,
             symbols: &[String],
+            _now: DateTime<Utc>,
         ) -> Vec<(String, Result<Quote, ProviderError>)> {
             self.calls.set(self.calls.get() + 1);
             symbols
@@ -681,7 +682,8 @@ mod tests {
         let (m, l) = (md(false), llm(true, true));
         let n = crate::premarket::universe().len();
         let want = format!(
-            "futures, movers | quotes ok=0 http429={n} http_other=0 empty=0 parse=0 net=0; \
+            "futures, movers | quotes ok=0 http429={n} http_other=0 empty=0 stale=0 parse=0 net=0 \
+             skipped=0; \
              movers liquid=0 gainers=0 losers=0; reasons proposed=0 kept=0; \
              search_err=1 llm_err=0; futures ok=0 err=4"
         );
