@@ -314,23 +314,36 @@ pub fn exhibit_991(docs: &[FilingDoc]) -> Option<&FilingDoc> {
         })
 }
 
-/// Plain text of an HTML document: scripts, styles and comments dropped,
-/// block ends and table cells become line breaks and spaces, entities
-/// decoded, each line's whitespace collapsed, blank lines removed.
+/// Plain text of an HTML document: scripts, styles, comments and the hidden
+/// inline-XBRL header dropped; each table row on one line (block tags inside
+/// cells become spaces), other block ends become line breaks; entities
+/// decoded; each line's whitespace collapsed; blank lines removed. Signs and
+/// units that filer software puts in their own cells are re-attached
+/// ("$ (0.25 )" -> "$(0.25)", "47.2 %" -> "47.2%").
 pub fn html_to_text(html: &str) -> String {
     static DROP: OnceLock<Regex> = OnceLock::new();
+    static ROW: OnceLock<Regex> = OnceLock::new();
     static BLOCK: OnceLock<Regex> = OnceLock::new();
     static CELL: OnceLock<Regex> = OnceLock::new();
     static TAG: OnceLock<Regex> = OnceLock::new();
+    static GLUE_AFTER: OnceLock<Regex> = OnceLock::new();
+    static GLUE_BEFORE: OnceLock<Regex> = OnceLock::new();
     let drop = DROP.get_or_init(|| {
-        re(r"(?is)<script\b.*?</script\s*>|<style\b.*?</style\s*>|<!--.*?-->|<head\b.*?</head\s*>")
+        re(r"(?is)<script\b.*?</script\s*>|<style\b.*?</style\s*>|<!--.*?-->|<head\b.*?</head\s*>|<ix:header\b.*?</ix:header\s*>")
     });
+    let row = ROW.get_or_init(|| re(r"(?is)<tr\b.*?</tr\s*>"));
     let block = BLOCK.get_or_init(|| {
         re(r"(?i)<br\s*/?>|</(?:p|div|tr|li|h[1-6]|table|title)\s*>|<(?:p|div|tr|li|table)\b[^>]*>")
     });
     let cell = CELL.get_or_init(|| re(r"(?i)</t[dh]\s*>"));
     let tag = TAG.get_or_init(|| re(r"(?s)<[^>]*>"));
+    let glue_after = GLUE_AFTER.get_or_init(|| re(r"([$(]) +([\d(])"));
+    let glue_before = GLUE_BEFORE.get_or_init(|| re(r"(\d) +([)%])"));
     let s = drop.replace_all(html, " ");
+    let s = row.replace_all(&s, |c: &regex::Captures| {
+        let one_line = block.replace_all(&c[0], " ").replace(['\n', '\r'], " ");
+        format!("\n{one_line}\n")
+    });
     let s = block.replace_all(&s, "\n");
     let s = cell.replace_all(&s, " ");
     let s = tag.replace_all(&s, "");
@@ -338,6 +351,11 @@ pub fn html_to_text(html: &str) -> String {
         .lines()
         .map(|l| l.split_whitespace().collect::<Vec<_>>().join(" "))
         .filter(|l| !l.is_empty())
+        .map(|l| {
+            let l = glue_after.replace_all(&l, "$1$2");
+            let l = glue_after.replace_all(&l, "$1$2");
+            glue_before.replace_all(&l, "$1$2").into_owned()
+        })
         .collect::<Vec<_>>()
         .join("\n")
 }
@@ -553,13 +571,38 @@ pub(crate) mod tests {
     #[test]
     fn html_text() {
         let t = html_to_text(EX991);
-        assert!(t.contains("Total net sales $ 102,466 $ 94,930"), "{t}");
+        assert!(t.contains("Total net sales $102,466 $94,930"), "{t}");
+        assert!(t.contains("Diluted $1.85 $0.97"), "{t}");
+        assert!(t.contains("ended September 26, 2026"), "nbsp: {t}");
         assert!(t.contains("fiscal 2026 fourth quarter ended September 26, 2026"));
         assert!(t.contains("Company\u{2019}s CEO"));
         assert!(t.contains("$102.5 billion"));
         assert!(!t.contains("999.9"), "script text leaked");
         assert!(!t.contains("margin: 0"), "style text leaked");
         assert!(!t.contains('<'));
+    }
+
+    #[test]
+    fn html_text_real_filer_markup() {
+        let html = r#"<div style="display:none"><ix:header><xbrli:context id="c1">2026-09-26</xbrli:context></ix:header></div>
+<table><tr><td><p style="margin:0"><span>Total net sales</span></p></td><td><div><p>$</p></div></td>
+<td><p><ix:nonFraction name="us-gaap:Revenues" scale="6">102,466</ix:nonFraction></p></td></tr>
+<tr><td><p>Diluted</p></td><td>$</td><td>(0.25</td><td>)</td></tr>
+<tr><td>Gross margin</td><td>47.2</td><td>%</td></tr></table>"#;
+        let t = html_to_text(html);
+        assert_eq!(
+            t,
+            "Total net sales $102,466\nDiluted $(0.25)\nGross margin 47.2%"
+        );
+    }
+
+    #[tokio::test]
+    async fn empty_index_is_empty() {
+        let e = edgar(&[(IDX_URL, 200, "<html><body>No documents</body></html>")]);
+        assert_eq!(
+            e.filing_docs(320193, "0000320193-26-000070").await,
+            Err(ProviderError::Empty)
+        );
     }
 
     #[tokio::test]
