@@ -31,6 +31,11 @@ pub trait Content {
     fn window(&self, day: DayKind) -> Window;
     /// ET time from which a still-failing ZH draft is marked `failed`.
     fn zh_give_up(&self) -> NaiveTime;
+    /// Whether a firing at ET time `t` retries a pending ZH draft. The
+    /// default is every firing; the give-up time always retries.
+    fn zh_retry_due(&self, _t: NaiveTime) -> bool {
+        true
+    }
     async fn build_facts(&self, date: NaiveDate, now: DateTime<Utc>) -> Self::Facts;
     /// Names of required sections that are unavailable; empty = publishable.
     fn missing_required(&self, f: &Self::Facts) -> Vec<&'static str>;
@@ -470,6 +475,10 @@ async fn retry_zh<C: Content>(
         if t.status != "pending" {
             return Ok(TickOutcome::Nothing);
         }
+    }
+    let local = et(now).time();
+    if !c.zh_retry_due(local) && local < c.zh_give_up() {
+        return Ok(TickOutcome::Nothing);
     }
     let json = store
         .get_facts(&post.facts_r2_key)

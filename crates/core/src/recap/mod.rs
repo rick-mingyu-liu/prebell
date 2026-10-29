@@ -4,7 +4,7 @@
 pub mod draft;
 
 use async_trait::async_trait;
-use chrono::{DateTime, Datelike, NaiveDate, NaiveTime, Utc};
+use chrono::{DateTime, Datelike, NaiveDate, NaiveTime, Timelike, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::clock::{recap_window, trading_day, DayKind, Window};
@@ -317,6 +317,11 @@ impl Content for Recap<'_> {
     /// Three hours past the 19:00 ET publish deadline.
     fn zh_give_up(&self) -> NaiveTime {
         NaiveTime::from_hms_opt(22, 0, 0).expect("valid built-in time")
+    }
+    /// Hourly, on the hour: the recap crons fire every 5 minutes until
+    /// 19:55 ET, and a ZH redraft each time would only repeat the failure.
+    fn zh_retry_due(&self, t: NaiveTime) -> bool {
+        t.minute() == 0
     }
     async fn build_facts(&self, date: NaiveDate, now: DateTime<Utc>) -> RecapFacts {
         build_facts(self.md, self.ns, self.llm, date, now).await
@@ -880,6 +885,7 @@ mod run_tests {
     struct FakeLlm {
         en_ok: Cell<bool>,
         zh_ok: Cell<bool>,
+        zh_calls: Cell<usize>,
     }
     #[async_trait(?Send)]
     impl LlmProvider for FakeLlm {
@@ -887,6 +893,7 @@ mod run_tests {
             if system.starts_with("You write the US after-close") {
                 Ok(draft_reply(Lang::En, self.en_ok.get()))
             } else if system.starts_with("你负责撰写美股收盘回顾") {
+                self.zh_calls.set(self.zh_calls.get() + 1);
                 Ok(draft_reply(Lang::Zh, self.zh_ok.get()))
             } else {
                 Ok(
@@ -899,6 +906,7 @@ mod run_tests {
         FakeLlm {
             en_ok: Cell::new(en_ok),
             zh_ok: Cell::new(zh_ok),
+            zh_calls: Cell::new(0),
         }
     }
     fn draft_reply(lang: Lang, ok: bool) -> Value {
@@ -1090,9 +1098,9 @@ mod run_tests {
             TickOutcome::PublishedEnOnly
         );
         assert_eq!(tr_status(&s, 1, "zh"), "pending");
-        // 21:55 ET (EDT) = 01:55Z the next UTC day: still pending, no alert.
+        // 21:00 ET (EDT) = 01:00Z the next UTC day: still pending, no alert.
         assert!(matches!(
-            tick(utc("2026-10-30T01:55:00Z"), &s, &m, &FakeNs, &l).await,
+            tick(utc("2026-10-30T01:00:00Z"), &s, &m, &FakeNs, &l).await,
             TickOutcome::Retrying(_)
         ));
         assert_eq!(tr_status(&s, 1, "zh"), "pending");
@@ -1119,12 +1127,55 @@ mod run_tests {
         tick(utc("2026-10-29T20:45:00Z"), &s, &m, &FakeNs, &l).await;
         l.zh_ok.set(true);
         assert_eq!(
-            tick(utc("2026-10-29T23:30:00Z"), &s, &m, &FakeNs, &l).await,
+            tick(utc("2026-10-29T23:00:00Z"), &s, &m, &FakeNs, &l).await,
             TickOutcome::Published
         );
         assert!(s.translations.borrow()[&(1, "zh".to_string())]
             .body_md
             .contains("## 指数收盘"));
+    }
+
+    #[tokio::test]
+    async fn zh_retries_only_on_the_hour_after_en_publishes() {
+        let s = MemStore::default();
+        let (m, l) = (md(true), llm(true, false));
+        assert_eq!(
+            tick(utc("2026-10-29T20:45:00Z"), &s, &m, &FakeNs, &l).await,
+            TickOutcome::PublishedEnOnly
+        );
+        let zh_calls = || l.zh_calls.get();
+        let after_publish = zh_calls();
+        // Every 5-minute recap firing between the hours does nothing: no LLM call.
+        for t in [
+            "2026-10-29T20:50:00Z",
+            "2026-10-29T21:05:00Z",
+            "2026-10-29T21:55:00Z",
+        ] {
+            assert_eq!(
+                tick(utc(t), &s, &m, &FakeNs, &l).await,
+                TickOutcome::Nothing,
+                "{t}"
+            );
+        }
+        assert_eq!(zh_calls(), after_publish);
+        // 18:00 ET retries once.
+        assert!(matches!(
+            tick(utc("2026-10-29T22:00:00Z"), &s, &m, &FakeNs, &l).await,
+            TickOutcome::Retrying(_)
+        ));
+        assert!(zh_calls() > after_publish);
+        let at_six = zh_calls();
+        l.zh_ok.set(true);
+        assert_eq!(
+            tick(utc("2026-10-29T22:30:00Z"), &s, &m, &FakeNs, &l).await,
+            TickOutcome::Nothing
+        );
+        assert_eq!(zh_calls(), at_six);
+        assert_eq!(
+            tick(utc("2026-10-29T23:00:00Z"), &s, &m, &FakeNs, &l).await,
+            TickOutcome::Published
+        );
+        assert_eq!(tr_status(&s, 1, "zh"), "published");
     }
 
     #[tokio::test]
