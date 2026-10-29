@@ -1,0 +1,121 @@
+# Earnings watchlist: the S&P 100 (one line per company; Alphabet once, as GOOGL)
+# plus a few large foreign private issuers (6-K/20-F filers: calendar only).
+#
+# REFRESH THIS FILE when the index changes (S&P rebalances quarterly) and check
+# every CIK against https://www.sec.gov/files/company_tickers.json. The poller
+# also skips (and logs) any entry whose EDGAR submissions do not list its ticker.
+# Membership as of 2026-10 from the builder's knowledge; not yet verified
+# against SEC data (data.sec.gov was unreachable from the build sandbox).
+#
+# Columns (tab-separated): ticker, CIK, filer (domestic | foreign), company
+# name, company web domains (comma-separated; subdomains match) used to accept
+# a company's own date announcement as calendar proof.
+AAPL	320193	domestic	Apple	apple.com
+ABBV	1551152	domestic	AbbVie	abbvie.com
+ABT	1800	domestic	Abbott Laboratories	abbott.com
+ACN	1467373	domestic	Accenture	accenture.com
+ADBE	796343	domestic	Adobe	adobe.com
+AIG	5272	domestic	American International Group	aig.com
+AMD	2488	domestic	Advanced Micro Devices	amd.com
+AMGN	318154	domestic	Amgen	amgen.com
+AMT	1053507	domestic	American Tower	americantower.com
+AMZN	1018724	domestic	Amazon	amazon.com,aboutamazon.com
+AVGO	1730168	domestic	Broadcom	broadcom.com
+AXP	4962	domestic	American Express	americanexpress.com
+BA	12927	domestic	Boeing	boeing.com
+BAC	70858	domestic	Bank of America	bankofamerica.com
+BK	1390777	domestic	BNY	bny.com,bnymellon.com
+BKNG	1075531	domestic	Booking Holdings	bookingholdings.com
+BLK	2012383	domestic	BlackRock	blackrock.com
+BMY	14272	domestic	Bristol-Myers Squibb	bms.com
+BRK.B	1067983	domestic	Berkshire Hathaway	berkshirehathaway.com
+C	831001	domestic	Citigroup	citigroup.com,citi.com
+CAT	18230	domestic	Caterpillar	caterpillar.com
+CHTR	1091667	domestic	Charter Communications	charter.com
+CL	21665	domestic	Colgate-Palmolive	colgatepalmolive.com
+CMCSA	1166691	domestic	Comcast	cmcsa.com,comcastcorporation.com
+COF	927628	domestic	Capital One	capitalone.com
+COP	1163165	domestic	ConocoPhillips	conocophillips.com
+COST	909832	domestic	Costco	costco.com
+CRM	1108524	domestic	Salesforce	salesforce.com
+CSCO	858877	domestic	Cisco	cisco.com
+CVS	64803	domestic	CVS Health	cvshealth.com
+CVX	93410	domestic	Chevron	chevron.com
+DE	315189	domestic	Deere	deere.com,johndeere.com
+DHR	313616	domestic	Danaher	danaher.com
+DIS	1744489	domestic	Walt Disney	thewaltdisneycompany.com,disney.com
+DUK	1326160	domestic	Duke Energy	duke-energy.com
+EMR	32604	domestic	Emerson Electric	emerson.com
+F	37996	domestic	Ford Motor	ford.com
+FDX	1048911	domestic	FedEx	fedex.com
+GD	40533	domestic	General Dynamics	gd.com
+GE	40545	domestic	GE Aerospace	ge.com,geaerospace.com
+GILD	882095	domestic	Gilead Sciences	gilead.com
+GM	1467858	domestic	General Motors	gm.com
+GOOGL	1652044	domestic	Alphabet	abc.xyz
+GS	886982	domestic	Goldman Sachs	goldmansachs.com
+HD	354950	domestic	Home Depot	homedepot.com
+HON	773840	domestic	Honeywell	honeywell.com
+IBM	51143	domestic	IBM	ibm.com
+INTC	50863	domestic	Intel	intel.com
+INTU	896878	domestic	Intuit	intuit.com
+ISRG	1035267	domestic	Intuitive Surgical	intuitive.com
+JNJ	200406	domestic	Johnson & Johnson	jnj.com
+JPM	19617	domestic	JPMorgan Chase	jpmorganchase.com
+KO	21344	domestic	Coca-Cola	coca-colacompany.com
+LIN	1707925	domestic	Linde	linde.com
+LLY	59478	domestic	Eli Lilly	lilly.com
+LMT	936468	domestic	Lockheed Martin	lockheedmartin.com
+LOW	60667	domestic	Lowe's	lowes.com
+MA	1141391	domestic	Mastercard	mastercard.com
+MCD	63908	domestic	McDonald's	mcdonalds.com
+MDLZ	1103982	domestic	Mondelez International	mondelezinternational.com
+MDT	1613103	domestic	Medtronic	medtronic.com
+MET	1099219	domestic	MetLife	metlife.com
+META	1326801	domestic	Meta Platforms	meta.com,atmeta.com,fb.com
+MMM	66740	domestic	3M	3m.com
+MO	764180	domestic	Altria	altria.com
+MRK	310158	domestic	Merck	merck.com
+MS	895421	domestic	Morgan Stanley	morganstanley.com
+MSFT	789019	domestic	Microsoft	microsoft.com
+NEE	753308	domestic	NextEra Energy	nexteraenergy.com
+NFLX	1065280	domestic	Netflix	netflix.com
+NKE	320187	domestic	Nike	nike.com
+NOW	1373715	domestic	ServiceNow	servicenow.com
+NVDA	1045810	domestic	Nvidia	nvidia.com
+ORCL	1341439	domestic	Oracle	oracle.com
+PEP	77476	domestic	PepsiCo	pepsico.com
+PFE	78003	domestic	Pfizer	pfizer.com
+PG	80424	domestic	Procter & Gamble	pg.com,pginvestor.com
+PLTR	1321655	domestic	Palantir Technologies	palantir.com
+PM	1413329	domestic	Philip Morris International	pmi.com
+PYPL	1633917	domestic	PayPal	paypal.com,paypal-corp.com
+QCOM	804328	domestic	Qualcomm	qualcomm.com
+RTX	101829	domestic	RTX	rtx.com
+SBUX	829224	domestic	Starbucks	starbucks.com
+SCHW	316709	domestic	Charles Schwab	aboutschwab.com,schwab.com
+SO	92122	domestic	Southern Company	southerncompany.com
+SPG	1063761	domestic	Simon Property Group	simon.com
+T	732717	domestic	AT&T	att.com
+TGT	27419	domestic	Target	target.com
+TMO	97745	domestic	Thermo Fisher Scientific	thermofisher.com
+TMUS	1283699	domestic	T-Mobile US	t-mobile.com
+TSLA	1318605	domestic	Tesla	tesla.com
+TXN	97476	domestic	Texas Instruments	ti.com
+UBER	1543151	domestic	Uber Technologies	uber.com
+UNH	731766	domestic	UnitedHealth Group	unitedhealthgroup.com
+UNP	100885	domestic	Union Pacific	up.com
+UPS	1090727	domestic	United Parcel Service	ups.com
+USB	36104	domestic	U.S. Bancorp	usbank.com
+V	1403161	domestic	Visa	visa.com
+VZ	732712	domestic	Verizon	verizon.com
+WFC	72971	domestic	Wells Fargo	wellsfargo.com
+WMT	104169	domestic	Walmart	walmart.com
+XOM	34088	domestic	Exxon Mobil	exxonmobil.com
+ASML	937966	foreign	ASML Holding	asml.com
+BCS	312069	foreign	Barclays	home.barclays
+NVO	353278	foreign	Novo Nordisk	novonordisk.com
+SAN	891478	foreign	Banco Santander	santander.com
+SAP	1000184	foreign	SAP	sap.com
+TM	1094517	foreign	Toyota Motor	global.toyota,toyota-global.com
+TSM	1046179	foreign	Taiwan Semiconductor Manufacturing	tsmc.com
