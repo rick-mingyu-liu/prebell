@@ -199,13 +199,32 @@ fn without_link_targets(md: &str) -> String {
         .into_owned()
 }
 
-/// The company name and ticker replaced by placeholders before the number check.
+/// The company name and ticker replaced by placeholders before the number
+/// check, as whole words only (no ASCII letter or digit on either side), so
+/// a one-letter ticker such as C, T, V or F never eats letters of "CEO" or
+/// "FY2026". CJK text next to a name still counts as a boundary.
 fn mask_names(text: &str, f: &EarningsFacts) -> String {
     let mut out = text.to_string();
     for name in [f.company.as_str(), f.ticker.as_str()] {
-        if !name.is_empty() {
-            out = out.replace(name, "NAME");
+        if name.is_empty() {
+            continue;
         }
+        let word = |c: Option<char>| c.is_some_and(|c| c.is_ascii_alphanumeric());
+        let mut masked = String::with_capacity(out.len());
+        let mut rest = 0;
+        for (i, _) in out.match_indices(name) {
+            if i < rest
+                || word(out[..i].chars().next_back())
+                || word(out[i + name.len()..].chars().next())
+            {
+                continue;
+            }
+            masked.push_str(&out[rest..i]);
+            masked.push_str("NAME");
+            rest = i + name.len();
+        }
+        masked.push_str(&out[rest..]);
+        out = masked;
     }
     out
 }
@@ -439,6 +458,26 @@ pub(crate) mod tests {
         let l = llm(vec![bad.clone(), bad]);
         let e = write(&l, &facts(), Lang::En).await.unwrap_err();
         assert!(e[0].contains("forbidden markup"), "{e:?}");
+    }
+
+    #[test]
+    fn one_letter_tickers_mask_only_whole_words() {
+        let mut f = facts();
+        f.company = "Citigroup".into();
+        f.ticker = "C".into();
+        assert_eq!(
+            mask_names(
+                "Citigroup (C) said CEO pay rose; C's EPS was $1.85 in FY2026 (花旗C公司).",
+                &f
+            ),
+            "NAME (NAME) said CEO pay rose; NAME's EPS was $1.85 in FY2026 (花旗NAME公司)."
+        );
+        f.ticker = "F".into();
+        f.company = "Ford Motor".into();
+        assert_eq!(
+            mask_names("Ford Motor (F): FCF and FY2026, per F.", &f),
+            "NAME (NAME): FCF and FY2026, per NAME."
+        );
     }
 
     #[tokio::test]
