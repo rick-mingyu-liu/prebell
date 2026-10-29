@@ -8,7 +8,7 @@ command = "worker-build --release"
 [triggers]
 # Every 5 min across both DST offsets of the 8:30-9:25 ET window; hourly afterwards for ZH retries.
 # `clock` decides what each firing means.
-crons = ["*/5 12-14 * * 1-5", "0 15-23 * * 1-5"]
+crons = ["*/5 12-14 * * MON-FRI", "0 15-23 * * MON-FRI"]  # named days: Cloudflare numbers 1 = Sunday
 
 [[d1_databases]]
 binding = "DB"
