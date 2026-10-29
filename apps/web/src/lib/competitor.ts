@@ -17,6 +17,8 @@ export interface Report {
   report_date: string;
   window_start: string;
   window_end: string;
+  /** Our posts are compared from here (previous trading day) to window_end. */
+  our_window_start: string;
   their_item_count: number;
   our_post_count: number;
   our_slugs: string[];

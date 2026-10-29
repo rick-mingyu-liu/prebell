@@ -53,6 +53,9 @@ pub struct Report {
     pub window_start: String,
     pub window_end: String,
     pub their_item_count: usize,
+    /// Start of our side of the comparison (see `our_window_start`); it
+    /// ends at `window_end` too.
+    pub our_window_start: String,
     pub our_post_count: usize,
     pub our_slugs: Vec<String>,
     /// Their tickers we did not mention, most-covered first.
@@ -83,6 +86,7 @@ pub fn build_report(
     report_date: NaiveDate,
     window_start: DateTime<Utc>,
     window_end: DateTime<Utc>,
+    our_window_start: DateTime<Utc>,
     theirs: &[StoredItem],
     ours: &[OurPost],
 ) -> Report {
@@ -128,6 +132,7 @@ pub fn build_report(
         window_start: iso(window_start),
         window_end: iso(window_end),
         their_item_count: theirs.len(),
+        our_window_start: iso(our_window_start),
         our_post_count: ours.len(),
         our_slugs: ours.iter().map(|p| p.slug.clone()).collect(),
         uncovered,
@@ -170,8 +175,11 @@ pub fn digest(r: &Report) -> String {
                 .to_string()
         })
         .unwrap_or_else(|_| r.window_end.clone());
+    let since = DateTime::parse_from_rfc3339(&r.our_window_start)
+        .map(|t| et(t.with_timezone(&Utc)).format("%a %m-%d").to_string())
+        .unwrap_or_else(|_| r.our_window_start.clone());
     let ours = format!(
-        "{} post{} from us",
+        "{} post{} from us since {since}",
         r.our_post_count,
         if r.our_post_count == 1 { "" } else { "s" }
     );
@@ -298,6 +306,7 @@ mod tests {
             NaiveDate::from_ymd_opt(2026, 10, 30).unwrap(),
             utc("2026-10-29T11:30:00Z"),
             utc("2026-10-30T11:30:00Z"),
+            utc("2026-10-29T04:00:00Z"),
             theirs,
             &ours(),
         )
@@ -396,6 +405,7 @@ mod tests {
             NaiveDate::from_ymd_opt(2026, 10, 30).unwrap(),
             utc("2026-10-29T11:30:00Z"),
             utc("2026-10-30T11:30:00Z"),
+            utc("2026-10-29T04:00:00Z"),
             &[item(1, &["F", "IT"], "2026-10-29T20:00:00Z")],
             &[OurPost {
                 slug: "s".into(),

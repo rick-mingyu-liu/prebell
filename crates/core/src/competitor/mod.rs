@@ -13,7 +13,9 @@ use std::collections::BTreeMap;
 use async_trait::async_trait;
 use chrono::{DateTime, Duration, NaiveDate, NaiveTime, SecondsFormat, Utc};
 
-use crate::clock::et;
+use chrono_tz::America::New_York;
+
+use crate::clock::{et, trading_day, DayKind};
 use crate::providers::Http;
 use feed::parse_feed;
 use report::{build_report, digest, OurPost, Report, StoredItem};
@@ -50,6 +52,24 @@ pub fn competitor_decision(now_utc: DateTime<Utc>) -> CompetitorDecision {
     } else {
         CompetitorDecision::NotNow
     }
+}
+
+/// Our side of the comparison reaches back to 00:00 ET of the previous NYSE
+/// trading day (or 24h, whichever is earlier). We don't publish on closed
+/// days, so a Monday or weekend report still compares against Friday's posts.
+pub fn our_window_start(now: DateTime<Utc>) -> DateTime<Utc> {
+    let mut d = et(now).date_naive() - Duration::days(1);
+    while trading_day(d) == DayKind::Closed {
+        d -= Duration::days(1);
+    }
+    let midnight = d
+        .and_hms_opt(0, 0, 0)
+        .unwrap()
+        .and_local_timezone(New_York)
+        .earliest()
+        .map(|t| t.with_timezone(&Utc));
+    let day_ago = now - Duration::hours(24);
+    midnight.map_or(day_ago, |m| m.min(day_ago))
 }
 
 /// A `competitor_items` row to insert or refresh.
@@ -226,10 +246,11 @@ async fn step(
     store.upsert_items(&rows, &iso(now)).await?;
 
     let start = now - Duration::hours(24);
+    let our_start = our_window_start(now);
     let (s, e) = (iso(start), iso(now));
     let theirs = store.items_between(&s, &e).await?;
-    let ours = store.our_posts_between(&s, &e).await?;
-    let report = build_report(report_date, start, now, &theirs, &ours);
+    let ours = store.our_posts_between(&iso(our_start), &e).await?;
+    let report = build_report(report_date, start, now, our_start, &theirs, &ours);
     let text = digest(&report);
     // Queue the digest first: it is the deliverable, and once the report
     // row exists later firings are no-ops.
@@ -322,6 +343,50 @@ mod tests {
         // DST ends Sun 2026-11-01 at 02:00; 07:30 that morning is EST.
         assert!(due("2026-11-01T12:30:00Z"));
         assert!(!due("2026-11-01T11:30:00Z"));
+    }
+
+    #[test]
+    fn our_window_reaches_back_to_last_trading_day() {
+        // Tue 07:31 EDT: the previous trading day is Mon; 24h ago is earlier.
+        assert_eq!(
+            our_window_start(utc("2026-10-27T11:31:00Z")),
+            utc("2026-10-26T04:00:00Z")
+        );
+        // Sat, Sun and Mon reports reach back to Fri 2026-10-30 00:00 EDT.
+        for now in [
+            "2026-10-31T11:31:00Z",
+            "2026-11-01T12:31:00Z",
+            "2026-11-02T12:31:00Z",
+        ] {
+            assert_eq!(
+                our_window_start(utc(now)),
+                utc("2026-10-30T04:00:00Z"),
+                "{now}"
+            );
+        }
+        // Fri after Thanksgiving reaches back to Wed 2026-11-25 (EST).
+        assert_eq!(
+            our_window_start(utc("2026-11-27T12:31:00Z")),
+            utc("2026-11-25T05:00:00Z")
+        );
+    }
+
+    #[tokio::test]
+    async fn weekend_report_compares_with_fridays_posts() {
+        let http = FakeHttp::new(200, FIXTURE);
+        let store = MemCompetitorStore::default();
+        store.our_posts.borrow_mut().push((
+            "2026-10-30T12:40:00Z".into(),
+            OurPost {
+                slug: "premarket-2026-10-30".into(),
+                text: "| MSFT | Microsoft |".into(),
+            },
+        ));
+        // Mon 2026-11-02 07:31 EST; Friday's post is 72h old.
+        run_competitor(utc("2026-11-02T12:31:00Z"), &http, &store, "x").await;
+        let r = store.reports.borrow()[0].0.clone();
+        assert_eq!(r.our_slugs, ["premarket-2026-10-30"]);
+        assert_eq!(r.our_window_start, "2026-10-30T04:00:00Z");
     }
 
     #[tokio::test]

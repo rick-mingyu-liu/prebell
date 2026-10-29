@@ -7,6 +7,7 @@ const report = (date: string, ticker: string) =>
     report_date: date,
     window_start: `${date}T11:30:00Z`,
     window_end: `${date}T11:30:00Z`,
+    our_window_start: `${date}T04:00:00Z`,
     their_item_count: 2,
     our_post_count: 1,
     our_slugs: ["premarket-2026-10-29"],

@@ -51,7 +51,8 @@ export default async function CompetitorPage({ searchParams }: PageProps<"/admin
           <h2>Report {latest.reportDate}</h2>
           <p className="muted">
             Window {formatEt(r.window_start, "en")} to {formatEt(r.window_end, "en")}: {r.their_item_count} of their
-            items, {r.our_post_count} of our posts{r.our_slugs.length > 0 && ` (${r.our_slugs.join(", ")})`}.
+            items. Our posts since {formatEt(r.our_window_start, "en")}: {r.our_post_count}
+            {r.our_slugs.length > 0 && ` (${r.our_slugs.join(", ")})`}.
           </p>
 
           <h3>Not covered by us ({r.uncovered.length})</h3>
