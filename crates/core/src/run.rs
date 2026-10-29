@@ -4,7 +4,7 @@
 //! the idempotency key. `Content` supplies what differs per type.
 
 use async_trait::async_trait;
-use chrono::{DateTime, Duration, NaiveDate, NaiveTime, SecondsFormat, Utc};
+use chrono::{DateTime, Duration, NaiveDate, NaiveTime, SecondsFormat, Timelike, Utc};
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 
@@ -80,6 +80,12 @@ impl Content for Premarket<'_> {
     }
     fn zh_give_up(&self) -> NaiveTime {
         NaiveTime::from_hms_opt(18, 0, 0).expect("valid built-in time")
+    }
+    /// Every firing inside the 08:30-09:25 ET window, then hourly on the
+    /// hour: the cron fires every 5 minutes all day.
+    fn zh_retry_due(&self, t: NaiveTime) -> bool {
+        let w = premarket_window(DayKind::Full);
+        (w.start..=w.end).contains(&t) || t.minute() == 0
     }
     async fn build_facts(&self, date: NaiveDate, now: DateTime<Utc>) -> PremarketFacts {
         build_facts(self.md, self.ns, self.llm, date, now).await
@@ -879,6 +885,51 @@ mod tests {
             tick(utc("2026-10-29T15:05:00Z"), &s, &m, &FakeNs, &l).await,
             TickOutcome::Nothing
         );
+    }
+
+    #[tokio::test]
+    async fn zh_retries_every_5_min_in_window_then_hourly() {
+        let s = MemStore::default();
+        let (m, l) = (md(true), llm(true, false));
+        assert_eq!(
+            tick(utc("2026-10-29T12:30:00Z"), &s, &m, &FakeNs, &l).await,
+            TickOutcome::PublishedEnOnly
+        );
+        // 08:35 and 09:25 ET: inside the window, every firing retries.
+        for t in ["2026-10-29T12:35:00Z", "2026-10-29T13:25:00Z"] {
+            let before = l.calls.get();
+            assert!(matches!(
+                tick(utc(t), &s, &m, &FakeNs, &l).await,
+                TickOutcome::Retrying(_)
+            ));
+            assert!(l.calls.get() > before, "{t}");
+        }
+        // After the window, 5-minute firings off the hour make no LLM call.
+        let before = l.calls.get();
+        for t in [
+            "2026-10-29T13:30:00Z",
+            "2026-10-29T14:05:00Z",
+            "2026-10-29T21:55:00Z",
+        ] {
+            assert_eq!(
+                tick(utc(t), &s, &m, &FakeNs, &l).await,
+                TickOutcome::Nothing,
+                "{t}"
+            );
+        }
+        assert_eq!(l.calls.get(), before);
+        // 10:00 ET retries on the hour.
+        assert!(matches!(
+            tick(utc("2026-10-29T14:00:00Z"), &s, &m, &FakeNs, &l).await,
+            TickOutcome::Retrying(_)
+        ));
+        assert!(l.calls.get() > before);
+        // The 18:00 ET give-up always runs, on or off the hour.
+        assert!(matches!(
+            tick(utc("2026-10-29T22:05:00Z"), &s, &m, &FakeNs, &l).await,
+            TickOutcome::Retrying(_)
+        ));
+        assert_eq!(tr_status(&s, "zh"), "failed");
     }
 
     #[tokio::test]
