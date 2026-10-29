@@ -1,4 +1,5 @@
-# Earnings watchlist: the S&P 100 (one line per company; Alphabet once, as GOOGL)
+# Earnings watchlist: the S&P 100 as the builder last knew it (102 companies, one
+# line per company; Alphabet once, as GOOGL; may include recent index leavers)
 # plus a few large foreign private issuers (6-K/20-F filers: calendar only).
 #
 # REFRESH THIS FILE when the index changes (S&P rebalances quarterly) and check

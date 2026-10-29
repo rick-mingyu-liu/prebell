@@ -28,6 +28,12 @@ pub struct WatchEntry {
     pub domains: Vec<&'static str>,
 }
 
+fn data_lines() -> impl Iterator<Item = &'static str> {
+    DATA.lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+}
+
 fn parse(line: &'static str) -> Option<WatchEntry> {
     let mut cols = line.split('\t').map(str::trim);
     let ticker = cols.next()?;
@@ -56,9 +62,8 @@ fn parse(line: &'static str) -> Option<WatchEntry> {
 
 /// Every watchlist entry, in file order.
 pub fn watchlist() -> Vec<WatchEntry> {
-    DATA.lines()
-        .filter(|l| !l.trim().is_empty() && !l.starts_with('#'))
-        .filter_map(parse)
+    data_lines()
+        .map(|l| parse(l).unwrap_or_else(|| panic!("bad watchlist.tsv row: {l:?}")))
         .collect()
 }
 
@@ -127,6 +132,19 @@ mod tests {
     }
 
     #[test]
+    fn every_row_parses_and_fits_five_batches() {
+        assert_eq!(data_lines().count(), watchlist().len());
+        let domestic = watchlist()
+            .iter()
+            .filter(|e| e.filer == Filer::Domestic)
+            .count();
+        assert!(
+            domestic <= 5 * BATCH,
+            "{domestic} domestic companies no longer fit 5 one-minute batches; raise BATCH"
+        );
+    }
+
+    #[test]
     fn cik_padding() {
         assert_eq!(cik10(320193), "0000320193");
         assert_eq!(cik10(1800), "0000001800");
@@ -139,7 +157,8 @@ mod tests {
         assert!(in_window(utc("2026-10-30T10:00:00Z"))); // 06:00 ET
         assert!(in_window(utc("2026-10-31T01:59:59Z"))); // Fri 21:59:59 ET
         assert!(!in_window(utc("2026-10-31T02:00:00Z"))); // Fri 22:00 ET
-                                                          // Mon 2026-11-02 is EST (UTC-5).
+
+        // Mon 2026-11-02 is EST (UTC-5).
         assert!(!in_window(utc("2026-11-02T10:30:00Z"))); // 05:30 ET
         assert!(in_window(utc("2026-11-02T11:00:00Z"))); // 06:00 ET
                                                          // Saturday.
