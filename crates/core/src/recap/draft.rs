@@ -4,13 +4,14 @@
 
 use crate::facts::{Field, Mover, NewsReason};
 use crate::numbers::{check, extract, Lang};
-use crate::premarket::draft::{
-    cell, fmt_num, fmt_pct, na, render_sources, write_with, Draft, DISCLAIMER_EN, DISCLAIMER_ZH,
-};
+use crate::premarket::draft::{cell, fmt_num, fmt_pct, na, render_sources, write_with, Draft};
 use crate::providers::LlmProvider;
 use crate::recap::{numbers_in_facts, RecapFacts};
 
 pub const TEMPLATE_ID: &str = "recap:v1";
+pub const DISCLAIMER_EN: &str =
+    "This recap is generated automatically from public data for information only. It is not investment advice.";
+pub const DISCLAIMER_ZH: &str = "本回顾根据公开数据自动生成，仅供参考，不构成投资建议。";
 
 const PROMPT_EN: &str = include_str!("../../prompts/recap_v1_en.md");
 const PROMPT_ZH: &str = include_str!("../../prompts/recap_v1_zh.md");
@@ -177,7 +178,6 @@ fn table_values(f: &RecapFacts) -> Vec<f64> {
 mod tests {
     use super::*;
     use crate::facts::{Field, Mover, NewsReason, Quote};
-    use crate::premarket::draft::{DISCLAIMER_EN, DISCLAIMER_ZH};
     use crate::providers::{LlmProvider, ProviderError};
     use async_trait::async_trait;
     use chrono::NaiveDate;

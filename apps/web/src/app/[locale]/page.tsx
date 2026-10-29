@@ -29,47 +29,51 @@ export default async function Home({ params }: PageProps<"/[locale]">) {
   ]);
   const shown = new Set([latest?.slug, recap?.slug]);
   const others = recent.filter((p) => !shown.has(p.slug)).slice(0, 10);
+  // The recap title is the page's top-level heading when there is no premarket brief.
+  const RecapHeading = latest ? "h3" : "h1";
 
   return (
     <>
       <div className="page-tools">
         <LangSwitch locale={locale} path="" />
       </div>
-      <section aria-labelledby="latest">
-        <h2 id="latest" className="eyebrow">
-          {t("home.latest")}
-        </h2>
-        {!latest && !recap && <p>{t("home.empty")}</p>}
-        {latest?.status === "pending" && (
-          <>
-            <h1>{pendingTitle(t, latest, locale)}</h1>
-            <PendingNotice slug={latest.slug} />
-          </>
-        )}
-        {latest?.status === "published" && (
-          <article>
-            <p className="meta">
-              <time dateTime={latest.publishedAt ?? undefined}>
-                {t("post.published", { time: formatEt(latest.publishedAt, locale) })}
-              </time>
-              {" · "}
-              <Link href={`/${locale}/p/${latest.slug}`}>{t("post.permalink")}</Link>
-            </p>
-            <PostBody markdown={latest.bodyMd} sources={latest.sources.map((s) => s.url)} />
-          </article>
-        )}
-      </section>
+      {!latest && !recap && <p>{t("home.empty")}</p>}
+      {latest && (
+        <section aria-labelledby="latest">
+          <h2 id="latest" className="eyebrow">
+            {t("home.latest")}
+          </h2>
+          {latest?.status === "pending" && (
+            <>
+              <h1>{pendingTitle(t, latest, locale)}</h1>
+              <PendingNotice slug={latest.slug} />
+            </>
+          )}
+          {latest?.status === "published" && (
+            <article>
+              <p className="meta">
+                <time dateTime={latest.publishedAt ?? undefined}>
+                  {t("post.published", { time: formatEt(latest.publishedAt, locale) })}
+                </time>
+                {" · "}
+                <Link href={`/${locale}/p/${latest.slug}`}>{t("post.permalink")}</Link>
+              </p>
+              <PostBody markdown={latest.bodyMd} sources={latest.sources.map((s) => s.url)} />
+            </article>
+          )}
+        </section>
+      )}
       {recap && (
         <section aria-labelledby="recap">
           <h2 id="recap" className="eyebrow">
             {t("home.latestRecap")}
           </h2>
           <article>
-            <h3>
+            <RecapHeading>
               <Link href={`/${locale}/p/${recap.slug}`}>
                 {recap.status === "published" ? recap.title : pendingTitle(t, recap, locale)}
               </Link>
-            </h3>
+            </RecapHeading>
             <p className="meta">
               <time dateTime={recap.tradingDate}>{formatDate(recap.tradingDate, locale)}</time>
             </p>

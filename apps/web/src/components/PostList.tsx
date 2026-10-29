@@ -11,10 +11,10 @@ export default async function PostList({ locale, items }: { locale: Locale; item
     <ul className="post-list">
       {items.map((p) => (
         <li key={p.slug}>
-          <time dateTime={p.tradingDate}>
-            {formatDate(p.tradingDate, locale)}
+          <span className="post-meta">
+            <time dateTime={p.tradingDate}>{formatDate(p.tradingDate, locale)}</time>
             {` · ${typeLabel(t, p.contentType)}`}
-          </time>
+          </span>
           <Link href={`/${locale}/p/${p.slug}`}>{p.title || p.slug}</Link>
           {p.summary && <p>{p.summary}</p>}
         </li>

@@ -55,7 +55,7 @@ export default async function Archive({ params, searchParams }: PageProps<"/[loc
       </div>
       <nav className="filters" aria-label={t("archive.filter")}>
         {[null, ...CONTENT_TYPES].map((ty) => (
-          <Link key={ty ?? "all"} href={href(ty, 1)} aria-current={ty === type ? "page" : undefined}>
+          <Link key={ty ?? "all"} href={href(ty, 1)} aria-current={ty === type ? (page === 1 ? "page" : "true") : undefined}>
             {ty ? typeLabel(t, ty) : t("archive.all")}
           </Link>
         ))}
