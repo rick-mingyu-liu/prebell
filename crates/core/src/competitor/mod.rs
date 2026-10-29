@@ -653,37 +653,48 @@ mod tests {
         assert!(alerts[0].2.contains("too large"), "{}", alerts[0].2);
     }
 
-    /// Spec §5: competitor data never feeds generation. The generation
-    /// modules and prompts must not reference this module or its tables.
+    /// Spec §5: competitor data never feeds generation. Every core source
+    /// file and prompt outside this module (and `lib.rs`, which declares it)
+    /// must not reference the module or its tables. The walk picks up new
+    /// files on its own.
     #[test]
     fn generation_never_reads_competitor_data() {
-        let sources = [
-            ("premarket/mod.rs", include_str!("../premarket/mod.rs")),
-            ("premarket/draft.rs", include_str!("../premarket/draft.rs")),
-            (
-                "premarket/universe.rs",
-                include_str!("../premarket/universe.rs"),
-            ),
-            ("run.rs", include_str!("../run.rs")),
-            ("facts.rs", include_str!("../facts.rs")),
-            ("store.rs", include_str!("../store.rs")),
-            ("anchor.rs", include_str!("../anchor.rs")),
-            ("numbers.rs", include_str!("../numbers.rs")),
-            (
-                "premarket_v1_en.md",
-                include_str!("../../prompts/premarket_v1_en.md"),
-            ),
-            (
-                "premarket_v1_zh.md",
-                include_str!("../../prompts/premarket_v1_zh.md"),
-            ),
-        ];
-        for (name, src) in sources {
-            let lower = src.to_lowercase();
-            assert!(
-                !lower.contains("competitor") && !lower.contains("alphalab"),
-                "{name} references competitor data"
-            );
+        fn walk(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+            for entry in std::fs::read_dir(dir).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    walk(&path, out);
+                } else {
+                    out.push(path);
+                }
+            }
+        }
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let skip_dir = root.join("src/competitor");
+        let skip_file = root.join("src/lib.rs");
+        let mut files = Vec::new();
+        walk(&root.join("src"), &mut files);
+        walk(&root.join("prompts"), &mut files);
+        let files: Vec<_> = files
+            .into_iter()
+            .filter(|p| !p.starts_with(&skip_dir) && *p != skip_file)
+            .collect();
+        assert!(files.iter().any(|p| p.ends_with("premarket/draft.rs")));
+        assert!(files.iter().any(|p| p.ends_with("premarket_v1_en.md")));
+        for path in files {
+            let src = std::fs::read_to_string(&path).unwrap().to_lowercase();
+            for banned in [
+                "competitor_items",
+                "competitor_reports",
+                "alphalab",
+                "competitor::",
+            ] {
+                assert!(
+                    !src.contains(banned),
+                    "{} mentions {banned}",
+                    path.display()
+                );
+            }
         }
     }
 }
