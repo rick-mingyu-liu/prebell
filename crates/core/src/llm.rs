@@ -52,7 +52,9 @@ pub fn llm_from_env<H: Http + 'static>(
 
 /// The error for an `LLM_PROVIDER` value with no implementation.
 pub fn unknown_provider(provider: &str) -> ProviderError {
-    ProviderError::Parse(format!("unknown LLM provider: {provider}"))
+    ProviderError::Parse(format!(
+        "unknown LLM_PROVIDER: {provider} (use claude or deepseek)"
+    ))
 }
 
 /// Strips a Markdown code fence (```` ```json ```` or bare ```` ``` ````) around a JSON reply.
@@ -234,11 +236,11 @@ mod tests {
     fn unknown_provider_errors() {
         assert!(matches!(
             llm_from_env("nope", fake("{}"), "k".into(), None, None, no_warn),
-            Err(ProviderError::Parse(m)) if m == "unknown LLM provider: nope"
+            Err(ProviderError::Parse(m)) if m == "unknown LLM_PROVIDER: nope (use claude or deepseek)"
         ));
         assert_eq!(
             unknown_provider("x").to_string(),
-            "parse error: unknown LLM provider: x"
+            "parse error: unknown LLM_PROVIDER: x (use claude or deepseek)"
         );
     }
 }

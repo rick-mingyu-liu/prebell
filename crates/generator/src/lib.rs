@@ -5,12 +5,14 @@ mod competitor;
 mod http;
 mod store;
 
+use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use prebell_core::competitor::run_competitor;
+use prebell_core::jobs::{redact, run_job, JobRunner};
 use prebell_core::llm::{api_key_var, llm_from_env, unknown_provider};
 use prebell_core::recap;
 use prebell_core::run::{tick_with_log, TickOutcome};
-use prebell_core::schedule::{jobs_for_cron, ContentJob, JobKind, JOBS};
+use prebell_core::schedule::{jobs_for_cron, ContentJob, JOBS};
 use prebell_core::tavily::Tavily;
 use prebell_core::yahoo::Yahoo;
 use serde::{Deserialize, Serialize};
@@ -95,29 +97,50 @@ async fn scheduled(event: ScheduledEvent, env: Env, _ctx: ScheduleContext) {
     }
 }
 
-/// A premarket or recap tick. Providers are built here, per message, so a bad
-/// LLM config fails only the jobs that need the LLM.
-async fn content(env: &Env, store: &D1Store, job: ContentJob) -> Result<TickOutcome> {
-    let md = Yahoo::new(WorkerHttp);
-    let ns = Tavily::new(WorkerHttp, secret_or_empty(env, "TAVILY_API_KEY"));
-    let provider = text(env, "LLM_PROVIDER").unwrap_or_else(|| "claude".into());
-    let key_var = api_key_var(&provider)
-        .ok_or_else(|| Error::RustError(unknown_provider(&provider).to_string()))?;
-    let llm = llm_from_env(
-        &provider,
-        WorkerHttp,
-        secret_or_empty(env, key_var),
-        text(env, "LLM_MODEL"),
-        text(env, "LLM_EFFORT"),
-        |m| console_warn!("{m}"),
-    )
-    .map_err(|e| Error::RustError(e.to_string()))?;
-    let log = |m: &str| console_log!("{m}");
-    let at = now(env);
-    Ok(match job {
-        ContentJob::Premarket => tick_with_log(at, store, &md, &ns, llm.as_ref(), &log).await,
-        ContentJob::Recap => recap::tick_with_log(at, store, &md, &ns, llm.as_ref(), &log).await,
-    })
+/// The Worker side of `jobs::run_job`.
+struct Runner<'a> {
+    env: &'a Env,
+    store: &'a D1Store,
+}
+
+#[async_trait(?Send)]
+impl JobRunner for Runner<'_> {
+    /// A premarket or recap tick. Providers are built here, per message, so
+    /// a bad LLM config fails only the jobs that need the LLM. The error
+    /// names the variable and its value, never a secret.
+    async fn content(&self, job: ContentJob) -> std::result::Result<TickOutcome, String> {
+        let env = self.env;
+        let md = Yahoo::new(WorkerHttp);
+        let news_key = secret_or_empty(env, "TAVILY_API_KEY");
+        let ns = Tavily::new(WorkerHttp, news_key.clone());
+        let provider = text(env, "LLM_PROVIDER").unwrap_or_else(|| "claude".into());
+        let key_var =
+            api_key_var(&provider).ok_or_else(|| unknown_provider(&provider).to_string())?;
+        let llm_key = secret_or_empty(env, key_var);
+        let llm = llm_from_env(
+            &provider,
+            WorkerHttp,
+            llm_key.clone(),
+            text(env, "LLM_MODEL"),
+            text(env, "LLM_EFFORT"),
+            |m| console_warn!("{m}"),
+        )
+        .map_err(|e| redact(&e.to_string(), &[&llm_key, &news_key]))?;
+        let log = |m: &str| console_log!("{m}");
+        let at = now(env);
+        let store = self.store;
+        Ok(match job {
+            ContentJob::Premarket => tick_with_log(at, store, &md, &ns, llm.as_ref(), &log).await,
+            ContentJob::Recap => {
+                recap::tick_with_log(at, store, &md, &ns, llm.as_ref(), &log).await
+            }
+        })
+    }
+
+    async fn competitor(&self) -> String {
+        let outcome = run_competitor(now(self.env), &WorkerHttp, &WorkerTimer, self.store).await;
+        format!("{outcome:?}")
+    }
 }
 
 #[event(queue)]
@@ -126,21 +149,18 @@ async fn queue(batch: MessageBatch<Job>, env: Env, _ctx: Context) -> Result<()> 
         db: env.d1("DB")?,
         facts: env.bucket("FACTS")?,
     };
+    let runner = Runner {
+        env: &env,
+        store: &store,
+    };
 
     for msg in batch.messages()? {
-        let job = msg.body().job.as_str();
-        match JobKind::parse(job) {
-            Some(JobKind::Competitor) => {
-                let outcome = run_competitor(now(&env), &WorkerHttp, &WorkerTimer, &store).await;
-                console_log!("job {job}: {outcome:?}");
-            }
-            Some(JobKind::Content(c)) => match content(&env, &store, c).await {
-                Ok(o) => console_log!("job {job}: {o:?}"),
-                // Logged, not returned: the error is config, so a queue retry
-                // would fail the same way, and other messages must still run.
-                Err(e) => console_error!("job {job}: {e}"),
-            },
-            None => console_error!("job {job}: unknown job, dropped"),
+        // A config error is alerted (once per job per ET day) and acked, not
+        // retried: a retry would fail the same way, and the other messages
+        // and the alert delivery below must still run.
+        match run_job(now(&env), &msg.body().job, &store, &runner).await {
+            Ok(line) => console_log!("{line}"),
+            Err(line) => console_error!("{line}"),
         }
         msg.ack();
     }

@@ -4,6 +4,7 @@ pub mod clock;
 pub mod competitor;
 pub mod deepseek;
 pub mod facts;
+pub mod jobs;
 pub mod llm;
 pub mod numbers;
 pub mod premarket;

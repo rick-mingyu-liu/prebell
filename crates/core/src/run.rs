@@ -1021,6 +1021,9 @@ mod tests {
         async fn add_alert(&self, run_key: &str, level: &str, msg: &str) -> Result<(), String> {
             self.inner.add_alert(run_key, level, msg).await
         }
+        async fn has_alert(&self, run_key: &str) -> Result<bool, String> {
+            self.inner.has_alert(run_key).await
+        }
         async fn put_facts(&self, key: &str, json: &str) -> Result<(), String> {
             self.inner.put_facts(key, json).await
         }
