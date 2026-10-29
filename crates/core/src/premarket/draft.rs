@@ -4,7 +4,9 @@
 //! through the LLM.
 
 use std::collections::HashSet;
+use std::sync::OnceLock;
 
+use regex::Regex;
 use serde_json::Value;
 
 use crate::facts::{numbers_in_facts, Field, Mover, PremarketFacts};
@@ -153,7 +155,8 @@ pub fn render_markdown(d: &Draft, f: &PremarketFacts) -> String {
         .chain(macro_items)
         .filter(|r| seen.insert(r.url.as_str()))
         .map(|r| {
-            let title = r.title.replace('[', "\\[").replace(']', "\\]");
+            let title = r.title.split_whitespace().collect::<Vec<_>>().join(" ");
+            let title = title.replace('[', "\\[").replace(']', "\\]");
             format!("- [{title}]({})\n", r.url)
         })
         .collect();
@@ -180,15 +183,45 @@ enum Problem {
     Numbers(Vec<String>),
 }
 
-/// Markup the LLM may not emit: links, images, HTML and URLs would let it
-/// cite sources outside the facts or forge page structure.
-const FORBIDDEN: [&str; 5] = ["](", "<", "http://", "https://", "javascript:"];
+/// Markup the LLM may not emit: links (inline, reference-style, bare or
+/// autolinked), images, HTML and URLs would let it cite sources outside the
+/// facts or forge page structure. Matched case-insensitively.
+const FORBIDDEN: [&str; 10] = [
+    "](",
+    "]:",
+    "![",
+    "<",
+    "http://",
+    "https://",
+    "//",
+    "www.",
+    "javascript:",
+    "mailto:",
+];
 
-fn reject_markup(what: &str, s: &str) -> Result<(), String> {
-    match FORBIDDEN.iter().find(|t| s.contains(*t)) {
-        Some(t) => Err(format!("{what} contains forbidden markup {t:?}")),
-        None => Ok(()),
+/// GFM autolinks bare emails as `mailto:` links.
+fn email_re() -> &'static Regex {
+    static R: OnceLock<Regex> = OnceLock::new();
+    R.get_or_init(|| Regex::new(r"\S+@\S+\.\S+").expect("valid built-in regex"))
+}
+
+/// Rejects text that markdown could render as a link, image or HTML.
+/// Shared with reason extraction, whose `summary_en` lands in the EN table.
+pub(crate) fn reject_markup(what: &str, s: &str) -> Result<(), String> {
+    let lower = s.to_lowercase();
+    if let Some(t) = FORBIDDEN.iter().find(|t| lower.contains(*t)) {
+        return Err(format!("{what} contains forbidden markup {t:?}"));
     }
+    if email_re().is_match(s) {
+        return Err(format!("{what} contains an email address"));
+    }
+    Ok(())
+}
+
+/// A setext heading underline: a line of only `=` or only `-`, length >= 2.
+fn is_setext_underline(line: &str) -> bool {
+    let l = line.trim();
+    l.len() >= 2 && (l.bytes().all(|b| b == b'=') || l.bytes().all(|b| b == b'-'))
 }
 
 /// A one-line string: whitespace runs (newlines included) become one space.
@@ -208,6 +241,9 @@ fn one_line(v: &Value, key: &str) -> Result<String, String> {
 fn parse(v: &Value, lang: Lang) -> Result<Draft, String> {
     let title = one_line(v, "title")?;
     let summary = one_line(v, "summary")?;
+    if summary.starts_with('#') {
+        return Err("summary starts with a heading marker".into());
+    }
     let want = headings(lang);
     let items = v
         .get("sections")
@@ -238,7 +274,9 @@ fn parse(v: &Value, lang: Lang) -> Result<Draft, String> {
     }
     for (h, m) in &got {
         reject_markup(&format!("section {h:?}"), m)?;
-        if m.lines().any(|l| l.trim_start().starts_with('#')) {
+        if m.lines()
+            .any(|l| l.trim_start().starts_with('#') || is_setext_underline(l))
+        {
             return Err(format!("section {h:?} contains a heading line"));
         }
     }
@@ -585,6 +623,68 @@ mod tests {
         assert_eq!(d.summary, "Apple gained 8%.");
         assert!(
             md.starts_with("# Futures edge up; Apple jumps 8%\n\nApple gained 8%.\n\n"),
+            "{md}"
+        );
+    }
+
+    #[test]
+    fn forbidden_markup_in_sections_is_rejected() {
+        for body in [
+            "See HTTPS://evil.example/x today.",
+            "See Http://evil.example/x today.",
+            "Visit www.evil.example for more.",
+            "Visit WWW.evil.example for more.",
+            "Write to ceo@evil.example now.",
+            "Read [here][r].\n\n[r]: //evil.example/p.png",
+            "Look ![p][r] here.",
+            "Proto-relative //evil.example/p.png link.",
+            "JavaScript:alert(1)",
+            "Forged heading\n===",
+            "Forged heading\n---",
+            "Forged heading\n  ----  ",
+        ] {
+            let v = reply(Lang::En, body).unwrap();
+            assert!(parse(&v, Lang::En).is_err(), "should reject: {body:?}");
+        }
+    }
+
+    #[test]
+    fn ordinary_prose_and_lists_pass_markup_check() {
+        for body in [
+            "Futures were mixed; 3-5 names led.",
+            "- Apple rose\n- Microsoft fell",
+            "Rates and/or yields moved.",
+            "A single dash line\n-",
+        ] {
+            let v = reply(Lang::En, body).unwrap();
+            assert!(parse(&v, Lang::En).is_ok(), "should accept: {body:?}");
+        }
+    }
+
+    #[test]
+    fn forbidden_markup_in_title_and_summary_is_rejected() {
+        for (key, val) in [
+            ("summary", "# Forged heading"),
+            ("summary", "  ## Forged heading"),
+            ("summary", "Mail ceo@evil.example"),
+            ("title", "See WWW.evil.example"),
+        ] {
+            let mut v = clean(Lang::En).unwrap();
+            v[key] = json!(val);
+            assert!(parse(&v, Lang::En).is_err(), "should reject {key}: {val:?}");
+        }
+    }
+
+    #[test]
+    fn source_titles_collapse_whitespace() {
+        let mut f = facts();
+        f.gainers[0].reasons = vec![reason(
+            "https://news.test/aapl",
+            "Apple\n\n[r]: //evil.example/p.png\n  jumps",
+        )];
+        let md = render_markdown(&draft(Lang::En), &f);
+        assert!(
+            md.contains("- [Apple \\[r\\]: //evil.example/p.png jumps](https://news.test/aapl)\n"),
             "{md}"
         );
     }
