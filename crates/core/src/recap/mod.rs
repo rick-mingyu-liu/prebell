@@ -1,6 +1,8 @@
 //! The after-close recap: index closes (required), notable movers with
 //! quote-anchored reasons, and after-hours earnings to watch (optional).
 
+pub mod draft;
+
 use chrono::{DateTime, Datelike, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
 
@@ -176,10 +178,10 @@ async fn liquid_closes(md: &dyn MarketData, date: NaiveDate) -> Vec<Quote> {
     md.close_quotes(&symbols, date)
         .await
         .into_iter()
-        .zip(tickers)
-        .filter_map(|((_, r), ticker)| {
+        .filter_map(|(sym, r)| {
             let mut q = r.ok()?;
-            q.symbol = ticker;
+            let i = symbols.iter().position(|s| *s == sym)?;
+            q.symbol = tickers[i].clone();
             Some(q)
         })
         .filter(|q| q.last >= MIN_PRICE && q.volume.is_some_and(|v| v >= MIN_VOLUME))
@@ -194,19 +196,44 @@ pub async fn build_facts(
     now: DateTime<Utc>,
 ) -> RecapFacts {
     let symbols: Vec<String> = INDEXES.iter().map(|(_, s)| s.to_string()).collect();
-    let indexes = INDEXES
+    let mut closes = md.close_quotes(&symbols, trading_date).await;
+    let indexes: Vec<(String, Field<Quote>)> = INDEXES
         .iter()
-        .zip(md.close_quotes(&symbols, trading_date).await)
-        .map(|((label, _), (_, r))| {
-            let f = match r {
-                Ok(q) => Field::Value(q),
-                Err(e) => Field::Missing {
-                    reason: e.to_string(),
+        .map(|(label, sym)| {
+            let f = match closes.iter().position(|(s, _)| s == sym) {
+                Some(i) => match closes.swap_remove(i).1 {
+                    Ok(q) => Field::Value(q),
+                    Err(e) => Field::Missing {
+                        reason: e.to_string(),
+                    },
+                },
+                None => Field::Missing {
+                    reason: "no quote returned".into(),
                 },
             };
             (label.to_string(), f)
         })
         .collect();
+    let early_close = trading_day(trading_date) == DayKind::EarlyClose;
+
+    // The run retries until every index close is in; skip the costly movers
+    // and news fan-out until then.
+    if indexes
+        .iter()
+        .any(|(_, f)| matches!(f, Field::Missing { .. }))
+    {
+        return RecapFacts {
+            trading_date,
+            as_of_utc: now,
+            early_close,
+            indexes,
+            gainers: vec![],
+            losers: vec![],
+            after_hours: Field::Missing {
+                reason: "not gathered: index closes unavailable".into(),
+            },
+        };
+    }
 
     let quotes = liquid_closes(md, trading_date).await;
     let mut up: Vec<Quote> = quotes
@@ -232,7 +259,7 @@ pub async fn build_facts(
     RecapFacts {
         trading_date,
         as_of_utc: now,
-        early_close: trading_day(trading_date) == DayKind::EarlyClose,
+        early_close,
         indexes,
         gainers,
         losers,
@@ -272,6 +299,8 @@ mod tests {
         indexes: HashMap<String, Quote>,
         stocks: HashMap<String, Quote>,
         sessions: RefCell<Vec<NaiveDate>>,
+        /// Answer `close_quotes` in reverse order, as a provider may.
+        reverse: bool,
     }
     #[async_trait(?Send)]
     impl MarketData for FakeMd {
@@ -283,6 +312,20 @@ mod tests {
             _symbols: &[String],
         ) -> Vec<(String, Result<Quote, ProviderError>)> {
             panic!("recap must not use premarket quotes")
+        }
+        async fn close_quotes(
+            &self,
+            symbols: &[String],
+            session: NaiveDate,
+        ) -> Vec<(String, Result<Quote, ProviderError>)> {
+            let mut out = Vec::new();
+            for s in symbols {
+                out.push((s.clone(), self.close_quote(s, session).await));
+            }
+            if self.reverse {
+                out.reverse();
+            }
+            out
         }
         async fn close_quote(
             &self,
@@ -314,6 +357,7 @@ mod tests {
                 .map(|s| (s.symbol.clone(), s.clone()))
                 .collect(),
             sessions: RefCell::new(vec![]),
+            reverse: false,
         }
     }
 
@@ -403,10 +447,32 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn one_index_missing_gates_indexes() {
-        let mut m = md(&[]);
-        m.indexes.remove("^RUT");
+    async fn reordered_provider_answers_map_by_symbol() {
+        let mut m = md(&[
+            q("BRK-B", 480.0, 2.0, Some(3_000_000)),
+            q("NVDA", 180.0, 1.0, Some(3_000_000)),
+        ]);
+        m.reverse = true;
+        m.indexes
+            .insert("^RUT".into(), q("^RUT", 2230.75, 1.05, Some(1)));
         let f = build_facts(&m, &ns(vec![]), &llm(vec![]), date(), now()).await;
+        assert!(
+            matches!(&f.indexes[3].1, Field::Value(q) if q.symbol == "^RUT" && q.last == 2230.75)
+        );
+        assert!(matches!(&f.indexes[0].1, Field::Value(q) if q.symbol == "^GSPC"));
+        assert_eq!(syms(&f.gainers), ["BRK.B", "NVDA"]);
+        assert_eq!(f.gainers[0].quote.last, 480.0);
+    }
+
+    #[tokio::test]
+    async fn one_index_missing_gates_indexes() {
+        let mut m = md(&[q("NVDA", 182.35, 3.08, Some(210_000_000))]);
+        m.indexes.remove("^RUT");
+        let l = llm(vec![]);
+        let f = build_facts(&m, &ns(vec![]), &l, date(), now()).await;
+        // No movers or news work while the required section is missing.
+        assert!(f.gainers.is_empty() && l.prompts.borrow().is_empty());
+        assert_eq!(m.sessions.borrow().len(), 4);
         assert_eq!(
             f.indexes[3].1,
             Field::Missing {
