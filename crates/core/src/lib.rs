@@ -7,6 +7,7 @@ pub mod premarket;
 pub mod providers;
 pub mod recap;
 pub mod run;
+pub mod schedule;
 pub mod store;
 pub mod tavily;
 pub mod yahoo;

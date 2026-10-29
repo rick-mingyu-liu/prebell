@@ -6,9 +6,12 @@ compatibility_date = "2025-01-01"
 command = "worker-build --release"
 
 [triggers]
-# Every 5 min across both DST offsets of the 8:30-9:25 ET window; hourly afterwards for ZH retries.
-# `clock` decides what each firing means.
-crons = ["*/5 12-14 * * 1-5", "0 15-23 * * 1-5"]
+# UTC. Each cron maps to its jobs in crates/core/src/schedule.rs (a test keeps
+# the two in sync); `clock` decides what each firing means in ET.
+# Day names, not numbers: Cloudflare numbers weekdays 1-7 starting on Sunday.
+# - premarket: every 5 min over the 8:30-9:25 ET window (EDT and EST), hourly ZH retries
+# - recap: every 5 min over 13:45/16:45-19:00 ET (EDT and EST), hourly ZH retries to 22:00 ET
+crons = ["*/5 12-14 * * MON-FRI", "0 15-23 * * MON-FRI", "*/5 17-23 * * MON-FRI", "*/5 0 * * TUE-SAT", "0 1-3 * * TUE-SAT"]
 
 [[d1_databases]]
 binding = "DB"

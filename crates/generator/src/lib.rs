@@ -6,7 +6,9 @@ mod store;
 
 use chrono::{DateTime, Utc};
 use prebell_core::deepseek::llm_from_env;
-use prebell_core::run::tick;
+use prebell_core::recap;
+use prebell_core::run::{self, TickOutcome};
+use prebell_core::schedule::{jobs_for_cron, JOBS};
 use prebell_core::tavily::Tavily;
 use prebell_core::yahoo::Yahoo;
 use serde::{Deserialize, Serialize};
@@ -66,18 +68,28 @@ async fn fetch(req: Request, _env: Env, _ctx: Context) -> Result<Response> {
 
 #[event(scheduled)]
 async fn scheduled(event: ScheduledEvent, env: Env, _ctx: ScheduleContext) {
-    let sent = match env.queue("JOBS") {
-        Ok(q) => {
-            q.send(Job {
-                job: "premarket".into(),
+    let cron = event.cron();
+    let jobs = jobs_for_cron(&cron).unwrap_or_else(|| {
+        console_error!("cron {cron}: not in schedule.rs; queueing every job");
+        JOBS
+    });
+    let queue = match env.queue("JOBS") {
+        Ok(q) => q,
+        Err(e) => {
+            console_error!("cron {cron}: queue binding failed: {e}");
+            return;
+        }
+    };
+    for job in jobs {
+        match queue
+            .send(Job {
+                job: job.to_string(),
             })
             .await
+        {
+            Ok(()) => console_log!("cron {cron}: queued {job} job"),
+            Err(e) => console_error!("cron {cron}: queue send for {job} failed: {e}"),
         }
-        Err(e) => Err(e),
-    };
-    match sent {
-        Ok(()) => console_log!("cron {}: queued premarket job", event.cron()),
-        Err(e) => console_error!("cron {}: queue send failed: {e}", event.cron()),
     }
 }
 
@@ -98,8 +110,17 @@ async fn queue(batch: MessageBatch<Job>, env: Env, _ctx: Context) -> Result<()> 
     .map_err(|e| Error::RustError(e.to_string()))?;
 
     for msg in batch.messages()? {
-        let outcome = tick(now(&env), &store, &md, &ns, llm.as_ref()).await;
-        console_log!("job {}: {:?}", msg.body().job, outcome);
+        let job = msg.body().job.as_str();
+        let at = now(&env);
+        let outcome: Option<TickOutcome> = match job {
+            "premarket" => Some(run::tick(at, &store, &md, &ns, llm.as_ref()).await),
+            "recap" => Some(recap::tick(at, &store, &md, &ns, llm.as_ref()).await),
+            _ => None,
+        };
+        match outcome {
+            Some(o) => console_log!("job {job}: {o:?}"),
+            None => console_error!("job {job}: unknown job, dropped"),
+        }
         msg.ack();
     }
 
