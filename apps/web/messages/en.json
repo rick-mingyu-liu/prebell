@@ -1,0 +1,42 @@
+{
+  "site": {
+    "name": "marketsite",
+    "tagline": "Premarket briefs for North American markets",
+    "home": "Home",
+    "archive": "Archive",
+    "about": "About",
+    "otherLang": "中文",
+    "otherLangLabel": "Read in Chinese"
+  },
+  "home": {
+    "latest": "Today's premarket brief",
+    "recent": "Recent briefs",
+    "empty": "No briefs have been published yet.",
+    "allBriefs": "All briefs"
+  },
+  "post": {
+    "permalink": "Permalink",
+    "published": "Published {time}",
+    "pendingTitle": "Premarket brief, {date}",
+    "pending": "The Chinese version is coming soon.",
+    "readEnglish": "Read the English version"
+  },
+  "archive": {
+    "title": "Archive",
+    "page": "Page {page}",
+    "newer": "Newer",
+    "older": "Older",
+    "empty": "Nothing here."
+  },
+  "about": {
+    "title": "About",
+    "p1": "marketsite publishes a short premarket brief every US trading day before the open: index futures, the biggest premarket movers and why they moved, and what to watch.",
+    "p2": "Every brief is generated automatically from public market data and news. Numbers are checked against the source data before publishing, and each brief lists its sources. Times are US Eastern.",
+    "p3": "English is published first; the Chinese version follows."
+  },
+  "notFound": {
+    "title": "Page not found",
+    "back": "Back to the home page"
+  },
+  "disclaimer": "This brief is generated automatically from public data for information only. It is not investment advice."
+}

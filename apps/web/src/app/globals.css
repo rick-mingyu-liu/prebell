@@ -1,0 +1,57 @@
+:root {
+  --text: #1a1a1a;
+  --muted: #666;
+  --rule: #e3e3e3;
+  --bg: #fff;
+  --accent: #0b5cad;
+  --notice: #fff8e1;
+  --sans: var(--font-inter), system-ui, -apple-system, "Segoe UI", Roboto, "PingFang SC", "Hiragino Sans GB",
+    "Microsoft YaHei", "Noto Sans SC", sans-serif;
+  --cjk: "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans SC", sans-serif;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --text: #e8e8e8;
+    --muted: #9a9a9a;
+    --rule: #333;
+    --bg: #141414;
+    --accent: #6cb2ff;
+    --notice: #2b2616;
+  }
+}
+* { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+body {
+  margin: 0 auto;
+  max-width: 46rem;
+  padding: 0 1rem 3rem;
+  font-family: var(--sans);
+  font-size: 1.0625rem;
+  line-height: 1.6;
+  color: var(--text);
+  background: var(--bg);
+}
+html:lang(zh-Hans) body { font-family: var(--font-inter), var(--cjk); line-height: 1.75; }
+a { color: var(--accent); }
+h1 { font-size: 1.75rem; line-height: 1.25; margin: 0.5rem 0 1rem; }
+h2 { font-size: 1.25rem; margin: 2rem 0 0.75rem; }
+.site-header { display: flex; justify-content: space-between; align-items: baseline; padding: 1.25rem 0; border-bottom: 1px solid var(--rule); margin-bottom: 1.5rem; }
+.brand { font-weight: 700; color: var(--text); text-decoration: none; }
+.site-header nav { display: flex; gap: 1rem; }
+.page-tools { display: flex; justify-content: space-between; align-items: baseline; gap: 1rem; flex-wrap: wrap; }
+.meta, .muted, .post-list time { color: var(--muted); font-size: 0.9rem; }
+.eyebrow { font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); margin: 0; }
+.lang-switch { font-size: 0.9rem; }
+.table-wrap { overflow-x: auto; margin: 1rem 0; }
+table { border-collapse: collapse; width: 100%; font-variant-numeric: tabular-nums; font-size: 0.95rem; }
+th, td { padding: 0.4rem 0.6rem; border-bottom: 1px solid var(--rule); text-align: left; vertical-align: top; }
+th { font-weight: 600; }
+.notice { background: var(--notice); padding: 1rem 1.25rem; border-radius: 6px; }
+.notice p { margin: 0.25rem 0; }
+.post-list { list-style: none; padding: 0; }
+.post-list li { padding: 0.75rem 0; border-bottom: 1px solid var(--rule); }
+.post-list time { display: block; }
+.post-list p { margin: 0.25rem 0 0; color: var(--muted); }
+.pager { display: flex; justify-content: space-between; margin-top: 1.5rem; }
+.site-footer { margin-top: 3rem; padding-top: 1rem; border-top: 1px solid var(--rule); }
+.disclaimer { color: var(--muted); font-size: 0.85rem; }

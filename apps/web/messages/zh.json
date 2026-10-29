@@ -1,0 +1,42 @@
+{
+  "site": {
+    "name": "marketsite",
+    "tagline": "北美市场盘前简报",
+    "home": "首页",
+    "archive": "归档",
+    "about": "关于",
+    "otherLang": "English",
+    "otherLangLabel": "阅读英文版"
+  },
+  "home": {
+    "latest": "今日盘前简报",
+    "recent": "近期简报",
+    "empty": "暂无已发布的简报。",
+    "allBriefs": "全部简报"
+  },
+  "post": {
+    "permalink": "本文链接",
+    "published": "发布于 {time}",
+    "pendingTitle": "盘前简报 {date}",
+    "pending": "中文版稍后推出",
+    "readEnglish": "阅读英文版"
+  },
+  "archive": {
+    "title": "归档",
+    "page": "第 {page} 页",
+    "newer": "较新",
+    "older": "较早",
+    "empty": "暂无内容。"
+  },
+  "about": {
+    "title": "关于",
+    "p1": "marketsite 在每个美股交易日开盘前发布一份简短的盘前简报：股指期货、盘前涨跌幅最大的个股及其原因，以及当日关注要点。",
+    "p2": "每份简报均根据公开的市场数据和新闻自动生成。发布前会将数字与源数据逐一核对，并列出所有来源。时间均为美东时间。",
+    "p3": "英文版先行发布，中文版随后推出。"
+  },
+  "notFound": {
+    "title": "页面不存在",
+    "back": "返回首页"
+  },
+  "disclaimer": "本简报根据公开数据自动生成，仅供参考，不构成投资建议。"
+}
