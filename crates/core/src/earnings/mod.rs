@@ -5,6 +5,7 @@
 
 pub mod charts;
 pub mod detect;
+pub mod draft;
 pub mod extract;
 pub mod facts;
 pub mod watchlist;

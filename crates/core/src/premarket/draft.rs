@@ -58,7 +58,7 @@ fn na(lang: Lang) -> &'static str {
 }
 
 /// Two decimals with thousands separators: 5812.25 -> "5,812.25".
-fn fmt_num(v: f64) -> String {
+pub(crate) fn fmt_num(v: f64) -> String {
     let s = format!("{:.2}", v.abs());
     let (int, frac) = s.split_once('.').unwrap_or((&s, "00"));
     let mut grouped = String::new();
@@ -219,13 +219,13 @@ pub(crate) fn reject_markup(what: &str, s: &str) -> Result<(), String> {
 }
 
 /// A setext heading underline: a line of only `=` or only `-`, length >= 2.
-fn is_setext_underline(line: &str) -> bool {
+pub(crate) fn is_setext_underline(line: &str) -> bool {
     let l = line.trim();
     l.len() >= 2 && (l.bytes().all(|b| b == b'=') || l.bytes().all(|b| b == b'-'))
 }
 
 /// A one-line string: whitespace runs (newlines included) become one space.
-fn one_line(v: &Value, key: &str) -> Result<String, String> {
+pub(crate) fn one_line(v: &Value, key: &str) -> Result<String, String> {
     let s = v
         .get(key)
         .and_then(Value::as_str)
