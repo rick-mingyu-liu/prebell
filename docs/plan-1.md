@@ -328,12 +328,12 @@ check("市值1.2万亿美元", Lang::Zh, &[1.2e12]) == Ok(())
 
 ### Task 13: Deploy and first live run
 
-**Files:** Modify `crates/generator/wrangler.toml`, `apps/web/wrangler.jsonc` (real D1/R2/queue IDs); create `docs/runbook.md`.
+**Files:** Modify `crates/generator/wrangler.toml`, `apps/web/wrangler.jsonc` (real D1/R2/queue IDs); extend `docs/runbook.md` (created by Plan 5 with the LLM provider section).
 
 - [ ] **Step 1:** Owner runs `pnpm exec wrangler login` (interactive). Create resources: `wrangler d1 create prebell`, `wrangler r2 bucket create prebell-facts`, `wrangler queues create prebell-jobs`; apply migrations `--remote`; set secrets `ANTHROPIC_API_KEY` (after Plan 5 merges; `LLM_PROVIDER="claude"`), `TAVILY_API_KEY`, `ALERT_WEBHOOK_URL`. `DEEPSEEK_API_KEY` is only needed if switching back to DeepSeek.
 - [ ] **Step 2:** `wrangler deploy` (generator) and `opennextjs-cloudflare deploy` (web) to `*.workers.dev`. Confirm with the owner before each deploy.
 - [ ] **Step 3: Verify:** next trading day at ~8:30–8:40 ET, `wrangler d1 execute prebell --remote --command "select r.status, t.lang, t.status from runs r join posts p using(run_key) join post_translations t on t.post_id=p.id"` → published rows; `https://prebell-web.<account>.workers.dev/en` shows the brief. If Yahoo blocks Cloudflare IPs (429 every attempt), record it in `docs/runbook.md` and stop: switching `MarketData` provider is a decision for the owner.
-- [ ] **Step 4:** `docs/runbook.md`: secrets, cron times, how to rerun a day (`FORCE_NOW_UTC` is dev-only; production rerun = delete the run row and wait for the next tick), where alerts go.
+- [ ] **Step 4:** Extend `docs/runbook.md` (it already has the LLM provider section from Plan 5): secrets, cron times, how to rerun a day (`FORCE_NOW_UTC` is dev-only; production rerun = delete the run row and wait for the next tick), where alerts go.
 - [ ] **Step 5: Commit** `chore: deploy config and runbook`.
 
 ---
