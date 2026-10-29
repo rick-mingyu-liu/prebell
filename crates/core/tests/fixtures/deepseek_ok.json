@@ -1,0 +1,1 @@
+{"id":"abc","object":"chat.completion","model":"deepseek-chat","choices":[{"index":0,"message":{"role":"assistant","content":"{\"headline\":\"Futures up\",\"n\":2}"},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":8,"total_tokens":18}}
