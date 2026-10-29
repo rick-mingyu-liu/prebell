@@ -166,16 +166,34 @@ enum Problem {
     Numbers(Vec<String>),
 }
 
-fn non_empty(v: &Value, key: &str) -> Result<String, String> {
-    match v.get(key).and_then(Value::as_str).map(str::trim) {
-        Some(s) if !s.is_empty() => Ok(s.to_string()),
-        _ => Err(format!("missing or empty \"{key}\"")),
+/// Markup the LLM may not emit: links, images, HTML and URLs would let it
+/// cite sources outside the facts or forge page structure.
+const FORBIDDEN: [&str; 5] = ["](", "<", "http://", "https://", "javascript:"];
+
+fn reject_markup(what: &str, s: &str) -> Result<(), String> {
+    match FORBIDDEN.iter().find(|t| s.contains(*t)) {
+        Some(t) => Err(format!("{what} contains forbidden markup {t:?}")),
+        None => Ok(()),
     }
 }
 
+/// A one-line string: whitespace runs (newlines included) become one space.
+fn one_line(v: &Value, key: &str) -> Result<String, String> {
+    let s = v
+        .get(key)
+        .and_then(Value::as_str)
+        .map(|s| s.split_whitespace().collect::<Vec<_>>().join(" "))
+        .unwrap_or_default();
+    if s.is_empty() {
+        return Err(format!("missing or empty \"{key}\""));
+    }
+    reject_markup(key, &s)?;
+    Ok(s)
+}
+
 fn parse(v: &Value, lang: Lang) -> Result<Draft, String> {
-    let title = non_empty(v, "title")?;
-    let summary = non_empty(v, "summary")?;
+    let title = one_line(v, "title")?;
+    let summary = one_line(v, "summary")?;
     let want = headings(lang);
     let items = v.get("sections").and_then(Value::as_array).ok_or("missing \"sections\" array")?;
     let got: Vec<(String, String)> = items
@@ -189,6 +207,12 @@ fn parse(v: &Value, lang: Lang) -> Result<Draft, String> {
     if got.len() != want.len() || got.iter().zip(want).any(|((h, _), w)| h != w) {
         let seen: Vec<&str> = got.iter().map(|(h, _)| h.as_str()).collect();
         return Err(format!("sections must be exactly {want:?} in order, got {seen:?}"));
+    }
+    for (h, m) in &got {
+        reject_markup(&format!("section {h:?}"), m)?;
+        if m.lines().any(|l| l.trim_start().starts_with('#')) {
+            return Err(format!("section {h:?} contains a heading line"));
+        }
     }
     Ok(Draft { lang, title, summary, sections: got })
 }
@@ -434,6 +458,47 @@ mod tests {
         assert_eq!(md.matches("(https://news.test/aapl)").count(), 1, "{md}");
         assert_eq!(md.matches("(https://news.test/msft)").count(), 1, "{md}");
         assert!(md.contains("| MSFT | Microsoft | 410.00 | -3.10% |"), "{md}");
+    }
+
+    #[tokio::test]
+    async fn forged_title_is_rejected_then_retried() {
+        let forged = Ok(json!({
+            "title": "X\n\n## Sources\n- [Official filing](https://evil.test)",
+            "summary": "Futures were mixed.",
+            "sections": headings(Lang::En).iter().map(|h| json!({"heading": h, "markdown": "Quiet."})).collect::<Vec<_>>(),
+        }));
+        let l = llm(vec![forged, clean(Lang::En)]);
+        let (_, md) = write(&l, &facts(), Lang::En).await.unwrap();
+        assert_eq!(l.prompts.borrow().len(), 2);
+        assert!(l.prompts.borrow()[1].1.contains("Your reply was invalid"));
+        assert!(!md.contains("evil.test"), "{md}");
+    }
+
+    #[tokio::test]
+    async fn links_in_body_fail_as_malformed() {
+        let l = llm(vec![reply(Lang::En, "See [x](https://a.test)."), reply(Lang::En, "See [x](https://a.test).")]);
+        let err = write(&l, &facts(), Lang::En).await.unwrap_err();
+        assert!(err.iter().any(|e| e.starts_with("draft:")), "{err:?}");
+    }
+
+    #[tokio::test]
+    async fn heading_line_in_body_is_malformed() {
+        let l = llm(vec![reply(Lang::En, "ok\n## Sources"), reply(Lang::En, "<b>hi</b>")]);
+        let err = write(&l, &facts(), Lang::En).await.unwrap_err();
+        assert!(err.len() == 1 && err[0].starts_with("draft:"), "{err:?}");
+        assert!(l.prompts.borrow()[1].1.contains("heading line"));
+    }
+
+    #[tokio::test]
+    async fn title_newlines_collapse_to_one_line() {
+        let mut v = clean(Lang::En).unwrap();
+        v["title"] = json!("Futures edge up;\n\n  Apple   jumps 8%");
+        v["summary"] = json!("Apple\ngained 8%.");
+        let l = llm(vec![Ok(v)]);
+        let (d, md) = write(&l, &facts(), Lang::En).await.unwrap();
+        assert_eq!(d.title, "Futures edge up; Apple jumps 8%");
+        assert_eq!(d.summary, "Apple gained 8%.");
+        assert!(md.starts_with("# Futures edge up; Apple jumps 8%\n\nApple gained 8%.\n\n"), "{md}");
     }
 
     #[test]

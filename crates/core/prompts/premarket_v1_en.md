@@ -13,7 +13,8 @@ Rules:
 - If a field is `Missing`, write "n/a" for it. Never fill it in, guess it or explain it with outside knowledge.
 - Use only numbers that appear in the facts. You may round them (5812.25 can become 5,812), but never compute new numbers, such as differences, sums or point changes.
 - Give no buy or sell advice, recommendations or price targets.
-- Cite no source that is not in the facts. Do not include links; the page lists the sources.
+- Cite no source that is not in the facts. Do not include links, URLs, images or HTML; the page lists the sources.
+- `title` and `summary` are single lines of plain text. Section bodies must not contain heading lines (lines starting with `#`).
 - Use plain, short sentences. Write tickers in capital letters, like $NVDA or NVDA.
 - Do not repeat tables; the page already shows futures and movers tables. Explain what moved and why.
 
