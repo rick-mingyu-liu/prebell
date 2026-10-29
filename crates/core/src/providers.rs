@@ -92,7 +92,8 @@ pub trait MarketData {
     ) -> Result<Quote, ProviderError> {
         Err(ProviderError::Empty)
     }
-    /// `close_quote` for each symbol, in order.
+    /// Closes for many symbols, in order. The default calls `close_quote`
+    /// for each; a provider may batch (Yahoo uses v7 quotes).
     async fn close_quotes(
         &self,
         symbols: &[String],

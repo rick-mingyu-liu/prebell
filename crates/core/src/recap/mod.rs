@@ -216,34 +216,25 @@ pub async fn build_facts(
     now: DateTime<Utc>,
 ) -> RecapFacts {
     let mut d = Diag::default();
-    let symbols: Vec<String> = INDEXES.iter().map(|(_, s)| s.to_string()).collect();
-    let mut closes = md.close_quotes(&symbols, trading_date).await;
-    let indexes: Vec<(String, Field<Quote>)> = INDEXES
-        .iter()
-        .map(|(label, sym)| {
-            let f = match closes.iter().position(|(s, _)| s == sym) {
-                Some(i) => match closes.swap_remove(i).1 {
-                    Ok(q) => {
-                        d.futures_ok += 1;
-                        Field::Value(q)
-                    }
-                    Err(e) => {
-                        d.futures_err += 1;
-                        Field::Missing {
-                            reason: e.to_string(),
-                        }
-                    }
-                },
-                None => {
-                    d.futures_err += 1;
-                    Field::Missing {
-                        reason: "no quote returned".into(),
-                    }
+    // Four chart requests, one per index, kept apart from the batched v7
+    // movers scan: the required section then needs no cookie/crumb session,
+    // and a v7 failure costs only the optional movers.
+    let mut indexes: Vec<(String, Field<Quote>)> = Vec::with_capacity(INDEXES.len());
+    for (label, sym) in INDEXES {
+        let f = match md.close_quote(sym, trading_date).await {
+            Ok(q) => {
+                d.futures_ok += 1;
+                Field::Value(q)
+            }
+            Err(e) => {
+                d.futures_err += 1;
+                Field::Missing {
+                    reason: e.to_string(),
                 }
-            };
-            (label.to_string(), f)
-        })
-        .collect();
+            }
+        };
+        indexes.push((label.to_string(), f));
+    }
     let early_close = trading_day(trading_date) == DayKind::EarlyClose;
 
     // The run retries until every index close is in; skip the costly movers
@@ -418,6 +409,8 @@ mod tests {
         sessions: RefCell<Vec<NaiveDate>>,
         /// Answer `close_quotes` in reverse order, as a provider may.
         reverse: bool,
+        /// The symbol list of each `close_quotes` call.
+        batches: RefCell<Vec<Vec<String>>>,
     }
     #[async_trait(?Send)]
     impl MarketData for FakeMd {
@@ -436,6 +429,7 @@ mod tests {
             symbols: &[String],
             session: NaiveDate,
         ) -> Vec<(String, Result<Quote, ProviderError>)> {
+            self.batches.borrow_mut().push(symbols.to_vec());
             let mut out = Vec::new();
             for s in symbols {
                 out.push((s.clone(), self.close_quote(s, session).await));
@@ -444,6 +438,9 @@ mod tests {
                 out.reverse();
             }
             out
+        }
+        fn diagnostics(&self) -> Vec<String> {
+            vec!["closes ok=1 other_day=519".into()]
         }
         async fn close_quote(
             &self,
@@ -476,6 +473,7 @@ mod tests {
                 .collect(),
             sessions: RefCell::new(vec![]),
             reverse: false,
+            batches: RefCell::new(vec![]),
         }
     }
 
@@ -562,6 +560,40 @@ mod tests {
         assert!(missing_required(&f).is_empty());
         // Every close quote was asked for this session.
         assert!(m.sessions.borrow().iter().all(|d| *d == date()));
+    }
+
+    #[tokio::test]
+    async fn indexes_by_close_quote_universe_in_one_batch() {
+        let m = md(&[q("NVDA", 182.35, 3.08, Some(210_000_000))]);
+        build_facts(&m, &ns(vec![]), &llm(vec![]), date(), now()).await;
+        // The four index closes are single requests (chart); only the
+        // universe goes through the batched `close_quotes`.
+        let batches = m.batches.borrow();
+        assert_eq!(batches.len(), 1, "{batches:?}");
+        assert_eq!(batches[0].len(), universe().len());
+        assert!(!batches[0].iter().any(|s| s.starts_with('^')));
+        assert_eq!(m.sessions.borrow().len(), 4 + universe().len());
+    }
+
+    #[tokio::test]
+    async fn diagnostics_say_why_movers_collapsed() {
+        let m = md(&[q("NVDA", 182.35, 3.08, Some(210_000_000))]);
+        let f = build_facts(&m, &ns(vec![]), &llm(vec![]), date(), now()).await;
+        let n = universe().len();
+        assert_eq!(
+            f.diagnostics,
+            vec![
+                format!(
+                    "quotes ok=1 http429=0 http_other={} empty=0 stale=0 parse=0 net=0 skipped=0",
+                    n - 1
+                ),
+                "closes ok=1 other_day=519".to_string(),
+                "movers liquid=1 gainers=1 losers=0".to_string(),
+                "reasons proposed=0 kept=0".to_string(),
+                "search_err=2 llm_err=0".to_string(),
+                "indexes ok=4 err=0".to_string(),
+            ]
+        );
     }
 
     #[tokio::test]

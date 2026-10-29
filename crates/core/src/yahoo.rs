@@ -47,6 +47,20 @@ struct Diag {
     states: BTreeMap<String, usize>,
     /// The last batch-level `quoteResponse.error.code`.
     error: Option<String>,
+    /// Outcomes of the last `close_quotes`; `None` after `premarket_quotes`.
+    closes: Option<CloseDiag>,
+}
+
+/// Why `close_quotes` items were rejected, so a collapsed movers scan says why.
+#[derive(Default, Clone, Copy)]
+struct CloseDiag {
+    ok: usize,
+    /// `regularMarketTime` on another ET date: a leftover close.
+    other_day: usize,
+    /// On the session date but before 15:59 ET (12:59 early close): a live price.
+    before_close: usize,
+    /// No price, time or previous close.
+    incomplete: usize,
 }
 
 impl<H: Http> Yahoo<H> {
@@ -73,6 +87,66 @@ impl<H: Http> Yahoo<H> {
             return Err(ProviderError::Http(resp.status));
         }
         Ok(resp.body)
+    }
+
+    /// Batched v7 quotes, `QUOTE_BATCH` symbols per request, each item
+    /// converted by `convert`. A failed cookie or crumb fetch fails every
+    /// symbol; after a 429 the remaining chunks are not requested and are
+    /// `Skipped`, so a throttled IP is not hammered.
+    async fn v7_quotes(
+        &self,
+        symbols: &[String],
+        convert: &dyn Fn(V7Quote) -> Result<Quote, ProviderError>,
+    ) -> Vec<(String, Result<Quote, ProviderError>)> {
+        {
+            let mut d = self.diag.borrow_mut();
+            d.states.clear();
+            d.error = None;
+            d.closes = None;
+        }
+        let fail_all = |e: ProviderError| {
+            symbols
+                .iter()
+                .map(|s| (s.clone(), Err(e.clone())))
+                .collect()
+        };
+        let mut session = match self.session(false).await {
+            Ok(s) => s,
+            Err(e) => return fail_all(e),
+        };
+        let mut refreshed = false;
+        let mut throttled = false;
+        let mut out = Vec::with_capacity(symbols.len());
+        for chunk in symbols.chunks(QUOTE_BATCH) {
+            let r = if throttled {
+                Err(ProviderError::Skipped)
+            } else {
+                let mut r = self.quote_batch(chunk, &session).await;
+                if !refreshed && r.as_ref().is_ok_and(|x| matches!(x.status, 401 | 403)) {
+                    refreshed = true;
+                    r = match self.session(true).await {
+                        Ok(s) => {
+                            session = s;
+                            self.quote_batch(chunk, &session).await
+                        }
+                        Err(e) => Err(e),
+                    };
+                }
+                r.and_then(|x| match x.status {
+                    s if s >= 400 => Err(ProviderError::Http(s)),
+                    _ => parse_batch(&x.body, &mut self.diag.borrow_mut(), convert),
+                })
+            };
+            throttled |= r.as_ref().err() == Some(&ProviderError::Http(429));
+            match r {
+                Ok(batch) => out.extend(chunk.iter().map(|s| {
+                    let q = batch.get(s).cloned().unwrap_or(Err(ProviderError::Empty));
+                    (s.clone(), q)
+                })),
+                Err(e) => out.extend(chunk.iter().map(|s| (s.clone(), Err(e.clone())))),
+            }
+        }
+        out
     }
 
     async fn session(&self, refresh: bool) -> Result<Session, ProviderError> {
@@ -221,7 +295,7 @@ struct QuoteResponse {
     result: Option<Vec<serde_json::Value>>,
     error: Option<serde_json::Value>,
 }
-#[derive(Deserialize)]
+#[derive(Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 struct V7Quote {
     symbol: String,
@@ -231,14 +305,23 @@ struct V7Quote {
     /// Epoch seconds of the last premarket trade.
     pre_market_time: Option<i64>,
     regular_market_price: Option<f64>,
+    regular_market_previous_close: Option<f64>,
+    regular_market_change_percent: Option<f64>,
+    regular_market_volume: Option<f64>,
+    /// Epoch seconds of the last regular-session trade.
+    regular_market_time: Option<i64>,
     market_state: Option<String>,
 }
 
 type Batch = HashMap<String, Result<Quote, ProviderError>>;
 
-/// One v7 quote body, keyed by each item's `symbol` field (never by position).
-/// `today` is the ET trading date the premarket fields must belong to.
-fn parse_batch(body: &str, today: NaiveDate, d: &mut Diag) -> Result<Batch, ProviderError> {
+/// One v7 quote body, keyed by each item's `symbol` field (never by position),
+/// each item converted by `convert`.
+fn parse_batch(
+    body: &str,
+    d: &mut Diag,
+    convert: &dyn Fn(V7Quote) -> Result<Quote, ProviderError>,
+) -> Result<Batch, ProviderError> {
     let root: QuoteRoot =
         serde_json::from_str(body).map_err(|e| ProviderError::Parse(e.to_string()))?;
     let QuoteResponse { result, error } = root.quote_response;
@@ -267,7 +350,7 @@ fn parse_batch(body: &str, today: NaiveDate, d: &mut Diag) -> Result<Batch, Prov
                 if let Some(st) = &v.market_state {
                     *d.states.entry(token(st)).or_default() += 1;
                 }
-                v7_quote(v, today)
+                convert(v)
             });
         out.insert(sym, q);
     }
@@ -317,6 +400,59 @@ fn v7_quote(v: V7Quote, today: NaiveDate) -> Result<Quote, ProviderError> {
             .unwrap_or((last - prev_close) / prev_close * 100.0),
         volume: None,
     })
+}
+
+/// The regular-session close of a v7 quote for the ET date `session`.
+///
+/// `regularMarketTime` must fall on `session` at or after 15:59 ET (12:59 on
+/// early-close days; one minute of slack for a final print stamped 15:59:xx).
+/// An earlier day is a leftover close and a time before the bell is a live
+/// price: both are `Stale`, never today's close.
+fn v7_close(v: V7Quote, session: NaiveDate, d: &mut CloseDiag) -> Result<Quote, ProviderError> {
+    let parts = (
+        v.regular_market_price.filter(|x| x.is_finite()),
+        v.regular_market_previous_close
+            .filter(|x| x.is_finite() && *x > 0.0),
+        v.regular_market_time
+            .and_then(|t| Utc.timestamp_opt(t, 0).single()),
+    );
+    let (Some(last), Some(prev_close), Some(at)) = parts else {
+        d.incomplete += 1;
+        return Err(ProviderError::Empty);
+    };
+    let at = at.with_timezone(&chrono_tz::America::New_York);
+    if at.date_naive() != session {
+        d.other_day += 1;
+        return Err(ProviderError::Stale);
+    }
+    if at.time() < close_time(session) {
+        d.before_close += 1;
+        return Err(ProviderError::Stale);
+    }
+    d.ok += 1;
+    Ok(Quote {
+        symbol: v.symbol,
+        last,
+        prev_close,
+        // Percent units already: 2.0 means +2%.
+        change_pct: v
+            .regular_market_change_percent
+            .filter(|x| x.is_finite())
+            .unwrap_or((last - prev_close) / prev_close * 100.0),
+        volume: v
+            .regular_market_volume
+            .filter(|x| x.is_finite() && *x >= 0.0)
+            .map(|x| x as u64),
+    })
+}
+
+/// The earliest ET time a last trade counts as the session's close.
+fn close_time(session: NaiveDate) -> NaiveTime {
+    match trading_day(session) {
+        DayKind::EarlyClose => NaiveTime::from_hms_opt(12, 59, 0),
+        _ => NaiveTime::from_hms_opt(15, 59, 0),
+    }
+    .expect("valid built-in time")
 }
 
 #[derive(Deserialize)]
@@ -398,14 +534,8 @@ fn parse_close(symbol: &str, body: &str, session: NaiveDate) -> Result<Quote, Pr
             "stale quote: last trade on {day}, not {session}"
         )));
     }
-    // A last trade well before the bell is a live price, not the close. One
-    // minute of slack allows a final print stamped 15:59:xx.
-    let close = match trading_day(session) {
-        DayKind::EarlyClose => NaiveTime::from_hms_opt(12, 59, 0),
-        _ => NaiveTime::from_hms_opt(15, 59, 0),
-    }
-    .expect("valid built-in time");
-    if traded.time() < close {
+    // A last trade well before the bell is a live price, not the close.
+    if traded.time() < close_time(session) {
         return Err(ProviderError::Parse(format!(
             "session not closed: last trade at {}",
             traded.format("%H:%M")
@@ -485,81 +615,34 @@ impl<H: Http> MarketData for Yahoo<H> {
         parse_close(symbol, &self.chart(symbol).await?, session)
     }
 
+    /// The movers scan: batched v7 quotes like `premarket_quotes`, keeping
+    /// each symbol's regular-session close for `session` (see `v7_close`).
     async fn close_quotes(
         &self,
         symbols: &[String],
         session: NaiveDate,
     ) -> Vec<(String, Result<Quote, ProviderError>)> {
-        let mut out = Vec::with_capacity(symbols.len());
-        for chunk in symbols.chunks(20) {
-            let results = futures::future::join_all(
-                chunk
-                    .iter()
-                    .map(|s| async move { self.close_quote(s, session).await }),
-            )
+        let closes = std::cell::Cell::new(CloseDiag::default());
+        let out = self
+            .v7_quotes(symbols, &|v| {
+                let mut c = closes.get();
+                let r = v7_close(v, session, &mut c);
+                closes.set(c);
+                r
+            })
             .await;
-            out.extend(chunk.iter().cloned().zip(results));
-        }
+        self.diag.borrow_mut().closes = Some(closes.get());
         out
     }
 
-    /// Batched v7 quotes, `QUOTE_BATCH` symbols per request. A failed cookie
-    /// or crumb fetch fails every symbol; after a 429 the remaining chunks are
-    /// not requested and are `Skipped`, so a throttled IP is not hammered.
+    /// Batched v7 premarket quotes for the ET trading date of `now`.
     async fn premarket_quotes(
         &self,
         symbols: &[String],
         now: DateTime<Utc>,
     ) -> Vec<(String, Result<Quote, ProviderError>)> {
         let today = crate::clock::et(now).date_naive();
-        {
-            let mut d = self.diag.borrow_mut();
-            d.states.clear();
-            d.error = None;
-        }
-        let fail_all = |e: ProviderError| {
-            symbols
-                .iter()
-                .map(|s| (s.clone(), Err(e.clone())))
-                .collect()
-        };
-        let mut session = match self.session(false).await {
-            Ok(s) => s,
-            Err(e) => return fail_all(e),
-        };
-        let mut refreshed = false;
-        let mut throttled = false;
-        let mut out = Vec::with_capacity(symbols.len());
-        for chunk in symbols.chunks(QUOTE_BATCH) {
-            let r = if throttled {
-                Err(ProviderError::Skipped)
-            } else {
-                let mut r = self.quote_batch(chunk, &session).await;
-                if !refreshed && r.as_ref().is_ok_and(|x| matches!(x.status, 401 | 403)) {
-                    refreshed = true;
-                    r = match self.session(true).await {
-                        Ok(s) => {
-                            session = s;
-                            self.quote_batch(chunk, &session).await
-                        }
-                        Err(e) => Err(e),
-                    };
-                }
-                r.and_then(|x| match x.status {
-                    s if s >= 400 => Err(ProviderError::Http(s)),
-                    _ => parse_batch(&x.body, today, &mut self.diag.borrow_mut()),
-                })
-            };
-            throttled |= r.as_ref().err() == Some(&ProviderError::Http(429));
-            match r {
-                Ok(batch) => out.extend(chunk.iter().map(|s| {
-                    let q = batch.get(s).cloned().unwrap_or(Err(ProviderError::Empty));
-                    (s.clone(), q)
-                })),
-                Err(e) => out.extend(chunk.iter().map(|s| (s.clone(), Err(e.clone())))),
-            }
-        }
-        out
+        self.v7_quotes(symbols, &|v| v7_quote(v, today)).await
     }
 
     fn diagnostics(&self) -> Vec<String> {
@@ -575,6 +658,12 @@ impl<H: Http> MarketData for Yahoo<H> {
         }
         if let Some(code) = &d.error {
             out.push(format!("yahoo_error={code}"));
+        }
+        if let Some(c) = d.closes {
+            out.push(format!(
+                "closes ok={} other_day={} before_close={} incomplete={}",
+                c.ok, c.other_day, c.before_close, c.incomplete
+            ));
         }
         out
     }
@@ -917,6 +1006,7 @@ mod tests {
             pre_market_time: time,
             regular_market_price: Some(rmp),
             market_state: Some("PRE".into()),
+            ..V7Quote::default()
         }
     }
 
@@ -1166,14 +1256,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn close_errors_and_order() {
+    async fn chart_close_errors() {
         let y = yahoo(&[("%5EGSPC", 429, HTML), ("NVDA", 200, NVDA)]);
-        let r = y
-            .close_quotes(&["^GSPC".into(), "NVDA".into()], day("2026-10-29"))
-            .await;
-        assert_eq!(r[0], ("^GSPC".to_string(), Err(ProviderError::Http(429))));
-        assert_eq!(r[1].0, "NVDA");
-        assert_eq!(r[1].1.as_ref().unwrap().last, 182.35);
+        assert_eq!(
+            y.close_quote("^GSPC", day("2026-10-29")).await,
+            Err(ProviderError::Http(429))
+        );
+        let nvda = y.close_quote("NVDA", day("2026-10-29")).await.unwrap();
+        assert_eq!(nvda.last, 182.35);
         let r = yahoo(&[("NVDA", 200, HTML)])
             .close_quote("NVDA", day("2026-10-29"))
             .await;
@@ -1203,5 +1293,151 @@ mod tests {
             .close_quote("NVDA", day("2026-10-29"))
             .await
             .is_ok());
+    }
+
+    /// 2026-10-29 16:00 ET, the close.
+    const CLOSE_T: i64 = 1793304000;
+
+    /// A v7 body with one after-close quote per symbol, last trade at `time`.
+    fn close_batch_for(symbols: &[String], time: i64) -> String {
+        let items: Vec<serde_json::Value> = symbols
+            .iter()
+            .map(|s| {
+                serde_json::json!({"symbol": s, "marketState": "POST", "regularMarketPrice": 102.0,
+                    "regularMarketPreviousClose": 100.0, "regularMarketChangePercent": 2.0,
+                    "regularMarketVolume": 2_000_000, "regularMarketTime": time})
+            })
+            .collect();
+        serde_json::json!({"quoteResponse": {"result": items, "error": null}}).to_string()
+    }
+
+    #[tokio::test]
+    async fn close_quotes_batch_through_v7_by_50() {
+        let y = yahoo_v7(|r, _| resp(200, &close_batch_for(&query(&r.url).0, CLOSE_T)));
+        let all: Vec<String> = (0..120).map(|i| format!("S{i:03}")).collect();
+        let r = y.close_quotes(&all, day("2026-10-29")).await;
+        let quotes = seen(&y, QUOTE_URL);
+        let sizes: Vec<usize> = quotes.iter().map(|q| query(&q.url).0.len()).collect();
+        assert_eq!(sizes, vec![50, 50, 20]);
+        // No per-symbol chart requests.
+        assert!(seen(&y, "https://query1.finance.yahoo.com/v8/").is_empty());
+        assert_eq!(r.iter().map(|(s, _)| s.clone()).collect::<Vec<_>>(), all);
+        let q = r[0].1.clone().unwrap();
+        assert_eq!(q.symbol, "S000");
+        assert_eq!((q.last, q.prev_close, q.change_pct), (102.0, 100.0, 2.0));
+        assert_eq!(q.volume, Some(2_000_000));
+    }
+
+    #[tokio::test]
+    async fn close_quotes_map_by_symbol_field() {
+        // The fixture's regular-session fields are 2026-10-28's close.
+        let y = yahoo_v7(|_, _| resp(200, BATCH));
+        let want = syms(&["NVDA", "ZZZZ", "MSFT", "AAPL"]);
+        let r = y.close_quotes(&want, day("2026-10-28")).await;
+        assert_eq!(r.iter().map(|(s, _)| s.clone()).collect::<Vec<_>>(), want);
+        let msft = r[2].1.clone().unwrap();
+        assert_eq!(msft.symbol, "MSFT");
+        assert_eq!((msft.last, msft.prev_close), (411.3, 409.2));
+        assert_eq!(msft.change_pct, 0.513196);
+        assert_eq!(msft.volume, Some(18_234_511));
+        assert_eq!(r[0].1.as_ref().unwrap().last, 180.0);
+        assert_eq!(r[1].1, Err(ProviderError::Empty));
+    }
+
+    #[tokio::test]
+    async fn close_from_another_day_or_before_the_bell_is_stale() {
+        let at = |t: i64| {
+            let y = yahoo_v7(move |r, _| resp(200, &close_batch_for(&query(&r.url).0, t)));
+            async move {
+                y.close_quotes(&syms(&["NVDA"]), day("2026-10-29")).await[0]
+                    .1
+                    .clone()
+            }
+        };
+        // Yesterday's close.
+        assert_eq!(at(CLOSE_T - 86_400).await, Err(ProviderError::Stale));
+        // 14:30 ET: a live price, not the close.
+        assert_eq!(at(CLOSE_T - 5_400).await, Err(ProviderError::Stale));
+        // 15:59:30 ET still counts.
+        assert!(at(CLOSE_T - 30).await.is_ok());
+        // Early close (2026-11-27): 12:59 ET counts, 12:30 ET does not.
+        let early = |t: i64| {
+            let y = yahoo_v7(move |r, _| resp(200, &close_batch_for(&query(&r.url).0, t)));
+            async move {
+                y.close_quotes(&syms(&["NVDA"]), day("2026-11-27")).await[0]
+                    .1
+                    .clone()
+            }
+        };
+        let one_pm = 1_795_802_400; // 2026-11-27 13:00 ET
+        assert!(early(one_pm - 60).await.is_ok());
+        assert_eq!(early(one_pm - 1_800).await, Err(ProviderError::Stale));
+    }
+
+    #[tokio::test]
+    async fn close_without_price_time_or_prev_close_is_empty() {
+        for field in [
+            "regularMarketPrice",
+            "regularMarketTime",
+            "regularMarketPreviousClose",
+        ] {
+            let y = yahoo_v7(move |r, _| {
+                resp(
+                    200,
+                    &close_batch_for(&query(&r.url).0, CLOSE_T).replace(field, "x"),
+                )
+            });
+            let r = y.close_quotes(&syms(&["NVDA"]), day("2026-10-29")).await;
+            assert_eq!(r[0].1, Err(ProviderError::Empty), "{field}");
+        }
+    }
+
+    #[tokio::test]
+    async fn close_429_stops_the_run() {
+        let y = yahoo_v7(|_, _| resp(429, HTML));
+        let all: Vec<String> = (0..120).map(|i| format!("S{i:03}")).collect();
+        let r = y.close_quotes(&all, day("2026-10-29")).await;
+        assert!(r[..50]
+            .iter()
+            .all(|(_, q)| *q == Err(ProviderError::Http(429))));
+        assert!(r[50..]
+            .iter()
+            .all(|(_, q)| *q == Err(ProviderError::Skipped)));
+        assert_eq!(seen(&y, QUOTE_URL).len(), 1);
+    }
+
+    #[tokio::test]
+    async fn close_diagnostics_count_why_closes_failed() {
+        let y = yahoo_v7(|r, _| {
+            let syms = query(&r.url).0;
+            let mut v: serde_json::Value =
+                serde_json::from_str(&close_batch_for(&syms, CLOSE_T)).unwrap();
+            let items = v["quoteResponse"]["result"].as_array_mut().unwrap();
+            if items.len() < 5 {
+                return resp(200, BATCH);
+            }
+            items[1]["regularMarketTime"] = (CLOSE_T - 86_400).into();
+            items[2]["regularMarketTime"] = (CLOSE_T - 5_400).into();
+            items[3]
+                .as_object_mut()
+                .unwrap()
+                .remove("regularMarketPrice");
+            resp(200, &v.to_string())
+        });
+        let r = y
+            .close_quotes(&syms(&["A", "B", "C", "D", "E"]), day("2026-10-29"))
+            .await;
+        assert_eq!(r.len(), 5);
+        assert_eq!(
+            y.diagnostics(),
+            vec![
+                "yahoo_session=ok refreshes=0",
+                "market_state POST=5",
+                "closes ok=2 other_day=1 before_close=1 incomplete=1",
+            ]
+        );
+        // A premarket call after it drops the close line.
+        y.premarket_quotes(&syms(&["A"]), now()).await;
+        assert!(!y.diagnostics().iter().any(|l| l.starts_with("closes")));
     }
 }
