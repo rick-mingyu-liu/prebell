@@ -14,6 +14,8 @@ use crate::providers::{Http, ProviderError};
 
 const UA: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0 Safari/537.36";
 const PAGE_SIZE: usize = 100;
+/// No server page size is this small; a page with fewer rows is the last.
+const MIN_FULL_PAGE: usize = 20;
 /// Busy days list several hundred companies; the watchlist is the largest of them.
 const MAX_PAGES: usize = 3;
 
@@ -106,19 +108,30 @@ pub fn parse_page(html: &str, date: NaiveDate) -> Result<(Vec<Seed>, usize), Pro
 impl<H: Http> CalendarSource for YahooCalendar<H> {
     async fn day(&self, date: NaiveDate) -> Result<Vec<Seed>, ProviderError> {
         let mut out = Vec::new();
+        let mut first_rows: Option<usize> = None;
+        let mut offset = 0;
         for page in 0..MAX_PAGES {
             let url = format!(
-                "https://finance.yahoo.com/calendar/earnings?day={}&offset={}&size={PAGE_SIZE}",
+                "https://finance.yahoo.com/calendar/earnings?day={}&offset={offset}&size={PAGE_SIZE}",
                 date.format("%Y-%m-%d"),
-                page * PAGE_SIZE
             );
             let r = self.http.get(&url, &[("User-Agent", UA)]).await?;
             if r.status != 200 {
                 return Err(ProviderError::Http(r.status));
             }
-            let (seeds, rows) = parse_page(&r.body, date)?;
+            // A later page without a results table is past the end.
+            let (seeds, rows) = match parse_page(&r.body, date) {
+                Ok(x) => x,
+                Err(_) if page > 0 => break,
+                Err(e) => return Err(e),
+            };
             out.extend(seeds);
-            if rows < PAGE_SIZE {
+            offset += rows;
+            // Yahoo may serve fewer than `size` rows per page, so a short page
+            // is the last only when it is shorter than the first page or
+            // clearly partial.
+            let first = *first_rows.get_or_insert(rows);
+            if rows < MIN_FULL_PAGE || rows < first {
                 break;
             }
         }
@@ -174,6 +187,26 @@ mod tests {
             .insert(URL0.into(), (200, "<html>consent</html>".into()));
         let y = YahooCalendar::new(http);
         assert!(matches!(y.day(d()).await, Err(ProviderError::Parse(_))));
+    }
+
+    #[tokio::test]
+    async fn pages_until_a_shorter_page() {
+        let row = |i: usize| {
+            format!("<tr><td>T{i}</td><td>x</td><td>e</td><td>After Market Close</td></tr>")
+        };
+        let page = |n: usize, from: usize| {
+            let rows: String = (from..from + n).map(row).collect();
+            format!("<table><tr><th>Symbol</th><th>Company</th><th>Event Name</th><th>Earnings Call Time</th></tr>{rows}</table>")
+        };
+        let mut http = FakeHttp::default();
+        // The server caps pages at 25 rows.
+        http.routes.insert(URL0.into(), (200, page(25, 0)));
+        http.routes
+            .insert(URL0.replace("offset=0", "offset=25"), (200, page(25, 25)));
+        http.routes
+            .insert(URL0.replace("offset=0", "offset=50"), (200, page(7, 50)));
+        let y = YahooCalendar::new(http);
+        assert_eq!(y.day(d()).await.unwrap().len(), 57);
     }
 
     #[tokio::test]

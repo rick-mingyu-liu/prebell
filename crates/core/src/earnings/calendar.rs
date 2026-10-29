@@ -9,11 +9,14 @@ use async_trait::async_trait;
 use chrono::{DateTime, Datelike, Duration, NaiveDate, SecondsFormat, Utc};
 use serde_json::Value;
 
-use crate::anchor::verify_quote;
+use regex::Regex;
+
+use crate::anchor::{normalize, verify_quote};
 use crate::clock::{et, trading_day, DayKind};
 use crate::earnings::store::{CalendarRow, EarningsStore, FilingRow};
 use crate::earnings::{find, watchlist, WatchEntry};
 use crate::edgar::filing_url;
+use crate::premarket::unclose;
 use crate::providers::{LlmProvider, NewsSearch, ProviderError, SearchHit};
 use crate::store::Store;
 
@@ -28,6 +31,8 @@ pub const IR_HORIZON_DAYS: i64 = 7;
 /// Quarantined rows are looked at again after this long.
 pub const RECHECK_HOURS: i64 = 12;
 const KV_REFRESHED: &str = "calendar_refreshed_on";
+/// A row's company-announcement check is not repeated within this window.
+pub const IR_RECHECK_HOURS: i64 = 20;
 /// Press-release wires companies publish their own announcements through.
 const WIRES: [&str; 3] = ["businesswire.com", "prnewswire.com", "globenewswire.com"];
 
@@ -143,7 +148,9 @@ pub fn reconcile(
         .collect();
     let same_event = |a: NaiveDate, b: NaiveDate| (a - b).num_days().abs() <= SAME_EVENT_DAYS;
 
-    if let Some(p) = proof.filter(|p| !reported.iter().any(|d| same_event(*d, p.date))) {
+    if let Some(p) =
+        proof.filter(|p| p.date >= today && !reported.iter().any(|d| same_event(*d, p.date)))
+    {
         let others: Vec<NaiveDate> = rows
             .keys()
             .copied()
@@ -212,14 +219,10 @@ pub fn reconcile(
                 }
                 // Rule 4: the aggregator disagrees with a company-confirmed date.
                 (false, _) => {
-                    if r.status != "quarantined"
-                        || r.conflict_reason.as_deref() != Some(&conflict(s.date, d))
-                    {
-                        r.status = "quarantined".into();
-                        r.conflict_reason = Some(conflict(s.date, d));
-                        r.next_check_at = recheck.clone();
-                        r.updated_at = ts.clone();
-                    }
+                    r.status = "quarantined".into();
+                    r.conflict_reason = Some(conflict(s.date, d));
+                    r.next_check_at = recheck.clone();
+                    r.updated_at = ts.clone();
                     rows.insert(d, r);
                 }
             }
@@ -277,7 +280,7 @@ fn host(url: &str) -> Option<String> {
     let rest = url
         .strip_prefix("https://")
         .or_else(|| url.strip_prefix("http://"))?;
-    let h = rest.split(['/', '?', '#']).next()?;
+    let h = rest.split(['/', '\\', '?', '#']).next()?;
     let h = h.rsplit('@').next()?.split(':').next()?;
     Some(h.to_ascii_lowercase())
 }
@@ -301,49 +304,72 @@ const MONTHS: [&str; 12] = [
     "december",
 ];
 
-/// The quote names `d` as "October 30, 2026", "Oct. 30, 2026", "Oct 30, 2026"
-/// or "10/30/2026".
+/// The quote names `d` as "October 30, 2026", "Oct. 30, 2026", "Sept. 30,
+/// 2026", "Oct 30, 2026" or "10/30/2026", not glued to a preceding digit
+/// ("1/5/2026" is not inside "11/5/2026").
 fn names_date(quote: &str, d: NaiveDate) -> bool {
-    let q = quote
-        .to_ascii_lowercase()
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ");
+    let q = normalize(quote).to_ascii_lowercase();
     let full = MONTHS[d.month0() as usize];
     let short = &full[..3];
     let (day, year) = (d.day(), d.year());
-    [
+    let mut forms = vec![
         format!("{full} {day}, {year}"),
         format!("{short}. {day}, {year}"),
         format!("{short} {day}, {year}"),
         format!("{}/{day}/{year}", d.month()),
         format!("{:02}/{day:02}/{year}", d.month()),
-    ]
-    .iter()
-    .any(|f| q.contains(f.as_str()))
+    ];
+    if d.month() == 9 {
+        forms.push(format!("sept. {day}, {year}"));
+    }
+    forms.iter().any(|f| {
+        q.match_indices(f.as_str())
+            .any(|(i, _)| !q[..i].ends_with(|c: char| c.is_ascii_digit()))
+    })
 }
 
+/// The quote names the company, or lists its ticker in the exchange form
+/// "(NYSE: T)" / "(NASDAQ: AAPL)". A bare ticker is not enough: "PM", "NOW"
+/// and "T" are ordinary words.
 fn names_company(quote: &str, e: &WatchEntry) -> bool {
-    let q = quote.to_ascii_lowercase();
-    q.contains(&e.name.to_ascii_lowercase())
-        || q.split(|c: char| !c.is_ascii_alphanumeric() && c != '.')
-            .any(|w| w.eq_ignore_ascii_case(e.ticker))
+    let q = normalize(quote);
+    if q.to_ascii_lowercase()
+        .contains(&e.name.to_ascii_lowercase())
+    {
+        return true;
+    }
+    let listing = Regex::new(&format!(
+        r"\((?:NYSE|NASDAQ|Nasdaq|NYSE American)\s*:\s*{}\)",
+        regex::escape(&e.ticker.replace('.', "-"))
+    ))
+    .expect("escaped ticker");
+    let dotted = Regex::new(&format!(
+        r"\((?:NYSE|NASDAQ|Nasdaq|NYSE American)\s*:\s*{}\)",
+        regex::escape(e.ticker)
+    ))
+    .expect("escaped ticker");
+    listing.is_match(&q) || dotted.is_match(&q)
 }
 
+/// The first time cue in the quote decides the slot ("release at 4:05 p.m.;
+/// replay until 11:59 a.m." is after the close).
 fn slot_in(quote: &str) -> TimeSlot {
-    let q = quote.to_ascii_lowercase();
-    if q.contains("before the market") || q.contains("before market") || q.contains("a.m.") {
-        TimeSlot::Bmo
-    } else if q.contains("after the market") || q.contains("after market") || q.contains("p.m.") {
-        TimeSlot::Amc
-    } else {
-        TimeSlot::Unknown
+    let q = normalize(quote).to_ascii_lowercase();
+    let first = |cues: &[&str]| cues.iter().filter_map(|c| q.find(c)).min();
+    let bmo = first(&["before the market", "before market", "a.m."]);
+    let amc = first(&["after the market", "after market", "p.m."]);
+    match (bmo, amc) {
+        (Some(b), Some(a)) if b < a => TimeSlot::Bmo,
+        (Some(_), None) => TimeSlot::Bmo,
+        (_, Some(_)) => TimeSlot::Amc,
+        _ => TimeSlot::Unknown,
     }
 }
 
 /// A search hit proves the date only if it is the company's own page (its
-/// domain or a subdomain) or a press-release wire, the quote is in the page,
-/// and the quote names the company and the date.
+/// domain or a subdomain) or a press-release wire (whose quote must also be
+/// about results), the quote is in the page, and the quote names the
+/// company and the date.
 pub fn proof_from_hit(e: &WatchEntry, hit: &SearchHit, quote: &str, d: NaiveDate) -> Option<Proof> {
     let h = host(&hit.url)?;
     let own = e.domains.iter().any(|dom| host_matches(&h, dom));
@@ -351,12 +377,20 @@ pub fn proof_from_hit(e: &WatchEntry, hit: &SearchHit, quote: &str, d: NaiveDate
     if !(own || wire) || !verify_quote(&hit.content, quote) {
         return None;
     }
+    let lower = normalize(quote).to_ascii_lowercase();
+    if wire
+        && !["results", "earnings", "conference call"]
+            .iter()
+            .any(|w| lower.contains(w))
+    {
+        return None;
+    }
     if !names_date(quote, d) || !names_company(quote, e) {
         return None;
     }
     Some(Proof {
         url: hit.url.clone(),
-        quote: quote.split_whitespace().collect::<Vec<_>>().join(" "),
+        quote: normalize(quote),
         date: d,
         slot: slot_in(quote),
     })
@@ -371,8 +405,8 @@ fn ir_user_prompt(e: &WatchEntry, hits: &[SearchHit]) -> String {
         out.push_str(&format!(
             "\n<article id=\"{}\">\nurl: {}\ncontent: {}\n</article>\n",
             i + 1,
-            h.url,
-            content.replace("</article", "< /article")
+            unclose(&h.url),
+            unclose(&content)
         ));
     }
     out
@@ -385,6 +419,7 @@ pub async fn find_proof(
     llm: &dyn LlmProvider,
     e: &WatchEntry,
     around: NaiveDate,
+    today: NaiveDate,
 ) -> Result<Option<Proof>, ProviderError> {
     let q = format!(
         "{} to announce quarterly results {} {} conference call",
@@ -412,6 +447,10 @@ pub async fn find_proof(
         ) else {
             continue;
         };
+        // An old announcement or a quarter-end date is not this report's date.
+        if d < today || (d - around).num_days().abs() > SAME_EVENT_DAYS {
+            continue;
+        }
         if let Some(hit) = hits.iter().find(|h| h.url == url) {
             if let Some(p) = proof_from_hit(e, hit, quote, d) {
                 return Ok(Some(p));
@@ -419,6 +458,11 @@ pub async fn find_proof(
         }
     }
     Ok(None)
+}
+
+/// kv key holding when a calendar row was last checked against company announcements.
+fn ir_key(r: &CalendarRow) -> String {
+    format!("ir_checked:{}:{}", r.ticker, r.report_date)
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -500,7 +544,8 @@ pub async fn refresh_tick(
 
     let tickers: Vec<&'static str> = watchlist().iter().map(|e| e.ticker).collect();
     let mut seeds: BTreeMap<String, Seed> = BTreeMap::new();
-    for d in trading_days(today) {
+    let days = trading_days(today);
+    for &d in &days {
         match src.day(d).await {
             Ok(list) => {
                 for s in list
@@ -513,27 +558,73 @@ pub async fn refresh_tick(
             Err(e) => out.errors.push(format!("calendar {d}: {e}")),
         }
     }
+    if out.errors.len() == days.len() {
+        store
+            .add_alert(
+                "calendar",
+                "warn",
+                &format!(
+                    "earnings calendar not refreshed on {today}: {}",
+                    out.errors[0]
+                ),
+            )
+            .await?;
+    }
     out.seeds = seeds.len();
     for (ticker, s) in &seeds {
         let existing = es.calendar_for(ticker).await?;
         let changes = reconcile(&existing, Some(s), None, today, now);
         apply(es, store, changes, &mut out).await?;
     }
+    // Rule 8: when the aggregator was read in full and no longer lists a
+    // quarantined ticker in the window, its conflicting date is gone and
+    // the company's date stands.
+    if out.errors.is_empty() {
+        if let Some(last) = days.last() {
+            for mut r in es.calendar_between(&ymd(today), &ymd(*last)).await? {
+                if r.status == "quarantined"
+                    && r.proof_url.is_some()
+                    && !seeds.contains_key(&r.ticker)
+                {
+                    r.status = "confirmed".into();
+                    r.conflict_reason = None;
+                    r.next_check_at = None;
+                    r.checked_at = iso(now);
+                    r.updated_at = iso(now);
+                    apply(es, store, vec![Change::Upsert(Box::new(r))], &mut out).await?;
+                }
+            }
+        }
+    }
 
     let horizon = ymd(today + Duration::days(IR_HORIZON_DAYS));
-    let candidates: Vec<CalendarRow> = es
-        .calendar_between(&ymd(today), &horizon)
-        .await?
-        .into_iter()
-        .filter(|r| r.status == "unconfirmed")
-        .take(IR_CHECKS)
-        .collect();
+    // Rotate: rows checked in the last `IR_RECHECK_HOURS` wait, so a busy
+    // week does not check the same five names every day.
+    let mut candidates = Vec::new();
+    for r in es.calendar_between(&ymd(today), &horizon).await? {
+        if r.status != "unconfirmed" {
+            continue;
+        }
+        let key = ir_key(&r);
+        let recent = es
+            .kv_get(&key)
+            .await?
+            .and_then(|t| DateTime::parse_from_rfc3339(&t).ok())
+            .is_some_and(|t| now - t.with_timezone(&Utc) < Duration::hours(IR_RECHECK_HOURS));
+        if !recent {
+            candidates.push(r);
+        }
+        if candidates.len() == IR_CHECKS {
+            break;
+        }
+    }
     for c in candidates {
         let (Some(e), Some(d)) = (find(&c.ticker), date(&c.report_date)) else {
             continue;
         };
         out.ir_checked += 1;
-        match find_proof(ns, llm, &e, d).await {
+        es.kv_set(&ir_key(&c), &iso(now), &iso(now)).await?;
+        match find_proof(ns, llm, &e, d, today).await {
             Ok(Some(p)) => {
                 let existing = es.calendar_for(&c.ticker).await?;
                 let changes = reconcile(&existing, None, Some(&p), today, now);
@@ -660,7 +751,7 @@ mod tests {
             .as_deref()
             .unwrap()
             .contains("2026-11-05"));
-        // The same conflict seen again the next day changes only checked_at.
+        // Seen again the next day: still quarantined, next check moved on.
         let ch2 = reconcile(
             &rows,
             Some(&seed("2026-11-05")),
@@ -669,7 +760,11 @@ mod tests {
             utc("2026-10-27T11:00:00Z"),
         );
         let rows2 = after(&rows, &ch2);
-        assert_eq!(rows2[0].next_check_at, rows[0].next_check_at);
+        assert_eq!(rows2[0].status, "quarantined");
+        assert_eq!(
+            rows2[0].next_check_at.as_deref(),
+            Some("2026-10-27T23:00:00Z")
+        );
     }
 
     #[test]
@@ -786,6 +881,46 @@ mod tests {
     }
 
     #[test]
+    fn short_tickers_need_the_exchange_form() {
+        let pm = find("PM").unwrap();
+        let q = "Results will be released on October 30, 2026 at 5 pm ET.";
+        assert!(!names_company(q, &pm));
+        assert!(names_company(
+            "Philip Morris International (NYSE: PM) will report on October 30, 2026",
+            &pm
+        ));
+        let t = find("T").unwrap();
+        assert!(!names_company("Don't miss results on October 30, 2026", &t));
+        assert!(names_company(
+            "AT&amp;T will report results on October 30, 2026",
+            &t
+        ));
+        let low = find("LOW").unwrap();
+        assert!(
+            names_company("Lowe\u{2019}s will report results", &low)
+                || names_company("Lowe's will report results", &low)
+        );
+    }
+
+    #[test]
+    fn past_or_far_proofs_are_ignored() {
+        let old = [existing("2026-10-30", "unconfirmed", "yahoo")];
+        let mut p = proof("2026-10-30");
+        p.date = d("2026-10-20");
+        assert!(reconcile(&old, None, Some(&p), today(), utc(NOW)).is_empty());
+    }
+
+    #[test]
+    fn slots() {
+        assert_eq!(
+            slot_in("release at 4:05 p.m. ET; replay until 11:59 a.m."),
+            TimeSlot::Amc
+        );
+        assert_eq!(slot_in("before the market opens"), TimeSlot::Bmo);
+        assert_eq!(slot_in("on October 30"), TimeSlot::Unknown);
+    }
+
+    #[test]
     fn date_forms() {
         let dd = d("2026-10-30");
         for q in [
@@ -797,6 +932,10 @@ mod tests {
             assert!(names_date(q, dd), "{q}");
         }
         assert!(!names_date("October 3, 2026", dd));
+        assert!(!names_date("11/5/2026", d("2026-01-05")));
+        assert!(names_date("on 1/5/2026", d("2026-01-05")));
+        assert!(names_date("October&nbsp;30, 2026", dd));
+        assert!(names_date("Sept. 30, 2026", d("2026-09-30")));
         assert!(!names_date("October 30, 2025", dd));
     }
 
@@ -898,6 +1037,56 @@ mod tests {
         .await
         .unwrap();
         assert!(!o.ran);
+    }
+
+    #[tokio::test]
+    async fn aggregator_dropping_a_quarantined_ticker_confirms_the_company_date() {
+        let base = Rc::new(MemStore::default());
+        let es = MemEarningsStore::new(base.clone());
+        let mut q = existing("2026-10-30", "quarantined", "ir");
+        q.conflict_reason = Some("aggregator says 2026-10-29; company says 2026-10-30".into());
+        es.upsert_calendar(&q).await.unwrap();
+        struct Empty;
+        #[async_trait(?Send)]
+        impl CalendarSource for Empty {
+            async fn day(&self, _: NaiveDate) -> Result<Vec<Seed>, ProviderError> {
+                Ok(vec![])
+            }
+        }
+        refresh_tick(utc(NOW), &es, base.as_ref(), &Empty, &Ns, &Llm)
+            .await
+            .unwrap();
+        let rows = es.calendar_for("AAPL").await.unwrap();
+        assert_eq!(summary(&rows), [s3("2026-10-30", "confirmed", "ir")]);
+    }
+
+    #[tokio::test]
+    async fn aggregator_down_alerts_once() {
+        let base = Rc::new(MemStore::default());
+        let es = MemEarningsStore::new(base.clone());
+        struct Down;
+        #[async_trait(?Send)]
+        impl CalendarSource for Down {
+            async fn day(&self, _: NaiveDate) -> Result<Vec<Seed>, ProviderError> {
+                Err(ProviderError::Http(429))
+            }
+        }
+        let o = refresh_tick(utc(NOW), &es, base.as_ref(), &Down, &Ns, &Llm)
+            .await
+            .unwrap();
+        assert_eq!(o.errors.len(), SEED_DAYS);
+        assert_eq!(base.alerts.borrow().len(), 1);
+        refresh_tick(
+            utc("2026-10-26T12:00:00Z"),
+            &es,
+            base.as_ref(),
+            &Down,
+            &Ns,
+            &Llm,
+        )
+        .await
+        .unwrap();
+        assert_eq!(base.alerts.borrow().len(), 1);
     }
 
     #[tokio::test]

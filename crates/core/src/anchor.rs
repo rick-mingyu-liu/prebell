@@ -51,7 +51,7 @@ pub(crate) fn decode_entities(s: &str) -> String {
 }
 
 /// Decode entities, unify curly quotes, collapse whitespace, trim.
-fn normalize(s: &str) -> String {
+pub(crate) fn normalize(s: &str) -> String {
     let mapped: String = decode_entities(s)
         .chars()
         .map(|c| match c {

@@ -63,7 +63,7 @@ fn articles_prompt(header: &str, hits: &[SearchHit]) -> String {
 }
 
 /// Breaks any `</article` in fetched text so it cannot close its delimiter.
-fn unclose(s: &str) -> String {
+pub(crate) fn unclose(s: &str) -> String {
     static R: OnceLock<Regex> = OnceLock::new();
     R.get_or_init(|| Regex::new(r"(?i)</article").expect("valid built-in regex"))
         .replace_all(s, "< /article")
