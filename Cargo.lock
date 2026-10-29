@@ -404,7 +404,11 @@ dependencies = [
 name = "marketsite-generator"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
+ "chrono",
  "marketsite-core",
+ "serde",
+ "serde_json",
  "worker",
 ]
 
