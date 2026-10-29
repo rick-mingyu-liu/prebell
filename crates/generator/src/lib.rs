@@ -1,10 +1,12 @@
 //! Generator Worker: cron -> queue -> `tick`, backed by D1 + R2.
 
 mod alerts;
+mod competitor;
 mod http;
 mod store;
 
 use chrono::{DateTime, Utc};
+use prebell_core::competitor::run_competitor;
 use prebell_core::deepseek::llm_from_env;
 use prebell_core::run::tick;
 use prebell_core::tavily::Tavily;
@@ -14,6 +16,10 @@ use worker::*;
 
 use crate::http::WorkerHttp;
 use crate::store::D1Store;
+
+/// Daily competitor watch (wrangler.toml); `core::competitor` picks the
+/// firing that is 07:30 ET. Every other cron is the premarket job.
+const COMPETITOR_CRON: &str = "30 11,12 * * *";
 
 /// Queue message body. A struct (not `serde_json::Value`) so it crosses the
 /// queue as a plain JS object rather than a JS `Map`.
@@ -66,19 +72,34 @@ async fn fetch(req: Request, _env: Env, _ctx: Context) -> Result<Response> {
 
 #[event(scheduled)]
 async fn scheduled(event: ScheduledEvent, env: Env, _ctx: ScheduleContext) {
+    let job = if event.cron() == COMPETITOR_CRON {
+        "competitor"
+    } else {
+        "premarket"
+    };
     let sent = match env.queue("JOBS") {
-        Ok(q) => {
-            q.send(Job {
-                job: "premarket".into(),
-            })
-            .await
-        }
+        Ok(q) => q.send(Job { job: job.into() }).await,
         Err(e) => Err(e),
     };
     match sent {
-        Ok(()) => console_log!("cron {}: queued premarket job", event.cron()),
+        Ok(()) => console_log!("cron {}: queued {job} job", event.cron()),
         Err(e) => console_error!("cron {}: queue send failed: {e}", event.cron()),
     }
+}
+
+async fn premarket(env: &Env, store: &D1Store, job: &str) -> Result<()> {
+    let md = Yahoo::new(WorkerHttp);
+    let ns = Tavily::new(WorkerHttp, secret_or_empty(env, "TAVILY_API_KEY"));
+    let provider = text(env, "LLM_PROVIDER").unwrap_or_else(|| "deepseek".into());
+    let llm = llm_from_env(
+        &provider,
+        WorkerHttp,
+        secret_or_empty(env, "DEEPSEEK_API_KEY"),
+    )
+    .map_err(|e| Error::RustError(e.to_string()))?;
+    let outcome = tick(now(env), store, &md, &ns, llm.as_ref()).await;
+    console_log!("job {job}: {outcome:?}");
+    Ok(())
 }
 
 #[event(queue)]
@@ -87,19 +108,16 @@ async fn queue(batch: MessageBatch<Job>, env: Env, _ctx: Context) -> Result<()> 
         db: env.d1("DB")?,
         facts: env.bucket("FACTS")?,
     };
-    let md = Yahoo::new(WorkerHttp);
-    let ns = Tavily::new(WorkerHttp, secret_or_empty(&env, "TAVILY_API_KEY"));
-    let provider = text(&env, "LLM_PROVIDER").unwrap_or_else(|| "deepseek".into());
-    let llm = llm_from_env(
-        &provider,
-        WorkerHttp,
-        secret_or_empty(&env, "DEEPSEEK_API_KEY"),
-    )
-    .map_err(|e| Error::RustError(e.to_string()))?;
 
     for msg in batch.messages()? {
-        let outcome = tick(now(&env), &store, &md, &ns, llm.as_ref()).await;
-        console_log!("job {}: {:?}", msg.body().job, outcome);
+        let job = msg.body().job.as_str();
+        if job == "competitor" {
+            let contact = text(&env, "SEC_CONTACT").unwrap_or_default();
+            let outcome = run_competitor(now(&env), &WorkerHttp, &store, &contact).await;
+            console_log!("job {job}: {outcome:?}");
+        } else {
+            premarket(&env, &store, job).await?;
+        }
         msg.ack();
     }
 
