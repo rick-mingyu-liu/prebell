@@ -1,0 +1,1 @@
+{"id":"msg_01FixtureThinking000000","type":"message","role":"assistant","model":"claude-sonnet-5-5","content":[{"type":"thinking","thinking":"","signature":"EqQBCkYIBRgCKkBfixture"},{"type":"text","text":"{\"headline\":\"Futures up\",\"n\":2}"}],"stop_reason":"end_turn","stop_sequence":null,"stop_details":null,"usage":{"input_tokens":12,"output_tokens":40}}

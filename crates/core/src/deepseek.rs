@@ -1,3 +1,4 @@
+use crate::llm::strip_fence;
 use crate::providers::{Http, LlmProvider, ProviderError};
 use async_trait::async_trait;
 use serde_json::{json, Value};
@@ -18,16 +19,6 @@ impl<H> DeepSeek<H> {
             model,
         }
     }
-}
-
-fn strip_fence(s: &str) -> &str {
-    let s = s.trim();
-    if let Some(rest) = s.strip_prefix("```") {
-        let rest = rest.strip_suffix("```").unwrap_or(rest);
-        let rest = rest.strip_prefix("json").unwrap_or(rest);
-        return rest.trim();
-    }
-    s
 }
 
 #[async_trait(?Send)]
