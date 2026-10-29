@@ -50,7 +50,7 @@ What makes ours different from AlphaLab:
 - **Front end:** Next.js.
 - **Platform:** Cloudflare.
 - **Generator / backend:** Rust.
-- **AI:** DeepSeek API first (existing credits), switching to the Claude API afterwards. The provider must be swappable by config.
+- **AI:** Claude API (owner, updated 2026-10-29: Anthropic API key with launch credit). Launch waits for the Claude provider (Plan 5). DeepSeek stays implemented as a fallback. The provider must be swappable by config (`LLM_PROVIDER`).
 - **Data:** start free like AlphaLab — Yahoo Finance (unofficial), SEC EDGAR, web search for news — and move to a paid market-data provider once the site proves itself. The source must be swappable.
 - **Audience:** North America primary; mainland China as a mix → Simplified Chinese; no China-specific delivery work.
 - **Competitor watch:** yes, AlphaLab's public feed only, metadata only.
@@ -78,9 +78,9 @@ EDGAR poller (every 2–5 min, market hours) ─┤
 - **Generator:** Rust compiled to WebAssembly with `workers-rs` (owner: Rust). Scheduled by Cron Triggers; heavy work goes through a Queue so each job runs in its own invocation. Cron times are UTC, so the Worker is triggered at both candidate UTC times and checks the current America/New_York time in code to handle daylight saving (DST ends 2026-11-01).
   - Fallback if a needed Rust crate won't run under WebAssembly: run the same Rust code as a native binary on a schedule (e.g., GitHub Actions or a small VM) writing to D1/R2 through Cloudflare's API. Builder decides if and when.
 - **Provider interfaces (traits in Rust):**
-  - `LlmProvider`: DeepSeek first (owner), Claude later (owner). Config selects provider and model.
+  - `LlmProvider`: Claude (owner, primary) with DeepSeek as an implemented fallback. Config selects provider and model.
   - `MarketData`: Yahoo Finance unofficial endpoints first (owner); paid provider later. Covers quotes incl. premarket/after-hours, futures, index levels, movers screens.
-  - `NewsSearch`: a web search API (Brave Search or Tavily — designer's call) because the DeepSeek API has no built-in search; can be replaced by Claude's web-search tool after the switch.
+  - `NewsSearch`: a web search API (Brave Search or Tavily — designer's call) because our code needs the full article text to verify quotes. Kept on Tavily after the Claude switch; Claude's web-search tool returns results to the model rather than raw text to our code.
   - `Filings`: SEC EDGAR (`data.sec.gov/submissions`, full-text/filing index). Must send a descriptive User-Agent with contact email and stay under 10 requests/second.
 - **Earnings detection:** during US hours (~6 AM–9 PM ET, weekdays), poll EDGAR submissions for watchlist companies every few minutes; a new 8-K with Item 2.02 queues an earnings job using the filing and its Exhibit 99.1 press release. Foreign filers (6-K, e.g., Toyota, Barclays, Santander) have no Item 2.02: at launch they're tracked only on the calendar, not auto-written.
 - **Earnings calendar:** seed upcoming dates from an aggregator (Yahoo's earnings calendar at launch); mark each entry `confirmed` only after primary proof (company IR announcement or EDGAR); entries with conflicting dates go to a quarantine list with reason and check times (AlphaLab's `pending_dates` idea).
@@ -115,7 +115,7 @@ EDGAR poller (every 2–5 min, market hours) ─┤
 
 ## 10. Constraints
 
-- Cost: free data at launch; Cloudflare Workers paid plan (~$5/month) is expected for Queues/CPU; AI spend on DeepSeek credits first.
+- Cost: free data at launch; Cloudflare Workers paid plan (~$5/month) is expected for Queues/CPU; AI spend on the owner's Anthropic API credit; cost per brief is measured on the first live run.
 - Yahoo Finance's terms don't permit scraping; the owner accepts this for launch. The `MarketData` interface exists so we can leave quickly if it breaks or blocks us.
 - EDGAR fair-access rules (User-Agent, ≤10 req/s).
 - All displayed times in US Eastern; stored in UTC.
