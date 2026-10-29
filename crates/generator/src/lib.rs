@@ -89,7 +89,7 @@ async fn queue(batch: MessageBatch<Job>, env: Env, _ctx: Context) -> Result<()> 
     };
     let md = Yahoo::new(WorkerHttp);
     let ns = Tavily::new(WorkerHttp, secret_or_empty(&env, "TAVILY_API_KEY"));
-    let provider = text(&env, "LLM_PROVIDER").unwrap_or_else(|| "deepseek".into());
+    let provider = text(&env, "LLM_PROVIDER").unwrap_or_else(|| "claude".into());
     let key_var = api_key_var(&provider)
         .ok_or_else(|| Error::RustError(unknown_provider(&provider).to_string()))?;
     let llm = llm_from_env(
@@ -97,6 +97,8 @@ async fn queue(batch: MessageBatch<Job>, env: Env, _ctx: Context) -> Result<()> 
         WorkerHttp,
         secret_or_empty(&env, key_var),
         text(&env, "LLM_MODEL"),
+        text(&env, "LLM_EFFORT"),
+        |m| console_warn!("{m}"),
     )
     .map_err(|e| Error::RustError(e.to_string()))?;
 
