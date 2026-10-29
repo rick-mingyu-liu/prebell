@@ -7,6 +7,7 @@ import PostBody from "@/components/PostBody";
 import PostList from "@/components/PostList";
 import type { Locale } from "@/i18n/routing";
 import { getDb } from "@/lib/db";
+import { listLatestEarnings } from "@/lib/earnings";
 import { getLatestPremarket, listPosts } from "@/lib/posts";
 import { pairedAlternates } from "@/lib/seo";
 import { formatDate, formatEt } from "@/lib/time";
@@ -21,8 +22,14 @@ export default async function Home({ params }: PageProps<"/[locale]">) {
   setRequestLocale(locale);
   const t = await getTranslations();
   const db = getDb();
-  const [latest, recent] = await Promise.all([getLatestPremarket(db, locale), listPosts(db, locale, 1)]);
-  const others = recent.filter((p) => p.slug !== latest?.slug).slice(0, 10);
+  const [latest, recent, earnings] = await Promise.all([
+    getLatestPremarket(db, locale),
+    listPosts(db, locale, 1),
+    listLatestEarnings(db, locale, 5),
+  ]);
+  const others = recent
+    .filter((p) => p.slug !== latest?.slug && p.contentType !== "earnings")
+    .slice(0, 10);
 
   return (
     <>
@@ -52,6 +59,13 @@ export default async function Home({ params }: PageProps<"/[locale]">) {
             <PostBody markdown={latest.bodyMd} sources={latest.sources.map((s) => s.url)} />
           </article>
         )}
+      </section>
+      <section aria-labelledby="earnings">
+        <h2 id="earnings">{t("home.latestEarnings")}</h2>
+        {earnings.length > 0 && <PostList locale={locale} items={earnings} />}
+        <p>
+          <Link href={`/${locale}/earnings`}>{t("home.calendar")} →</Link>
+        </p>
       </section>
       {others.length > 0 && (
         <section aria-labelledby="recent">

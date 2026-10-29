@@ -6,13 +6,16 @@
     "archive": "归档",
     "about": "关于",
     "otherLang": "English",
-    "otherLangLabel": "阅读英文版"
+    "otherLangLabel": "阅读英文版",
+    "earnings": "财报"
   },
   "home": {
     "latest": "最新盘前简报",
     "recent": "近期简报",
     "empty": "暂无已发布的简报。",
-    "allBriefs": "全部简报"
+    "allBriefs": "全部简报",
+    "latestEarnings": "最新财报速评",
+    "calendar": "财报日历"
   },
   "post": {
     "permalink": "本文链接",
@@ -38,5 +41,27 @@
     "title": "页面不存在",
     "back": "返回首页"
   },
-  "disclaimer": "本简报根据公开数据自动生成，仅供参考，不构成投资建议。"
+  "disclaimer": "本简报根据公开数据自动生成，仅供参考，不构成投资建议。",
+  "earnings": {
+    "calendarTitle": "财报日历",
+    "weekOf": "{date}当周",
+    "timesEt": "时间均为美东时间",
+    "legend": "已确认：公司已公布日期。未确认：日期来自第三方汇总，可能变动。已发布：业绩已向美国证监会提交。",
+    "bmo": "盘前",
+    "amc": "盘后",
+    "timeUnknown": "时间暂缺",
+    "unconfirmed": "未确认",
+    "confirmed": "已确认",
+    "reported": "已发布",
+    "none": "无财报。",
+    "prevWeek": "上一周",
+    "nextWeek": "下一周",
+    "tickerTitle": "{ticker} 财报",
+    "checks": "财报速评",
+    "noChecks": "暂无财报速评。",
+    "dates": "财报日期",
+    "readCheck": "阅读速评",
+    "charts": "图表（GAAP）",
+    "chartsNote": "图表为美国证监会文件中的 GAAP 数据；标为 8-K 的最后一栏为本次公布数据。空缺表示公司未单独公布该季度数据。"
+  }
 }
