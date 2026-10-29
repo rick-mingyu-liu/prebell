@@ -56,6 +56,6 @@ The `<error>` part:
 | `http status 429` | Rate limit. |
 | `http status 529` / `5xx` | Anthropic overloaded or unavailable; usually clears on a later tick. |
 | `parse error: truncated` | The reply hit `max_tokens` (16000). It is never used as partial JSON. |
-| `parse error: refusal: <category>` | The model declined the request. Facts are only saved after a successful EN draft, so find the request in `wrangler tail`. |
+| `parse error: refusal: <category>` | The model declined the request. Facts are only saved after a successful EN draft, so a refused build leaves nothing in R2 to inspect; tell the developer the date and category. |
 | `parse error: stop_reason: <x>` | The turn ended unfinished in some other way. It is never used. |
 | `parse error: ...` (other) | The reply was not a JSON object. |
