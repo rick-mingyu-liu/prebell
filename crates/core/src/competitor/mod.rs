@@ -3,3 +3,4 @@
 //! generation; a test below enforces that.
 
 pub mod feed;
+pub mod tickers;
