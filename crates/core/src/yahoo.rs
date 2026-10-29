@@ -1,7 +1,7 @@
 use crate::facts::Quote;
 use crate::providers::{Http, MarketData, ProviderError};
 use async_trait::async_trait;
-use chrono::{NaiveTime, TimeZone, Utc};
+use chrono::{NaiveDate, NaiveTime, TimeZone, Utc};
 use chrono_tz::Tz;
 use serde::Deserialize;
 
@@ -14,6 +14,23 @@ pub struct Yahoo<H: Http> {
 impl<H: Http> Yahoo<H> {
     pub fn new(http: H) -> Self {
         Self { http }
+    }
+
+    /// The 1-minute chart body for today, with pre/post-market bars. Index
+    /// symbols carry `^`, which is percent-encoded in the path.
+    async fn chart(&self, symbol: &str) -> Result<String, ProviderError> {
+        let path = symbol.replace('^', "%5E");
+        let url = format!(
+            "https://query1.finance.yahoo.com/v8/finance/chart/{path}?interval=1m&range=1d&includePrePost=true"
+        );
+        let resp = self
+            .http
+            .get(&url, &[("User-Agent", UA), ("Accept", "application/json")])
+            .await?;
+        if resp.status >= 400 {
+            return Err(ProviderError::Http(resp.status));
+        }
+        Ok(resp.body)
     }
 }
 
@@ -39,6 +56,13 @@ struct Meta {
     chart_previous_close: Option<f64>,
     #[serde(rename = "exchangeTimezoneName")]
     tz: Option<String>,
+    #[serde(rename = "regularMarketPrice")]
+    regular_price: Option<f64>,
+    /// Unix seconds of the last regular-session trade.
+    #[serde(rename = "regularMarketTime")]
+    regular_time: Option<i64>,
+    #[serde(rename = "regularMarketVolume")]
+    regular_volume: Option<f64>,
 }
 #[derive(Deserialize)]
 struct Indicators {
@@ -53,23 +77,59 @@ struct Bars {
     volume: Vec<Option<f64>>,
 }
 
-fn parse_quote(symbol: &str, body: &str) -> Result<Quote, ProviderError> {
+fn first_result(body: &str) -> Result<ResultItem, ProviderError> {
     let root: Root = serde_json::from_str(body).map_err(|e| ProviderError::Parse(e.to_string()))?;
     if root.chart.error.as_ref().is_some_and(|e| !e.is_null()) {
         return Err(ProviderError::Empty);
     }
-    let item = root
-        .chart
+    root.chart
         .result
         .and_then(|r| r.into_iter().next())
-        .ok_or(ProviderError::Empty)?;
-    let meta = item.meta.ok_or(ProviderError::Empty)?;
-    let prev_close = meta.chart_previous_close.ok_or(ProviderError::Empty)?;
-    let tz: Tz = meta
-        .tz
+        .ok_or(ProviderError::Empty)
+}
+
+fn exchange_tz(meta: &Meta) -> Tz {
+    meta.tz
         .as_deref()
         .and_then(|s| s.parse().ok())
-        .unwrap_or(chrono_tz::America::New_York);
+        .unwrap_or(chrono_tz::America::New_York)
+}
+
+/// The regular-session close from the chart `meta`, which Yahoo keeps at the
+/// official close after 16:00 while post-market bars keep arriving.
+fn parse_close(symbol: &str, body: &str, session: NaiveDate) -> Result<Quote, ProviderError> {
+    let meta = first_result(body)?.meta.ok_or(ProviderError::Empty)?;
+    let last = meta.regular_price.ok_or(ProviderError::Empty)?;
+    let prev_close = meta.chart_previous_close.ok_or(ProviderError::Empty)?;
+    let at = meta.regular_time.ok_or(ProviderError::Empty)?;
+    let day = Utc
+        .timestamp_opt(at, 0)
+        .single()
+        .ok_or(ProviderError::Empty)?
+        .with_timezone(&exchange_tz(&meta))
+        .date_naive();
+    if day != session {
+        return Err(ProviderError::Parse(format!(
+            "stale quote: last trade on {day}, not {session}"
+        )));
+    }
+    if prev_close == 0.0 {
+        return Err(ProviderError::Empty);
+    }
+    Ok(Quote {
+        symbol: symbol.to_string(),
+        last,
+        prev_close,
+        change_pct: (last - prev_close) / prev_close * 100.0,
+        volume: meta.regular_volume.map(|v| v as u64),
+    })
+}
+
+fn parse_quote(symbol: &str, body: &str) -> Result<Quote, ProviderError> {
+    let item = first_result(body)?;
+    let meta = item.meta.ok_or(ProviderError::Empty)?;
+    let prev_close = meta.chart_previous_close.ok_or(ProviderError::Empty)?;
+    let tz = exchange_tz(&meta);
     let bars = item
         .indicators
         .and_then(|i| i.quote.into_iter().next())
@@ -120,17 +180,29 @@ fn parse_quote(symbol: &str, body: &str) -> Result<Quote, ProviderError> {
 #[async_trait(?Send)]
 impl<H: Http> MarketData for Yahoo<H> {
     async fn quote(&self, symbol: &str) -> Result<Quote, ProviderError> {
-        let url = format!(
-            "https://query1.finance.yahoo.com/v8/finance/chart/{symbol}?interval=1m&range=1d&includePrePost=true"
-        );
-        let resp = self
-            .http
-            .get(&url, &[("User-Agent", UA), ("Accept", "application/json")])
-            .await?;
-        if resp.status >= 400 {
-            return Err(ProviderError::Http(resp.status));
+        parse_quote(symbol, &self.chart(symbol).await?)
+    }
+
+    async fn close_quote(&self, symbol: &str, session: NaiveDate) -> Result<Quote, ProviderError> {
+        parse_close(symbol, &self.chart(symbol).await?, session)
+    }
+
+    async fn close_quotes(
+        &self,
+        symbols: &[String],
+        session: NaiveDate,
+    ) -> Vec<(String, Result<Quote, ProviderError>)> {
+        let mut out = Vec::with_capacity(symbols.len());
+        for chunk in symbols.chunks(20) {
+            let results = futures::future::join_all(
+                chunk
+                    .iter()
+                    .map(|s| async move { self.close_quote(s, session).await }),
+            )
+            .await;
+            out.extend(chunk.iter().cloned().zip(results));
         }
-        parse_quote(symbol, &resp.body)
+        out
     }
 
     async fn premarket_quotes(
@@ -157,6 +229,12 @@ mod tests {
     const ES: &str = include_str!("../tests/fixtures/yahoo_chart_ES=F.json");
     const AAPL: &str = include_str!("../tests/fixtures/yahoo_chart_AAPL_pre.json");
     const HTML: &str = include_str!("../tests/fixtures/yahoo_429.html");
+    const GSPC: &str = include_str!("../tests/fixtures/yahoo_chart_GSPC_close.json");
+    const NVDA: &str = include_str!("../tests/fixtures/yahoo_chart_NVDA_close.json");
+
+    fn day(s: &str) -> NaiveDate {
+        s.parse().unwrap()
+    }
 
     struct FakeHttp(HashMap<String, (u16, String)>);
     #[async_trait(?Send)]
@@ -268,5 +346,70 @@ mod tests {
         assert_eq!(r[0].0, "ES=F");
         assert!(r[0].1.is_ok());
         assert_eq!(r[1].1, Err(ProviderError::Http(429)));
+    }
+
+    #[tokio::test]
+    async fn index_close_comes_from_meta_and_encodes_caret() {
+        // FakeHttp only knows the encoded URL, so an unencoded `^` fails.
+        let y = yahoo(&[("%5EGSPC", 200, GSPC)]);
+        let q = y.close_quote("^GSPC", day("2026-10-29")).await.unwrap();
+        assert_eq!(q.symbol, "^GSPC");
+        assert_eq!(q.last, 5850.12);
+        assert_eq!(q.prev_close, 5820.4);
+        assert!((q.change_pct - (5850.12 - 5820.4) / 5820.4 * 100.0).abs() < 1e-9);
+    }
+
+    #[tokio::test]
+    async fn stock_close_ignores_after_hours_bars() {
+        let q = yahoo(&[("NVDA", 200, NVDA)])
+            .close_quote("NVDA", day("2026-10-29"))
+            .await
+            .unwrap();
+        assert_eq!(q.last, 182.35);
+        assert_eq!(q.prev_close, 176.9);
+        assert_eq!(q.volume, Some(210_000_000));
+    }
+
+    #[tokio::test]
+    async fn close_from_another_session_is_stale() {
+        let y = yahoo(&[("NVDA", 200, NVDA)]);
+        let r = y.close_quote("NVDA", day("2026-10-30")).await;
+        assert!(
+            matches!(&r, Err(ProviderError::Parse(m)) if m.contains("stale")),
+            "{r:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn close_without_market_time_or_price_is_empty() {
+        let y = yahoo(&[("NVDA", 200, &NVDA.replace("\"regularMarketTime\"", "\"x\""))]);
+        assert_eq!(
+            y.close_quote("NVDA", day("2026-10-29")).await,
+            Err(ProviderError::Empty)
+        );
+        let y = yahoo(&[(
+            "NVDA",
+            200,
+            &NVDA.replace("\"regularMarketPrice\"", "\"x\""),
+        )]);
+        assert_eq!(
+            y.close_quote("NVDA", day("2026-10-29")).await,
+            Err(ProviderError::Empty)
+        );
+    }
+
+    #[tokio::test]
+    async fn close_errors_and_order() {
+        let y = yahoo(&[("%5EGSPC", 429, HTML), ("NVDA", 200, NVDA)]);
+        let r = y
+            .close_quotes(&["^GSPC".into(), "NVDA".into()], day("2026-10-29"))
+            .await;
+        assert_eq!(r[0], ("^GSPC".to_string(), Err(ProviderError::Http(429))));
+        assert_eq!(r[1].0, "NVDA");
+        assert_eq!(r[1].1.as_ref().unwrap().last, 182.35);
+        let r = yahoo(&[("NVDA", 200, HTML)])
+            .close_quote("NVDA", day("2026-10-29"))
+            .await;
+        assert!(matches!(r, Err(ProviderError::Parse(_))));
     }
 }

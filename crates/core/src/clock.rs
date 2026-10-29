@@ -254,6 +254,13 @@ mod tests {
             recap_decision(utc("2026-11-28T00:00:00Z")),
             SlotDecision::PastDeadline { .. }
         ));
+        // Christmas Eve 2026 is the other early close.
+        assert_eq!(
+            recap_decision(utc("2026-12-24T18:45:00Z")),
+            SlotDecision::InWindow {
+                trading_date: d("2026-12-24")
+            }
+        );
         // Thanksgiving: closed.
         assert_eq!(
             recap_decision(utc("2026-11-26T22:00:00Z")),
