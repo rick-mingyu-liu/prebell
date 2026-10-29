@@ -57,3 +57,6 @@ max_concurrency = 1
 LLM_PROVIDER = "claude"
 LLM_EFFORT = "low"
 SEC_CONTACT = "placeholder@example.com"
+# Earnings calendar seeding: "yahoo" (Yahoo v7 quote earnings dates, the default)
+# or "off" (only company announcements and EDGAR filings).
+EARNINGS_CALENDAR_SEED = "yahoo"

@@ -1,220 +1,237 @@
-//! `CalendarSource` over Yahoo Finance's earnings calendar page (unofficial,
-//! like `yahoo.rs`). Only the symbol and the call-time columns are read; the
-//! estimate columns are never parsed or stored (spec §8: no consensus).
-
-use std::sync::OnceLock;
+//! `CalendarSource` over Yahoo's batched v7 quote session (unofficial, like
+//! `yahoo.rs`): each symbol's `earningsTimestamp`, `earningsTimestampStart`,
+//! `earningsTimestampEnd` and `isEarningsDateEstimate`, about 3 requests for
+//! the whole watchlist. No HTML pages are scraped, and no estimate figures
+//! are read (spec §8: no consensus).
 
 use async_trait::async_trait;
-use chrono::NaiveDate;
-use regex::Regex;
+use chrono::{NaiveTime, Timelike};
 
-use crate::earnings::calendar::{CalendarSource, Seed, TimeSlot};
-use crate::edgar::html_to_text;
-use crate::providers::{Http, ProviderError};
-
-const UA: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0 Safari/537.36";
-const PAGE_SIZE: usize = 100;
-/// No server page size is this small; a page with fewer rows is the last.
-const MIN_FULL_PAGE: usize = 20;
-/// Busy days list several hundred companies; the watchlist is the largest of them.
-const MAX_PAGES: usize = 3;
+use crate::clock::et;
+use crate::earnings::calendar::{CalendarSource, Seed, SeedRead, TimeSlot};
+use crate::providers::{Http, MarketData, ProviderError};
+use crate::yahoo::{EarningsTimes, Yahoo};
 
 pub struct YahooCalendar<H: Http> {
-    pub http: H,
+    pub yahoo: Yahoo<H>,
 }
 
 impl<H: Http> YahooCalendar<H> {
     pub fn new(http: H) -> Self {
-        Self { http }
+        Self {
+            yahoo: Yahoo::new(http),
+        }
     }
 }
 
-fn re(p: &str) -> Regex {
-    Regex::new(p).expect("valid built-in regex")
-}
-
-fn slot(text: &str) -> TimeSlot {
-    let t = text.trim().to_ascii_lowercase();
-    if t == "bmo" || t.contains("before market") {
+/// The report's slot from its ET time of day: before the 09:30 open is
+/// before market, from the 16:00 close after it. Midnight is Yahoo's "no
+/// time", and an estimate's time means nothing.
+fn slot(t: &EarningsTimes, local: NaiveTime) -> TimeSlot {
+    if t.estimate || local == NaiveTime::MIN {
+        TimeSlot::Unknown
+    } else if local < NaiveTime::from_hms_opt(9, 30, 0).unwrap() {
         TimeSlot::Bmo
-    } else if t == "amc" || t.contains("after market") {
+    } else if local.hour() >= 16 {
         TimeSlot::Amc
     } else {
         TimeSlot::Unknown
     }
 }
 
-/// Seeds from one results page, in page order, plus the number of data rows
-/// (to know whether another page follows).
-pub fn parse_page(html: &str, date: NaiveDate) -> Result<(Vec<Seed>, usize), ProviderError> {
-    static DROP: OnceLock<Regex> = OnceLock::new();
-    static TABLE: OnceLock<Regex> = OnceLock::new();
-    static ROW: OnceLock<Regex> = OnceLock::new();
-    static TH: OnceLock<Regex> = OnceLock::new();
-    static TD: OnceLock<Regex> = OnceLock::new();
-    let drop = DROP.get_or_init(|| re(r"(?is)<script\b.*?</script\s*>|<!--.*?-->"));
-    let html = drop.replace_all(html, " ");
-    let table = TABLE
-        .get_or_init(|| re(r"(?is)<table\b.*?</table\s*>"))
-        .find(&html)
-        .ok_or_else(|| ProviderError::Parse("no results table".into()))?;
-    let th = TH.get_or_init(|| re(r"(?is)<th\b[^>]*>(.*?)</th\s*>"));
-    let td = TD.get_or_init(|| re(r"(?is)<td\b[^>]*>(.*?)</td\s*>"));
-    let headers: Vec<String> = th
-        .captures_iter(table.as_str())
-        .map(|c| html_to_text(&c[1]).to_ascii_lowercase())
-        .collect();
-    let col = |want: &[&str]| {
-        headers
-            .iter()
-            .position(|h| want.iter().any(|w| h.contains(w)))
-    };
-    let symbol = col(&["symbol"]).ok_or_else(|| ProviderError::Parse("no Symbol column".into()))?;
-    let time = col(&["call time", "event start", "time"]);
-    let mut out = Vec::new();
-    let mut rows = 0;
-    for r in ROW
-        .get_or_init(|| re(r"(?is)<tr\b[^>]*>(.*?)</tr\s*>"))
-        .captures_iter(table.as_str())
-    {
-        let cells: Vec<String> = td
-            .captures_iter(&r[1])
-            .map(|c| html_to_text(&c[1]))
-            .collect();
-        if cells.is_empty() {
-            continue;
-        }
-        rows += 1;
-        let Some(sym) = cells
-            .get(symbol)
-            .map(|s| s.trim())
-            .filter(|s| !s.is_empty())
-        else {
-            continue;
-        };
-        out.push(Seed {
-            // Yahoo writes class shares with a dash; the watchlist with a dot.
-            ticker: sym.replace('-', "."),
-            date,
-            slot: time
-                .and_then(|i| cells.get(i))
-                .map_or(TimeSlot::Unknown, |t| slot(t)),
-        });
-    }
-    Ok((out, rows))
+/// The seed for one watchlist ticker: the ET date of `earningsTimestamp`
+/// (else the start of Yahoo's estimated range).
+pub fn seed(ticker: &str, t: &EarningsTimes) -> Option<Seed> {
+    let local = et(t.at.or(t.start)?);
+    Some(Seed {
+        ticker: ticker.to_string(),
+        date: local.date_naive(),
+        slot: slot(t, local.time()),
+    })
 }
 
 #[async_trait(?Send)]
 impl<H: Http> CalendarSource for YahooCalendar<H> {
-    async fn day(&self, date: NaiveDate) -> Result<Vec<Seed>, ProviderError> {
-        let mut out = Vec::new();
-        let mut first_rows: Option<usize> = None;
-        let mut offset = 0;
-        for page in 0..MAX_PAGES {
-            let url = format!(
-                "https://finance.yahoo.com/calendar/earnings?day={}&offset={offset}&size={PAGE_SIZE}",
-                date.format("%Y-%m-%d"),
-            );
-            let r = self.http.get(&url, &[("User-Agent", UA)]).await?;
-            if r.status != 200 {
-                return Err(ProviderError::Http(r.status));
-            }
-            // A later page without a results table is past the end.
-            let (seeds, rows) = match parse_page(&r.body, date) {
-                Ok(x) => x,
-                Err(_) if page > 0 => break,
-                Err(e) => return Err(e),
-            };
-            out.extend(seeds);
-            offset += rows;
-            // Yahoo may serve fewer than `size` rows per page, so a short page
-            // is the last only when it is shorter than the first page or
-            // clearly partial.
-            let first = *first_rows.get_or_insert(rows);
-            if rows < MIN_FULL_PAGE || rows < first {
-                break;
+    async fn upcoming(&self, tickers: &[&str]) -> SeedRead {
+        // Yahoo writes class shares with a dash; the watchlist with a dot.
+        let symbols: Vec<String> = tickers.iter().map(|t| t.replace('.', "-")).collect();
+        let mut out = SeedRead::default();
+        for ((_, r), ticker) in self
+            .yahoo
+            .earnings_times(&symbols)
+            .await
+            .iter()
+            .zip(tickers)
+        {
+            match r {
+                Ok(t) => out.seeds.extend(seed(ticker, t)),
+                // No earnings date known for the symbol.
+                Err(ProviderError::Empty) => {}
+                Err(e) => {
+                    out.failed += 1;
+                    out.error.get_or_insert_with(|| e.to_string());
+                }
             }
         }
-        Ok(out)
+        out.diagnostics = self.yahoo.diagnostics();
+        out
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::edgar::tests::FakeHttp;
+    use crate::providers::HttpResp;
+    use chrono::{DateTime, NaiveDate, Utc};
+    use std::cell::RefCell;
 
-    const PAGE: &str = include_str!("../tests/fixtures/yahoo_earnings_calendar.html");
-    const URL0: &str =
-        "https://finance.yahoo.com/calendar/earnings?day=2026-10-30&offset=0&size=100";
-
-    fn d() -> NaiveDate {
-        "2026-10-30".parse().unwrap()
+    fn utc(s: &str) -> Option<DateTime<Utc>> {
+        Some(s.parse().unwrap())
+    }
+    fn times(at: &str, estimate: bool) -> EarningsTimes {
+        EarningsTimes {
+            at: utc(at),
+            start: utc(at),
+            end: utc(at),
+            estimate,
+        }
+    }
+    fn d(s: &str) -> NaiveDate {
+        s.parse().unwrap()
     }
 
     #[test]
-    fn parses_symbols_and_slots() {
-        let (s, rows) = parse_page(PAGE, d()).unwrap();
-        assert_eq!(rows, 5);
-        let got: Vec<(&str, TimeSlot)> = s.iter().map(|x| (x.ticker.as_str(), x.slot)).collect();
+    fn slots_and_et_dates() {
+        let s = |at: &str, est: bool| {
+            let x = seed("AAPL", &times(at, est)).unwrap();
+            (x.date, x.slot)
+        };
+        // 16:30 EDT; 07:00 EST; 12:00 EDT; midnight ET; an estimate.
+        assert_eq!(
+            s("2026-10-30T20:30:00Z", false),
+            (d("2026-10-30"), TimeSlot::Amc)
+        );
+        assert_eq!(
+            s("2026-11-05T12:00:00Z", false),
+            (d("2026-11-05"), TimeSlot::Bmo)
+        );
+        assert_eq!(
+            s("2026-10-30T16:00:00Z", false),
+            (d("2026-10-30"), TimeSlot::Unknown)
+        );
+        assert_eq!(
+            s("2026-10-30T04:00:00Z", false),
+            (d("2026-10-30"), TimeSlot::Unknown)
+        );
+        assert_eq!(
+            s("2026-10-30T20:30:00Z", true),
+            (d("2026-10-30"), TimeSlot::Unknown)
+        );
+        // After 8 PM ET the UTC date is the next day; the ET date is not.
+        assert_eq!(s("2026-10-31T00:30:00Z", false).0, d("2026-10-30"));
+        // Only a range: its start.
+        let r = EarningsTimes {
+            at: None,
+            start: utc("2026-10-29T12:00:00Z"),
+            end: utc("2026-11-02T12:00:00Z"),
+            estimate: true,
+        };
+        assert_eq!(seed("XOM", &r).unwrap().date, d("2026-10-29"));
+        let none = EarningsTimes {
+            at: None,
+            start: None,
+            end: None,
+            estimate: false,
+        };
+        assert!(seed("XOM", &none).is_none());
+    }
+
+    /// Cookie, crumb, then v7 quotes: AAPL confirmed, BRK-B an estimate,
+    /// XOM without a date; `quote_status` answers the quote requests.
+    struct Fake {
+        quote_status: u16,
+        seen: RefCell<Vec<String>>,
+    }
+    #[async_trait(?Send)]
+    impl Http for Fake {
+        async fn get(&self, url: &str, _: &[(&str, &str)]) -> Result<HttpResp, ProviderError> {
+            self.seen.borrow_mut().push(url.into());
+            let r = |status, body: &str, cookie: Option<&str>| HttpResp {
+                status,
+                body: body.into(),
+                set_cookie: cookie.map(String::from),
+            };
+            if url.starts_with("https://fc.yahoo.com") {
+                return Ok(r(404, "", Some("A3=d=x; Path=/")));
+            }
+            if url.contains("getcrumb") {
+                return Ok(r(200, "crumb1", None));
+            }
+            let body = serde_json::json!({"quoteResponse": {"error": null, "result": [
+                {"symbol": "AAPL", "earningsTimestamp": 1793392200_i64, "isEarningsDateEstimate": false},
+                {"symbol": "BRK-B", "earningsTimestampStart": 1793361600_i64,
+                 "earningsTimestampEnd": 1793448000_i64, "isEarningsDateEstimate": true},
+                {"symbol": "XOM"}
+            ]}});
+            Ok(r(self.quote_status, &body.to_string(), None))
+        }
+        async fn post_json(
+            &self,
+            _: &str,
+            _: &[(&str, &str)],
+            _: &serde_json::Value,
+        ) -> Result<HttpResp, ProviderError> {
+            unreachable!()
+        }
+    }
+
+    #[tokio::test]
+    async fn reads_the_watchlist_through_v7_quotes() {
+        let y = YahooCalendar::new(Fake {
+            quote_status: 200,
+            seen: RefCell::new(vec![]),
+        });
+        let r = y.upcoming(&["AAPL", "BRK.B", "XOM"]).await;
+        let got: Vec<(&str, NaiveDate, TimeSlot)> = r
+            .seeds
+            .iter()
+            .map(|s| (s.ticker.as_str(), s.date, s.slot))
+            .collect();
         assert_eq!(
             got,
             [
-                ("AAPL", TimeSlot::Amc),
-                ("XOM", TimeSlot::Bmo),
-                ("BRK.B", TimeSlot::Unknown),
-                ("ZZZQ", TimeSlot::Bmo),
-                ("TM", TimeSlot::Unknown),
+                ("AAPL", d("2026-10-30"), TimeSlot::Amc),
+                ("BRK.B", d("2026-10-30"), TimeSlot::Unknown),
             ]
         );
-        assert!(s.iter().all(|x| x.date == d()));
-    }
-
-    #[test]
-    fn script_tables_are_ignored() {
-        let (s, _) = parse_page(PAGE, d()).unwrap();
-        assert!(s.iter().all(|x| x.ticker != "FAKE"));
-    }
-
-    #[tokio::test]
-    async fn http_errors_and_blocks() {
-        let mut http = FakeHttp::default();
-        http.routes.insert(URL0.into(), (429, String::new()));
-        let y = YahooCalendar::new(http);
-        assert_eq!(y.day(d()).await, Err(ProviderError::Http(429)));
-        let mut http = FakeHttp::default();
-        http.routes
-            .insert(URL0.into(), (200, "<html>consent</html>".into()));
-        let y = YahooCalendar::new(http);
-        assert!(matches!(y.day(d()).await, Err(ProviderError::Parse(_))));
+        assert_eq!((r.failed, r.error), (0, None));
+        let seen = y.yahoo.http.seen.borrow();
+        assert_eq!(seen.len(), 3);
+        assert!(seen[2].contains("symbols=AAPL,BRK-B,XOM"), "{}", seen[2]);
+        assert!(
+            !seen.iter().any(|u| u.contains("/calendar/")),
+            "no page scraping"
+        );
     }
 
     #[tokio::test]
-    async fn pages_until_a_shorter_page() {
-        let row = |i: usize| {
-            format!("<tr><td>T{i}</td><td>x</td><td>e</td><td>After Market Close</td></tr>")
-        };
-        let page = |n: usize, from: usize| {
-            let rows: String = (from..from + n).map(row).collect();
-            format!("<table><tr><th>Symbol</th><th>Company</th><th>Event Name</th><th>Earnings Call Time</th></tr>{rows}</table>")
-        };
-        let mut http = FakeHttp::default();
-        // The server caps pages at 25 rows.
-        http.routes.insert(URL0.into(), (200, page(25, 0)));
-        http.routes
-            .insert(URL0.replace("offset=0", "offset=25"), (200, page(25, 25)));
-        http.routes
-            .insert(URL0.replace("offset=0", "offset=50"), (200, page(7, 50)));
-        let y = YahooCalendar::new(http);
-        assert_eq!(y.day(d()).await.unwrap().len(), 57);
-    }
-
-    #[tokio::test]
-    async fn short_page_stops_paging() {
-        let mut http = FakeHttp::default();
-        http.routes.insert(URL0.into(), (200, PAGE.into()));
-        let y = YahooCalendar::new(http);
-        assert_eq!(y.day(d()).await.unwrap().len(), 5);
-        assert_eq!(y.http.seen.borrow().len(), 1);
+    async fn a_429_fails_the_read_and_shows_in_diagnostics() {
+        let y = YahooCalendar::new(Fake {
+            quote_status: 429,
+            seen: RefCell::new(vec![]),
+        });
+        let tickers: Vec<String> = (0..109).map(|i| format!("T{i}")).collect();
+        let refs: Vec<&str> = tickers.iter().map(String::as_str).collect();
+        let r = y.upcoming(&refs).await;
+        assert!(r.seeds.is_empty());
+        assert_eq!(r.failed, 109);
+        assert_eq!(r.error.as_deref(), Some("http status 429"));
+        assert!(
+            r.diagnostics.contains(&"yahoo_429=1".to_string()),
+            "{:?}",
+            r.diagnostics
+        );
+        // The cookie, the crumb and one quote request: nothing after the 429.
+        assert_eq!(y.yahoo.http.seen.borrow().len(), 3);
     }
 }

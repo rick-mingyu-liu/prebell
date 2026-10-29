@@ -22,7 +22,7 @@ use crate::store::Store;
 
 /// Calendar rows of one ticker this close together describe the same report.
 pub const SAME_EVENT_DAYS: i64 = 21;
-/// Trading days ahead the aggregator is read for.
+/// Trading days ahead the aggregator's dates are kept for.
 pub const SEED_DAYS: usize = 10;
 /// Company-announcement checks per daily refresh (each is one search and one LLM call).
 pub const IR_CHECKS: usize = 5;
@@ -76,10 +76,36 @@ pub enum Change {
     Delete { ticker: String, date: String },
 }
 
-/// Upcoming report dates for one day, from an aggregator.
+/// What one aggregator read returned.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct SeedRead {
+    /// The next (or latest) report date of each ticker the aggregator knows.
+    pub seeds: Vec<Seed>,
+    /// Tickers not read (an error, or skipped after a 429).
+    pub failed: usize,
+    /// The first error.
+    pub error: Option<String>,
+    /// Provider diagnostic lines, e.g. `yahoo_429=1`.
+    pub diagnostics: Vec<String>,
+}
+
+/// Report dates from an aggregator, for many tickers at once.
 #[async_trait(?Send)]
 pub trait CalendarSource {
-    async fn day(&self, date: NaiveDate) -> Result<Vec<Seed>, ProviderError>;
+    /// `tickers` in watchlist form (`BRK.B`).
+    async fn upcoming(&self, tickers: &[&str]) -> SeedRead;
+}
+
+/// `EARNINGS_CALENDAR_SEED`: `yahoo` (the default) seeds the calendar from
+/// Yahoo; `off` keeps only company announcements and EDGAR.
+pub fn yahoo_seeding(var: Option<&str>) -> Result<bool, String> {
+    match var.map(str::trim) {
+        None | Some("") | Some("yahoo") => Ok(true),
+        Some("off") => Ok(false),
+        Some(v) => Err(format!(
+            "unknown EARNINGS_CALENDAR_SEED: {v:?} (use yahoo or off)"
+        )),
+    }
 }
 
 fn iso(t: DateTime<Utc>) -> String {
@@ -482,6 +508,8 @@ pub struct RefreshOutcome {
     pub ir_checked: usize,
     pub quarantined: Vec<String>,
     pub errors: Vec<String>,
+    /// The aggregator's diagnostic lines (`yahoo_429=1` after a 429).
+    pub diagnostics: Vec<String>,
 }
 
 /// The next `SEED_DAYS` NYSE trading days from `today` (inclusive).
@@ -534,15 +562,79 @@ pub async fn refreshed_today(es: &dyn EarningsStore, now: DateTime<Utc>) -> Resu
     Ok(es.kv_get(KV_REFRESHED).await?.as_deref() == Some(today.as_str()))
 }
 
-/// Once per ET day (from 06:00, the polling window): read the aggregator for
-/// the next trading days, reconcile every watchlist ticker it lists, then
-/// check up to `IR_CHECKS` near, unconfirmed dates against company
-/// announcements. Provider errors are collected; a store error aborts.
-pub async fn refresh_tick(
+/// Reads the aggregator and reconciles its dates (rules 1-7), then rule 8.
+async fn seed_from(
     now: DateTime<Utc>,
     es: &dyn EarningsStore,
     store: &dyn Store,
     src: &dyn CalendarSource,
+    out: &mut RefreshOutcome,
+) -> Result<(), String> {
+    let today = et(now).date_naive();
+    let tickers: Vec<&'static str> = watchlist().iter().map(|e| e.ticker).collect();
+    let read = src.upcoming(&tickers).await;
+    out.diagnostics = read.diagnostics;
+    if let Some(e) = &read.error {
+        out.errors.push(format!(
+            "calendar: {} of {} tickers not read: {e}",
+            read.failed,
+            tickers.len()
+        ));
+        if read.failed >= tickers.len() {
+            store
+                .add_alert(
+                    "calendar",
+                    "warn",
+                    &format!("earnings calendar not refreshed on {today}: {e}"),
+                )
+                .await?;
+        }
+    }
+    let days = trading_days(today);
+    let Some(&last) = days.last() else {
+        return Ok(());
+    };
+    let mut seeds: BTreeMap<String, Seed> = BTreeMap::new();
+    for s in read.seeds {
+        if tickers.contains(&s.ticker.as_str()) && today <= s.date && s.date <= last {
+            seeds.entry(s.ticker.clone()).or_insert(s);
+        }
+    }
+    out.seeds = seeds.len();
+    for (ticker, s) in &seeds {
+        let existing = es.calendar_for(ticker).await?;
+        let changes = reconcile(&existing, Some(s), None, today, now);
+        apply(es, store, changes, out).await?;
+    }
+    // Rule 8: when the aggregator was read in full and no longer has a
+    // quarantined ticker in the window, its conflicting date is gone and
+    // the company's date stands.
+    if read.failed == 0 {
+        for mut r in es.calendar_between(&ymd(today), &ymd(last)).await? {
+            if r.status == "quarantined" && r.proof_url.is_some() && !seeds.contains_key(&r.ticker)
+            {
+                r.status = "confirmed".into();
+                r.conflict_reason = None;
+                r.next_check_at = None;
+                r.checked_at = iso(now);
+                r.updated_at = iso(now);
+                apply(es, store, vec![Change::Upsert(Box::new(r))], out).await?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Once per ET day (from 06:00, the polling window): read the aggregator
+/// (`src`; `None` when seeding is off) for the whole watchlist, reconcile
+/// every ticker with a date in the next `SEED_DAYS` trading days, then check
+/// up to `IR_CHECKS` near, unconfirmed dates against company announcements.
+/// Provider errors are collected; a store error aborts.
+pub async fn refresh_tick(
+    now: DateTime<Utc>,
+    es: &dyn EarningsStore,
+    store: &dyn Store,
+    src: Option<&dyn CalendarSource>,
     ns: &dyn NewsSearch,
     llm: &dyn LlmProvider,
 ) -> Result<RefreshOutcome, String> {
@@ -554,60 +646,8 @@ pub async fn refresh_tick(
     out.ran = true;
     // Mark first: a failing aggregator must not be retried every firing.
     es.kv_set(KV_REFRESHED, &ymd(today), &iso(now)).await?;
-
-    let tickers: Vec<&'static str> = watchlist().iter().map(|e| e.ticker).collect();
-    let mut seeds: BTreeMap<String, Seed> = BTreeMap::new();
-    let days = trading_days(today);
-    for &d in &days {
-        match src.day(d).await {
-            Ok(list) => {
-                for s in list
-                    .into_iter()
-                    .filter(|s| tickers.contains(&s.ticker.as_str()))
-                {
-                    seeds.entry(s.ticker.clone()).or_insert(s);
-                }
-            }
-            Err(e) => out.errors.push(format!("calendar {d}: {e}")),
-        }
-    }
-    if out.errors.len() == days.len() {
-        store
-            .add_alert(
-                "calendar",
-                "warn",
-                &format!(
-                    "earnings calendar not refreshed on {today}: {}",
-                    out.errors[0]
-                ),
-            )
-            .await?;
-    }
-    out.seeds = seeds.len();
-    for (ticker, s) in &seeds {
-        let existing = es.calendar_for(ticker).await?;
-        let changes = reconcile(&existing, Some(s), None, today, now);
-        apply(es, store, changes, &mut out).await?;
-    }
-    // Rule 8: when the aggregator was read in full and no longer lists a
-    // quarantined ticker in the window, its conflicting date is gone and
-    // the company's date stands.
-    if out.errors.is_empty() {
-        if let Some(last) = days.last() {
-            for mut r in es.calendar_between(&ymd(today), &ymd(*last)).await? {
-                if r.status == "quarantined"
-                    && r.proof_url.is_some()
-                    && !seeds.contains_key(&r.ticker)
-                {
-                    r.status = "confirmed".into();
-                    r.conflict_reason = None;
-                    r.next_check_at = None;
-                    r.checked_at = iso(now);
-                    r.updated_at = iso(now);
-                    apply(es, store, vec![Change::Upsert(Box::new(r))], &mut out).await?;
-                }
-            }
-        }
+    if let Some(src) = src {
+        seed_from(now, es, store, src, &mut out).await?;
     }
 
     let horizon = ymd(today + Duration::days(IR_HORIZON_DAYS));
@@ -1037,33 +1077,32 @@ mod tests {
         assert!(!names_date("October 30, 2025", dd));
     }
 
+    /// Seeds by ticker; records each read's ticker list.
     struct Src {
-        calls: RefCell<Vec<NaiveDate>>,
+        calls: RefCell<Vec<Vec<String>>>,
     }
     #[async_trait(?Send)]
     impl CalendarSource for Src {
-        async fn day(&self, date: NaiveDate) -> Result<Vec<Seed>, ProviderError> {
-            self.calls.borrow_mut().push(date);
-            Ok(match date.to_string().as_str() {
-                "2026-10-29" => vec![
-                    Seed {
-                        ticker: "AAPL".into(),
-                        date,
-                        slot: TimeSlot::Amc,
-                    },
-                    Seed {
-                        ticker: "ZZZQ".into(),
-                        date,
-                        slot: TimeSlot::Bmo,
-                    },
+        async fn upcoming(&self, tickers: &[&str]) -> SeedRead {
+            self.calls
+                .borrow_mut()
+                .push(tickers.iter().map(|t| t.to_string()).collect());
+            let seed = |t: &str, date: &str, slot| Seed {
+                ticker: t.into(),
+                date: d(date),
+                slot,
+            };
+            SeedRead {
+                seeds: vec![
+                    seed("AAPL", "2026-10-29", TimeSlot::Amc),
+                    seed("ZZZQ", "2026-10-29", TimeSlot::Bmo),
+                    seed("XOM", "2026-10-30", TimeSlot::Bmo),
+                    // Past the seeding window, and already past.
+                    seed("MSFT", "2027-01-28", TimeSlot::Amc),
+                    seed("NVDA", "2026-08-27", TimeSlot::Amc),
                 ],
-                "2026-10-30" => vec![Seed {
-                    ticker: "XOM".into(),
-                    date,
-                    slot: TimeSlot::Bmo,
-                }],
-                _ => vec![],
-            })
+                ..Default::default()
+            }
         }
     }
     struct Ns;
@@ -1096,12 +1135,17 @@ mod tests {
         let src = Src {
             calls: RefCell::new(vec![]),
         };
-        let o = refresh_tick(utc(NOW), &es, base.as_ref(), &src, &Ns, &Llm)
+        let o = refresh_tick(utc(NOW), &es, base.as_ref(), Some(&src), &Ns, &Llm)
             .await
             .unwrap();
         assert!(o.ran);
-        assert_eq!(src.calls.borrow().len(), SEED_DAYS);
-        assert_eq!(o.seeds, 2, "ZZZQ is not on the watchlist");
+        // One read for the whole watchlist.
+        assert_eq!(src.calls.borrow().len(), 1);
+        assert_eq!(src.calls.borrow()[0].len(), watchlist().len());
+        assert_eq!(
+            o.seeds, 2,
+            "ZZZQ is not on the watchlist; MSFT and NVDA are outside the window"
+        );
         assert_eq!(o.ir_checked, 2);
         // Yahoo says Oct 29; Apple says Oct 30.
         let aapl = es.calendar_for("AAPL").await.unwrap();
@@ -1115,20 +1159,20 @@ mod tests {
             utc("2026-10-26T15:00:00Z"),
             &es,
             base.as_ref(),
-            &src,
+            Some(&src),
             &Ns,
             &Llm,
         )
         .await
         .unwrap();
         assert!(!o.ran);
-        assert_eq!(src.calls.borrow().len(), SEED_DAYS);
+        assert_eq!(src.calls.borrow().len(), 1);
         // Before 06:00 ET nothing runs.
         let o = refresh_tick(
             utc("2026-10-27T09:00:00Z"),
             &es,
             base.as_ref(),
-            &src,
+            Some(&src),
             &Ns,
             &Llm,
         )
@@ -1147,11 +1191,11 @@ mod tests {
         struct Empty;
         #[async_trait(?Send)]
         impl CalendarSource for Empty {
-            async fn day(&self, _: NaiveDate) -> Result<Vec<Seed>, ProviderError> {
-                Ok(vec![])
+            async fn upcoming(&self, _: &[&str]) -> SeedRead {
+                SeedRead::default()
             }
         }
-        refresh_tick(utc(NOW), &es, base.as_ref(), &Empty, &Ns, &Llm)
+        refresh_tick(utc(NOW), &es, base.as_ref(), Some(&Empty), &Ns, &Llm)
             .await
             .unwrap();
         let rows = es.calendar_for("AAPL").await.unwrap();
@@ -1165,26 +1209,100 @@ mod tests {
         struct Down;
         #[async_trait(?Send)]
         impl CalendarSource for Down {
-            async fn day(&self, _: NaiveDate) -> Result<Vec<Seed>, ProviderError> {
-                Err(ProviderError::Http(429))
+            async fn upcoming(&self, tickers: &[&str]) -> SeedRead {
+                SeedRead {
+                    seeds: vec![],
+                    failed: tickers.len(),
+                    error: Some("http status 429".into()),
+                    diagnostics: vec!["yahoo_429=1".into()],
+                }
             }
         }
-        let o = refresh_tick(utc(NOW), &es, base.as_ref(), &Down, &Ns, &Llm)
+        let o = refresh_tick(utc(NOW), &es, base.as_ref(), Some(&Down), &Ns, &Llm)
             .await
             .unwrap();
-        assert_eq!(o.errors.len(), SEED_DAYS);
+        assert_eq!(o.errors.len(), 1, "{:?}", o.errors);
+        assert!(o.errors[0].contains("429"));
+        assert_eq!(o.diagnostics, ["yahoo_429=1"]);
         assert_eq!(base.alerts.borrow().len(), 1);
         refresh_tick(
             utc("2026-10-26T12:00:00Z"),
             &es,
             base.as_ref(),
-            &Down,
+            Some(&Down),
             &Ns,
             &Llm,
         )
         .await
         .unwrap();
         assert_eq!(base.alerts.borrow().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_partial_read_seeds_but_never_confirms_by_absence() {
+        // A 429 part-way: what was read is seeded, but a quarantined row is
+        // not confirmed just because its ticker was not read.
+        let base = Rc::new(MemStore::default());
+        let es = MemEarningsStore::new(base.clone());
+        let mut q = existing("2026-10-30", "quarantined", "ir");
+        q.conflict_reason = Some("aggregator says 2026-10-29; company says 2026-10-30".into());
+        es.upsert_calendar(&q).await.unwrap();
+        struct Partial;
+        #[async_trait(?Send)]
+        impl CalendarSource for Partial {
+            async fn upcoming(&self, tickers: &[&str]) -> SeedRead {
+                SeedRead {
+                    seeds: vec![Seed {
+                        ticker: "XOM".into(),
+                        date: "2026-10-30".parse().unwrap(),
+                        slot: TimeSlot::Bmo,
+                    }],
+                    failed: tickers.len() - 50,
+                    error: Some("not requested after HTTP 429".into()),
+                    diagnostics: vec![],
+                }
+            }
+        }
+        let o = refresh_tick(utc(NOW), &es, base.as_ref(), Some(&Partial), &Ns, &Llm)
+            .await
+            .unwrap();
+        assert_eq!(o.seeds, 1);
+        assert_eq!(
+            es.calendar_for("AAPL").await.unwrap()[0].status,
+            "quarantined"
+        );
+        assert!(
+            base.alerts.borrow().is_empty(),
+            "a partial read does not alert"
+        );
+    }
+
+    #[tokio::test]
+    async fn seeding_off_still_checks_announcements() {
+        let base = Rc::new(MemStore::default());
+        let es = MemEarningsStore::new(base.clone());
+        es.upsert_calendar(&existing("2026-10-30", "unconfirmed", "yahoo"))
+            .await
+            .unwrap();
+        let o = refresh_tick(utc(NOW), &es, base.as_ref(), None, &Ns, &Llm)
+            .await
+            .unwrap();
+        assert!(o.ran);
+        assert_eq!((o.seeds, o.ir_checked), (0, 1));
+        assert_eq!(
+            es.calendar_for("AAPL").await.unwrap()[0].status,
+            "confirmed"
+        );
+    }
+
+    #[test]
+    fn seed_switch() {
+        assert_eq!(yahoo_seeding(None), Ok(true));
+        assert_eq!(yahoo_seeding(Some("yahoo")), Ok(true));
+        assert_eq!(yahoo_seeding(Some("off")), Ok(false));
+        assert!(yahoo_seeding(Some("yahooo"))
+            .unwrap_err()
+            .contains("EARNINGS_CALENDAR_SEED"));
     }
 
     #[tokio::test]

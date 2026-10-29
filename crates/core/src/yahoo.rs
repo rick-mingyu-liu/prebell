@@ -17,6 +17,8 @@ const CRUMB_URL: &str = "https://query1.finance.yahoo.com/v1/test/getcrumb";
 const QUOTE_URL: &str = "https://query1.finance.yahoo.com/v7/finance/quote";
 /// Symbols per v7 quote request. Requests are sent one after another.
 const QUOTE_BATCH: usize = 50;
+/// Largest v7 quote body read (50 symbols are ~150 KB).
+const MAX_QUOTE_BYTES: usize = 1024 * 1024;
 /// `preMarketPrice - preMarketChange` may differ from `regularMarketPrice` by
 /// this fraction of the price before the quote counts as stale.
 const ANCHOR_TOLERANCE: f64 = 0.005;
@@ -49,6 +51,21 @@ struct Diag {
     error: Option<String>,
     /// Outcomes of the last `close_quotes`; `None` after `premarket_quotes`.
     closes: Option<CloseDiag>,
+    /// HTTP 429 answers in the last batched call.
+    throttled: usize,
+}
+
+/// Yahoo's earnings-date fields of one symbol (`earningsTimestamp`,
+/// `earningsTimestampStart`, `earningsTimestampEnd`,
+/// `isEarningsDateEstimate`). The timestamp may be the last report until
+/// Yahoo rolls it forward.
+#[derive(Debug, Clone, PartialEq)]
+pub struct EarningsTimes {
+    pub at: Option<DateTime<Utc>>,
+    pub start: Option<DateTime<Utc>>,
+    pub end: Option<DateTime<Utc>>,
+    /// Yahoo's own guess, not the company's announcement.
+    pub estimate: bool,
 }
 
 /// Why `close_quotes` items were rejected, so a collapsed movers scan says why.
@@ -93,16 +110,17 @@ impl<H: Http> Yahoo<H> {
     /// converted by `convert`. A failed cookie or crumb fetch fails every
     /// symbol; after a 429 the remaining chunks are not requested and are
     /// `Skipped`, so a throttled IP is not hammered.
-    async fn v7_quotes(
+    async fn v7_quotes<T: Clone>(
         &self,
         symbols: &[String],
-        convert: &dyn Fn(V7Quote) -> Result<Quote, ProviderError>,
-    ) -> Vec<(String, Result<Quote, ProviderError>)> {
+        convert: &dyn Fn(V7Quote) -> Result<T, ProviderError>,
+    ) -> Vec<(String, Result<T, ProviderError>)> {
         {
             let mut d = self.diag.borrow_mut();
             d.states.clear();
             d.error = None;
             d.closes = None;
+            d.throttled = 0;
         }
         let fail_all = |e: ProviderError| {
             symbols
@@ -137,7 +155,10 @@ impl<H: Http> Yahoo<H> {
                     _ => parse_batch(&x.body, &mut self.diag.borrow_mut(), convert),
                 })
             };
-            throttled |= r.as_ref().err() == Some(&ProviderError::Http(429));
+            if r.as_ref().err() == Some(&ProviderError::Http(429)) {
+                throttled = true;
+                self.diag.borrow_mut().throttled += 1;
+            }
             match r {
                 Ok(batch) => out.extend(chunk.iter().map(|s| {
                     let q = batch.get(s).cloned().unwrap_or(Err(ProviderError::Empty));
@@ -231,15 +252,40 @@ impl<H: Http> Yahoo<H> {
             encode(&s.crumb)
         );
         self.http
-            .get(
+            .get_capped(
                 &url,
                 &[
                     ("User-Agent", UA),
                     ("Accept", "application/json"),
                     ("Cookie", &s.cookie),
                 ],
+                MAX_QUOTE_BYTES,
             )
             .await
+    }
+
+    /// Earnings-date fields for many symbols through the batched v7 quote
+    /// session (109 symbols: the cookie, the crumb and 3 quote requests).
+    /// After a 429 the rest are `Skipped`; a symbol without the fields is
+    /// `Empty`.
+    pub async fn earnings_times(
+        &self,
+        symbols: &[String],
+    ) -> Vec<(String, Result<EarningsTimes, ProviderError>)> {
+        let ts = |s: Option<i64>| s.and_then(|s| DateTime::from_timestamp(s, 0));
+        self.v7_quotes(symbols, &|v| {
+            let t = EarningsTimes {
+                at: ts(v.earnings_timestamp),
+                start: ts(v.earnings_timestamp_start),
+                end: ts(v.earnings_timestamp_end),
+                estimate: v.is_earnings_date_estimate.unwrap_or(false),
+            };
+            if t.at.is_none() && t.start.is_none() && t.end.is_none() {
+                return Err(ProviderError::Empty);
+            }
+            Ok(t)
+        })
+        .await
     }
 }
 
@@ -311,17 +357,22 @@ struct V7Quote {
     /// Epoch seconds of the last regular-session trade.
     regular_market_time: Option<i64>,
     market_state: Option<String>,
+    /// Epoch seconds of the next (or latest) earnings report.
+    earnings_timestamp: Option<i64>,
+    earnings_timestamp_start: Option<i64>,
+    earnings_timestamp_end: Option<i64>,
+    is_earnings_date_estimate: Option<bool>,
 }
 
-type Batch = HashMap<String, Result<Quote, ProviderError>>;
+type Batch<T> = HashMap<String, Result<T, ProviderError>>;
 
 /// One v7 quote body, keyed by each item's `symbol` field (never by position),
 /// each item converted by `convert`.
-fn parse_batch(
+fn parse_batch<T>(
     body: &str,
     d: &mut Diag,
-    convert: &dyn Fn(V7Quote) -> Result<Quote, ProviderError>,
-) -> Result<Batch, ProviderError> {
+    convert: &dyn Fn(V7Quote) -> Result<T, ProviderError>,
+) -> Result<Batch<T>, ProviderError> {
     let root: QuoteRoot =
         serde_json::from_str(body).map_err(|e| ProviderError::Parse(e.to_string()))?;
     let QuoteResponse { result, error } = root.quote_response;
@@ -658,6 +709,9 @@ impl<H: Http> MarketData for Yahoo<H> {
         }
         if let Some(code) = &d.error {
             out.push(format!("yahoo_error={code}"));
+        }
+        if d.throttled > 0 {
+            out.push(format!("yahoo_429={}", d.throttled));
         }
         if let Some(c) = d.closes {
             out.push(format!(
@@ -1439,5 +1493,66 @@ mod tests {
         // A premarket call after it drops the close line.
         y.premarket_quotes(&syms(&["A"]), now()).await;
         assert!(!y.diagnostics().iter().any(|l| l.starts_with("closes")));
+    }
+
+    /// v7 items with Yahoo's earnings-date fields (epoch seconds).
+    fn earnings_body(symbols: &[String]) -> String {
+        let items: Vec<serde_json::Value> = symbols
+            .iter()
+            .map(|s| match s.as_str() {
+                // Confirmed: 2026-10-30 16:30 ET (20:30Z).
+                "AAPL" => serde_json::json!({"symbol": s, "earningsTimestamp": 1793392200_i64,
+                    "earningsTimestampStart": 1793392200_i64, "earningsTimestampEnd": 1793392200_i64,
+                    "isEarningsDateEstimate": false}),
+                // An estimate spanning two days.
+                "XOM" => serde_json::json!({"symbol": s, "earningsTimestampStart": 1793361600_i64,
+                    "earningsTimestampEnd": 1793448000_i64, "isEarningsDateEstimate": true}),
+                _ => serde_json::json!({"symbol": s}),
+            })
+            .collect();
+        serde_json::json!({"quoteResponse": {"result": items, "error": null}}).to_string()
+    }
+
+    #[tokio::test]
+    async fn earnings_times_are_read_from_batched_v7_quotes() {
+        let y = yahoo_v7(|r, _| resp(200, &earnings_body(&query(&r.url).0)));
+        let symbols: Vec<String> = (0..109)
+            .map(|i| format!("S{i}"))
+            .chain(syms(&["AAPL", "XOM"]))
+            .collect();
+        let r = y.earnings_times(&symbols).await;
+        assert_eq!(r.len(), 111);
+        // fc.yahoo.com, getcrumb and 3 quote requests of at most 50 symbols.
+        assert_eq!(y.http.seen.borrow().len(), 5);
+        assert_eq!(seen(&y, QUOTE_URL).len(), 3);
+        let get = |s: &str| r.iter().find(|(k, _)| k == s).unwrap().1.clone();
+        let aapl = get("AAPL").unwrap();
+        assert_eq!(aapl.at, Some("2026-10-30T20:30:00Z".parse().unwrap()));
+        assert!(!aapl.estimate);
+        let xom = get("XOM").unwrap();
+        assert_eq!((xom.at, xom.estimate), (None, true));
+        assert_eq!(xom.start, Some("2026-10-30T12:00:00Z".parse().unwrap()));
+        assert_eq!(xom.end, Some("2026-10-31T12:00:00Z".parse().unwrap()));
+        // No earnings fields: nothing known.
+        assert_eq!(get("S0"), Err(ProviderError::Empty));
+    }
+
+    #[tokio::test]
+    async fn earnings_times_stop_on_429_and_count_it() {
+        let y = yahoo_v7(|_, _| resp(429, HTML));
+        let symbols: Vec<String> = (0..109).map(|i| format!("S{i}")).collect();
+        let r = y.earnings_times(&symbols).await;
+        assert_eq!(seen(&y, QUOTE_URL).len(), 1, "no request after the 429");
+        assert!(r[..50]
+            .iter()
+            .all(|(_, q)| *q == Err(ProviderError::Http(429))));
+        assert!(r[50..]
+            .iter()
+            .all(|(_, q)| *q == Err(ProviderError::Skipped)));
+        assert!(
+            y.diagnostics().contains(&"yahoo_429=1".to_string()),
+            "{:?}",
+            y.diagnostics()
+        );
     }
 }

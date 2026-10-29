@@ -9,7 +9,7 @@ mod store;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use prebell_core::competitor::run_competitor;
-use prebell_core::earnings::calendar::refresh_tick;
+use prebell_core::earnings::calendar::{refresh_tick, yahoo_seeding, CalendarSource};
 use prebell_core::earnings::run::{build_tick, poll_job};
 use prebell_core::edgar::Edgar;
 use prebell_core::jobs::{alert_once_today, redact, run_job, JobRunner};
@@ -259,8 +259,10 @@ impl JobRunner for Runner<'_> {
                 let news_key = secret_or_empty(env, "TAVILY_API_KEY");
                 let ns = Tavily::new(self.http.clone(), news_key.clone());
                 let llm = self.llm(&[&news_key])?;
+                let yahoo = yahoo_seeding(text(env, "EARNINGS_CALENDAR_SEED").as_deref())?;
                 let cal = YahooCalendar::new(self.http.clone());
-                let o = refresh_tick(t, store, store, &cal, &ns, llm.as_ref()).await?;
+                let src: Option<&dyn CalendarSource> = if yahoo { Some(&cal) } else { None };
+                let o = refresh_tick(t, store, store, src, &ns, llm.as_ref()).await?;
                 Ok(format!("{o:?}"))
             }
         }
