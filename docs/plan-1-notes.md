@@ -64,3 +64,30 @@ one D1 batch) and the R2 `put_facts`/`get_facts`.
 
 Local D1 also already held a run row (`premarket-2026-01-05`) and a post from
 Task 1's schema check. Both were left alone.
+
+## Yahoo batching and run diagnostics (2026-10-29)
+
+The first live run sent one Yahoo chart request per symbol: 522 requests in
+about 10 seconds. Yahoo answered HTTP 429, no movers survived, and the run
+ended `Retrying("movers")` without saying why.
+
+- `premarket_quotes` now uses the v7 quote endpoint
+  (`/v7/finance/quote?symbols=…&crumb=…`), 50 symbols per request, sent one
+  after another. The cookie comes from `fc.yahoo.com` (a 404 there is normal)
+  and the crumb from `/v1/test/getcrumb`. Both are cached for the life of the
+  `Yahoo` struct and refreshed once on a 401 or 403. After a 429 the
+  remaining chunks are not requested. `quote()` (the 4 futures) still uses
+  the per-symbol chart endpoint.
+- Field mapping: `last = preMarketPrice`, `change_pct = preMarketChangePercent`
+  (percent units), `prev_close = regularMarketPrice`, which at 8:30 AM ET is
+  still the prior session's close. If `preMarketPrice − preMarketChange`
+  disagrees with it, that difference is used. A symbol without
+  `preMarketPrice` (no premarket trades) or absent from the response is
+  `Empty`.
+- **Liquidity ruling:** v7 has no premarket volume, so `volume` is `None`.
+  When `volume` is `None` the mover filter skips the 50,000-share premarket
+  volume test and keeps only the `last ≥ $5` floor. Every name in the
+  universe is an S&P 500 or Nasdaq-100 large cap.
+- The fixtures (`yahoo_quote_batch.json`, `yahoo_getcrumb.txt`) are hand-written
+  from the documented response shapes used by yfinance. Yahoo was not
+  fetched live, because this IP was throttled.

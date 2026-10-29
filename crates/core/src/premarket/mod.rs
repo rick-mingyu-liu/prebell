@@ -176,7 +176,11 @@ async fn liquid_quotes(md: &dyn MarketData) -> Vec<Quote> {
             q.symbol = tickers[i].clone();
             Some(q)
         })
-        .filter(|q| q.last >= MIN_PRICE && q.volume.is_some_and(|v| v >= MIN_VOLUME))
+        // Ruling (plan 1): Yahoo's v7 quote has no premarket volume, so
+        // `volume` is `None` for every mover candidate. The volume test is then
+        // skipped: the universe is S&P 500 and Nasdaq-100 large caps, which
+        // are liquid. The $5 price floor always applies.
+        .filter(|q| q.last >= MIN_PRICE && q.volume.is_none_or(|v| v >= MIN_VOLUME))
         .collect()
 }
 
@@ -503,11 +507,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn low_or_unknown_volume_is_excluded() {
+    async fn low_volume_is_excluded_unknown_volume_is_kept() {
         let m = md(&[
             q("AAPL", 230.0, 9.0, Some(49_999)),
-            q("MSFT", 400.0, 9.0, None),
+            q("MSFT", 400.0, 8.0, None),
             q("NVDA", 180.0, 1.0, Some(50_000)),
+            q("F", 4.99, 30.0, None),
         ]);
         let f = build_facts(&m, &ns(vec![]), &llm(vec![]), date(), now()).await;
         assert_eq!(
@@ -515,7 +520,7 @@ mod tests {
                 .iter()
                 .map(|m| m.quote.symbol.as_str())
                 .collect::<Vec<_>>(),
-            vec!["NVDA"]
+            vec!["MSFT", "NVDA"]
         );
     }
 
