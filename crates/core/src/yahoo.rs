@@ -1,3 +1,4 @@
+use crate::clock::{trading_day, DayKind};
 use crate::facts::Quote;
 use crate::providers::{Http, MarketData, ProviderError};
 use async_trait::async_trait;
@@ -102,15 +103,28 @@ fn parse_close(symbol: &str, body: &str, session: NaiveDate) -> Result<Quote, Pr
     let last = meta.regular_price.ok_or(ProviderError::Empty)?;
     let prev_close = meta.chart_previous_close.ok_or(ProviderError::Empty)?;
     let at = meta.regular_time.ok_or(ProviderError::Empty)?;
-    let day = Utc
+    let traded = Utc
         .timestamp_opt(at, 0)
         .single()
         .ok_or(ProviderError::Empty)?
-        .with_timezone(&exchange_tz(&meta))
-        .date_naive();
+        .with_timezone(&exchange_tz(&meta));
+    let day = traded.date_naive();
     if day != session {
         return Err(ProviderError::Parse(format!(
             "stale quote: last trade on {day}, not {session}"
+        )));
+    }
+    // A last trade well before the bell is a live price, not the close. One
+    // minute of slack allows a final print stamped 15:59:xx.
+    let close = match trading_day(session) {
+        DayKind::EarlyClose => NaiveTime::from_hms_opt(12, 59, 0),
+        _ => NaiveTime::from_hms_opt(15, 59, 0),
+    }
+    .expect("valid built-in time");
+    if traded.time() < close {
+        return Err(ProviderError::Parse(format!(
+            "session not closed: last trade at {}",
+            traded.format("%H:%M")
         )));
     }
     if prev_close == 0.0 {
@@ -411,5 +425,30 @@ mod tests {
             .close_quote("NVDA", day("2026-10-29"))
             .await;
         assert!(matches!(r, Err(ProviderError::Parse(_))));
+    }
+
+    #[tokio::test]
+    async fn intraday_price_is_not_a_close() {
+        // 1793298600 = 2026-10-29 14:30 ET.
+        let body = NVDA.replace(
+            "\"regularMarketTime\": 1793304000",
+            "\"regularMarketTime\": 1793298600",
+        );
+        let r = yahoo(&[("NVDA", 200, &body)])
+            .close_quote("NVDA", day("2026-10-29"))
+            .await;
+        assert!(
+            matches!(&r, Err(ProviderError::Parse(m)) if m.contains("not closed")),
+            "{r:?}"
+        );
+        // 15:59:30 ET still counts as the close.
+        let body = NVDA.replace(
+            "\"regularMarketTime\": 1793304000",
+            "\"regularMarketTime\": 1793303970",
+        );
+        assert!(yahoo(&[("NVDA", 200, &body)])
+            .close_quote("NVDA", day("2026-10-29"))
+            .await
+            .is_ok());
     }
 }
