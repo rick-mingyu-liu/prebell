@@ -43,7 +43,19 @@ pub async fn tick(
     ns: &dyn NewsSearch,
     llm: &dyn LlmProvider,
 ) -> TickOutcome {
-    step(now, store, md, ns, llm)
+    tick_with_log(now, store, md, ns, llm, &|_| {}).await
+}
+
+/// `tick`, passing the build's diagnostics line to `log` once when it builds.
+pub async fn tick_with_log(
+    now: DateTime<Utc>,
+    store: &dyn Store,
+    md: &dyn MarketData,
+    ns: &dyn NewsSearch,
+    llm: &dyn LlmProvider,
+    log: &dyn Fn(&str),
+) -> TickOutcome {
+    step(now, store, md, ns, llm, log)
         .await
         .unwrap_or_else(TickOutcome::Retrying)
 }
@@ -54,6 +66,7 @@ async fn step(
     md: &dyn MarketData,
     ns: &dyn NewsSearch,
     llm: &dyn LlmProvider,
+    log: &dyn Fn(&str),
 ) -> Result<TickOutcome, String> {
     let decision = premarket_decision(now);
     let date = match decision {
@@ -85,7 +98,7 @@ async fn step(
 
     match decision {
         SlotDecision::InWindow { .. } if in_flight => Ok(TickOutcome::Nothing),
-        SlotDecision::InWindow { .. } => build(now, store, md, ns, llm, date, run).await,
+        SlotDecision::InWindow { .. } => build(now, store, md, ns, llm, log, date, run).await,
         // Let an in-flight build finish; once its lease expires it is skipped.
         SlotDecision::PastDeadline { .. } if in_flight => Ok(TickOutcome::Nothing),
         SlotDecision::PastDeadline { .. } => skip(now, store, date, run).await,
@@ -185,12 +198,14 @@ fn new_run(now: DateTime<Utc>, date: NaiveDate) -> RunRow {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn build(
     now: DateTime<Utc>,
     store: &dyn Store,
     md: &dyn MarketData,
     ns: &dyn NewsSearch,
     llm: &dyn LlmProvider,
+    log: &dyn Fn(&str),
     date: NaiveDate,
     run: Option<RunRow>,
 ) -> Result<TickOutcome, String> {
@@ -202,9 +217,15 @@ async fn build(
     store.upsert_run(&row).await?;
 
     let facts = build_facts(md, ns, llm, date, now).await;
+    let diagnostics = facts.diagnostics.join("; ");
+    log(&format!("diagnostics: {diagnostics}"));
     let missing = missing_required(&facts);
     if !missing.is_empty() {
-        return retry_later(store, row, missing.join(", ")).await;
+        let mut err = missing.join(", ");
+        if !diagnostics.is_empty() {
+            err = format!("{err} | {diagnostics}");
+        }
+        return retry_later(store, row, err).await;
     }
 
     let (en, en_md) = match write(llm, &facts, Lang::En).await {
@@ -658,16 +679,19 @@ mod tests {
     async fn all_429_retries_then_skips_once() {
         let s = MemStore::default();
         let (m, l) = (md(false), llm(true, true));
+        let n = crate::premarket::universe().len();
+        let want = format!(
+            "futures, movers | quotes ok=0 http429={n} http_other=0 empty=0 parse=0 net=0; \
+             movers liquid=0 gainers=0 losers=0; reasons proposed=0 kept=0; \
+             search_err=1 llm_err=0; futures ok=0 err=4"
+        );
         for t in ["2026-10-29T12:30:00Z", "2026-10-29T12:35:00Z"] {
             match tick(utc(t), &s, &m, &FakeNs, &l).await {
-                TickOutcome::Retrying(e) => assert_eq!(e, "futures, movers"),
+                TickOutcome::Retrying(e) => assert_eq!(e, want),
                 o => panic!("{o:?}"),
             }
             assert_eq!(run_status(&s), "pending");
-            assert_eq!(
-                s.runs.borrow()[KEY].last_error.as_deref(),
-                Some("futures, movers")
-            );
+            assert_eq!(s.runs.borrow()[KEY].last_error.as_deref(), Some(&*want));
         }
         assert_eq!(s.runs.borrow()[KEY].attempts, 2);
         assert_eq!(
@@ -687,6 +711,31 @@ mod tests {
         );
         assert_eq!(s.alerts.borrow().len(), 1);
         assert!(s.posts.borrow().is_empty());
+    }
+
+    #[tokio::test]
+    async fn build_logs_diagnostics_once() {
+        let s = MemStore::default();
+        let (m, l) = (md(true), llm(true, true));
+        let logs = std::cell::RefCell::new(Vec::<String>::new());
+        let log = |m: &str| logs.borrow_mut().push(m.to_string());
+        let now = utc("2026-10-29T12:30:00Z");
+        assert_eq!(
+            tick_with_log(now, &s, &m, &FakeNs, &l, &log).await,
+            TickOutcome::Published
+        );
+        {
+            let logs = logs.borrow();
+            assert_eq!(logs.len(), 1, "{logs:?}");
+            assert!(logs[0].starts_with("diagnostics: quotes ok=1 "), "{logs:?}");
+            assert!(
+                logs[0].contains("; movers liquid=1 gainers=1 losers=0"),
+                "{logs:?}"
+            );
+        }
+        // No build, no diagnostics line.
+        tick_with_log(now, &s, &m, &FakeNs, &l, &log).await;
+        assert_eq!(logs.borrow().len(), 1);
     }
 
     #[tokio::test]

@@ -327,8 +327,13 @@ pub async fn write(
     f: &PremarketFacts,
     lang: Lang,
 ) -> Result<(Draft, String), Vec<String>> {
-    let facts_json =
-        serde_json::to_string_pretty(f).map_err(|e| vec![format!("draft: facts json: {e}")])?;
+    // Diagnostics are operational counters, not facts the brief may cite.
+    let for_llm = PremarketFacts {
+        diagnostics: vec![],
+        ..f.clone()
+    };
+    let facts_json = serde_json::to_string_pretty(&for_llm)
+        .map_err(|e| vec![format!("draft: facts json: {e}")])?;
     let allowed = numbers_in_facts(f);
     let mut user = facts_json.clone();
     let mut last = None;
@@ -422,6 +427,7 @@ mod tests {
             watch_list: Field::Missing {
                 reason: "not available in v1".into(),
             },
+            diagnostics: vec![],
         }
     }
 
@@ -694,5 +700,18 @@ mod tests {
         assert_eq!(fmt_num(1234567.891), "1,234,567.89");
         assert_eq!(fmt_num(-42.0), "-42.00");
         assert_eq!(fmt_num(999.999), "1,000.00");
+    }
+
+    #[tokio::test]
+    async fn diagnostics_are_not_sent_to_the_llm() {
+        let l = llm(vec![clean(Lang::En)]);
+        let mut f = facts();
+        f.diagnostics = vec!["quotes ok=480 http429=0".into()];
+        write(&l, &f, Lang::En).await.unwrap();
+        let user = &l.prompts.borrow()[0].1;
+        assert!(
+            !user.contains("diagnostics") && !user.contains("http429"),
+            "{user}"
+        );
     }
 }

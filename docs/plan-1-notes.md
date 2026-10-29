@@ -91,3 +91,11 @@ ended `Retrying("movers")` without saying why.
 - The fixtures (`yahoo_quote_batch.json`, `yahoo_getcrumb.txt`) are hand-written
   from the documented response shapes used by yfinance. Yahoo was not
   fetched live, because this IP was throttled.
+- **Diagnostics:** `PremarketFacts.diagnostics` (serde default, omitted when
+  empty, never sent to the LLM) holds short counters such as
+  `quotes ok=480 http429=0 http_other=0 empty=42 parse=0 net=0`,
+  `movers liquid=470 gainers=5 losers=5`, `reasons proposed=14 kept=9`,
+  `search_err=0 llm_err=0` and `futures ok=4 err=0`. When required sections are
+  missing, `last_error` is the missing list, then ` | `, then the counters
+  joined by `; `, e.g. `movers | quotes ok=0 http429=522 …`. The generator logs
+  `diagnostics: …` once per build tick.

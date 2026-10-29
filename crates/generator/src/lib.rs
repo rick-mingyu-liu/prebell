@@ -6,7 +6,7 @@ mod store;
 
 use chrono::{DateTime, Utc};
 use prebell_core::llm::{api_key_var, llm_from_env, unknown_provider};
-use prebell_core::run::tick;
+use prebell_core::run::tick_with_log;
 use prebell_core::tavily::Tavily;
 use prebell_core::yahoo::Yahoo;
 use serde::{Deserialize, Serialize};
@@ -103,7 +103,10 @@ async fn queue(batch: MessageBatch<Job>, env: Env, _ctx: Context) -> Result<()> 
     .map_err(|e| Error::RustError(e.to_string()))?;
 
     for msg in batch.messages()? {
-        let outcome = tick(now(&env), &store, &md, &ns, llm.as_ref()).await;
+        let outcome = tick_with_log(now(&env), &store, &md, &ns, llm.as_ref(), &|m| {
+            console_log!("{m}")
+        })
+        .await;
         console_log!("job {}: {:?}", msg.body().job, outcome);
         msg.ack();
     }
