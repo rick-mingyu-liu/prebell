@@ -192,19 +192,55 @@ struct SubRoot {
 struct SubFilings {
     recent: Recent,
 }
+/// Rows of `filings.recent` kept (newest first). The rest of each column is
+/// skipped without allocating: a big filer lists 1,000 rows, and 34 such
+/// documents per poll must fit the Free plan's CPU budget.
+pub const MAX_RECENT_ROWS: usize = 100;
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct Recent {
+    #[serde(deserialize_with = "newest")]
     accession_number: Vec<String>,
+    #[serde(deserialize_with = "newest")]
     form: Vec<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "newest")]
     items: Vec<String>,
+    #[serde(deserialize_with = "newest")]
     filing_date: Vec<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "newest")]
     report_date: Vec<String>,
+    #[serde(deserialize_with = "newest")]
     acceptance_date_time: Vec<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "newest")]
     primary_document: Vec<String>,
+}
+
+/// The first `MAX_RECENT_ROWS` strings of a JSON array; later ones are
+/// skipped unparsed.
+fn newest<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<String>, D::Error> {
+    struct V;
+    impl<'de> serde::de::Visitor<'de> for V {
+        type Value = Vec<String>;
+        fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+            f.write_str("an array of strings")
+        }
+        fn visit_seq<A: serde::de::SeqAccess<'de>>(
+            self,
+            mut seq: A,
+        ) -> Result<Self::Value, A::Error> {
+            let mut out = Vec::new();
+            while out.len() < MAX_RECENT_ROWS {
+                match seq.next_element::<String>()? {
+                    Some(v) => out.push(v),
+                    None => return Ok(out),
+                }
+            }
+            while seq.next_element::<serde::de::IgnoredAny>()?.is_some() {}
+            Ok(out)
+        }
+    }
+    d.deserialize_seq(V)
 }
 
 /// EDGAR's `acceptanceDateTime` is RFC 3339 UTC (`2026-07-30T20:30:28.000Z`
@@ -515,6 +551,33 @@ pub(crate) mod tests {
             Some("2026-10-31T00:45:00Z".parse().unwrap())
         );
         assert_eq!(parse_accepted("2026-10-31 00:45"), None);
+    }
+
+    #[test]
+    fn submissions_keep_only_the_newest_rows() {
+        // Big filers list up to 1,000 recent rows; only the newest matter
+        // (the detection window is 96 h), and the rest are skipped unparsed
+        // to stay inside the Free plan's CPU budget.
+        let n = MAX_RECENT_ROWS + 50;
+        let col = |f: &dyn Fn(usize) -> String| {
+            let v: Vec<String> = (0..n).map(f).collect();
+            serde_json::to_string(&v).unwrap()
+        };
+        let body = format!(
+            r#"{{"cik":"1","name":"X","tickers":["X"],"filings":{{"recent":{{
+            "accessionNumber":{},"form":{},"items":{},"filingDate":{},"reportDate":{},
+            "acceptanceDateTime":{},"primaryDocument":{}}}}}}}"#,
+            col(&|i| format!("0000000001-26-{i:06}")),
+            col(&|_| "4".into()),
+            col(&|_| String::new()),
+            col(&|_| "2026-10-30".into()),
+            col(&|_| "2026-10-30".into()),
+            col(&|_| "2026-10-30T20:30:41.000Z".into()),
+            col(&|_| "x.htm".into()),
+        );
+        let s = parse_submissions(&body).unwrap();
+        assert_eq!(s.recent.len(), MAX_RECENT_ROWS);
+        assert_eq!(s.recent[0].accession, "0000000001-26-000000");
     }
 
     #[tokio::test]

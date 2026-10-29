@@ -519,6 +519,12 @@ async fn apply(
     Ok(())
 }
 
+/// Whether the calendar refresh already ran on `now`'s ET date.
+pub async fn refreshed_today(es: &dyn EarningsStore, now: DateTime<Utc>) -> Result<bool, String> {
+    let today = ymd(et(now).date_naive());
+    Ok(es.kv_get(KV_REFRESHED).await?.as_deref() == Some(today.as_str()))
+}
+
 /// Once per ET day (from 06:00, the polling window): read the aggregator for
 /// the next trading days, reconcile every watchlist ticker it lists, then
 /// check up to `IR_CHECKS` near, unconfirmed dates against company
@@ -533,13 +539,11 @@ pub async fn refresh_tick(
 ) -> Result<RefreshOutcome, String> {
     let mut out = RefreshOutcome::default();
     let today = et(now).date_naive();
-    if !crate::earnings::in_window(now)
-        || es.kv_get(KV_REFRESHED).await?.as_deref() == Some(&ymd(today))
-    {
+    if !crate::earnings::in_window(now) || refreshed_today(es, now).await? {
         return Ok(out);
     }
     out.ran = true;
-    // Mark first: a failing aggregator must not be retried every minute.
+    // Mark first: a failing aggregator must not be retried every firing.
     es.kv_set(KV_REFRESHED, &ymd(today), &iso(now)).await?;
 
     let tickers: Vec<&'static str> = watchlist().iter().map(|e| e.ticker).collect();

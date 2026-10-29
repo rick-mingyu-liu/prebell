@@ -10,7 +10,7 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use prebell_core::competitor::run_competitor;
 use prebell_core::earnings::calendar::refresh_tick;
-use prebell_core::earnings::run::{build_tick, poll_tick};
+use prebell_core::earnings::run::{build_tick, poll_job};
 use prebell_core::edgar::Edgar;
 use prebell_core::jobs::{alert_once_today, redact, run_job, JobRunner};
 use prebell_core::llm::{api_key_var, llm_from_env, unknown_provider};
@@ -18,7 +18,9 @@ use prebell_core::providers::CountingHttp;
 use prebell_core::providers::LlmProvider;
 use prebell_core::recap;
 use prebell_core::run::{tick_with_hooks, Hooks, TickOutcome};
-use prebell_core::schedule::{jobs_for_cron, queue_for, ContentJob, EarningsStep, JOBS};
+use prebell_core::schedule::{
+    jobs_for_cron, queue_for, ContentJob, EarningsStep, EARNINGS_QUEUE, JOBS,
+};
 use prebell_core::tavily::Tavily;
 use prebell_core::yahoo::Yahoo;
 use prebell_core::yahoo_calendar::YahooCalendar;
@@ -29,8 +31,6 @@ use crate::http::{WorkerHttp, WorkerTimer};
 use crate::store::D1Store;
 
 const PLACEHOLDER_CONTACT: &str = "placeholder@example.com";
-/// An earnings message older than this polls the current batch.
-const MAX_POLL_LAG_MINUTES: i64 = 3;
 
 /// Queue message body. A struct (not `serde_json::Value`) so it crosses the
 /// queue as a plain JS object rather than a JS `Map`.
@@ -201,32 +201,25 @@ impl JobRunner for Runner<'_> {
         format!("{outcome:?}")
     }
 
-    /// One earnings tick: poll a watchlist batch, refresh the calendar (once
-    /// a day), then build at most one queued filing.
-    async fn earnings(&self, _step: EarningsStep) -> std::result::Result<String, String> {
+    /// One earnings step, each its own message and so its own subrequest
+    /// budget: a poll (no LLM) queues the builds and the calendar refresh.
+    async fn earnings(&self, step: EarningsStep) -> std::result::Result<String, String> {
         let env = self.env;
         let store = self.store;
         let t = now(env);
         let edgar = self.edgar()?;
-        let news_key = secret_or_empty(env, "TAVILY_API_KEY");
-        let ns = Tavily::new(self.http.clone(), news_key.clone());
-        let llm = self.llm(&[&news_key])?;
-        let fired = self.fired.unwrap_or(t);
-        // A message delayed by a long build polls the current batch instead
-        // of its own.
-        let poll_at = if t - fired <= chrono::Duration::minutes(MAX_POLL_LAG_MINUTES) {
-            fired
-        } else {
-            t
-        };
-        match poll_tick(poll_at, store, store, &edgar).await {
-            Ok(o) => {
+        match step {
+            EarningsStep::Poll => {
+                let o = poll_job(t, self.fired, store, store, &edgar).await?;
+                if o.stale {
+                    return Ok("stale message, dropped".into());
+                }
                 for e in &o.errors {
                     console_warn!("earnings poll: {e}");
                 }
                 if o.throttled {
                     let msg = format!(
-                        "SEC EDGAR refused requests (403/429); polling paused this tick: {}",
+                        "SEC EDGAR refused requests (403/429); polling stopped for this firing: {}",
                         o.errors.last().cloned().unwrap_or_default()
                     );
                     if let Err(e) = alert_once_today(t, "sec-throttled", "error", &msg, store).await
@@ -234,25 +227,43 @@ impl JobRunner for Runner<'_> {
                         console_error!("alert sec-throttled: {e}");
                     }
                 }
-                console_log!("earnings poll: checked {}, new {:?}", o.checked, o.detected);
-            }
-            Err(e) => console_error!("earnings poll aborted: {e}"),
-        }
-        let cal = YahooCalendar::new(self.http.clone());
-        match refresh_tick(t, store, store, &cal, &ns, llm.as_ref()).await {
-            Ok(o) if o.ran => console_log!("calendar refresh: {o:?}"),
-            Ok(_) => {}
-            Err(e) => console_error!("calendar refresh aborted: {e}"),
-        }
-        match build_tick(now(env), store, store, &edgar, llm.as_ref()).await {
-            Ok(o) => {
-                for (key, outcome) in o {
-                    console_log!("earnings {key}: {outcome:?}");
+                let queue = env.queue(EARNINGS_QUEUE).map_err(|e| e.to_string());
+                for next in &o.follow_ups {
+                    let sent = match &queue {
+                        Ok(q) => q
+                            .send(Job {
+                                job: next.job().into(),
+                                at: None,
+                            })
+                            .await
+                            .map_err(|e| e.to_string()),
+                        Err(e) => Err(e.clone()),
+                    };
+                    if let Err(e) = sent {
+                        console_error!("earnings: queue send for {} failed: {e}", next.job());
+                    }
                 }
+                Ok(format!(
+                    "checked {}, new {:?}, queued {:?}",
+                    o.checked,
+                    o.detected,
+                    o.follow_ups.iter().map(|s| s.job()).collect::<Vec<_>>()
+                ))
             }
-            Err(e) => console_error!("earnings build aborted: {e}"),
+            EarningsStep::Build => {
+                let llm = self.llm(&[])?;
+                let o = build_tick(t, store, store, &edgar, llm.as_ref()).await?;
+                Ok(format!("{o:?}"))
+            }
+            EarningsStep::Calendar => {
+                let news_key = secret_or_empty(env, "TAVILY_API_KEY");
+                let ns = Tavily::new(self.http.clone(), news_key.clone());
+                let llm = self.llm(&[&news_key])?;
+                let cal = YahooCalendar::new(self.http.clone());
+                let o = refresh_tick(t, store, store, &cal, &ns, llm.as_ref()).await?;
+                Ok(format!("{o:?}"))
+            }
         }
-        Ok("done".into())
     }
 }
 

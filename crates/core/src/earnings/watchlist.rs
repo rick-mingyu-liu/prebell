@@ -6,8 +6,14 @@ use chrono::{DateTime, Datelike, NaiveTime, Timelike, Utc, Weekday};
 use crate::clock::et;
 
 const DATA: &str = include_str!("../../data/watchlist.tsv");
-/// Companies polled per one-minute tick (one submissions request each).
-pub const BATCH: usize = 21;
+/// Companies polled per firing (one submissions request each): at most 34
+/// fetch subrequests of the Free plan's 50 per invocation.
+pub const BATCH: usize = 34;
+/// Firings (5 minutes apart) per polling cycle: every company is polled
+/// once per 15 minutes.
+pub const CYCLE_SLOTS: usize = 3;
+/// Minutes between the cron firings that poll.
+pub const FIRING_MINUTES: u32 = 5;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Filer {
@@ -90,18 +96,18 @@ pub fn in_window(now: DateTime<Utc>) -> bool {
     t >= NaiveTime::from_hms_opt(6, 0, 0).unwrap() && t < NaiveTime::from_hms_opt(22, 0, 0).unwrap()
 }
 
-/// The domestic companies this minute's tick polls. Consecutive minutes walk
-/// the chunks in order, so every company is polled once per cycle.
-pub fn poll_batch(now: DateTime<Utc>) -> Vec<WatchEntry> {
-    let domestic: Vec<WatchEntry> = watchlist()
+/// The domestic companies the firing at `fired` polls: its 5-minute slot of
+/// the ET day picks one of `CYCLE_SLOTS` batches, so consecutive firings
+/// walk the batches in order and a late message keeps its firing's batch.
+pub fn poll_batch(fired: DateTime<Utc>) -> Vec<WatchEntry> {
+    let local = et(fired);
+    let slot = ((local.hour() * 60 + local.minute()) / FIRING_MINUTES) as usize;
+    watchlist()
         .into_iter()
         .filter(|e| e.filer == Filer::Domestic)
-        .collect();
-    let chunks = domestic.len().div_ceil(BATCH).max(1);
-    let local = et(now);
-    let minute = (local.hour() * 60 + local.minute()) as usize;
-    let i = minute % chunks;
-    domestic.into_iter().skip(i * BATCH).take(BATCH).collect()
+        .skip(slot % CYCLE_SLOTS * BATCH)
+        .take(BATCH)
+        .collect()
 }
 
 #[cfg(test)]
@@ -132,15 +138,19 @@ mod tests {
     }
 
     #[test]
-    fn every_row_parses_and_fits_five_batches() {
+    fn every_row_parses_and_fits_the_poll_cycle() {
         assert_eq!(data_lines().count(), watchlist().len());
         let domestic = watchlist()
             .iter()
             .filter(|e| e.filer == Filer::Domestic)
             .count();
+        // At most 34 submissions requests per invocation (Free plan: 50
+        // subrequests), every company once per 15 minutes.
+        assert_eq!(BATCH, 34);
+        assert_eq!(CYCLE_SLOTS, 3);
         assert!(
-            domestic <= 5 * BATCH,
-            "{domestic} domestic companies no longer fit 5 one-minute batches; raise BATCH"
+            domestic <= CYCLE_SLOTS * BATCH,
+            "{domestic} domestic companies no longer fit {CYCLE_SLOTS} batches of {BATCH}"
         );
     }
 
@@ -166,13 +176,15 @@ mod tests {
     }
 
     #[test]
-    fn five_minutes_cover_every_domestic_company_once() {
+    fn three_firings_cover_every_domestic_company_once() {
         let mut seen = Vec::new();
-        for m in 0..5 {
-            let t = utc("2026-10-30T14:00:00Z") + chrono::Duration::minutes(m);
+        for m in 0..3 {
+            let t = utc("2026-10-30T14:00:00Z") + chrono::Duration::minutes(5 * m);
             let b = poll_batch(t);
             assert!(b.len() <= BATCH && !b.is_empty());
             assert!(b.iter().all(|e| e.filer == Filer::Domestic));
+            // A firing a few seconds or minutes late polls the same batch.
+            assert_eq!(b, poll_batch(t + chrono::Duration::seconds(299)));
             seen.extend(b.into_iter().map(|e| e.ticker));
         }
         let domestic = watchlist()
@@ -182,5 +194,8 @@ mod tests {
         let unique: HashSet<_> = seen.iter().collect();
         assert_eq!(seen.len(), domestic);
         assert_eq!(unique.len(), domestic);
+        // The cycle repeats every 15 minutes.
+        let t = utc("2026-10-30T14:00:00Z");
+        assert_eq!(poll_batch(t), poll_batch(t + chrono::Duration::minutes(15)));
     }
 }

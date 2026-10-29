@@ -1,8 +1,10 @@
-//! The earnings run state machine. Every one-minute tick in the polling
-//! window calls `poll_tick` (detect new 8-K Item 2.02 filings for one batch
-//! of the watchlist) and `build_tick` (write at most one queued filing, or
-//! retry its Chinese draft). The run key `earnings:{TICKER}:{accession}` is
-//! the idempotency key: re-running never creates a second post.
+//! The earnings run state machine. Every 5-minute firing in the polling
+//! window runs `poll_job` (detect new 8-K Item 2.02 filings for one batch of
+//! the watchlist), which asks for follow-up messages: `build_tick` (write at
+//! most one queued filing, or retry its Chinese draft) and the daily
+//! calendar refresh, each in its own invocation with its own subrequest
+//! budget. The run key `earnings:{TICKER}:{accession}` is the idempotency
+//! key: re-running never creates a second post.
 
 use chrono::{DateTime, Duration, SecondsFormat, Utc};
 
@@ -20,6 +22,7 @@ use crate::facts::{Field, NewsReason};
 use crate::numbers::Lang;
 use crate::providers::{LlmProvider, ProviderError};
 use crate::run::TickOutcome;
+use crate::schedule::EarningsStep;
 use crate::store::{PostRow, RunRow, Store, TranslationRow};
 
 /// A `building` run younger than this is in flight (a build takes 1-5 min).
@@ -32,6 +35,9 @@ const BUILD_DEADLINE_HOURS: i64 = 6;
 const LATE_DETECTION_HOURS: i64 = 1;
 /// Chinese retries stop this long after acceptance.
 const ZH_DEADLINE_HOURS: i64 = 24;
+/// A poll message older than one firing interval is dropped: after a
+/// backlog the next firing polls its own batch.
+pub const MAX_POLL_LAG_MINUTES: i64 = 5;
 
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct PollOutcome {
@@ -43,6 +49,10 @@ pub struct PollOutcome {
     pub errors: Vec<String>,
     /// SEC answered 403/429 (blocked or rate-limited) and the batch stopped.
     pub throttled: bool,
+    /// The message was older than `MAX_POLL_LAG_MINUTES` and did nothing.
+    pub stale: bool,
+    /// Messages to queue next, each its own invocation.
+    pub follow_ups: Vec<EarningsStep>,
 }
 
 pub fn run_key(ticker: &str, accession: &str) -> String {
@@ -59,7 +69,7 @@ fn parse_iso(s: &str) -> Option<DateTime<Utc>> {
         .map(|t| t.with_timezone(&Utc))
 }
 
-/// Polls this minute's watchlist batch for new earnings filings. A provider
+/// Polls the watchlist batch of the firing at `now` for new earnings filings. A provider
 /// error skips that company; 403/429 (SEC throttling) stops the batch. A
 /// store error aborts the tick.
 pub async fn poll_tick(
@@ -119,6 +129,39 @@ pub async fn poll_tick(
             }
             out.detected.push(key);
         }
+    }
+    Ok(out)
+}
+
+/// One `earnings` queue message: drops it when stale, else polls the batch
+/// of its firing time `fired` and lists the follow-up messages: one build
+/// per new filing (or one while any filing is still open, for retries and
+/// Chinese drafts) and the calendar refresh until it ran today.
+pub async fn poll_job(
+    now: DateTime<Utc>,
+    fired: Option<DateTime<Utc>>,
+    es: &dyn EarningsStore,
+    store: &dyn Store,
+    filings: &dyn Filings,
+) -> Result<PollOutcome, String> {
+    let fired = fired.unwrap_or(now);
+    if now - fired > Duration::minutes(MAX_POLL_LAG_MINUTES) {
+        return Ok(PollOutcome {
+            stale: true,
+            ..Default::default()
+        });
+    }
+    let mut out = poll_tick(fired, es, store, filings).await?;
+    if !in_window(now) {
+        return Ok(out);
+    }
+    let builds = match out.detected.len() {
+        0 => usize::from(!es.open_filings().await?.is_empty()),
+        n => n,
+    };
+    out.follow_ups = vec![EarningsStep::Build; builds];
+    if !crate::earnings::calendar::refreshed_today(es, now).await? {
+        out.follow_ups.push(EarningsStep::Calendar);
     }
     Ok(out)
 }
@@ -783,14 +826,14 @@ mod tests {
         (base, es)
     }
 
-    /// A minute (ET 16:45 on Fri 2026-10-30) whose batch contains AAPL.
+    /// A firing (from ET 16:45 on Fri 2026-10-30) whose batch contains AAPL.
     fn poll_time() -> DateTime<Utc> {
         let mut t = utc("2026-10-30T20:45:00Z");
         while !crate::earnings::poll_batch(t)
             .iter()
             .any(|e| e.ticker == "AAPL")
         {
-            t += Duration::minutes(1);
+            t += Duration::minutes(5);
         }
         t
     }
@@ -866,6 +909,71 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(o[0].1, TickOutcome::Skipped, "{o:?}");
+    }
+
+    #[tokio::test]
+    async fn a_poll_sends_at_most_34_requests_and_queues_one_build_per_filing() {
+        let (base, es) = stores();
+        let fl = FakeFilings::default();
+        let t = poll_time();
+        let o = poll_job(t, Some(t), &es, base.as_ref(), &fl).await.unwrap();
+        assert!(fl.sub_calls.borrow().len() <= 34);
+        assert_eq!(o.detected, vec![KEY.to_string()]);
+        // One build per new filing, plus the day's calendar refresh.
+        assert_eq!(o.follow_ups, [EarningsStep::Build, EarningsStep::Calendar]);
+        assert!(!o.stale);
+        // Next firing: nothing new, but the open filing still gets a build
+        // message (retries and the Chinese draft).
+        es.kv_set("calendar_refreshed_on", "2026-10-30", "x")
+            .await
+            .unwrap();
+        let t2 = t + Duration::minutes(15);
+        let o = poll_job(t2, Some(t2), &es, base.as_ref(), &fl)
+            .await
+            .unwrap();
+        assert!(o.detected.is_empty());
+        assert_eq!(o.follow_ups, [EarningsStep::Build]);
+        // Nothing open, calendar done: no follow-ups.
+        es.set_filing_state(ACC, "done").await.unwrap();
+        let o = poll_job(t2, Some(t2), &es, base.as_ref(), &fl)
+            .await
+            .unwrap();
+        assert!(o.follow_ups.is_empty(), "{o:?}");
+    }
+
+    #[tokio::test]
+    async fn a_stale_poll_message_is_dropped() {
+        // After a backlog the message is older than one firing interval: the
+        // next firing polls its own batch, so this one does nothing.
+        let (base, es) = stores();
+        let fl = FakeFilings::default();
+        let fired = poll_time();
+        let now = fired + Duration::minutes(MAX_POLL_LAG_MINUTES) + Duration::seconds(1);
+        let o = poll_job(now, Some(fired), &es, base.as_ref(), &fl)
+            .await
+            .unwrap();
+        assert!(o.stale);
+        assert!(fl.sub_calls.borrow().is_empty());
+        assert!(o.follow_ups.is_empty());
+        // Within the lag it polls the batch of its firing time.
+        let now = fired + Duration::minutes(MAX_POLL_LAG_MINUTES);
+        let o = poll_job(now, Some(fired), &es, base.as_ref(), &fl)
+            .await
+            .unwrap();
+        assert!(!o.stale);
+        assert_eq!(o.detected.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn poll_stops_on_403_for_the_rest_of_the_invocation() {
+        let (base, es) = stores();
+        let t = poll_time();
+        let batch = crate::earnings::poll_batch(t);
+        let mut fl = FakeFilings::default();
+        fl.errors.insert(batch[2].cik, ProviderError::Http(403));
+        let o = poll_job(t, Some(t), &es, base.as_ref(), &fl).await.unwrap();
+        assert_eq!(fl.sub_calls.borrow().len(), 3);
+        assert!(o.throttled);
     }
 
     #[tokio::test]
