@@ -13,7 +13,7 @@
       // Same database as crates/generator/wrangler.toml; real id set in Task 13.
       "binding": "DB",
       "database_name": "marketsite",
-      "database_id": "00000000-0000-0000-0000-000000000000"
+      "database_id": "d44fa779-4253-41c6-ab8c-1ef478cfc984"
     }
   ],
   "vars": {
