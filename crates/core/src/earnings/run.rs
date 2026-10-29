@@ -28,6 +28,8 @@ const BUILD_LEASE_MINUTES: i64 = 15;
 const RETRY_MINUTES: i64 = 5;
 /// Required figures may arrive late (exhibit amended, EDGAR lag) for this long.
 const BUILD_DEADLINE_HOURS: i64 = 6;
+/// A filing detected late still gets this long of retries.
+const LATE_DETECTION_HOURS: i64 = 1;
 /// Chinese retries stop this long after acceptance.
 const ZH_DEADLINE_HOURS: i64 = 24;
 
@@ -103,13 +105,15 @@ pub async fn poll_tick(
                 state: "open".into(),
                 detected_at: iso(now),
             };
+            // Calendar first and on every sighting (idempotent), so a failed
+            // write after the insert cannot leave the calendar unmarked.
+            crate::earnings::calendar::record_filing(es, &row, now).await?;
             if !es.insert_filing(&row).await? {
                 continue;
             }
             if store.get_run(&key).await?.is_none() {
                 store.upsert_run(&new_run(&row, now)).await?;
             }
-            crate::earnings::calendar::record_filing(es, &row, now).await?;
             out.detected.push(key);
         }
     }
@@ -140,6 +144,14 @@ fn age(f: &FilingRow, now: DateTime<Utc>) -> Duration {
     parse_iso(&f.accepted_at).map_or(Duration::zero(), |t| now - t)
 }
 
+/// `BUILD_DEADLINE_HOURS` after acceptance, but at least `LATE_DETECTION_HOURS`
+/// after detection, so a filing found late (weekend, outage) still gets retries.
+fn past_deadline(f: &FilingRow, now: DateTime<Utc>) -> bool {
+    let detected = parse_iso(&f.detected_at).map_or(Duration::zero(), |t| now - t);
+    age(f, now) >= Duration::hours(BUILD_DEADLINE_HOURS)
+        && detected >= Duration::hours(LATE_DETECTION_HOURS)
+}
+
 fn since_update(r: &RunRow, now: DateTime<Utc>) -> Duration {
     parse_iso(&r.updated_at).map_or(Duration::MAX, |t| now - t)
 }
@@ -155,7 +167,9 @@ pub async fn build_tick(
     llm: &dyn LlmProvider,
 ) -> Result<Vec<(String, TickOutcome)>, String> {
     let mut out = Vec::new();
-    let mut worked = false;
+    // One build and one Chinese retry per tick, budgeted separately so a
+    // Chinese draft that keeps failing never holds up new posts.
+    let (mut built, mut zh_tried) = (false, false);
     for f in es.open_filings().await? {
         let run = match store.get_run(&f.run_key).await? {
             Some(r) => r,
@@ -170,15 +184,23 @@ pub async fn build_tick(
                 es.set_filing_state(&f.accession, "done").await?;
                 continue;
             }
-            "published" if worked => continue,
-            "published" => {
-                worked = true;
-                retry_zh(now, es, store, llm, &f, &run).await?
-            }
+            "published" if zh_tried => continue,
+            "published" => match retry_zh(now, es, store, llm, &f, &run).await? {
+                TickOutcome::Nothing => continue,
+                o => {
+                    zh_tried = true;
+                    o
+                }
+            },
             "building" if since_update(&run, now) < Duration::minutes(BUILD_LEASE_MINUTES) => {
                 continue
             }
-            _ if worked => continue,
+            // A build that never finishes (the Worker killed mid-build) must
+            // not be retried forever.
+            "building" if past_deadline(&f, now) => {
+                give_up(now, es, store, &f, run, "the build never finished".into()).await?
+            }
+            _ if built => continue,
             _ if run.attempts > 0
                 && run.status == "pending"
                 && since_update(&run, now) < Duration::minutes(RETRY_MINUTES) =>
@@ -186,7 +208,7 @@ pub async fn build_tick(
                 continue
             }
             _ => {
-                worked = true;
+                built = true;
                 if let Some(o) = reconcile(now, es, store, &f, &run).await? {
                     o
                 } else {
@@ -218,6 +240,14 @@ async fn reconcile(
         .is_some_and(|t| t.status == "published")
     {
         return Ok(None);
+    }
+    // The failed write may have been sources or charts; both replace, so redo them.
+    if let Some(json) = store.get_facts(&post.facts_r2_key).await? {
+        let facts: EarningsFacts =
+            serde_json::from_str(&json).map_err(|e| format!("facts json: {e}"))?;
+        store.add_sources(post_id, &sources(&facts)).await?;
+        let rows = store_charts(store, &facts, post_id).await?;
+        es.set_charts(post_id, &rows).await?;
     }
     let ts = iso(now);
     let zh = store.get_translation(post_id, "zh").await?;
@@ -332,27 +362,41 @@ async fn not_ready(
     if superseded(store, &row.run_key).await? {
         return Ok(TickOutcome::Nothing);
     }
+    if past_deadline(f, now) {
+        return give_up(now, es, store, f, row, err).await;
+    }
     row.last_error = Some(err.clone());
     row.updated_at = iso(now);
-    if age(f, now) >= Duration::hours(BUILD_DEADLINE_HOURS) {
-        row.status = "failed".into();
-        store.upsert_run(&row).await?;
-        store
-            .add_alert(
-                &row.run_key,
-                "error",
-                &format!(
-                    "earnings check for {} ({}) not published after {BUILD_DEADLINE_HOURS}h: {err}",
-                    f.ticker, f.accession
-                ),
-            )
-            .await?;
-        es.set_filing_state(&f.accession, "done").await?;
-        return Ok(TickOutcome::Skipped);
-    }
     row.status = "pending".into();
     store.upsert_run(&row).await?;
     Ok(TickOutcome::Retrying(err))
+}
+
+/// The run is `failed` with one error alert and the filing is closed.
+async fn give_up(
+    now: DateTime<Utc>,
+    es: &dyn EarningsStore,
+    store: &dyn Store,
+    f: &FilingRow,
+    mut row: RunRow,
+    err: String,
+) -> Result<TickOutcome, String> {
+    row.status = "failed".into();
+    row.last_error = Some(err.clone());
+    row.updated_at = iso(now);
+    store.upsert_run(&row).await?;
+    store
+        .add_alert(
+            &row.run_key,
+            "error",
+            &format!(
+                "earnings check for {} ({}) not published: {err}",
+                f.ticker, f.accession
+            ),
+        )
+        .await?;
+    es.set_filing_state(&f.accession, "done").await?;
+    Ok(TickOutcome::Skipped)
 }
 
 async fn superseded(store: &dyn Store, run_key: &str) -> Result<bool, String> {
@@ -360,6 +404,28 @@ async fn superseded(store: &dyn Store, run_key: &str) -> Result<bool, String> {
         .get_run(run_key)
         .await?
         .is_some_and(|r| r.status == "published" || r.status == "failed"))
+}
+
+/// Draws the charts, stores each SVG in R2 and returns their rows.
+async fn store_charts(
+    store: &dyn Store,
+    facts: &EarningsFacts,
+    post_id: i64,
+) -> Result<Vec<ChartRow>, String> {
+    let mut rows = Vec::new();
+    for (i, c) in charts(facts).iter().enumerate() {
+        let key = r2_key(facts, c.name);
+        store.put_facts(&key, &c.svg).await?;
+        rows.push(ChartRow {
+            post_id,
+            name: c.name.into(),
+            r2_key: key,
+            alt_en: c.alt_en.clone(),
+            alt_zh: c.alt_zh.clone(),
+            sort: i as i64,
+        });
+    }
+    Ok(rows)
 }
 
 fn sources(f: &EarningsFacts) -> Vec<NewsReason> {
@@ -412,7 +478,6 @@ async fn build(
         Err(e) => return not_ready(now, es, store, f, row, format!("en: {}", e.join("; "))).await,
     };
     let zh = write(llm, &facts, Lang::Zh).await;
-    let chart_list = charts(&facts);
 
     if superseded(store, &row.run_key).await? {
         return Ok(TickOutcome::Nothing);
@@ -424,19 +489,7 @@ async fn build(
     );
     let json = serde_json::to_string(&facts).map_err(|e| format!("facts json: {e}"))?;
     store.put_facts(&facts_key, &json).await?;
-    let mut chart_rows = Vec::new();
-    for (i, c) in chart_list.iter().enumerate() {
-        let key = r2_key(&facts, c.name);
-        store.put_facts(&key, &c.svg).await?;
-        chart_rows.push(ChartRow {
-            post_id: 0,
-            name: c.name.into(),
-            r2_key: key,
-            alt_en: c.alt_en.clone(),
-            alt_zh: c.alt_zh.clone(),
-            sort: i as i64,
-        });
-    }
+    let mut chart_rows = store_charts(store, &facts, 0).await?;
 
     let mut post_slug = slug(&facts);
     if es
@@ -522,25 +575,47 @@ async fn retry_zh(
     f: &FilingRow,
     run: &RunRow,
 ) -> Result<TickOutcome, String> {
-    let post = store
-        .get_post_by_run(&run.run_key)
-        .await?
-        .ok_or("published run has no post")?;
+    let Some(post) = store.get_post_by_run(&run.run_key).await? else {
+        return zh_failed(
+            now,
+            es,
+            store,
+            f,
+            run,
+            None,
+            "published run has no post".into(),
+        )
+        .await;
+    };
     let post_id = post.id.ok_or("post has no id")?;
-    if store
-        .get_translation(post_id, "zh")
-        .await?
-        .is_some_and(|t| t.status != "pending")
-    {
-        es.set_filing_state(&f.accession, "done").await?;
-        return Ok(TickOutcome::Nothing);
+    let zh = store.get_translation(post_id, "zh").await?;
+    match &zh {
+        Some(t) if t.status != "pending" => {
+            es.set_filing_state(&f.accession, "done").await?;
+            return Ok(TickOutcome::Nothing);
+        }
+        Some(t)
+            if parse_iso(&t.updated_at)
+                .is_some_and(|u| now - u < Duration::minutes(RETRY_MINUTES)) =>
+        {
+            return Ok(TickOutcome::Nothing);
+        }
+        _ => {}
     }
-    let json = store
-        .get_facts(&post.facts_r2_key)
-        .await?
-        .ok_or("facts not found")?;
-    let facts: EarningsFacts =
-        serde_json::from_str(&json).map_err(|e| format!("facts json: {e}"))?;
+    // Missing or unreadable facts cannot be fixed by retrying.
+    let facts: EarningsFacts = match store.get_facts(&post.facts_r2_key).await? {
+        None => {
+            let err = "facts not found".to_string();
+            return zh_failed(now, es, store, f, run, Some(post_id), err).await;
+        }
+        Some(json) => match serde_json::from_str(&json) {
+            Ok(x) => x,
+            Err(e) => {
+                let err = format!("facts json: {e}");
+                return zh_failed(now, es, store, f, run, Some(post_id), err).await;
+            }
+        },
+    };
     let ts = iso(now);
     match write(llm, &facts, Lang::Zh).await {
         Ok((d, body)) => {
@@ -561,24 +636,44 @@ async fn retry_zh(
         Err(e) => {
             let err = format!("zh: {}", e.join("; "));
             if age(f, now) >= Duration::hours(ZH_DEADLINE_HOURS) {
-                store
-                    .upsert_translation(&empty_translation(post_id, "zh", "failed", &ts))
-                    .await?;
-                store
-                    .add_alert(
-                        &run.run_key,
-                        "warn",
-                        &format!(
-                            "Chinese earnings check failed for {} ({}): {err}",
-                            f.ticker, f.accession
-                        ),
-                    )
-                    .await?;
-                es.set_filing_state(&f.accession, "done").await?;
+                return zh_failed(now, es, store, f, run, Some(post_id), err).await;
             }
+            // Restarts the retry pause.
+            store
+                .upsert_translation(&empty_translation(post_id, "zh", "pending", &ts))
+                .await?;
             Ok(TickOutcome::Retrying(err))
         }
     }
+}
+
+/// Chinese is final as `failed`, with one warn alert; the filing is closed.
+async fn zh_failed(
+    now: DateTime<Utc>,
+    es: &dyn EarningsStore,
+    store: &dyn Store,
+    f: &FilingRow,
+    run: &RunRow,
+    post_id: Option<i64>,
+    err: String,
+) -> Result<TickOutcome, String> {
+    if let Some(id) = post_id {
+        store
+            .upsert_translation(&empty_translation(id, "zh", "failed", &iso(now)))
+            .await?;
+    }
+    store
+        .add_alert(
+            &run.run_key,
+            "warn",
+            &format!(
+                "Chinese earnings check failed for {} ({}): {err}",
+                f.ticker, f.accession
+            ),
+        )
+        .await?;
+    es.set_filing_state(&f.accession, "done").await?;
+    Ok(TickOutcome::Skipped)
 }
 
 #[cfg(test)]
@@ -896,7 +991,7 @@ mod tests {
         let o = build_tick(utc("2026-10-31T20:31:00Z"), &es, base.as_ref(), &fl, &l)
             .await
             .unwrap();
-        assert!(matches!(o[0].1, TickOutcome::Retrying(_)));
+        assert_eq!(o[0].1, TickOutcome::Skipped);
         assert_eq!(
             base.translations.borrow()[&(1, "zh".to_string())].status,
             "failed"
@@ -975,5 +1070,139 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(o.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn pending_zh_does_not_hold_up_new_builds() {
+        let (base, es, fl) = detected().await;
+        let l = llm(true, false);
+        build_tick(poll_time(), &es, base.as_ref(), &fl, &l)
+            .await
+            .unwrap();
+        let mut second = es.filings.borrow()[ACC].clone();
+        second.accession = "0000320193-26-000099".into();
+        second.run_key = run_key("AAPL", &second.accession);
+        second.state = "open".into();
+        second.accepted_at = "2026-10-30T20:40:00Z".into();
+        es.insert_filing(&second).await.unwrap();
+        let t = poll_time() + Duration::minutes(6);
+        let o = build_tick(t, &es, base.as_ref(), &fl, &l).await.unwrap();
+        let keys: Vec<_> = o.iter().map(|(k, _)| k.as_str()).collect();
+        assert!(keys.contains(&second.run_key.as_str()), "{o:?}");
+        assert!(keys.contains(&KEY), "the ZH retry runs too: {o:?}");
+    }
+
+    #[tokio::test]
+    async fn zh_retries_wait_between_attempts() {
+        let (base, es, fl) = detected().await;
+        let l = llm(true, false);
+        let t = poll_time();
+        build_tick(t, &es, base.as_ref(), &fl, &l).await.unwrap();
+        let drafts = l.drafts.get();
+        let o = build_tick(t + Duration::minutes(2), &es, base.as_ref(), &fl, &l)
+            .await
+            .unwrap();
+        assert!(o.is_empty());
+        assert_eq!(l.drafts.get(), drafts);
+        let o = build_tick(t + Duration::minutes(6), &es, base.as_ref(), &fl, &l)
+            .await
+            .unwrap();
+        assert!(matches!(o[0].1, TickOutcome::Retrying(_)));
+    }
+
+    #[tokio::test]
+    async fn a_build_that_never_finishes_fails_once() {
+        let (base, es, fl) = detected().await;
+        let mut r = base.runs.borrow()[KEY].clone();
+        r.status = "building".into();
+        r.attempts = 3;
+        r.updated_at = "2026-10-31T01:00:00Z".into();
+        base.runs.borrow_mut().insert(KEY.into(), r);
+        let l = llm(true, true);
+        // 6h after acceptance (20:30Z) and the lease long expired.
+        let o = build_tick(utc("2026-10-31T02:40:00Z"), &es, base.as_ref(), &fl, &l)
+            .await
+            .unwrap();
+        assert_eq!(o[0].1, TickOutcome::Skipped);
+        assert_eq!(base.runs.borrow()[KEY].status, "failed");
+        assert_eq!(base.alerts.borrow().len(), 1);
+        assert_eq!(l.drafts.get(), 0);
+        let o = build_tick(utc("2026-10-31T02:50:00Z"), &es, base.as_ref(), &fl, &l)
+            .await
+            .unwrap();
+        assert!(o.is_empty());
+        assert_eq!(base.alerts.borrow().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn reconcile_restores_sources_and_charts() {
+        let (base, es, fl) = detected().await;
+        let l = llm(true, true);
+        let t = poll_time();
+        build_tick(t, &es, base.as_ref(), &fl, &l).await.unwrap();
+        // Simulate a crash after EN was written: no sources, no charts, run not published.
+        base.sources.borrow_mut().clear();
+        es.charts.borrow_mut().clear();
+        es.set_filing_state(ACC, "open").await.unwrap();
+        let mut r = base.runs.borrow()[KEY].clone();
+        r.status = "building".into();
+        r.updated_at = iso(t);
+        base.runs.borrow_mut().insert(KEY.into(), r);
+        let drafts = l.drafts.get();
+        build_tick(t + Duration::minutes(20), &es, base.as_ref(), &fl, &l)
+            .await
+            .unwrap();
+        assert_eq!(l.drafts.get(), drafts, "no rebuild");
+        assert_eq!(base.runs.borrow()[KEY].status, "published");
+        assert_eq!(base.sources.borrow()[&1].len(), 2);
+        assert_eq!(es.charts.borrow()[&1].len(), 2);
+    }
+
+    #[tokio::test]
+    async fn unreadable_facts_end_zh_without_blocking() {
+        let (base, es, fl) = detected().await;
+        let l = llm(true, false);
+        build_tick(poll_time(), &es, base.as_ref(), &fl, &l)
+            .await
+            .unwrap();
+        base.facts
+            .borrow_mut()
+            .insert("earnings/AAPL/0000320193-26-000070.json".into(), "{".into());
+        let o = build_tick(
+            poll_time() + Duration::minutes(6),
+            &es,
+            base.as_ref(),
+            &fl,
+            &l,
+        )
+        .await
+        .unwrap();
+        assert_eq!(o[0].1, TickOutcome::Skipped);
+        assert_eq!(
+            base.translations.borrow()[&(1, "zh".to_string())].status,
+            "failed"
+        );
+        assert_eq!(es.filings.borrow()[ACC].state, "done");
+    }
+
+    #[tokio::test]
+    async fn late_detection_still_gets_retries() {
+        let (base, es, fl) = detected().await;
+        fl.no_exhibit.set(true);
+        // Found on Monday after a Friday filing: past 6h from acceptance, but
+        // just detected.
+        let mut f = es.filings.borrow()[ACC].clone();
+        f.detected_at = "2026-11-02T11:00:00Z".into();
+        es.filings.borrow_mut().insert(ACC.into(), f);
+        let o = build_tick(
+            utc("2026-11-02T11:05:00Z"),
+            &es,
+            base.as_ref(),
+            &fl,
+            &llm(true, true),
+        )
+        .await
+        .unwrap();
+        assert!(matches!(o[0].1, TickOutcome::Retrying(_)), "{o:?}");
     }
 }
