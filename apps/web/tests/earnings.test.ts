@@ -14,6 +14,7 @@ import {
   todayEt,
   weekStart,
 } from "../src/lib/earnings";
+import type { D1Like } from "../src/lib/posts";
 import { memoryD1 } from "./d1";
 
 const ACC = "0000320193-26-000070";
@@ -213,5 +214,28 @@ describe("stripDay", () => {
     const day = await stripDay(db, "2026-11-03", { exact: true, lang: "zh" });
     expect(day?.amc.map((e) => [e.ticker, e.postSlug])).toEqual([["NVDA", null]]);
     expect((await stripDay(db, "2026-11-03", { exact: true, lang: "en" }))?.amc[0].postSlug).toBe("nvda-2026-11-03-earnings");
+  });
+  it("reads one day's posts through the trading_date index", async () => {
+    const db = memoryD1(seed);
+    const seen: { sql: string; args: unknown[] }[] = [];
+    const spy: D1Like = {
+      prepare(sql) {
+        const st = db.prepare(sql);
+        const bind = st.bind.bind(st);
+        st.bind = (...args) => {
+          seen.push({ sql, args });
+          return bind(...args);
+        };
+        return st;
+      },
+    };
+    await stripDay(spy, "2026-10-30", { exact: true, lang: "en" });
+    const entries = seen.find((q) => q.sql.includes("post_translations"));
+    expect(entries).toBeDefined();
+    const { results } = await db
+      .prepare(`EXPLAIN QUERY PLAN ${entries!.sql}`)
+      .bind(...entries!.args)
+      .all<{ detail: string }>();
+    expect(results.map((r) => r.detail).join("\n")).toContain("idx_posts_trading_date");
   });
 });

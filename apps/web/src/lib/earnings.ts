@@ -70,15 +70,25 @@ interface CalRow {
 }
 
 // Earnings posts the post page shows in `lang` (a pending ZH page shows the
-// "coming soon" notice), by ticker and ET date. Binds `lang` once, then one value per `where` placeholder.
-const postsByTickerDate = (where = "") => `SELECT f.ticker, p.trading_date, MIN(p.slug) AS slug
+// "coming soon" notice), by ticker and ET date. Binds `lang` once.
+const POSTS_BY_TICKER_DATE = `SELECT f.ticker, p.trading_date, MIN(p.slug) AS slug
   FROM earnings_filings f
   JOIN posts p ON p.run_key = f.run_key
   JOIN post_translations en ON en.post_id = p.id AND en.lang = 'en' AND en.status = 'published'
   JOIN post_translations t ON t.post_id = p.id AND t.lang = ?
     AND (t.status = 'published' OR (t.lang = 'zh' AND t.status = 'pending'))
-  ${where} GROUP BY f.ticker, p.trading_date`;
-const POSTS_BY_TICKER_DATE = postsByTickerDate();
+  GROUP BY f.ticker, p.trading_date`;
+
+// The same rows for one ET date (binds `lang`, then the date). CROSS JOIN pins the join order so
+// SQLite starts from idx_posts_trading_date instead of scanning every published translation.
+const POSTS_ON_DATE = `SELECT f.ticker, p.trading_date, MIN(p.slug) AS slug
+  FROM posts p
+  CROSS JOIN post_translations en ON en.post_id = p.id AND en.lang = 'en' AND en.status = 'published'
+  CROSS JOIN post_translations t ON t.post_id = p.id AND t.lang = ?
+    AND (t.status = 'published' OR (t.lang = 'zh' AND t.status = 'pending'))
+  CROSS JOIN earnings_filings f ON f.run_key = p.run_key
+  WHERE p.trading_date = ?
+  GROUP BY f.ticker, p.trading_date`;
 
 const toEntry = (r: CalRow): CalendarEntry => ({
   ticker: r.ticker,
@@ -142,7 +152,7 @@ export async function stripDay(
     .prepare(
       `SELECT c.ticker, c.report_date, c.time_slot, c.status, x.slug AS post_slug
        FROM earnings_calendar c
-       LEFT JOIN (${postsByTickerDate("WHERE p.trading_date = ?")}) x ON x.ticker = c.ticker AND x.trading_date = c.report_date
+       LEFT JOIN (${POSTS_ON_DATE}) x ON x.ticker = c.ticker AND x.trading_date = c.report_date
        WHERE c.report_date = ? AND c.status IN ('unconfirmed','confirmed','reported')
        ORDER BY CASE c.time_slot WHEN 'bmo' THEN 0 WHEN 'amc' THEN 1 ELSE 2 END, c.ticker`,
     )
