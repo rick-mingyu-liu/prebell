@@ -72,6 +72,7 @@
     "stripToday": "Earnings today",
     "stripUnknown": "Time TBD",
     "stripAll": "Full calendar →",
+    "stripMore": "+{count} more",
     "prevWeek": "Previous week",
     "nextWeek": "Next week",
     "tickerTitle": "{ticker} earnings",

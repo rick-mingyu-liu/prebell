@@ -72,6 +72,7 @@
     "stripToday": "今日财报",
     "stripUnknown": "时间待定",
     "stripAll": "完整日历 →",
+    "stripMore": "另有{count}家",
     "prevWeek": "上一周",
     "nextWeek": "下一周",
     "tickerTitle": "{ticker} 财报",

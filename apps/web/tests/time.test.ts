@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { formatEt, formatEtTime } from "../src/lib/time";
+import { formatDayShort, formatEt, formatEtTime } from "../src/lib/time";
 
 describe("formatEt", () => {
   it("formats in US Eastern for both languages", () => {
@@ -26,5 +26,15 @@ describe("formatEtTime", () => {
   it("returns empty for a missing or bad timestamp", () => {
     expect(formatEtTime(null, "en")).toBe("");
     expect(formatEtTime("nope", "zh")).toBe("");
+  });
+});
+
+describe("formatDayShort", () => {
+  it("is a short date with the weekday", () => {
+    expect(formatDayShort("2026-11-02", "en")).toBe("Mon, Nov 2");
+    expect(formatDayShort("2026-11-02", "zh")).toBe("11月2日 周一");
+  });
+  it("returns a bad date unchanged", () => {
+    expect(formatDayShort("nope", "en")).toBe("nope");
   });
 });

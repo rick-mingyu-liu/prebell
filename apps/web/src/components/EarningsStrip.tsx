@@ -4,6 +4,9 @@ import { todayEt, type CalendarEntry, type StripDay } from "../lib/earnings";
 import { formatDayShort } from "../lib/time";
 import { translator } from "../lib/translator";
 
+/** Chips shown per group; the rest collapse into a "+K more" chip. */
+const MAX_CHIPS = 8;
+
 /** The green band under the header: one day's report entries by slot, as ticker chips. Nothing for no day. */
 export default function EarningsStrip({
   day,
@@ -24,7 +27,7 @@ export default function EarningsStrip({
     [t("earnings.stripUnknown"), day.unknown],
   ];
   return (
-    <section className="estrip" aria-label={label}>
+    <section className="estrip">
       <div className="wrap estrip-in">
         <time className="estrip-title" dateTime={day.date}>
           {label}
@@ -34,15 +37,20 @@ export default function EarningsStrip({
             entries.length > 0 && (
               <div key={name} className="estrip-group">
                 <span className="estrip-slot">{name}</span>
-                {entries.map((e) => (
+                {entries.slice(0, MAX_CHIPS).map((e) => (
                   <Link
                     key={e.ticker}
-                    className="chip"
+                    className="estrip-chip"
                     href={e.postSlug ? `/${locale}/p/${e.postSlug}` : `/${locale}/t/${encodeURIComponent(e.ticker)}`}
                   >
                     {e.ticker}
                   </Link>
                 ))}
+                {entries.length > MAX_CHIPS && (
+                  <Link className="estrip-chip estrip-more" href={`/${locale}/earnings`}>
+                    {t("earnings.stripMore", { count: entries.length - MAX_CHIPS })}
+                  </Link>
+                )}
               </div>
             ),
         )}

@@ -20,6 +20,7 @@
   --header-line: transparent;
   --strip-bg: #f3fbf3;
   --strip-line: #ddefdd;
+  --chip-line: #8a8a8a; /* 3.4:1 on white, 3.2:1 on the strip: the chip boundary (WCAG 1.4.11) */
   --sans: var(--font-inter), system-ui, -apple-system, "Segoe UI", Roboto, "PingFang SC", "Hiragino Sans GB",
     "Microsoft YaHei", "Noto Sans SC", sans-serif;
   --cjk: "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans SC", sans-serif;
@@ -39,6 +40,7 @@
     --header-line: #262626; /* the header is as black as the page */
     --strip-bg: #07140a;
     --strip-line: #16361a;
+    --chip-line: #6b6b6b; /* 3.9:1 on #000 */
   }
 }
 
@@ -146,14 +148,19 @@ main:not(.wrap) { max-width: 46rem; margin: 0 auto; padding: 1.5rem 16px 3rem; }
 .estrip-title::before { content: "\25CF"; color: var(--up); margin-right: 0.35rem; }
 .estrip-group { display: flex; align-items: center; gap: 0.4rem; }
 .estrip-slot { color: var(--muted); margin-left: 0.4rem; white-space: nowrap; }
-.chip { border: 1px solid var(--strip-line); background: var(--bg); color: var(--fg); border-radius: 6px; padding: 0.15rem 0.5rem; font-weight: 700; font-size: 0.75rem; text-decoration: none; white-space: nowrap; }
-.chip:hover, .chip:focus-visible { border-color: var(--accent); }
+.estrip-chip { border: 1px solid var(--chip-line); background: var(--bg); color: var(--fg); border-radius: 6px; padding: 0.15rem 0.5rem; font-weight: 700; font-size: 0.75rem; text-decoration: none; white-space: nowrap; }
+.estrip-chip:hover { border-color: var(--accent); }
+.estrip-chip:focus-visible, .estrip-all:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.estrip-more { color: var(--muted); }
 .estrip-all { margin-left: auto; border: 1px solid var(--accent); color: var(--accent); border-radius: 99px; padding: 0.15rem 0.75rem; font-weight: 600; text-decoration: none; white-space: nowrap; }
 .estrip-all:hover, .estrip-all:focus-visible { background: var(--accent); color: var(--bg); }
 @media (max-width: 640px) {
   .estrip-in { flex-wrap: nowrap; overflow-x: auto; }
   .estrip-group { flex: none; }
-  .estrip-title, .estrip-all { flex: none; }
+  .estrip-title { flex: none; }
+  /* Stays in view while the chips scroll under it. */
+  .estrip-all { flex: none; position: sticky; right: 0; background: var(--strip-bg); }
+  .estrip-all:hover, .estrip-all:focus-visible { background: var(--accent); }
 }
 
 /* Existing pages (restyled in a later pass); kept readable on the wider shell. */

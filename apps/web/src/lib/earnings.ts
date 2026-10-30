@@ -70,14 +70,15 @@ interface CalRow {
 }
 
 // Earnings posts the post page shows in `lang` (a pending ZH page shows the
-// "coming soon" notice), by ticker and ET date. Binds `lang` once.
-const POSTS_BY_TICKER_DATE = `SELECT f.ticker, p.trading_date, MIN(p.slug) AS slug
+// "coming soon" notice), by ticker and ET date. Binds `lang` once, then one value per `where` placeholder.
+const postsByTickerDate = (where = "") => `SELECT f.ticker, p.trading_date, MIN(p.slug) AS slug
   FROM earnings_filings f
   JOIN posts p ON p.run_key = f.run_key
   JOIN post_translations en ON en.post_id = p.id AND en.lang = 'en' AND en.status = 'published'
   JOIN post_translations t ON t.post_id = p.id AND t.lang = ?
     AND (t.status = 'published' OR (t.lang = 'zh' AND t.status = 'pending'))
-  GROUP BY f.ticker, p.trading_date`;
+  ${where} GROUP BY f.ticker, p.trading_date`;
+const POSTS_BY_TICKER_DATE = postsByTickerDate();
 
 const toEntry = (r: CalRow): CalendarEntry => ({
   ticker: r.ticker,
@@ -127,19 +128,27 @@ export async function stripDay(
   opts: { exact: boolean; lang: Lang },
 ): Promise<StripDay | null> {
   const last = opts.exact ? fromDate : addDays(fromDate, STRIP_LOOKAHEAD_DAYS);
+  // Two cheap indexed reads: find the day, then read only that day (and only its posts).
+  const first = await db
+    .prepare(
+      `SELECT MIN(report_date) AS date FROM earnings_calendar
+       WHERE report_date BETWEEN ? AND ? AND status IN ('unconfirmed','confirmed','reported')`,
+    )
+    .bind(fromDate, last)
+    .first<{ date: string | null }>();
+  const date = first?.date;
+  if (!date) return null;
   const { results } = await db
     .prepare(
       `SELECT c.ticker, c.report_date, c.time_slot, c.status, x.slug AS post_slug
        FROM earnings_calendar c
-       LEFT JOIN (${POSTS_BY_TICKER_DATE}) x ON x.ticker = c.ticker AND x.trading_date = c.report_date
-       WHERE c.report_date BETWEEN ? AND ? AND c.status IN ('unconfirmed','confirmed','reported')
-       ORDER BY c.report_date, CASE c.time_slot WHEN 'bmo' THEN 0 WHEN 'amc' THEN 1 ELSE 2 END, c.ticker`,
+       LEFT JOIN (${postsByTickerDate("WHERE p.trading_date = ?")}) x ON x.ticker = c.ticker AND x.trading_date = c.report_date
+       WHERE c.report_date = ? AND c.status IN ('unconfirmed','confirmed','reported')
+       ORDER BY CASE c.time_slot WHEN 'bmo' THEN 0 WHEN 'amc' THEN 1 ELSE 2 END, c.ticker`,
     )
-    .bind(opts.lang, fromDate, last)
+    .bind(opts.lang, date, date)
     .all<CalRow>();
-  if (results.length === 0) return null;
-  const date = results[0].report_date;
-  const entries = results.filter((r) => r.report_date === date).map(toEntry);
+  const entries = results.map(toEntry);
   return {
     date,
     bmo: entries.filter((e) => e.slot === "bmo"),

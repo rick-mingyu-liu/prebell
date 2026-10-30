@@ -197,4 +197,21 @@ describe("stripDay", () => {
     expect(day?.date).toBe("2026-10-28");
     expect(day?.amc[0].postSlug).toBe("msft-2026-10-28-earnings"); // pending ZH still links
   });
+  it("other dates and other days' posts do not affect the result", async () => {
+    const extras =
+      cal("OLD", "2026-10-26", "confirmed") +
+      cal("FAR", "2026-11-20", "confirmed") +
+      cal("TSLA", "2026-11-02", "quarantined") +
+      earnings(3, "NVDA", "0001045810-26-000010", "2026-11-03", "published") +
+      cal("NVDA", "2026-11-03", "reported");
+    const opts = { exact: false, lang: "en" } as const;
+    const plain = await stripDay(memoryD1(seed), "2026-10-31", opts);
+    expect(await stripDay(memoryD1(seed + extras), "2026-10-31", opts)).toEqual(plain);
+  });
+  it("in Chinese, a reported entry with no ZH row links no post", async () => {
+    const db = memoryD1(earnings(3, "NVDA", "0001045810-26-000010", "2026-11-03", null) + cal("NVDA", "2026-11-03", "reported"));
+    const day = await stripDay(db, "2026-11-03", { exact: true, lang: "zh" });
+    expect(day?.amc.map((e) => [e.ticker, e.postSlug])).toEqual([["NVDA", null]]);
+    expect((await stripDay(db, "2026-11-03", { exact: true, lang: "en" }))?.amc[0].postSlug).toBe("nvda-2026-11-03-earnings");
+  });
 });

@@ -250,4 +250,18 @@ describe("EarningsStrip", () => {
     expect(out).not.toContain("Time TBD");
     expect(out).toContain("After close");
   });
+  it("caps chips per group and links the overflow to the calendar", () => {
+    const many: StripDay = {
+      ...day,
+      bmo: Array.from({ length: 11 }, (_, i) => entry(`T${i}`, "bmo")),
+    };
+    const out = renderToStaticMarkup(<EarningsStrip day={many} locale="en" today="2026-10-31" />);
+    expect(out).toContain(">T7<");
+    expect(out).not.toContain(">T8<");
+    expect(out).toMatch(/<a class="estrip-chip estrip-more" href="\/en\/earnings">\+3 more<\/a>/);
+    expect(out).toContain("Full calendar");
+    expect(out).toContain(">MSFT<"); // other groups are not squeezed out
+    expect(renderToStaticMarkup(<EarningsStrip day={many} locale="zh" today="2026-10-31" />)).toContain("另有3家");
+    expect(renderToStaticMarkup(<EarningsStrip day={day} locale="en" today="2026-10-31" />)).not.toContain("more");
+  });
 });
