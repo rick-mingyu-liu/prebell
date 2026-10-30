@@ -1,8 +1,8 @@
 import type { Metadata } from "next";
 import Link from "next/link";
 import { getTranslations, setRequestLocale } from "next-intl/server";
-import LangSwitch from "@/components/LangSwitch";
 import PostList from "@/components/PostList";
+import Sidebar from "@/components/Sidebar";
 import type { Locale } from "@/i18n/routing";
 import { getDb } from "@/lib/db";
 import { typeLabel } from "@/lib/labels";
@@ -44,27 +44,31 @@ export default async function Archive({ params, searchParams }: PageProps<"/[loc
   const href = (ty: ContentType | null, n: number) => `/${locale}${archivePath(ty, n)}`;
 
   return (
-    <>
-      <div className="page-tools">
+    <div className="grid-article">
+      <div className="page-main">
         <h1>
           {t("archive.title")}
           {type && <span className="muted"> · {typeLabel(t, type)}</span>}
           {page > 1 && <span className="muted"> · {t("archive.page", { page })}</span>}
         </h1>
-        <LangSwitch locale={locale} path={archivePath(type, 1)} />
+        <nav className="filters" aria-label={t("archive.filter")}>
+          {[null, ...CONTENT_TYPES].map((ty) => (
+            <Link
+              key={ty ?? "all"}
+              href={href(ty, 1)}
+              aria-current={ty === type ? (page === 1 ? "page" : "true") : undefined}
+            >
+              {ty ? typeLabel(t, ty) : t("archive.all")}
+            </Link>
+          ))}
+        </nav>
+        {items.length === 0 ? <p>{t("archive.empty")}</p> : <PostList locale={locale} items={items} />}
+        <nav className="pager">
+          {page > 1 && <Link href={href(type, page - 1)}>← {t("archive.newer")}</Link>}
+          {items.length === PAGE_SIZE && <Link href={href(type, page + 1)}>{t("archive.older")} →</Link>}
+        </nav>
       </div>
-      <nav className="filters" aria-label={t("archive.filter")}>
-        {[null, ...CONTENT_TYPES].map((ty) => (
-          <Link key={ty ?? "all"} href={href(ty, 1)} aria-current={ty === type ? (page === 1 ? "page" : "true") : undefined}>
-            {ty ? typeLabel(t, ty) : t("archive.all")}
-          </Link>
-        ))}
-      </nav>
-      {items.length === 0 ? <p>{t("archive.empty")}</p> : <PostList locale={locale} items={items} />}
-      <nav className="pager">
-        {page > 1 && <Link href={href(type, page - 1)}>← {t("archive.newer")}</Link>}
-        {items.length === PAGE_SIZE && <Link href={href(type, page + 1)}>{t("archive.older")} →</Link>}
-      </nav>
-    </>
+      <Sidebar locale={locale} />
+    </div>
   );
 }

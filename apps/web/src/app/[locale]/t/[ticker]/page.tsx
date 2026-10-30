@@ -2,8 +2,8 @@ import type { Metadata } from "next";
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { getTranslations, setRequestLocale } from "next-intl/server";
-import LangSwitch from "@/components/LangSwitch";
 import PostList from "@/components/PostList";
+import Sidebar from "@/components/Sidebar";
 import type { Locale } from "@/i18n/routing";
 import { getDb } from "@/lib/db";
 import { listTickerCalendar, listTickerPosts, normalizeTicker, tickerKnown } from "@/lib/earnings";
@@ -29,7 +29,10 @@ export default async function TickerArchive({ params }: PageProps<"/[locale]/t/[
   const db = getDb();
   if (!ticker || !(await tickerKnown(db, ticker))) notFound();
   const t = await getTranslations("earnings");
-  const [posts, dates] = await Promise.all([listTickerPosts(db, ticker, locale), listTickerCalendar(db, ticker, locale)]);
+  const [posts, dates] = await Promise.all([
+    listTickerPosts(db, ticker, locale),
+    listTickerCalendar(db, ticker, locale),
+  ]);
   const status: Record<string, string> = {
     unconfirmed: t("unconfirmed"),
     confirmed: t("confirmed"),
@@ -38,37 +41,43 @@ export default async function TickerArchive({ params }: PageProps<"/[locale]/t/[
   const slot: Record<string, string> = { bmo: t("bmo"), amc: t("amc"), unknown: t("timeUnknown") };
 
   return (
-    <>
-      <div className="page-tools">
+    <div className="grid-article">
+      <div className="page-main">
         <h1>{t("tickerTitle", { ticker })}</h1>
-        <LangSwitch locale={locale} path={`/t/${encodeURIComponent(ticker)}`} />
-      </div>
-      <section aria-labelledby="checks">
-        <h2 id="checks">{t("checks")}</h2>
-        {posts.length === 0 ? <p className="muted">{t("noChecks")}</p> : <PostList locale={locale} items={posts} />}
-      </section>
-      {dates.length > 0 && (
-        <section aria-labelledby="dates">
-          <h2 id="dates">{t("dates")}</h2>
-          <ul className="post-list">
-            {dates.map((d) => (
-              <li key={d.date}>
-                <time dateTime={d.date}>{formatDate(d.date, locale)}</time> {slot[d.slot]} ·{" "}
-                <span className={`badge badge-${d.status}`}>{status[d.status]}</span>
-                {d.postSlug && (
-                  <>
-                    {" · "}
-                    <Link href={`/${locale}/p/${d.postSlug}`}>{t("readCheck")}</Link>
-                  </>
-                )}
-              </li>
-            ))}
-          </ul>
+        <section aria-labelledby="checks">
+          <h2 id="checks">{t("checks")}</h2>
+          {posts.length === 0 ? <p className="muted">{t("noChecks")}</p> : <PostList locale={locale} items={posts} />}
         </section>
-      )}
-      <p>
-        <Link href={`/${locale}/earnings`}>{t("calendarTitle")} →</Link>
-      </p>
-    </>
+        {dates.length > 0 && (
+          <section aria-labelledby="dates">
+            <h2 id="dates">{t("dates")}</h2>
+            <ul className="date-list">
+              {dates.map((d) => (
+                <li key={d.date} className="row">
+                  <span>
+                    <time dateTime={d.date}>{formatDate(d.date, locale)}</time>{" "}
+                    <span className="muted">{slot[d.slot]}</span>
+                  </span>
+                  <span className="row-end">
+                    <span className={`badge badge-${d.status}`}>{status[d.status]}</span>
+                    {d.postSlug && (
+                      <Link className="more" href={`/${locale}/p/${d.postSlug}`}>
+                        {t("readCheck")} →
+                      </Link>
+                    )}
+                  </span>
+                </li>
+              ))}
+            </ul>
+          </section>
+        )}
+        <p>
+          <Link className="more" href={`/${locale}/earnings`}>
+            {t("calendarTitle")} →
+          </Link>
+        </p>
+      </div>
+      <Sidebar locale={locale} />
+    </div>
   );
 }

@@ -1,8 +1,8 @@
 import type { Locale } from "../i18n/routing";
+import { CONTENT_TYPES, type ContentType } from "./posts";
 import { formatDate } from "./time";
 
-const TYPE_KEYS = ["types.premarket", "types.recap", "types.earnings"] as const;
-type Key = (typeof TYPE_KEYS)[number] | "post.pendingTitle";
+type Key = `types.${ContentType}` | "post.pendingTitle";
 
 /**
  * The subset of a root-namespace translator these helpers use. Keys are literal, so both
@@ -15,8 +15,8 @@ export interface Translator {
 
 /** "After-close recap" for a known content type, else the raw type. */
 export function typeLabel(t: Translator, contentType: string): string {
-  const key = TYPE_KEYS.find((k) => k === `types.${contentType}`);
-  return key && t.has(key) ? t(key) : contentType;
+  const known = CONTENT_TYPES.find((c) => c === contentType);
+  return known && t.has(`types.${known}`) ? t(`types.${known}`) : contentType;
 }
 
 /** "After-close recap, Oct 29, 2026": the heading of a post whose text is pending. */

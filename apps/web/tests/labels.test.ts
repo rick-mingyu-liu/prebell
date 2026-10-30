@@ -1,4 +1,7 @@
 import { describe, expect, it } from "vitest";
+import en from "../messages/en.json";
+import zh from "../messages/zh.json";
+import { CONTENT_TYPES } from "../src/lib/posts";
 import { pendingTitle, typeLabel, type Translator } from "../src/lib/labels";
 
 const messages: Record<string, string> = {
@@ -22,5 +25,13 @@ describe("labels", () => {
     expect(pendingTitle(t, { contentType: "recap", tradingDate: "2026-10-29" }, "en")).toMatch(
       /^After-close recap, Oct 29, 2026$/,
     );
+  });
+});
+
+describe("message coverage", () => {
+  it("has a type label in both languages for every content type", () => {
+    for (const messages of [en, zh]) {
+      for (const type of CONTENT_TYPES) expect(messages.types[type]).toBeTruthy();
+    }
   });
 });
