@@ -1,0 +1,29 @@
+{
+ "chart": {
+  "result": [
+   {
+    "meta": {
+     "currency": "USD",
+     "symbol": "NVDA",
+     "exchangeName": "NMS",
+     "instrumentType": "EQUITY",
+     "exchangeTimezoneName": "America/New_York",
+     "regularMarketPrice": 182.35,
+     "regularMarketTime": 1793304000,
+     "regularMarketVolume": 210000000,
+     "chartPreviousClose": 176.9
+    },
+    "timestamp": [1793280600, 1793303940, 1793305800],
+    "indicators": {
+     "quote": [
+      {
+       "close": [177.5, 182.3, 184.0],
+       "volume": [900000, 1500000, 200000]
+      }
+     ]
+    }
+   }
+  ],
+  "error": null
+ }
+}

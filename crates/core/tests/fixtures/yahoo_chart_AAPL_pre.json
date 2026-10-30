@@ -1,0 +1,72 @@
+{
+ "chart": {
+  "result": [
+   {
+    "meta": {
+     "currency": "USD",
+     "symbol": "AAPL",
+     "exchangeName": "CME",
+     "exchangeTimezoneName": "America/New_York",
+     "chartPreviousClose": 225.0,
+     "regularMarketPrice": 230.2,
+     "instrumentType": "EQUITY"
+    },
+    "timestamp": [
+     1736931600,
+     1736946900,
+     1736949600,
+     1736951340,
+     1736951400,
+     1736951460
+    ],
+    "indicators": {
+     "quote": [
+      {
+       "close": [
+        226.1,
+        227.4,
+        228.0,
+        228.5,
+        229.9,
+        230.2
+       ],
+       "volume": [
+        3000,
+        null,
+        12000,
+        4000,
+        50000,
+        40000
+       ],
+       "open": [
+        226.1,
+        227.4,
+        228.0,
+        228.5,
+        229.9,
+        230.2
+       ],
+       "high": [
+        226.1,
+        227.4,
+        228.0,
+        228.5,
+        229.9,
+        230.2
+       ],
+       "low": [
+        226.1,
+        227.4,
+        228.0,
+        228.5,
+        229.9,
+        230.2
+       ]
+      }
+     ]
+    }
+   }
+  ],
+  "error": null
+ }
+}

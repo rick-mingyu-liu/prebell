@@ -1,0 +1,32 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "prebell-web",
+  "main": ".open-next/worker.js",
+  "compatibility_date": "2026-10-01",
+  "compatibility_flags": ["nodejs_compat", "global_fetch_strictly_public"],
+  "assets": {
+    "directory": ".open-next/assets",
+    "binding": "ASSETS"
+  },
+  "d1_databases": [
+    {
+      // Same database as crates/generator/wrangler.toml; real id set in Task 13.
+      "binding": "DB",
+      "database_name": "prebell",
+      "database_id": "eb17fcaf-48fd-4956-88c6-d5ef18ac2662"
+    }
+  ],
+  "r2_buckets": [
+    {
+      // Same bucket as crates/generator/wrangler.toml; the site serves chart SVGs from its charts/ prefix.
+      "binding": "FACTS",
+      "bucket_name": "prebell-facts"
+    }
+  ],
+  "vars": {
+    // Origin for canonical and hreflang URLs; https://prebell.ai is a placeholder until the domain is bought.
+    "SITE_URL": "https://prebell.ai"
+    // CF_BEACON_TOKEN (Cloudflare Web Analytics) is optional; set it as a var to enable the beacon.
+    // ADMIN_TOKEN is a secret (`wrangler secret put ADMIN_TOKEN`) for /admin/competitor; never a var.
+  }
+}

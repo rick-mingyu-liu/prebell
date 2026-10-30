@@ -1,0 +1,124 @@
+{
+  "site": {
+    "name": "PreBell",
+    "tagline": "Premarket briefs and after-close recaps for US stocks",
+    "home": "Home",
+    "archive": "Archive",
+    "about": "About",
+    "otherLang": "中文",
+    "otherLangLabel": "Read in Chinese",
+    "earnings": "Earnings",
+    "briefs": "Briefs",
+    "calendar": "Calendar",
+    "wordmark": "Pre<b>Bell</b>",
+    "wordmarkSub": "盘前铃",
+    "navLabel": "Main"
+  },
+  "home": {
+    "recent": "Recent posts",
+    "empty": "Nothing has been published yet.",
+    "allBriefs": "All posts",
+    "noEarnings": "No earnings checks yet.",
+    "briefTabs": "Daily brief",
+    "readFull": "Read the full brief →",
+    "tabMovers": "Top movers",
+    "tabEarnings": "Earnings checks",
+    "panelTabs": "Movers and earnings checks",
+    "noMovers": "No movers for this brief.",
+    "allEarnings": "All earnings checks →",
+    "moversInBrief": "Movers are in the full brief →"
+  },
+  "post": {
+    "permalink": "Permalink",
+    "published": "Published {time}",
+    "pendingTitle": "{type}, {date}",
+    "pending": "The Chinese version is coming soon.",
+    "readEnglish": "Read the English version"
+  },
+  "archive": {
+    "title": "Archive",
+    "page": "Page {page}",
+    "newer": "Newer",
+    "older": "Older",
+    "empty": "Nothing here.",
+    "all": "All briefs",
+    "filter": "Filter by type"
+  },
+  "about": {
+    "title": "About",
+    "p1": "PreBell publishes a short premarket brief every US trading day before the open (index futures, the biggest premarket movers and why they moved, and what to watch) and an after-close recap after the bell (index closes, notable movers and why, and after-hours earnings to watch).",
+    "p2": "Every post is generated automatically from public market data and news. Numbers are checked against the source data before publishing, and each post lists its sources. Times are US Eastern.",
+    "p3": "English is published first; the Chinese version follows."
+  },
+  "notFound": {
+    "title": "Page not found",
+    "back": "Back to the home page"
+  },
+  "disclaimer": "Content on this site is generated automatically from public data for information only. It is not investment advice.",
+  "types": {
+    "premarket": "Premarket brief",
+    "recap": "After-close recap",
+    "earnings": "Earnings check"
+  },
+  "earnings": {
+    "calendarTitle": "Earnings calendar",
+    "weekOf": "Week of {date}",
+    "timesEt": "Times US Eastern",
+    "legend": "Confirmed: the company announced the date. Unconfirmed: the date comes from an aggregator and may change. Reported: the results are filed with the SEC.",
+    "bmo": "Before open",
+    "amc": "After close",
+    "timeUnknown": "Time n/a",
+    "unconfirmed": "Unconfirmed",
+    "confirmed": "Confirmed",
+    "reported": "Reported",
+    "none": "No reports.",
+    "stripLabel": "Earnings · {date}",
+    "stripToday": "Earnings today",
+    "stripUnknown": "Time TBD",
+    "stripAll": "Full calendar →",
+    "stripMore": "+{count} more",
+    "prevWeek": "Previous week",
+    "nextWeek": "Next week",
+    "tickerTitle": "{ticker} earnings",
+    "checks": "Earnings checks",
+    "noChecks": "No earnings checks yet.",
+    "dates": "Report dates",
+    "readCheck": "Read the check",
+    "charts": "Charts (GAAP)",
+    "chartsNote": "Charts show GAAP figures from SEC filings; the last bar marked 8-K is this release. A gap means the company did not report that quarter separately."
+  },
+  "index": {
+    "es": "S&P 500 futures",
+    "nq": "Nasdaq 100 futures",
+    "ym": "Dow futures",
+    "rty": "Russell 2000 futures",
+    "gspc": "S&P 500",
+    "ndx": "Nasdaq 100",
+    "ixic": "Nasdaq Composite",
+    "dji": "Dow",
+    "rut": "Russell 2000"
+  },
+  "movers": {
+    "noNews": "No clear news"
+  },
+  "partners": {
+    "brokers": "Brokers",
+    "crypto": "Crypto exchanges",
+    "disclosure": "Affiliate links: PreBell may earn a reward if you sign up. Not investment advice."
+  },
+  "termpocket": {
+    "name": "TermPocket",
+    "copy": "From the PreBell team. Plan your goals and habits with Pocky, your AI assistant.",
+    "cta": "Try TermPocket →"
+  },
+  "brief": {
+    "crumbLabel": "Breadcrumb",
+    "premarket": "Premarket",
+    "recap": "Recap",
+    "checked": "✓ Numbers checked against source data",
+    "movers": "Top movers",
+    "adjacent": "More briefs",
+    "prev": "Previous",
+    "next": "Next"
+  }
+}

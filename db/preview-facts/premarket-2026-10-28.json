@@ -1,0 +1,100 @@
+{
+  "trading_date": "2026-10-28",
+  "as_of_utc": "2026-10-28T12:30:00Z",
+  "futures": [
+    [
+      "S&P 500 futures",
+      {
+        "Value": {
+          "symbol": "ES=F",
+          "last": 5889.75,
+          "prev_close": 5912.22,
+          "change_pct": -0.38,
+          "volume": null
+        }
+      }
+    ],
+    [
+      "Nasdaq 100 futures",
+      {
+        "Value": {
+          "symbol": "NQ=F",
+          "last": 20702.25,
+          "prev_close": 20873.41,
+          "change_pct": -0.82,
+          "volume": null
+        }
+      }
+    ],
+    [
+      "Dow futures",
+      {
+        "Value": {
+          "symbol": "YM=F",
+          "last": 43050.0,
+          "prev_close": 43106.04,
+          "change_pct": -0.13,
+          "volume": null
+        }
+      }
+    ],
+    [
+      "Russell 2000 futures",
+      {
+        "Missing": {
+          "reason": "no quote returned"
+        }
+      }
+    ]
+  ],
+  "gainers": [
+    {
+      "quote": {
+        "symbol": "V",
+        "last": 312.6,
+        "prev_close": 302.2,
+        "change_pct": 3.44,
+        "volume": null
+      },
+      "name": "Visa Inc.",
+      "reasons": [
+        {
+          "url": "https://news.example.com/visa-q4",
+          "title": "Payments volume beat estimates",
+          "quote": "Payments volume beat estimates.",
+          "summary_en": "Payments volume beat estimates"
+        }
+      ]
+    }
+  ],
+  "losers": [
+    {
+      "quote": {
+        "symbol": "NXPI",
+        "last": 201.15,
+        "prev_close": 218.19,
+        "change_pct": -7.81,
+        "volume": null
+      },
+      "name": "NXP Semiconductors",
+      "reasons": [
+        {
+          "url": "https://news.example.com/nxp-guide",
+          "title": "Guided fourth-quarter revenue below estimates",
+          "quote": "Guided fourth-quarter revenue below estimates.",
+          "summary_en": "Guided fourth-quarter revenue below estimates"
+        }
+      ]
+    }
+  ],
+  "macro_items": {
+    "Missing": {
+      "reason": "preview fixture"
+    }
+  },
+  "watch_list": {
+    "Missing": {
+      "reason": "preview fixture"
+    }
+  }
+}

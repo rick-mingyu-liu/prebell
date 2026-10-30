@@ -1,0 +1,124 @@
+{
+  "site": {
+    "name": "盘前铃 PreBell",
+    "tagline": "美股盘前简报与收盘回顾",
+    "home": "首页",
+    "archive": "归档",
+    "about": "关于",
+    "otherLang": "English",
+    "otherLangLabel": "阅读英文版",
+    "earnings": "财报",
+    "briefs": "简报",
+    "calendar": "日历",
+    "wordmark": "Pre<b>Bell</b>",
+    "wordmarkSub": "盘前铃",
+    "navLabel": "主导航"
+  },
+  "home": {
+    "recent": "近期文章",
+    "empty": "暂无已发布的内容。",
+    "allBriefs": "全部文章",
+    "noEarnings": "暂无财报速评。",
+    "briefTabs": "每日简报",
+    "readFull": "阅读完整简报 →",
+    "tabMovers": "涨跌榜",
+    "tabEarnings": "财报速评",
+    "panelTabs": "涨跌榜与财报速评",
+    "noMovers": "本期暂无涨跌榜。",
+    "allEarnings": "全部财报速评 →",
+    "moversInBrief": "涨跌榜见完整简报 →"
+  },
+  "post": {
+    "permalink": "本文链接",
+    "published": "发布于 {time}",
+    "pendingTitle": "{type} {date}",
+    "pending": "中文版稍后推出",
+    "readEnglish": "阅读英文版"
+  },
+  "archive": {
+    "title": "归档",
+    "page": "第 {page} 页",
+    "newer": "较新",
+    "older": "较早",
+    "empty": "暂无内容。",
+    "all": "全部简报",
+    "filter": "按类型筛选"
+  },
+  "about": {
+    "title": "关于",
+    "p1": "盘前铃 PreBell 在每个美股交易日开盘前发布一份简短的盘前简报（股指期货、盘前涨跌幅最大的个股及其原因、当日关注要点），并在收盘后发布收盘回顾（主要指数收盘、异动个股及其原因、盘后财报关注）。",
+    "p2": "所有文章均根据公开的市场数据和新闻自动生成。发布前会将数字与源数据逐一核对，并列出所有来源。时间均为美东时间。",
+    "p3": "英文版先行发布，中文版随后推出。"
+  },
+  "notFound": {
+    "title": "页面不存在",
+    "back": "返回首页"
+  },
+  "disclaimer": "本站内容根据公开数据自动生成，仅供参考，不构成投资建议。",
+  "types": {
+    "premarket": "盘前简报",
+    "recap": "收盘回顾",
+    "earnings": "财报速评"
+  },
+  "earnings": {
+    "calendarTitle": "财报日历",
+    "weekOf": "{date}当周",
+    "timesEt": "时间均为美东时间",
+    "legend": "已确认：公司已公布日期。未确认：日期来自第三方汇总，可能变动。已发布：业绩已向美国证监会提交。",
+    "bmo": "盘前",
+    "amc": "盘后",
+    "timeUnknown": "时间暂缺",
+    "unconfirmed": "未确认",
+    "confirmed": "已确认",
+    "reported": "已发布",
+    "none": "无财报。",
+    "stripLabel": "财报 · {date}",
+    "stripToday": "今日财报",
+    "stripUnknown": "时间待定",
+    "stripAll": "完整日历 →",
+    "stripMore": "另有{count}家",
+    "prevWeek": "上一周",
+    "nextWeek": "下一周",
+    "tickerTitle": "{ticker} 财报",
+    "checks": "财报速评",
+    "noChecks": "暂无财报速评。",
+    "dates": "财报日期",
+    "readCheck": "阅读速评",
+    "charts": "图表（GAAP）",
+    "chartsNote": "图表为美国证监会文件中的 GAAP 数据；标为 8-K 的最后一栏为本次公布数据。空缺表示公司未单独公布该季度数据。"
+  },
+  "index": {
+    "es": "标普500期货",
+    "nq": "纳指100期货",
+    "ym": "道指期货",
+    "rty": "罗素2000期货",
+    "gspc": "标普500",
+    "ndx": "纳指100",
+    "ixic": "纳指综合",
+    "dji": "道指",
+    "rut": "罗素2000"
+  },
+  "movers": {
+    "noNews": "暂无明确消息"
+  },
+  "partners": {
+    "brokers": "券商",
+    "crypto": "加密交易所",
+    "disclosure": "推广链接：通过链接注册，PreBell 可能获得奖励。不构成投资建议。"
+  },
+  "termpocket": {
+    "name": "TermPocket",
+    "copy": "来自 PreBell 团队。用 AI 助手 Pocky 规划你的目标与习惯。",
+    "cta": "试用 TermPocket →"
+  },
+  "brief": {
+    "crumbLabel": "当前位置",
+    "premarket": "盘前",
+    "recap": "收盘",
+    "checked": "✓ 数字已与源数据核对",
+    "movers": "涨跌榜",
+    "adjacent": "更多简报",
+    "prev": "上一篇",
+    "next": "下一篇"
+  }
+}
