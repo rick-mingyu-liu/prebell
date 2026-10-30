@@ -18,6 +18,8 @@
   --header-bg: #000;
   --header-fg: #fff;
   --header-line: transparent;
+  --strip-bg: #f3fbf3;
+  --strip-line: #ddefdd;
   --sans: var(--font-inter), system-ui, -apple-system, "Segoe UI", Roboto, "PingFang SC", "Hiragino Sans GB",
     "Microsoft YaHei", "Noto Sans SC", sans-serif;
   --cjk: "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans SC", sans-serif;
@@ -35,6 +37,8 @@
     --accent: #00c805;
     --notice: #2b2616;
     --header-line: #262626; /* the header is as black as the page */
+    --strip-bg: #07140a;
+    --strip-line: #16361a;
   }
 }
 
@@ -134,6 +138,23 @@ main:not(.wrap) { max-width: 46rem; margin: 0 auto; padding: 1.5rem 16px 3rem; }
 .tp-card .tp-name { font-size: 0.95rem; font-weight: 800; margin: 0; opacity: 1; }
 .tp-cta { display: inline-block; background: #fff; color: #0e1b2b; font-size: 0.75rem; font-weight: 700; padding: 0.3rem 0.75rem; border-radius: 99px; text-decoration: none; }
 .tp-cta:hover, .tp-cta:focus-visible { text-decoration: underline; }
+
+/* Earnings strip: a green band under the header; scrolls sideways on phones. */
+.estrip { background: var(--strip-bg); border-bottom: 1px solid var(--strip-line); font-size: 0.75rem; }
+.estrip-in { display: flex; align-items: center; gap: 0.5rem 0.6rem; flex-wrap: wrap; padding-top: 0.6rem; padding-bottom: 0.6rem; }
+.estrip-title { font-weight: 700; }
+.estrip-title::before { content: "\25CF"; color: var(--up); margin-right: 0.35rem; }
+.estrip-group { display: flex; align-items: center; gap: 0.4rem; }
+.estrip-slot { color: var(--muted); margin-left: 0.4rem; white-space: nowrap; }
+.chip { border: 1px solid var(--strip-line); background: var(--bg); color: var(--fg); border-radius: 6px; padding: 0.15rem 0.5rem; font-weight: 700; font-size: 0.75rem; text-decoration: none; white-space: nowrap; }
+.chip:hover, .chip:focus-visible { border-color: var(--accent); }
+.estrip-all { margin-left: auto; border: 1px solid var(--accent); color: var(--accent); border-radius: 99px; padding: 0.15rem 0.75rem; font-weight: 600; text-decoration: none; white-space: nowrap; }
+.estrip-all:hover, .estrip-all:focus-visible { background: var(--accent); color: var(--bg); }
+@media (max-width: 640px) {
+  .estrip-in { flex-wrap: nowrap; overflow-x: auto; }
+  .estrip-group { flex: none; }
+  .estrip-title, .estrip-all { flex: none; }
+}
 
 /* Existing pages (restyled in a later pass); kept readable on the wider shell. */
 .prose, .post-body, .post-list, .notice { max-width: 46rem; }

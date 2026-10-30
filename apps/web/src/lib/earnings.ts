@@ -106,6 +106,48 @@ export async function listCalendarWeek(db: D1Like, monday: string, lang: Lang): 
   });
 }
 
+/** The earnings strip's day: its entries grouped by report slot. */
+export interface StripDay {
+  date: string;
+  bmo: CalendarEntry[];
+  amc: CalendarEntry[];
+  unknown: CalendarEntry[];
+}
+
+/** How far ahead the homepage strip looks for a date with entries. */
+const STRIP_LOOKAHEAD_DAYS = 7;
+
+/**
+ * The strip's report day. With `exact`, only `fromDate`; otherwise the first date from `fromDate`
+ * through 7 days ahead that has entries. Null when there are none. Quarantined rows are not shown.
+ */
+export async function stripDay(
+  db: D1Like,
+  fromDate: string,
+  opts: { exact: boolean; lang: Lang },
+): Promise<StripDay | null> {
+  const last = opts.exact ? fromDate : addDays(fromDate, STRIP_LOOKAHEAD_DAYS);
+  const { results } = await db
+    .prepare(
+      `SELECT c.ticker, c.report_date, c.time_slot, c.status, x.slug AS post_slug
+       FROM earnings_calendar c
+       LEFT JOIN (${POSTS_BY_TICKER_DATE}) x ON x.ticker = c.ticker AND x.trading_date = c.report_date
+       WHERE c.report_date BETWEEN ? AND ? AND c.status IN ('unconfirmed','confirmed','reported')
+       ORDER BY c.report_date, CASE c.time_slot WHEN 'bmo' THEN 0 WHEN 'amc' THEN 1 ELSE 2 END, c.ticker`,
+    )
+    .bind(opts.lang, fromDate, last)
+    .all<CalRow>();
+  if (results.length === 0) return null;
+  const date = results[0].report_date;
+  const entries = results.filter((r) => r.report_date === date).map(toEntry);
+  return {
+    date,
+    bmo: entries.filter((e) => e.slot === "bmo"),
+    amc: entries.filter((e) => e.slot === "amc"),
+    unknown: entries.filter((e) => e.slot === "unknown"),
+  };
+}
+
 /** A ticker's calendar rows (newest first), quarantined ones hidden. */
 export async function listTickerCalendar(db: D1Like, ticker: string, lang: Lang): Promise<CalendarEntry[]> {
   const { results } = await db

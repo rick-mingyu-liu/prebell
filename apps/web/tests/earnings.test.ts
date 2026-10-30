@@ -9,6 +9,7 @@ import {
   listTickerCalendar,
   listTickerPosts,
   normalizeTicker,
+  stripDay,
   tickerKnown,
   todayEt,
   weekStart,
@@ -161,5 +162,39 @@ describe("charts", () => {
       expect((await chartResponse(bucket, bad)).status).toBe(404);
     }
     expect(seen).toHaveLength(2);
+  });
+});
+
+describe("stripDay", () => {
+  it("a weekend start date lands on Monday's entries", async () => {
+    const day = await stripDay(memoryD1(seed), "2026-10-31", { exact: false, lang: "en" });
+    expect(day?.date).toBe("2026-11-02");
+    expect(day?.amc.map((e) => e.ticker)).toEqual(["AMZN"]);
+  });
+  it("an exact date without entries is null, even when a later date has some", async () => {
+    const db = memoryD1(seed);
+    expect(await stripDay(db, "2026-10-31", { exact: true, lang: "en" })).toBeNull();
+    expect(await stripDay(db, "2026-10-29", { exact: true, lang: "en" })).toBeNull(); // only a quarantined row
+  });
+  it("looks at most 7 days ahead", async () => {
+    const db = memoryD1(seed);
+    expect((await stripDay(db, "2026-10-26", { exact: false, lang: "en" }))?.date).toBe("2026-10-28");
+    expect(await stripDay(db, "2026-11-03", { exact: false, lang: "en" })).toBeNull();
+    expect((await stripDay(memoryD1(cal("KO", "2026-11-09", "confirmed")), "2026-11-02", { exact: false, lang: "en" }))?.date).toBe("2026-11-09");
+    expect(await stripDay(memoryD1(cal("KO", "2026-11-10", "confirmed")), "2026-11-02", { exact: false, lang: "en" })).toBeNull();
+  });
+  it("groups by slot in order and carries the post slug of reported entries", async () => {
+    const day = await stripDay(memoryD1(seed), "2026-10-30", { exact: true, lang: "en" });
+    expect(day?.bmo.map((e) => [e.ticker, e.postSlug])).toEqual([
+      ["CVX", null],
+      ["XOM", null],
+    ]);
+    expect(day?.amc.map((e) => [e.ticker, e.postSlug])).toEqual([["AAPL", "aapl-2026-10-30-earnings"]]);
+    expect(day?.unknown).toEqual([]);
+  });
+  it("uses the entry's own date as the day", async () => {
+    const day = await stripDay(memoryD1(seed), "2026-10-27", { exact: false, lang: "zh" });
+    expect(day?.date).toBe("2026-10-28");
+    expect(day?.amc[0].postSlug).toBe("msft-2026-10-28-earnings"); // pending ZH still links
   });
 });

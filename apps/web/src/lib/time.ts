@@ -44,3 +44,14 @@ export function formatEtTime(iso: string | null | undefined, lang: Lang): string
   if (lang === "en") return `${enTime.format(d).replace(/[  ]/g, " ")} ET`;
   return `${zhTime.format(d).replace(/[  ]/g, " ")}（美东）`;
 }
+
+const enDay = new Intl.DateTimeFormat("en-US", { timeZone: "UTC", weekday: "short", month: "short", day: "numeric" });
+const zhMonthDay = new Intl.DateTimeFormat("zh-CN", { timeZone: "UTC", month: "long", day: "numeric" });
+const zhWeekday = new Intl.DateTimeFormat("zh-CN", { timeZone: "UTC", weekday: "short" });
+
+/** A trading date as a short label with the weekday: "Mon, Nov 2" / "11月2日 周一". */
+export function formatDayShort(date: string, lang: Lang): string {
+  const d = new Date(`${date}T12:00:00Z`);
+  if (Number.isNaN(d.getTime())) return date;
+  return lang === "en" ? enDay.format(d) : `${zhMonthDay.format(d)} ${zhWeekday.format(d)}`;
+}
