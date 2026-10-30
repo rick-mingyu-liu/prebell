@@ -7,7 +7,12 @@
     "about": "关于",
     "otherLang": "English",
     "otherLangLabel": "阅读英文版",
-    "earnings": "财报"
+    "earnings": "财报",
+    "briefs": "简报",
+    "calendar": "日历",
+    "wordmark": "Pre<b>Bell</b>",
+    "wordmarkSub": "盘前铃",
+    "navLabel": "主导航"
   },
   "home": {
     "latest": "最新盘前简报",

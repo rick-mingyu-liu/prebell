@@ -173,7 +173,14 @@ describe("content types", () => {
     expect(parseContentType("recap")).toBe("recap");
     expect(parseContentType("premarket")).toBe("premarket");
     expect(parseContentType(["recap", "x"])).toBe("recap");
-    expect(parseContentType("earnings")).toBeNull();
+    expect(parseContentType("earnings")).toBe("earnings");
+    expect(parseContentType("x")).toBeNull();
     expect(parseContentType(undefined)).toBeNull();
+  });
+
+  it("listPosts with type earnings returns only earnings posts", async () => {
+    const db = memoryD1(mixed + post(5, "2026-10-29", "published", "published", "earnings"));
+    expect((await listPosts(db, "en", 1, "earnings")).map((i) => i.slug)).toEqual(["earnings-2026-10-29"]);
+    expect((await listPosts(db, "zh", 1, "earnings")).map((i) => i.contentType)).toEqual(["earnings"]);
   });
 });

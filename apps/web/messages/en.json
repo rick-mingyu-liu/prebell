@@ -7,7 +7,12 @@
     "about": "About",
     "otherLang": "中文",
     "otherLangLabel": "Read in Chinese",
-    "earnings": "Earnings"
+    "earnings": "Earnings",
+    "briefs": "Briefs",
+    "calendar": "Calendar",
+    "wordmark": "Pre<b>Bell</b>",
+    "wordmarkSub": "盘前铃",
+    "navLabel": "Main"
   },
   "home": {
     "latest": "Latest premarket brief",
