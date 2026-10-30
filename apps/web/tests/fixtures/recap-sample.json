@@ -1,0 +1,114 @@
+{
+  "trading_date": "2026-10-29",
+  "as_of_utc": "2026-10-29T20:30:00Z",
+  "early_close": false,
+  "indexes": [
+    [
+      "S&P 500",
+      {
+        "Value": {
+          "symbol": "^GSPC",
+          "last": 6890.12,
+          "prev_close": 6850.4,
+          "change_pct": 0.5798,
+          "volume": 3200000000
+        }
+      }
+    ],
+    [
+      "Nasdaq 100",
+      {
+        "Value": {
+          "symbol": "^NDX",
+          "last": 25410.55,
+          "prev_close": 25300.1,
+          "change_pct": 0.4366,
+          "volume": null
+        }
+      }
+    ],
+    [
+      "Dow Jones",
+      {
+        "Value": {
+          "symbol": "^DJI",
+          "last": 48120.3,
+          "prev_close": 48120.0,
+          "change_pct": 0.0006,
+          "volume": null
+        }
+      }
+    ],
+    [
+      "Russell 2000",
+      {
+        "Value": {
+          "symbol": "^RUT",
+          "last": 2860.75,
+          "prev_close": 2875.0,
+          "change_pct": -0.4957,
+          "volume": null
+        }
+      }
+    ]
+  ],
+  "gainers": [
+    {
+      "quote": {
+        "symbol": "AAPL",
+        "last": 241.1,
+        "prev_close": 227.2,
+        "change_pct": 6.118,
+        "volume": 5000000
+      },
+      "name": "Apple Inc.",
+      "reasons": [
+        {
+          "url": "https://news.example.com/aapl",
+          "title": "Apple Inc. news",
+          "quote": "Services revenue beat estimates.",
+          "summary_en": "Services revenue beat estimates."
+        }
+      ]
+    }
+  ],
+  "losers": [
+    {
+      "quote": {
+        "symbol": "PYPL",
+        "last": 71.88,
+        "prev_close": 75.9,
+        "change_pct": -5.2964,
+        "volume": 5000000
+      },
+      "name": "PayPal Holdings",
+      "reasons": [
+        {
+          "url": "https://news.example.com/pypl",
+          "title": "PayPal Holdings news",
+          "quote": "Branded checkout growth slowed.",
+          "summary_en": "Branded checkout growth slowed."
+        }
+      ]
+    },
+    {
+      "quote": {
+        "symbol": "XYZ",
+        "last": 12.0,
+        "prev_close": 12.8,
+        "change_pct": -6.25,
+        "volume": 2000000
+      },
+      "name": "Example Corp",
+      "reasons": []
+    }
+  ],
+  "after_hours": {
+    "Missing": {
+      "reason": "no news hits"
+    }
+  },
+  "diagnostics": [
+    "quotes ok=4"
+  ]
+}

@@ -7,17 +7,26 @@
     "about": "About",
     "otherLang": "中文",
     "otherLangLabel": "Read in Chinese",
-    "earnings": "Earnings"
+    "earnings": "Earnings",
+    "briefs": "Briefs",
+    "calendar": "Calendar",
+    "wordmark": "Pre<b>Bell</b>",
+    "wordmarkSub": "盘前铃",
+    "navLabel": "Main"
   },
   "home": {
-    "latest": "Latest premarket brief",
     "recent": "Recent posts",
     "empty": "Nothing has been published yet.",
     "allBriefs": "All posts",
-    "latestRecap": "Latest after-close recap",
-    "latestEarnings": "Latest earnings checks",
-    "calendar": "Earnings calendar",
-    "noEarnings": "No earnings checks yet."
+    "noEarnings": "No earnings checks yet.",
+    "briefTabs": "Daily brief",
+    "readFull": "Read the full brief →",
+    "tabMovers": "Top movers",
+    "tabEarnings": "Earnings checks",
+    "panelTabs": "Movers and earnings checks",
+    "noMovers": "No movers for this brief.",
+    "allEarnings": "All earnings checks →",
+    "moversInBrief": "Movers are in the full brief →"
   },
   "post": {
     "permalink": "Permalink",
@@ -32,7 +41,7 @@
     "newer": "Newer",
     "older": "Older",
     "empty": "Nothing here.",
-    "all": "All",
+    "all": "All briefs",
     "filter": "Filter by type"
   },
   "about": {
@@ -63,6 +72,11 @@
     "confirmed": "Confirmed",
     "reported": "Reported",
     "none": "No reports.",
+    "stripLabel": "Earnings · {date}",
+    "stripToday": "Earnings today",
+    "stripUnknown": "Time TBD",
+    "stripAll": "Full calendar →",
+    "stripMore": "+{count} more",
     "prevWeek": "Previous week",
     "nextWeek": "Next week",
     "tickerTitle": "{ticker} earnings",
@@ -72,5 +86,39 @@
     "readCheck": "Read the check",
     "charts": "Charts (GAAP)",
     "chartsNote": "Charts show GAAP figures from SEC filings; the last bar marked 8-K is this release. A gap means the company did not report that quarter separately."
+  },
+  "index": {
+    "es": "S&P 500 futures",
+    "nq": "Nasdaq 100 futures",
+    "ym": "Dow futures",
+    "rty": "Russell 2000 futures",
+    "gspc": "S&P 500",
+    "ndx": "Nasdaq 100",
+    "ixic": "Nasdaq Composite",
+    "dji": "Dow",
+    "rut": "Russell 2000"
+  },
+  "movers": {
+    "noNews": "No clear news"
+  },
+  "partners": {
+    "brokers": "Brokers",
+    "crypto": "Crypto exchanges",
+    "disclosure": "Affiliate links: PreBell may earn a reward if you sign up. Not investment advice."
+  },
+  "termpocket": {
+    "name": "TermPocket",
+    "copy": "From the PreBell team. Plan your goals and habits with Pocky, your AI assistant.",
+    "cta": "Try TermPocket →"
+  },
+  "brief": {
+    "crumbLabel": "Breadcrumb",
+    "premarket": "Premarket",
+    "recap": "Recap",
+    "checked": "✓ Numbers checked against source data",
+    "movers": "Top movers",
+    "adjacent": "More briefs",
+    "prev": "Previous",
+    "next": "Next"
   }
 }

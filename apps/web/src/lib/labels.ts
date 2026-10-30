@@ -1,16 +1,22 @@
 import type { Locale } from "../i18n/routing";
+import { CONTENT_TYPES, type ContentType } from "./posts";
 import { formatDate } from "./time";
 
-/** The subset of a root-namespace next-intl translator these helpers use. */
+type Key = `types.${ContentType}` | "post.pendingTitle";
+
+/**
+ * The subset of a root-namespace translator these helpers use. Keys are literal, so both
+ * `getTranslations()` and the message-typed `translator(locale)` fit.
+ */
 export interface Translator {
-  (key: string, values?: Record<string, string>): string;
-  has(key: string): boolean;
+  (key: Key, values?: Record<string, string>): string;
+  has(key: Key): boolean;
 }
 
 /** "After-close recap" for a known content type, else the raw type. */
 export function typeLabel(t: Translator, contentType: string): string {
-  const key = `types.${contentType}`;
-  return t.has(key) ? t(key) : contentType;
+  const known = CONTENT_TYPES.find((c) => c === contentType);
+  return known && t.has(`types.${known}`) ? t(`types.${known}`) : contentType;
 }
 
 /** "After-close recap, Oct 29, 2026": the heading of a post whose text is pending. */

@@ -9,10 +9,12 @@ import {
   listTickerCalendar,
   listTickerPosts,
   normalizeTicker,
+  stripDay,
   tickerKnown,
   todayEt,
   weekStart,
 } from "../src/lib/earnings";
+import type { D1Like } from "../src/lib/posts";
 import { memoryD1 } from "./d1";
 
 const ACC = "0000320193-26-000070";
@@ -161,5 +163,79 @@ describe("charts", () => {
       expect((await chartResponse(bucket, bad)).status).toBe(404);
     }
     expect(seen).toHaveLength(2);
+  });
+});
+
+describe("stripDay", () => {
+  it("a weekend start date lands on Monday's entries", async () => {
+    const day = await stripDay(memoryD1(seed), "2026-10-31", { exact: false, lang: "en" });
+    expect(day?.date).toBe("2026-11-02");
+    expect(day?.amc.map((e) => e.ticker)).toEqual(["AMZN"]);
+  });
+  it("an exact date without entries is null, even when a later date has some", async () => {
+    const db = memoryD1(seed);
+    expect(await stripDay(db, "2026-10-31", { exact: true, lang: "en" })).toBeNull();
+    expect(await stripDay(db, "2026-10-29", { exact: true, lang: "en" })).toBeNull(); // only a quarantined row
+  });
+  it("looks at most 7 days ahead", async () => {
+    const db = memoryD1(seed);
+    expect((await stripDay(db, "2026-10-26", { exact: false, lang: "en" }))?.date).toBe("2026-10-28");
+    expect(await stripDay(db, "2026-11-03", { exact: false, lang: "en" })).toBeNull();
+    expect((await stripDay(memoryD1(cal("KO", "2026-11-09", "confirmed")), "2026-11-02", { exact: false, lang: "en" }))?.date).toBe("2026-11-09");
+    expect(await stripDay(memoryD1(cal("KO", "2026-11-10", "confirmed")), "2026-11-02", { exact: false, lang: "en" })).toBeNull();
+  });
+  it("groups by slot in order and carries the post slug of reported entries", async () => {
+    const day = await stripDay(memoryD1(seed), "2026-10-30", { exact: true, lang: "en" });
+    expect(day?.bmo.map((e) => [e.ticker, e.postSlug])).toEqual([
+      ["CVX", null],
+      ["XOM", null],
+    ]);
+    expect(day?.amc.map((e) => [e.ticker, e.postSlug])).toEqual([["AAPL", "aapl-2026-10-30-earnings"]]);
+    expect(day?.unknown).toEqual([]);
+  });
+  it("uses the entry's own date as the day", async () => {
+    const day = await stripDay(memoryD1(seed), "2026-10-27", { exact: false, lang: "zh" });
+    expect(day?.date).toBe("2026-10-28");
+    expect(day?.amc[0].postSlug).toBe("msft-2026-10-28-earnings"); // pending ZH still links
+  });
+  it("other dates and other days' posts do not affect the result", async () => {
+    const extras =
+      cal("OLD", "2026-10-26", "confirmed") +
+      cal("FAR", "2026-11-20", "confirmed") +
+      cal("TSLA", "2026-11-02", "quarantined") +
+      earnings(3, "NVDA", "0001045810-26-000010", "2026-11-03", "published") +
+      cal("NVDA", "2026-11-03", "reported");
+    const opts = { exact: false, lang: "en" } as const;
+    const plain = await stripDay(memoryD1(seed), "2026-10-31", opts);
+    expect(await stripDay(memoryD1(seed + extras), "2026-10-31", opts)).toEqual(plain);
+  });
+  it("in Chinese, a reported entry with no ZH row links no post", async () => {
+    const db = memoryD1(earnings(3, "NVDA", "0001045810-26-000010", "2026-11-03", null) + cal("NVDA", "2026-11-03", "reported"));
+    const day = await stripDay(db, "2026-11-03", { exact: true, lang: "zh" });
+    expect(day?.amc.map((e) => [e.ticker, e.postSlug])).toEqual([["NVDA", null]]);
+    expect((await stripDay(db, "2026-11-03", { exact: true, lang: "en" }))?.amc[0].postSlug).toBe("nvda-2026-11-03-earnings");
+  });
+  it("reads one day's posts through the trading_date index", async () => {
+    const db = memoryD1(seed);
+    const seen: { sql: string; args: unknown[] }[] = [];
+    const spy: D1Like = {
+      prepare(sql) {
+        const st = db.prepare(sql);
+        const bind = st.bind.bind(st);
+        st.bind = (...args) => {
+          seen.push({ sql, args });
+          return bind(...args);
+        };
+        return st;
+      },
+    };
+    await stripDay(spy, "2026-10-30", { exact: true, lang: "en" });
+    const entries = seen.find((q) => q.sql.includes("post_translations"));
+    expect(entries).toBeDefined();
+    const { results } = await db
+      .prepare(`EXPLAIN QUERY PLAN ${entries!.sql}`)
+      .bind(...entries!.args)
+      .all<{ detail: string }>();
+    expect(results.map((r) => r.detail).join("\n")).toContain("idx_posts_trading_date");
   });
 });

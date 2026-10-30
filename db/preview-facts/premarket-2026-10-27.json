@@ -1,0 +1,122 @@
+{
+  "trading_date": "2026-10-27",
+  "as_of_utc": "2026-10-27T12:30:00Z",
+  "futures": [
+    [
+      "S&P 500 futures",
+      {
+        "Value": {
+          "symbol": "ES=F",
+          "last": 5912.25,
+          "prev_close": 5887.52,
+          "change_pct": 0.42,
+          "volume": null
+        }
+      }
+    ],
+    [
+      "Nasdaq 100 futures",
+      {
+        "Value": {
+          "symbol": "NQ=F",
+          "last": 20874.5,
+          "prev_close": 20727.34,
+          "change_pct": 0.71,
+          "volume": null
+        }
+      }
+    ],
+    [
+      "Dow futures",
+      {
+        "Value": {
+          "symbol": "YM=F",
+          "last": 43105.0,
+          "prev_close": 43027.55,
+          "change_pct": 0.18,
+          "volume": null
+        }
+      }
+    ],
+    [
+      "Russell 2000 futures",
+      {
+        "Value": {
+          "symbol": "RTY=F",
+          "last": 2241.3,
+          "prev_close": 2243.99,
+          "change_pct": -0.12,
+          "volume": null
+        }
+      }
+    ]
+  ],
+  "gainers": [
+    {
+      "quote": {
+        "symbol": "AAPL",
+        "last": 241.1,
+        "prev_close": 227.2,
+        "change_pct": 6.12,
+        "volume": null
+      },
+      "name": "Apple Inc.",
+      "reasons": [
+        {
+          "url": "https://news.example.com/apple-q4",
+          "title": "Services revenue beat estimates",
+          "quote": "Services revenue beat estimates.",
+          "summary_en": "Services revenue beat estimates"
+        }
+      ]
+    },
+    {
+      "quote": {
+        "symbol": "AMD",
+        "last": 158.42,
+        "prev_close": 152.25,
+        "change_pct": 4.05,
+        "volume": null
+      },
+      "name": "Advanced Micro Devices",
+      "reasons": [
+        {
+          "url": "https://news.example.com/amd-outlook",
+          "title": "Raised data-center outlook",
+          "quote": "Raised data-center outlook.",
+          "summary_en": "Raised data-center outlook"
+        }
+      ]
+    }
+  ],
+  "losers": [
+    {
+      "quote": {
+        "symbol": "PYPL",
+        "last": 71.88,
+        "prev_close": 75.9,
+        "change_pct": -5.3,
+        "volume": null
+      },
+      "name": "PayPal Holdings",
+      "reasons": [
+        {
+          "url": "https://news.example.com/paypal-q3",
+          "title": "Weaker branded checkout growth",
+          "quote": "Weaker branded checkout growth.",
+          "summary_en": "Weaker branded checkout growth"
+        }
+      ]
+    }
+  ],
+  "macro_items": {
+    "Missing": {
+      "reason": "preview fixture"
+    }
+  },
+  "watch_list": {
+    "Missing": {
+      "reason": "preview fixture"
+    }
+  }
+}

@@ -1,15 +1,16 @@
 import Link from "next/link";
-import { getTranslations } from "next-intl/server";
+import type { Locale } from "../i18n/routing";
+import { translator } from "../lib/translator";
 
 /** Shown on a Chinese page while only the English text is published. */
-export default async function PendingNotice({ slug }: { slug: string }) {
-  const t = await getTranslations("post");
+export default function PendingNotice({ slug, locale }: { slug: string; locale: Locale }) {
+  const t = translator(locale);
   return (
     <div className="notice" role="status">
-      <p>{t("pending")}</p>
+      <p>{t("post.pending")}</p>
       <p>
         <Link href={`/en/p/${slug}`} hrefLang="en" lang="en">
-          {t("readEnglish")}
+          {t("post.readEnglish")}
         </Link>
       </p>
     </div>

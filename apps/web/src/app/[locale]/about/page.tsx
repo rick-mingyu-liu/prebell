@@ -1,7 +1,6 @@
 import type { Metadata } from "next";
 import { getTranslations, setRequestLocale } from "next-intl/server";
 import Disclaimer from "@/components/Disclaimer";
-import LangSwitch from "@/components/LangSwitch";
 import type { Locale } from "@/i18n/routing";
 import { pairedAlternates } from "@/lib/seo";
 
@@ -17,10 +16,7 @@ export default async function About({ params }: PageProps<"/[locale]/about">) {
   const t = await getTranslations("about");
   return (
     <article className="prose">
-      <div className="page-tools">
-        <h1>{t("title")}</h1>
-        <LangSwitch locale={locale} path="/about" />
-      </div>
+      <h1>{t("title")}</h1>
       <p>{t("p1")}</p>
       <p>{t("p2")}</p>
       <p>{t("p3")}</p>

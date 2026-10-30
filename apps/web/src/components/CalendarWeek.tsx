@@ -1,49 +1,63 @@
 import Link from "next/link";
-import { getTranslations } from "next-intl/server";
-import type { Locale } from "@/i18n/routing";
-import type { CalendarDay, CalendarEntry } from "@/lib/earnings";
-import { formatDate } from "@/lib/time";
+import type { Locale } from "../i18n/routing";
+import type { CalendarDay, CalendarEntry, Slot } from "../lib/earnings";
+import { formatDayShort } from "../lib/time";
+import { translator } from "../lib/translator";
 
-function Entry({ e, locale, labels }: { e: CalendarEntry; locale: Locale; labels: Record<string, string> }) {
-  const ticker = e.postSlug ? (
-    <Link href={`/${locale}/p/${e.postSlug}`}>{e.ticker}</Link>
-  ) : (
-    <Link href={`/${locale}/t/${encodeURIComponent(e.ticker)}`}>{e.ticker}</Link>
-  );
-  return (
-    <li className={`cal-entry cal-${e.status}`}>
-      {ticker} <span className="muted">{labels[e.slot]}</span>{" "}
-      <span className={`badge badge-${e.status}`}>{labels[e.status]}</span>
-    </li>
-  );
-}
+const SLOTS: Slot[] = ["bmo", "amc", "unknown"];
 
-/** One week of report dates; confirmed, unconfirmed and reported are marked in words, not color alone. */
-export default async function CalendarWeek({ days, locale }: { days: CalendarDay[]; locale: Locale }) {
-  const t = await getTranslations("earnings");
-  const labels: Record<string, string> = {
-    bmo: t("bmo"),
-    amc: t("amc"),
-    unknown: t("timeUnknown"),
-    unconfirmed: t("unconfirmed"),
-    confirmed: t("confirmed"),
-    reported: t("reported"),
+/** One week of report dates as ticker chips by slot; the status is written on each chip, not shown by color alone. */
+export default function CalendarWeek({ days, locale }: { days: CalendarDay[]; locale: Locale }) {
+  const t = translator(locale);
+  const slotLabel: Record<Slot, string> = {
+    bmo: t("earnings.bmo"),
+    amc: t("earnings.amc"),
+    unknown: t("earnings.timeUnknown"),
+  };
+  const statusLabel: Record<CalendarEntry["status"], string> = {
+    unconfirmed: t("earnings.unconfirmed"),
+    confirmed: t("earnings.confirmed"),
+    reported: t("earnings.reported"),
   };
   return (
     <div className="cal-week">
       {days.map((d) => (
-        <section key={d.date} className="cal-day" aria-label={formatDate(d.date, locale)}>
-          <h2>
-            <time dateTime={d.date}>{formatDate(d.date, locale)}</time>
+        <section key={d.date} className="cal-day" aria-labelledby={`cal-${d.date}`}>
+          <h2 className="cal-date" id={`cal-${d.date}`}>
+            <time dateTime={d.date}>{formatDayShort(d.date, locale)}</time>
           </h2>
           {d.entries.length === 0 ? (
-            <p className="muted">{t("none")}</p>
+            <p className="muted cal-none">{t("earnings.none")}</p>
           ) : (
-            <ul>
-              {d.entries.map((e) => (
-                <Entry key={e.ticker} e={e} locale={locale} labels={labels} />
-              ))}
-            </ul>
+            <div className="cal-slots">
+              {SLOTS.map((slot) => {
+                const entries = d.entries.filter((e) => e.slot === slot);
+                return (
+                  entries.length > 0 && (
+                    <div key={slot} className="cal-slot">
+                      <h3 className="lbl">{slotLabel[slot]}</h3>
+                      <ul className="cal-chips">
+                        {entries.map((e) => (
+                          <li key={e.ticker}>
+                            <Link
+                              className={`cal-chip cal-${e.status}`}
+                              href={
+                                e.postSlug
+                                  ? `/${locale}/p/${e.postSlug}`
+                                  : `/${locale}/t/${encodeURIComponent(e.ticker)}`
+                              }
+                            >
+                              <b>{e.ticker}</b>
+                              <span className={`badge badge-${e.status}`}>{statusLabel[e.status]}</span>
+                            </Link>
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  )
+                );
+              })}
+            </div>
           )}
         </section>
       ))}

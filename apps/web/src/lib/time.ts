@@ -32,3 +32,26 @@ export function formatDate(date: string, lang: Lang): string {
     dateStyle: lang === "en" ? "medium" : "long",
   }).format(d);
 }
+
+const enTime = new Intl.DateTimeFormat("en-US", { timeZone: TZ, timeStyle: "short" });
+const zhTime = new Intl.DateTimeFormat("zh-CN", { timeZone: TZ, hour: "numeric", minute: "2-digit", hour12: true });
+
+/** A UTC ISO timestamp as a time of day in US Eastern, e.g. "8:34 AM ET". */
+export function formatEtTime(iso: string | null | undefined, lang: Lang): string {
+  if (!iso) return "";
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "";
+  if (lang === "en") return `${enTime.format(d).replace(/[  ]/g, " ")} ET`;
+  return `${zhTime.format(d).replace(/[  ]/g, " ")}（美东）`;
+}
+
+const enDay = new Intl.DateTimeFormat("en-US", { timeZone: "UTC", weekday: "short", month: "short", day: "numeric" });
+const zhMonthDay = new Intl.DateTimeFormat("zh-CN", { timeZone: "UTC", month: "long", day: "numeric" });
+const zhWeekday = new Intl.DateTimeFormat("zh-CN", { timeZone: "UTC", weekday: "short" });
+
+/** A trading date as a short label with the weekday: "Mon, Nov 2" / "11月2日 周一". */
+export function formatDayShort(date: string, lang: Lang): string {
+  const d = new Date(`${date}T12:00:00Z`);
+  if (Number.isNaN(d.getTime())) return date;
+  return lang === "en" ? enDay.format(d) : `${zhMonthDay.format(d)} ${zhWeekday.format(d)}`;
+}
