@@ -2,6 +2,7 @@
 -- Apply: cd crates/generator && pnpm exec wrangler d1 execute prebell --local --file ../../db/seed-preview.sql
 --   premarket-2026-10-27: EN published + ZH published (hreflang pair)
 --   premarket-2026-10-28: EN published + ZH pending (ZH page shows the pending notice, noindex)
+-- Facts JSON for these briefs: bash db/load-preview-facts.sh (local R2, premarket/{date}.json)
 
 DELETE FROM sources WHERE post_id IN (SELECT id FROM posts WHERE run_key IN ('premarket:2026-10-27','premarket:2026-10-28'));
 DELETE FROM post_translations WHERE post_id IN (SELECT id FROM posts WHERE run_key IN ('premarket:2026-10-27','premarket:2026-10-28'));
@@ -13,8 +14,8 @@ INSERT INTO runs (run_key, content_type, trading_date, status, attempts, last_er
   ('premarket:2026-10-28', 'premarket', '2026-10-28', 'published', 1, NULL, '2026-10-28T12:30:00Z', '2026-10-28T12:36:00Z');
 
 INSERT INTO posts (run_key, content_type, template_id, trading_date, slug, facts_r2_key, published_at) VALUES
-  ('premarket:2026-10-27', 'premarket', 'premarket:v1', '2026-10-27', 'premarket-2026-10-27', 'facts/premarket/2026-10-27.json', '2026-10-27T12:34:00Z'),
-  ('premarket:2026-10-28', 'premarket', 'premarket:v1', '2026-10-28', 'premarket-2026-10-28', 'facts/premarket/2026-10-28.json', '2026-10-28T12:36:00Z');
+  ('premarket:2026-10-27', 'premarket', 'premarket:v1', '2026-10-27', 'premarket-2026-10-27', 'premarket/2026-10-27.json', '2026-10-27T12:34:00Z'),
+  ('premarket:2026-10-28', 'premarket', 'premarket:v1', '2026-10-28', 'premarket-2026-10-28', 'premarket/2026-10-28.json', '2026-10-28T12:36:00Z');
 
 INSERT INTO post_translations (post_id, lang, status, title, summary, body_md, updated_at)
 SELECT id, 'en', 'published',
