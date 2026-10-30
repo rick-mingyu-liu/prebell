@@ -51,15 +51,17 @@ export default function BriefView({ locale, today, post, facts, adjacent, strip,
             {" › "}
             <time dateTime={post.tradingDate}>{formatDate(post.tradingDate, locale)}</time>
           </nav>
-          <p className="meta brief-meta">
-            {/* A pending translation is not published yet; its publish time is the English one. */}
-            {!pending && (
-              <time dateTime={post.publishedAt ?? undefined}>
-                {t("post.published", { time: formatEt(post.publishedAt, locale) })}
-              </time>
-            )}
-            {kind && <span className="checked">{t("brief.checked")}</span>}
-          </p>
+          {/* A pending translation is not published yet; its publish time is the English one. */}
+          {(!pending || kind) && (
+            <p className="meta brief-meta">
+              {!pending && (
+                <time dateTime={post.publishedAt ?? undefined}>
+                  {t("post.published", { time: formatEt(post.publishedAt, locale) })}
+                </time>
+              )}
+              {kind && <span className="checked">{t("brief.checked")}</span>}
+            </p>
+          )}
 
           {facts && <NumbersBlock facts={facts} variant="page" locale={locale} />}
           {facts && facts.gainers.length + facts.losers.length > 0 && (
@@ -80,7 +82,7 @@ export default function BriefView({ locale, today, post, facts, adjacent, strip,
             <>
               <h1 className="brief-title">{post.title}</h1>
               {post.summary && <p className="brief-sum">{post.summary}</p>}
-              <PostBody markdown={trimStory(post.bodyMd)} sources={sources} colorSigned />
+              <PostBody markdown={trimStory(post.bodyMd, post.summary)} sources={sources} colorSigned />
             </>
           ) : (
             <PostBody markdown={post.bodyMd} sources={sources} />

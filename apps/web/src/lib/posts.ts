@@ -182,21 +182,31 @@ export async function listPosts(
 }
 
 /**
- * The published premarket or recap briefs in `lang` right before and after `publishedAt`, by
- * publish time, in one D1 read. Earnings checks and unpublished translations are skipped.
+ * The published premarket or recap briefs in `lang` right before and after `at`, in archive order
+ * (`trading_date`, then `published_at`, then slug), in one D1 read. Earnings checks and unpublished
+ * translations are skipped. Each side walks `idx_posts_trading_date` from `at` and stops at the first
+ * match, so the rows read do not grow with history; a re-run brief keeps its trading date's place.
  */
-export async function getAdjacentPosts(db: D1Like, lang: Lang, publishedAt: string | null): Promise<AdjacentPosts> {
-  if (!publishedAt) return { prev: null, next: null };
-  const side = (dir: "prev" | "next") =>
-    `SELECT * FROM (
+export async function getAdjacentPosts(
+  db: D1Like,
+  lang: Lang,
+  at: { tradingDate: string; publishedAt: string | null; slug: string },
+): Promise<AdjacentPosts> {
+  if (!at.publishedAt) return { prev: null, next: null };
+  // CROSS JOIN keeps posts as the outer table, so SQLite starts from the date index.
+  const side = (dir: "prev" | "next") => {
+    const [cmp, order] = dir === "prev" ? ["<", "DESC"] : [">", "ASC"];
+    return `SELECT * FROM (
        SELECT '${dir}' AS dir, p.slug, p.content_type, p.trading_date, p.published_at, t.title, t.summary
-       FROM posts p JOIN post_translations t ON t.post_id = p.id AND t.lang = ?
+       FROM posts p CROSS JOIN post_translations t ON t.post_id = p.id AND t.lang = ?
        WHERE t.status = 'published' AND p.content_type IN ('premarket', 'recap')
-         AND p.published_at ${dir === "prev" ? "<" : ">"} ?
-       ORDER BY p.published_at ${dir === "prev" ? "DESC" : "ASC"} LIMIT 1)`;
+         AND p.trading_date ${cmp}= ? AND (p.trading_date, p.published_at, p.slug) ${cmp} (?, ?, ?)
+       ORDER BY p.trading_date ${order}, p.published_at ${order}, p.slug ${order} LIMIT 1)`;
+  };
+  const key = [at.tradingDate, at.tradingDate, at.publishedAt, at.slug];
   const { results } = await db
     .prepare(`${side("prev")} UNION ALL ${side("next")}`)
-    .bind(lang, publishedAt, lang, publishedAt)
+    .bind(lang, ...key, lang, ...key)
     .all<ListRow & { dir: "prev" | "next" }>();
   const pick = (dir: "prev" | "next") => {
     const row = results.find((r) => r.dir === dir);
@@ -215,4 +225,19 @@ export async function isPublishedIn(db: D1Like, slug: string, lang: Lang): Promi
     .bind(lang, slug)
     .first<{ hit: number }>();
   return row !== null;
+}
+
+/**
+ * The post at `slug` in `lang`; or, when that translation is not visible but the other language's is
+ * published (this one failed), a redirect to this language's home page, so the header's language
+ * switch, which keeps the path, never lands on a 404. Null otherwise. The miss path costs one more read.
+ */
+export async function resolvePost(
+  db: D1Like,
+  slug: string,
+  lang: Lang,
+): Promise<{ post: PostView } | { redirectTo: string } | null> {
+  const post = await getPostBySlug(db, slug, lang);
+  if (post) return { post };
+  return (await isPublishedIn(db, slug, other(lang))) ? { redirectTo: `/${lang}` } : null;
 }

@@ -19,7 +19,7 @@ const post = (over: Partial<PostView> = {}): PostView => ({
   tradingDate: "2026-10-30",
   publishedAt: "2026-10-30T13:20:43Z",
   title: "Tech earnings drag futures lower; Intel plunges premarket",
-  summary: "US futures fell for a second day as weak tech earnings drove a rotation out of the sector.",
+  summary: bodyEn.split("\n\n")[1],
   bodyMd: bodyEn,
   status: "published",
   sources: sourcesEn,
@@ -159,6 +159,17 @@ describe("BriefView", () => {
     expect(out).not.toContain("Numbers checked");
     expect(out).not.toContain("numbers-page");
     expect(at(out, "<table>")).toBeLessThan(at(out, 'class="charts"'));
+  });
+
+  it("renders no empty meta line on a pending earnings check", () => {
+    const out = render({
+      locale: "zh",
+      post: post({ slug: "earnings-aapl-2026-10-30", contentType: "earnings", status: "pending", bodyMd: "", sources: [] }),
+      facts: null,
+      adjacent: { prev: null, next: null },
+    });
+    expect(out).toContain('role="status"');
+    expect(out).not.toContain("brief-meta");
   });
 });
 

@@ -34,7 +34,7 @@ export async function loadBrief(
   const kind = briefKind(post.contentType);
   const [facts, adjacent, strip, charts] = await Promise.all([
     kind ? loadFacts(bucket, post.factsKey, kind, onError) : null,
-    kind ? getAdjacentPosts(db, lang, post.publishedAt) : { prev: null, next: null },
+    kind ? getAdjacentPosts(db, lang, post) : { prev: null, next: null },
     stripDay(db, post.tradingDate, { exact: true, lang }),
     !kind && post.status === "published" ? getPostCharts(db, post.slug, lang) : [],
   ]);

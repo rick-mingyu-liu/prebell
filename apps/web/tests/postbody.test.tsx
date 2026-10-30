@@ -139,17 +139,25 @@ describe("PostBody colorSigned", () => {
       "",
       "Not investment advice.",
     ].join("\n");
-    const out = colored(trimStory(md));
+    const out = colored(trimStory(md, "Summary with [s](https://evil.example/s) +1.00%."));
     expectNoEvil(out);
     expect(out).not.toContain("<table");
     expect(out).not.toContain("Summary with");
-    expect(out).toContain(
-      `<a href="${SOURCE}" rel="nofollow noopener" target="_blank">Apple <span class="num up">+23%</span></a>`,
-    );
+    expect(out).toContain(`<a href="${SOURCE}" rel="nofollow noopener" target="_blank">Apple +23%</a>`);
     expect(out).toContain(`<a href="${SOURCE}" rel="nofollow noopener" target="_blank">Apple</a>`);
     expect(out).toContain('<a href="/en/about">about</a>');
-    expect(out).toContain('evil <span class="num up">+5%</span>');
+    expect(out).toContain("evil +5%");
+    expect(out).not.toMatch(/<span[^>]*>\+(23|5)%/);
     expect(out).toContain('<span class="num down">-1.14%</span>');
     expect(out.match(/<a /g)).toHaveLength(3);
+  });
+
+  it("does not color inside links, allowed or not", () => {
+    const out = colored(`[Q3 profit +23%](${SOURCE}), [x -4%](/en/about), https://evil.example/+5% and -1.14%.`);
+    expect(out).toContain(`<a href="${SOURCE}" rel="nofollow noopener" target="_blank">Q3 profit +23%</a>`);
+    expect(out).toContain('<a href="/en/about">x -4%</a>');
+    expect(out).toContain("https://evil.example/+5%");
+    expect(out.match(/<span/g)).toHaveLength(1);
+    expect(out).toContain('<span class="num down">-1.14%</span>');
   });
 });

@@ -8,6 +8,8 @@ import {
   listPosts,
   PAGE_SIZE,
   parseContentType,
+  resolvePost,
+  type D1Like,
 } from "../src/lib/posts";
 import { memoryD1 } from "./d1";
 
@@ -224,7 +226,7 @@ describe("content types", () => {
 });
 
 describe("getAdjacentPosts", () => {
-  // Briefs in publish order: pm 27, recap 27, pm 28 (ZH failed), earnings 28, recap 28, pm 29 (ZH pending).
+  // Briefs in archive order: pm 27, recap 27, pm 28 (ZH failed), earnings 28, recap 28, pm 29 (ZH pending).
   const seq =
     post(1, "2026-10-27", "published", "published", "premarket", "2026-10-27T12:34:00Z") +
     post(2, "2026-10-27", "published", "published", "recap", "2026-10-27T20:45:00Z") +
@@ -232,19 +234,47 @@ describe("getAdjacentPosts", () => {
     post(4, "2026-10-28", "published", "published", "earnings", "2026-10-28T16:00:00Z") +
     post(5, "2026-10-28", "published", "published", "recap", "2026-10-28T20:45:00Z") +
     post(6, "2026-10-29", "published", "pending", "premarket", "2026-10-29T12:34:00Z");
+  const at = (tradingDate: string, publishedAt: string | null, slug: string) => ({ tradingDate, publishedAt, slug });
 
-  it("returns the previous and next published brief by publish time, skipping earnings checks", async () => {
-    const adj = await getAdjacentPosts(memoryD1(seq), "en", "2026-10-28T12:34:00Z");
+  it("returns the previous and next published brief in archive order, skipping earnings checks", async () => {
+    const adj = await getAdjacentPosts(memoryD1(seq), "en", at("2026-10-28", "2026-10-28T12:34:00Z", "premarket-2026-10-28"));
     expect(adj.prev).toMatchObject({ slug: "recap-2026-10-27", contentType: "recap", title: "EN 2026-10-27" });
     expect(adj.next).toMatchObject({ slug: "recap-2026-10-28", tradingDate: "2026-10-28" });
   });
 
   it("skips translations that are not published in the language", async () => {
-    const adj = await getAdjacentPosts(memoryD1(seq), "zh", "2026-10-28T20:45:00Z");
+    const recap28 = at("2026-10-28", "2026-10-28T20:45:00Z", "recap-2026-10-28");
+    const adj = await getAdjacentPosts(memoryD1(seq), "zh", recap28);
     expect(adj.prev?.slug).toBe("recap-2026-10-27");
     expect(adj.next).toBeNull();
-    expect((await getAdjacentPosts(memoryD1(seq), "en", "2026-10-28T20:45:00Z")).next?.slug).toBe(
-      "premarket-2026-10-29",
+    expect((await getAdjacentPosts(memoryD1(seq), "en", recap28)).next?.slug).toBe("premarket-2026-10-29");
+  });
+
+  it("keeps a republished old brief in trading-date order", async () => {
+    // premarket 10-27 re-run on 10-30: its published_at is now the newest of all.
+    const rerun = seq.replace("'premarket-2026-10-27',NULL,'2026-10-27T12:34:00Z'", "'premarket-2026-10-27',NULL,'2026-10-30T09:00:00Z'");
+    expect(rerun).not.toBe(seq);
+    const db = memoryD1(rerun);
+    const pm27 = await getAdjacentPosts(db, "en", at("2026-10-27", "2026-10-30T09:00:00Z", "premarket-2026-10-27"));
+    // Archive order within 10-27 follows publish time, so the re-run now comes after the recap,
+    // but it stays on its own date instead of jumping past 10-29.
+    expect(pm27.prev?.slug).toBe("recap-2026-10-27");
+    expect(pm27.next?.slug).toBe("premarket-2026-10-28");
+    const pm29 = await getAdjacentPosts(db, "en", at("2026-10-29", "2026-10-29T12:34:00Z", "premarket-2026-10-29"));
+    expect(pm29.next).toBeNull();
+    expect(pm29.prev?.slug).toBe("recap-2026-10-28");
+  });
+
+  it("orders briefs with the same date and publish time by slug, without skipping either", async () => {
+    const tie =
+      post(1, "2026-10-27", "published", "published", "premarket", "2026-10-27T20:00:00Z") +
+      post(2, "2026-10-27", "published", "published", "recap", "2026-10-27T20:00:00Z");
+    const db = memoryD1(tie);
+    expect((await getAdjacentPosts(db, "en", at("2026-10-27", "2026-10-27T20:00:00Z", "premarket-2026-10-27"))).next?.slug).toBe(
+      "recap-2026-10-27",
+    );
+    expect((await getAdjacentPosts(db, "en", at("2026-10-27", "2026-10-27T20:00:00Z", "recap-2026-10-27"))).prev?.slug).toBe(
+      "premarket-2026-10-27",
     );
   });
 
@@ -252,12 +282,63 @@ describe("getAdjacentPosts", () => {
     const db = memoryD1(seq);
     const sql: string[] = [];
     const spy = { prepare: (q: string) => (sql.push(q), db.prepare(q)) };
-    const first = await getAdjacentPosts(spy, "en", "2026-10-27T12:34:00Z");
+    const first = await getAdjacentPosts(spy, "en", at("2026-10-27", "2026-10-27T12:34:00Z", "premarket-2026-10-27"));
     expect(first.prev).toBeNull();
     expect(first.next?.slug).toBe("recap-2026-10-27");
     expect(sql).toHaveLength(1);
-    expect(await getAdjacentPosts(spy, "en", null)).toEqual({ prev: null, next: null });
+    expect(sql[0]).toContain("CROSS JOIN");
+    expect(await getAdjacentPosts(spy, "en", at("2026-10-28", null, "premarket-2026-10-28"))).toEqual({
+      prev: null,
+      next: null,
+    });
     expect(sql).toHaveLength(1);
+  });
+
+  it("reads through the trading_date index", async () => {
+    const db = memoryD1(seq);
+    const seen: { sql: string; args: unknown[] }[] = [];
+    const spy: D1Like = {
+      prepare(sql) {
+        const st = db.prepare(sql);
+        const bind = st.bind.bind(st);
+        st.bind = (...args) => {
+          seen.push({ sql, args });
+          return bind(...args);
+        };
+        return st;
+      },
+    };
+    await getAdjacentPosts(spy, "en", at("2026-10-28", "2026-10-28T12:34:00Z", "premarket-2026-10-28"));
+    expect(seen).toHaveLength(1);
+    const { results } = await db
+      .prepare(`EXPLAIN QUERY PLAN ${seen[0].sql}`)
+      .bind(...seen[0].args)
+      .all<{ detail: string }>();
+    const plan = results.map((r) => r.detail).join("\n");
+    // Both sides start from posts by date; neither scans the translations by language.
+    expect(plan.match(/SEARCH p USING INDEX idx_posts_trading_date/g)).toHaveLength(2);
+    expect(plan).not.toContain("idx_post_translations_lang_status");
+  });
+});
+
+describe("resolvePost", () => {
+  const db = () => memoryD1(seed);
+
+  it("returns a visible post, published or pending", async () => {
+    expect(await resolvePost(db(), "premarket-2026-10-27", "zh")).toMatchObject({ post: { status: "published" } });
+    expect(await resolvePost(db(), "premarket-2026-10-29", "zh")).toMatchObject({ post: { status: "pending" } });
+  });
+
+  it("sends a failed translation to the home page of the language asked for", async () => {
+    expect(await resolvePost(db(), "premarket-2026-10-28", "zh")).toEqual({ redirectTo: "/zh" });
+    const enFailed = memoryD1(post(9, "2026-10-25", "failed", "published"));
+    expect(await resolvePost(enFailed, "premarket-2026-10-25", "en")).toEqual({ redirectTo: "/en" });
+  });
+
+  it("is null for an unknown slug or a post published in neither language", async () => {
+    expect(await resolvePost(db(), "nope", "en")).toBeNull();
+    expect(await resolvePost(db(), "premarket-2026-10-26", "zh")).toBeNull();
+    expect(await resolvePost(db(), "premarket-2026-10-26", "en")).toBeNull();
   });
 });
 

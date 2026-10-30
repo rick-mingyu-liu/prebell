@@ -72,15 +72,21 @@ function splitSigned(value: string): HastNode[] {
   return out;
 }
 
+/** Elements whose text is never colored: code, and links (a source title or URL is quoted, not a figure of ours). */
+const NO_COLOR = new Set(["a", "code", "pre"]);
+
 function colorSignedIn(nodes: HastNode[]): HastNode[] {
   return nodes.flatMap((n) => {
     if (n.type === "text") return splitSigned(n.value ?? "");
-    if (n.children && n.tagName !== "code" && n.tagName !== "pre") n.children = colorSignedIn(n.children);
+    if (n.children && !NO_COLOR.has(n.tagName ?? "")) n.children = colorSignedIn(n.children);
     return [n];
   });
 }
 
-/** Rehype plugin: only text changes (into text and spans), so links, images and raw HTML are untouched. */
+/**
+ * Rehype plugin: only text outside links and code changes (into text and spans), so links, images
+ * and raw HTML are untouched. It runs before `components`, while every link is still an `a`.
+ */
 const rehypeColorSigned = () => (tree: HastNode) => {
   tree.children = colorSignedIn(tree.children ?? []);
 };
