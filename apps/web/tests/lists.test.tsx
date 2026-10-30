@@ -37,6 +37,7 @@ describe("CalendarWeek", () => {
         { ticker: "AMD", date: "2026-11-02", slot: "amc", status: "confirmed", postSlug: null },
         { ticker: "PFE", date: "2026-11-02", slot: "bmo", status: "unconfirmed", postSlug: null },
         { ticker: "INTC", date: "2026-11-02", slot: "bmo", status: "reported", postSlug: "intc-q3" },
+        { ticker: "UBER", date: "2026-11-02", slot: "unknown", status: "unconfirmed", postSlug: null },
       ],
     },
     { date: "2026-11-03", entries: [] },
@@ -47,9 +48,20 @@ describe("CalendarWeek", () => {
     expect(out.indexOf("Before open")).toBeLessThan(out.indexOf("After close"));
     expect(out).toContain('class="cal-chip cal-unconfirmed" href="/en/t/PFE"');
     expect(out).toContain('class="cal-chip cal-reported" href="/en/p/intc-q3"');
+    expect(out).toContain('class="cal-chip cal-confirmed" href="/en/t/AMD"');
+    expect(out).toContain(">Confirmed<");
+    expect(out.indexOf("After close")).toBeLessThan(out.indexOf("Time n/a"));
+    expect(out.indexOf("Time n/a")).toBeLessThan(out.indexOf(">UBER<"));
     expect(out).toContain(">Unconfirmed<");
     expect(out).toContain(">Reported<");
     expect(out).toContain("No reports.");
+  });
+
+  it("names each day's region by its heading, once", () => {
+    const out = renderToStaticMarkup(<CalendarWeek days={days} locale="en" />);
+    expect(out).toContain('<section class="cal-day" aria-labelledby="cal-2026-11-02"><h2 class="cal-date" id="cal-2026-11-02">');
+    expect(out).toContain('aria-labelledby="cal-2026-11-03"');
+    expect(out).not.toContain("aria-label=");
   });
 
   it("uses Chinese labels on ZH pages", () => {
@@ -57,5 +69,6 @@ describe("CalendarWeek", () => {
     expect(out).toContain("盘前");
     expect(out).toContain(">未确认<");
     expect(out).toContain("无财报。");
+    expect(out).toContain("时间暂缺");
   });
 });

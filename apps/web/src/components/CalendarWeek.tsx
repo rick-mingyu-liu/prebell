@@ -1,7 +1,7 @@
 import Link from "next/link";
 import type { Locale } from "../i18n/routing";
 import type { CalendarDay, CalendarEntry, Slot } from "../lib/earnings";
-import { formatDate, formatDayShort } from "../lib/time";
+import { formatDayShort } from "../lib/time";
 import { translator } from "../lib/translator";
 
 const SLOTS: Slot[] = ["bmo", "amc", "unknown"];
@@ -22,8 +22,8 @@ export default function CalendarWeek({ days, locale }: { days: CalendarDay[]; lo
   return (
     <div className="cal-week">
       {days.map((d) => (
-        <section key={d.date} className="cal-day" aria-label={formatDate(d.date, locale)}>
-          <h2 className="cal-date">
+        <section key={d.date} className="cal-day" aria-labelledby={`cal-${d.date}`}>
+          <h2 className="cal-date" id={`cal-${d.date}`}>
             <time dateTime={d.date}>{formatDayShort(d.date, locale)}</time>
           </h2>
           {d.entries.length === 0 ? (

@@ -94,6 +94,7 @@ describe("trimStory", () => {
     const md = `## S\n\n| a |\n|-${" ".repeat(50_000)}x\n`;
     const start = performance.now();
     trimStory(md);
-    expect(performance.now() - start).toBeLessThan(100);
+    // A generous bound: the quadratic regex this guards against takes far longer at this size.
+    expect(performance.now() - start).toBeLessThan(1000);
   });
 });

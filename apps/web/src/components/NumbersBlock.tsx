@@ -54,7 +54,7 @@ function Tile({ index, name }: { index: IndexView; name: string }) {
   return (
     <div className="tile">
       <div className="k">{name}</div>
-      <div className="v">{q ? fmtPrice(q.last) : "—"}</div>
+      <div className={q ? "v" : "v muted"}>{q ? fmtPrice(q.last) : "—"}</div>
       <div className={`num ${q ? q.dir : "flat"}`}>{q ? fmtPct(q.changePct) : "—"}</div>
     </div>
   );
@@ -66,7 +66,7 @@ function IndexRow({ index, name }: { index: IndexView; name: string }) {
     <div className="row">
       <span>{name}</span>
       <span className="row-end">
-        <span className="v">{q ? fmtPrice(q.last) : "—"}</span>
+        <span className={q ? "v" : "v muted"}>{q ? fmtPrice(q.last) : "—"}</span>
         <span className={`num ${q ? q.dir : "flat"}`}>{q ? fmtPct(q.changePct) : "—"}</span>
       </span>
     </div>

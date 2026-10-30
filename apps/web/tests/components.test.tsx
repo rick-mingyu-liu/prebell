@@ -117,6 +117,7 @@ describe("NumbersBlock", () => {
     for (const variant of ["home", "page"] as const) {
       const out = renderToStaticMarkup(<NumbersBlock facts={facts} variant={variant} locale="en" />);
       expect(out).toMatch(/<[^>]*class="[^"]*\bflat\b[^"]*"[^>]*>—</);
+      expect(out).toMatch(/class="v muted">—</); // the value dash is muted too
       expect(out).toContain("Nasdaq 100 futures");
     }
   });

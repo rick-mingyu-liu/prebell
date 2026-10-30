@@ -111,8 +111,8 @@ main:not(.wrap) { max-width: 46rem; margin: 0 auto; padding: 1.5rem 16px 3rem; }
 .chart-slot { height: 56px; margin: 0.4rem 0; }
 .chart-slot:empty { display: none; } /* no chart yet: no reserved space */
 .tiles { display: flex; gap: 0.4rem; }
-.tiles .tile { flex: 1; min-width: 0; padding: 0.5rem; }
-.tile .k { font-size: 0.6875rem; color: var(--muted); }
+.tiles .tile { flex: 1; min-width: 0; padding: 0.5rem; display: flex; flex-direction: column; }
+.tile .k { font-size: 0.6875rem; line-height: 1.35; color: var(--muted); margin-bottom: auto; } /* a wrapped label keeps the values level */
 .tile .v, .row-end .v { font-size: 0.8125rem; font-weight: 700; font-variant-numeric: tabular-nums; }
 .tile .num { font-size: 0.75rem; }
 .row-end { display: flex; gap: 0.75rem; align-items: baseline; }
@@ -120,9 +120,17 @@ main:not(.wrap) { max-width: 46rem; margin: 0 auto; padding: 1.5rem 16px 3rem; }
 /* Movers list. */
 .movers { list-style: none; margin: 0; padding: 0; }
 .mover-main { min-width: 0; }
+.mover-main > div:first-child { line-height: 1.35; }
 .mover-main b { font-weight: 700; }
 .why { font-size: 0.8125rem; color: var(--muted); line-height: 1.4; }
 .mover-end { display: flex; align-items: center; gap: 0.75rem; flex: none; }
+@media (max-width: 640px) {
+  /* Ticker and name beside price and pill, the reason under both at full width. */
+  .movers .row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 0.2rem 0.75rem; }
+  .movers .mover-main { display: contents; }
+  .movers .mover-end { grid-column: 2; grid-row: 1; }
+  .movers .why { grid-column: 1 / -1; }
+}
 .more { color: var(--accent); font-weight: 700; font-size: 0.875rem; text-decoration: none; }
 .more:hover, .more:focus-visible { text-decoration: underline; }
 
@@ -130,6 +138,9 @@ main:not(.wrap) { max-width: 46rem; margin: 0 auto; padding: 1.5rem 16px 3rem; }
 .sidebar { min-width: 0; }
 .side-box { border: 1px solid var(--line); border-radius: 10px; overflow: hidden; margin-bottom: 0.75rem; }
 .side-box h2 { margin: 0; padding: 0.5rem 0.75rem; background: var(--header-bg); color: var(--header-fg); font-size: 0.75rem; font-weight: 700; }
+@media (prefers-color-scheme: dark) {
+  .side-box h2 { background: var(--tile); } /* the header black is the page black here */
+}
 .side-box ul { list-style: none; margin: 0; padding: 0; }
 .side-box li + li { border-top: 1px solid var(--line); }
 .side-box a { display: flex; justify-content: space-between; align-items: center; padding: 0.55rem 0.75rem; font-size: 0.8125rem; font-weight: 700; text-decoration: none; }
@@ -141,6 +152,11 @@ main:not(.wrap) { max-width: 46rem; margin: 0 auto; padding: 1.5rem 16px 3rem; }
 .tp-card .tp-name { font-size: 0.95rem; font-weight: 800; margin: 0; opacity: 1; }
 .tp-cta { display: inline-block; background: #fff; color: #0e1b2b; font-size: 0.75rem; font-weight: 700; padding: 0.3rem 0.75rem; border-radius: 99px; text-decoration: none; }
 .tp-cta:hover, .tp-cta:focus-visible { text-decoration: underline; }
+@media (min-width: 640px) and (max-width: 1023.98px) {
+  .sidebar { display: grid; grid-template-columns: repeat(auto-fill, minmax(14rem, 1fr)); gap: 0.75rem; align-items: start; }
+  .sidebar > * { margin-bottom: 0; }
+  .side-disc { grid-column: 1 / -1; }
+}
 
 /* Earnings strip: a green band under the header; scrolls sideways on phones. */
 .estrip { background: var(--strip-bg); border-bottom: 1px solid var(--strip-line); font-size: 0.75rem; }
@@ -236,7 +252,7 @@ main > .estrip:first-child .estrip-in { padding-left: 0; padding-right: 0; }
 .index-rows { display: flex; flex-direction: column; gap: 0.4rem; }
 .index-rows .row { background: var(--tile); border-radius: 8px; border-bottom: 0; padding: 0.45rem 0.75rem; font-size: 0.8125rem; }
 @media (min-width: 640px) {
-  .numbers-page { grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr); align-items: end; }
+  .numbers-page { grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr); align-items: start; }
 }
 .brief-movers { margin-top: 1.5rem; }
 .brief-movers .lbl { margin: 0 0 0.25rem; }
@@ -284,6 +300,10 @@ th { font-weight: 600; }
 .post-main > a { font-weight: 700; line-height: 1.35; text-decoration: none; }
 .post-main > a:hover, .post-main > a:focus-visible { text-decoration: underline; }
 .post-main p { margin: 0.2rem 0 0; color: var(--muted); font-size: 0.875rem; line-height: 1.45; }
+@media (max-width: 640px) {
+  .post-row { flex-direction: column; align-items: stretch; gap: 0.3rem; }
+  .post-row .tag { order: -1; }
+}
 .date-list .row { gap: 0.25rem 1rem; flex-wrap: wrap; }
 .date-list .row-end { align-items: center; }
 .date-list .more { margin: 0; }
