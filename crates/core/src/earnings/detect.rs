@@ -21,8 +21,91 @@ pub fn domestic_by_cik() -> HashMap<u64, WatchEntry> {
         .collect()
 }
 
+/// Words that do not identify a company.
+const NAME_NOISE: [&str; 19] = [
+    "inc",
+    "incorporated",
+    "corp",
+    "corporation",
+    "co",
+    "company",
+    "companies",
+    "ltd",
+    "limited",
+    "plc",
+    "holdings",
+    "holding",
+    "the",
+    "group",
+    "sa",
+    "nv",
+    "ag",
+    "lp",
+    "llc",
+];
+
+/// Lowercase tokens of a company name: "&", ".", and apostrophes are dropped
+/// inside words ("AT&T" = "ATT", "Lowe's" = "LOWES", "Amazon.com" =
+/// "AMAZON COM"), other punctuation separates, and legal suffixes go.
+fn name_tokens(name: &str) -> Vec<String> {
+    let joined: String = name
+        .to_lowercase()
+        .chars()
+        .filter(|c| !matches!(c, '&' | '.' | '\'' | '\u{2019}'))
+        .map(|c| if c.is_alphanumeric() { c } else { ' ' })
+        .collect();
+    joined
+        .split_whitespace()
+        .filter(|t| !NAME_NOISE.contains(t))
+        .map(String::from)
+        .collect()
+}
+
+/// The filer's name and ours start with the same significant word, also
+/// across a space ("EXXON MOBIL" = "ExxonMobil", "AMAZON COM" = "Amazon").
+pub fn same_company(filer: &str, ours: &str) -> bool {
+    let (a, b) = (name_tokens(filer), name_tokens(ours));
+    let (Some(a0), Some(b0)) = (a.first(), b.first()) else {
+        return false;
+    };
+    a0 == b0
+        || a.get(1).is_some_and(|a1| format!("{a0}{a1}") == *b0)
+        || b.get(1).is_some_and(|b1| format!("{b0}{b1}") == *a0)
+}
+
+/// The watchlist entry for a feed entry, unless the filer's name is not
+/// the row's company (a wrong CIK in the data file).
+fn watched<'w>(f: &FeedEntry, watch: &'w HashMap<u64, WatchEntry>) -> Option<&'w WatchEntry> {
+    watch
+        .get(&f.cik)
+        .filter(|w| same_company(&f.company, w.name) || same_company(&f.company, w.sec_name()))
+}
+
+/// Watchlist rows whose CIK files under another company's name, as
+/// `(ticker, message)`, one per ticker.
+pub fn name_mismatches(
+    entries: &[FeedEntry],
+    watch: &HashMap<u64, WatchEntry>,
+) -> Vec<(&'static str, String)> {
+    let mut out: Vec<(&'static str, String)> = Vec::new();
+    for f in entries {
+        let Some(w) = watch.get(&f.cik) else { continue };
+        if watched(f, watch).is_none() && !out.iter().any(|(t, _)| *t == w.ticker) {
+            out.push((
+                w.ticker,
+                format!(
+                    "watchlist {} has CIK {}, but EDGAR files it as {:?}; its filings are skipped until data/watchlist.tsv is fixed",
+                    w.ticker, f.cik, f.company
+                ),
+            ));
+        }
+    }
+    out
+}
+
 /// Original 8-K filings (not `8-K/A`) with Item 2.02 by a domestic
-/// watchlist company, accepted within `MAX_AGE_HOURS`, with their entry.
+/// watchlist company (its filer name matching the row), accepted within
+/// `MAX_AGE_HOURS`, with their entry.
 pub fn earnings_entries<'a>(
     entries: &'a [FeedEntry],
     watch: &HashMap<u64, WatchEntry>,
@@ -33,7 +116,7 @@ pub fn earnings_entries<'a>(
         .filter(|f| f.form == "8-K")
         .filter(|f| f.items.iter().any(|i| i == "2.02"))
         .filter(|f| now - f.accepted_at <= Duration::hours(MAX_AGE_HOURS))
-        .filter_map(|f| Some((f, watch.get(&f.cik)?.clone())))
+        .filter_map(|f| Some((f, watched(f, watch)?.clone())))
         .collect()
 }
 
@@ -49,7 +132,7 @@ mod tests {
         FeedEntry {
             form: form.into(),
             cik,
-            company: "X".into(),
+            company: "Apple Inc.".into(),
             accession: format!("0000000001-26-{:06}", items.len() + form.len()),
             filing_date: "2026-10-30".into(),
             items: items.iter().map(|i| i.to_string()).collect(),
@@ -96,6 +179,69 @@ mod tests {
         // A foreign (6-K) filer on the watchlist is calendar only.
         let tm = crate::earnings::find("TM").unwrap().cik;
         assert!(earnings_entries(&[entry(tm, "8-K", &["2.02"], t)], &w, now).is_empty());
+    }
+
+    #[test]
+    fn filer_names_match_the_watchlist_name() {
+        for (filer, ours) in [
+            ("APPLE INC", "Apple"),
+            ("Apple Inc.", "Apple"),
+            ("META PLATFORMS, INC.", "Meta Platforms"),
+            ("EXXON MOBIL CORP", "ExxonMobil"),
+            ("ExxonMobil Holdings Corp", "ExxonMobil"),
+            ("AT&T INC.", "AT&T"),
+            ("COCA COLA CO", "Coca-Cola"),
+            ("LOWES COMPANIES INC", "Lowe's"),
+            ("AMAZON COM INC", "Amazon"),
+            ("The Walt Disney Company", "Walt Disney"),
+        ] {
+            assert!(same_company(filer, ours), "{filer} vs {ours}");
+        }
+        for (filer, ours) in [
+            ("Estrella Immunopharma, Inc.", "Apple"),
+            ("Apple Hospitality REIT, Inc.", "Intuit"),
+            ("INC", "Apple"),
+        ] {
+            assert!(!same_company(filer, ours), "{filer} vs {ours}");
+        }
+    }
+
+    #[test]
+    fn every_watchlist_name_matches_its_sec_name() {
+        // The SEC's conformed names (company_tickers.json, 2026-10-29) of
+        // rows whose display name differs most.
+        for (ticker, sec) in [
+            ("BNY", "Bank of New York Mellon Corp"),
+            ("BRK.B", "BERKSHIRE HATHAWAY INC"),
+            ("GOOGL", "Alphabet Inc."),
+            ("XOM", "ExxonMobil Holdings Corp"),
+        ] {
+            let w = crate::earnings::find(ticker).unwrap();
+            assert!(
+                same_company(sec, w.sec_name()),
+                "{ticker}: {sec} vs {}",
+                w.sec_name()
+            );
+        }
+    }
+
+    #[test]
+    fn a_wrong_cik_is_not_assigned_to_the_ticker() {
+        let mut w = domestic_by_cik();
+        // Suppose the data file gave AAPL's CIK to another ticker.
+        let mut wrong = w.remove(&320193).unwrap();
+        wrong.ticker = "INTU";
+        wrong.name = "Intuit";
+        wrong.sec = None;
+        w.insert(320193, wrong);
+        let f = parse_current_feed(FEED).unwrap();
+        let now = utc("2026-10-30T21:00:00Z");
+        assert!(earnings_entries(&f, &w, now).is_empty());
+        let bad = name_mismatches(&f, &w);
+        assert_eq!(bad.len(), 1);
+        assert_eq!(bad[0].0, "INTU");
+        assert!(bad[0].1.contains("Apple Inc."), "{}", bad[0].1);
+        assert!(name_mismatches(&f, &domestic_by_cik()).is_empty());
     }
 
     #[test]

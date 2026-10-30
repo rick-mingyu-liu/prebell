@@ -24,6 +24,15 @@ pub struct WatchEntry {
     pub name: &'static str,
     /// The company's own web domains; subdomains match.
     pub domains: Vec<&'static str>,
+    /// The SEC filer name, when `name` does not start the same way.
+    pub sec: Option<&'static str>,
+}
+
+impl WatchEntry {
+    /// The name EDGAR files under (for the wrong-CIK guard).
+    pub fn sec_name(&self) -> &'static str {
+        self.sec.unwrap_or(self.name)
+    }
 }
 
 fn data_lines() -> impl Iterator<Item = &'static str> {
@@ -49,12 +58,14 @@ fn parse(line: &'static str) -> Option<WatchEntry> {
         .map(str::trim)
         .filter(|d| !d.is_empty())
         .collect();
+    let sec = cols.next().filter(|s| !s.is_empty());
     Some(WatchEntry {
         ticker,
         cik,
         filer,
         name,
         domains,
+        sec,
     })
 }
 

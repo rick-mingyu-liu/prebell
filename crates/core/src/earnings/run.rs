@@ -11,7 +11,7 @@ use chrono::{DateTime, Duration, SecondsFormat, Utc};
 
 use crate::clock::et;
 use crate::earnings::charts::{charts, r2_key};
-use crate::earnings::detect::{domestic_by_cik, earnings_entries};
+use crate::earnings::detect::{domestic_by_cik, earnings_entries, name_mismatches};
 use crate::earnings::draft::{slug, write, CONTENT_TYPE, TEMPLATE_ID};
 use crate::earnings::extract::{extract, Extracted};
 use crate::earnings::facts::{missing_required, EarningsFacts, Metrics};
@@ -151,6 +151,10 @@ pub async fn poll_tick(
         }
     }
     let watch = domestic_by_cik();
+    for (ticker, msg) in name_mismatches(&entries, &watch) {
+        out.errors.push(msg.clone());
+        alert_once_today(now, &format!("watchlist-cik:{ticker}"), "warn", &msg, store).await?;
+    }
     for (f, w) in earnings_entries(&entries, &watch, now) {
         let row = filing_row(f, &w, now);
         let key = row.run_key.clone();
@@ -843,7 +847,8 @@ mod tests {
                 .map(|i| format!("&lt;br&gt;Item {i}: Something\n"))
                 .collect();
             out.push_str(&format!(
-                "<entry>\n<title>8-K - Co (00{cik:08}) (Filer)</title>\n<link rel=\"alternate\" type=\"text/html\" href=\"https://www.sec.gov/Archives/edgar/data/{cik}/{nodash}/{acc}-index.htm\"/>\n<summary type=\"html\">\n &lt;b&gt;Filed:&lt;/b&gt; {} &lt;b&gt;AccNo:&lt;/b&gt; {acc}\n{lines}</summary>\n<updated>{}</updated>\n<id>urn:tag:sec.gov,2008:accession-number={acc}</id>\n</entry>\n",
+                "<entry>\n<title>8-K - {} (00{cik:08}) (Filer)</title>\n<link rel=\"alternate\" type=\"text/html\" href=\"https://www.sec.gov/Archives/edgar/data/{cik}/{nodash}/{acc}-index.htm\"/>\n<summary type=\"html\">\n &lt;b&gt;Filed:&lt;/b&gt; {} &lt;b&gt;AccNo:&lt;/b&gt; {acc}\n{lines}</summary>\n<updated>{}</updated>\n<id>urn:tag:sec.gov,2008:accession-number={acc}</id>\n</entry>\n",
+                crate::earnings::by_cik(*cik).map_or("Co", |w| w.name),
                 et(*at).format("%Y-%m-%d"),
                 at.to_rfc3339()
             ));
@@ -1050,6 +1055,36 @@ mod tests {
         assert_eq!(alerts.len(), 1, "{alerts:?}");
         assert_eq!(alerts[0].0, "sec-throttled:2026-10-30");
         assert_eq!(alerts[0].1, "error");
+    }
+
+    #[tokio::test]
+    async fn a_filer_name_mismatch_is_skipped_and_alerted_once_a_day() {
+        // The feed says CIK 320193 is someone else: a wrong CIK in the data
+        // file must not publish that company's results as Apple's.
+        let (base, es) = stores();
+        let fl = FakeFilings::default();
+        fl.pages.borrow_mut().insert(
+            0,
+            Ok(FEED.replace(
+                "8-K - Apple Inc. (0000320193)",
+                "8-K - Estrella Immunopharma, Inc. (0000320193)",
+            )),
+        );
+        let t = poll_time();
+        let o = poll_tick(t, &es, base.as_ref(), &fl).await.unwrap();
+        assert!(o.detected.is_empty());
+        assert!(
+            o.errors[0].contains("AAPL") && o.errors[0].contains("Estrella"),
+            "{:?}",
+            o.errors
+        );
+        poll_tick(t + Duration::minutes(5), &es, base.as_ref(), &fl)
+            .await
+            .unwrap();
+        let alerts = base.alerts.borrow();
+        assert_eq!(alerts.len(), 1, "{alerts:?}");
+        assert_eq!(alerts[0].0, "watchlist-cik:AAPL:2026-10-30");
+        assert_eq!(alerts[0].1, "warn");
     }
 
     #[tokio::test]

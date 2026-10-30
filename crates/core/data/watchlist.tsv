@@ -4,13 +4,16 @@
 #
 # REFRESH THIS FILE when the index changes (S&P rebalances quarterly) and check
 # every CIK against https://www.sec.gov/files/company_tickers.json. The poller
-# also skips (and logs) any entry whose EDGAR submissions do not list its ticker.
+# also skips (and alerts once a day about) any EDGAR filing under a row's CIK
+# whose filer name does not match the row's company name (or SEC name).
 # Membership as of 2026-10 from the builder's knowledge. Every row's ticker
 # and CIK were checked against company_tickers.json on 2026-10-29.
 #
 # Columns (tab-separated): ticker, CIK, filer (domestic | foreign), company
 # name, company web domains (comma-separated; subdomains match) used to accept
-# a company's own date announcement as calendar proof.
+# a company's own date announcement as calendar proof; optionally, the SEC
+# filer name when the company name does not start the same way (BNY is
+# "Bank of New York Mellon Corp" on EDGAR).
 AAPL	320193	domestic	Apple	apple.com
 ABBV	1551152	domestic	AbbVie	abbvie.com
 ABT	1800	domestic	Abbott Laboratories	abbott.com
@@ -25,7 +28,7 @@ AVGO	1730168	domestic	Broadcom	broadcom.com
 AXP	4962	domestic	American Express	americanexpress.com
 BA	12927	domestic	Boeing	boeing.com
 BAC	70858	domestic	Bank of America	bankofamerica.com
-BNY	1390777	domestic	BNY	bny.com,bnymellon.com
+BNY	1390777	domestic	BNY	bny.com,bnymellon.com	Bank of New York Mellon
 BKNG	1075531	domestic	Booking Holdings	bookingholdings.com
 BLK	2012383	domestic	BlackRock	blackrock.com
 BMY	14272	domestic	Bristol-Myers Squibb	bms.com
@@ -50,14 +53,14 @@ EMR	32604	domestic	Emerson Electric	emerson.com
 F	37996	domestic	Ford Motor	ford.com
 FDX	1048911	domestic	FedEx	fedex.com
 GD	40533	domestic	General Dynamics	gd.com
-GE	40545	domestic	GE Aerospace	ge.com,geaerospace.com
+GE	40545	domestic	GE Aerospace	ge.com,geaerospace.com	General Electric
 GILD	882095	domestic	Gilead Sciences	gilead.com
 GM	1467858	domestic	General Motors	gm.com
 GOOGL	1652044	domestic	Alphabet	abc.xyz
 GS	886982	domestic	Goldman Sachs	goldmansachs.com
 HD	354950	domestic	Home Depot	homedepot.com
 HON	773840	domestic	Honeywell	honeywell.com
-IBM	51143	domestic	IBM	ibm.com
+IBM	51143	domestic	IBM	ibm.com	International Business Machines
 INTC	50863	domestic	Intel	intel.com
 INTU	896878	domestic	Intuit	intuit.com
 ISRG	1035267	domestic	Intuitive Surgical	intuitive.com
@@ -94,7 +97,7 @@ PYPL	1633917	domestic	PayPal	paypal.com,paypal-corp.com
 QCOM	804328	domestic	Qualcomm	qualcomm.com
 RTX	101829	domestic	RTX	rtx.com
 SBUX	829224	domestic	Starbucks	starbucks.com
-SCHW	316709	domestic	Charles Schwab	aboutschwab.com,schwab.com
+SCHW	316709	domestic	Charles Schwab	aboutschwab.com,schwab.com	Schwab Charles
 SO	92122	domestic	Southern Company	southerncompany.com
 SPG	1063761	domestic	Simon Property Group	simon.com
 T	732717	domestic	AT&T	att.com
