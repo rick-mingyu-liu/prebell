@@ -103,14 +103,25 @@ impl D1Store {
             _ => Ok(()),
         }
     }
+}
 
-    pub async fn unsent_alerts(&self) -> Result<Vec<AlertRec>, String> {
-        let sql = "SELECT id, run_key, level, message FROM alerts WHERE sent = 0 ORDER BY id";
-        let r = self.db.prepare(sql).all().await.map_err(|e| err(sql, e))?;
+#[async_trait(?Send)]
+impl crate::alerts::AlertQueue for D1Store {
+    async fn unsent_alerts(&self, limit: usize) -> Result<Vec<AlertRec>, String> {
+        let sql =
+            "SELECT id, run_key, level, message FROM alerts WHERE sent = 0 ORDER BY id LIMIT ?1";
+        let r = self
+            .db
+            .prepare(sql)
+            .bind(&[int(limit as i64)])
+            .map_err(|e| err(sql, e))?
+            .all()
+            .await
+            .map_err(|e| err(sql, e))?;
         r.results::<AlertRec>().map_err(|e| err(sql, e))
     }
 
-    pub async fn mark_alert_sent(&self, id: i64) -> Result<(), String> {
+    async fn mark_alert_sent(&self, id: i64) -> Result<(), String> {
         self.run("UPDATE alerts SET sent = 1 WHERE id = ?1", &[int(id)])
             .await
     }

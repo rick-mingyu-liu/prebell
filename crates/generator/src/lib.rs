@@ -267,6 +267,8 @@ async fn queue(batch: MessageBatch<Job>, env: Env, _ctx: Context) -> Result<()> 
         facts: env.bucket("FACTS")?,
     };
     let http = CountingHttp::new(WorkerHttp);
+    // Fetch subrequests this invocation has used (Free plan: 50).
+    let mut used = 0;
 
     for msg in batch.messages()? {
         let body = msg.body();
@@ -291,11 +293,20 @@ async fn queue(batch: MessageBatch<Job>, env: Env, _ctx: Context) -> Result<()> 
         }
         // Free plan: fetch subrequests this job used (limit 50 per invocation).
         console_log!("subrequests={} job={job}", http.count());
+        used += http.count();
         msg.ack();
     }
 
     http.reset();
-    alerts::deliver(&store, &http, text(&env, "ALERT_WEBHOOK_URL").as_deref()).await;
+    // Whatever the jobs left of the budget; the rest wait for the next invocation.
+    let budget = alerts::delivery_budget(used);
+    alerts::deliver(
+        &store,
+        &http,
+        text(&env, "ALERT_WEBHOOK_URL").as_deref(),
+        budget,
+    )
+    .await;
     console_log!("subrequests={} job=alerts", http.count());
     Ok(())
 }
