@@ -1,4 +1,6 @@
 /** Sidebar invite links and where each may be shown. Change a link or a rule here only. */
+// Server-only so the gated URLs can never be bundled into client JS; client code imports types only.
+import "server-only";
 
 export type PartnerGroup = "brokers" | "crypto";
 
@@ -55,13 +57,14 @@ function normalize(value: unknown): string | null {
 }
 
 /**
- * The visitor's country from Cloudflare: the `cf-ipcountry` header, else `request.cf.country`.
- * On OpenNext the route gets a rebuilt request without `cf`, so the caller passes
- * `getCloudflareContext().cf` (the original request's `cf`).
+ * The visitor's country from Cloudflare: `request.cf.country`, else the `cf-ipcountry` header.
+ * `cf` comes first because the Workers runtime sets it and a client can't forge it; the header
+ * covers local dev. On OpenNext the route gets a rebuilt request without `cf`, so the caller
+ * passes `getCloudflareContext().cf` (the original request's `cf`).
  */
 export function countryOf(
   req: Request,
   cf: { country?: unknown } | undefined = (req as { cf?: { country?: unknown } }).cf,
 ): string | null {
-  return normalize(req.headers.get("cf-ipcountry")) ?? normalize(cf?.country);
+  return normalize(cf?.country) ?? normalize(req.headers.get("cf-ipcountry"));
 }

@@ -1,17 +1,31 @@
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
+import { getPathMatch } from "next/dist/shared/lib/router/utils/path-match";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import nextConfig from "../next.config";
 import { GET } from "../src/app/api/partners/route";
 import { PartnerBoxes } from "../src/components/PartnerLinks";
 import Sidebar from "../src/components/Sidebar";
-import { countryOf, partnersFor } from "../src/lib/partners";
+import { countryOf, partnersFor, type PartnersResponse } from "../src/lib/partners";
 
-const cf = vi.hoisted(() => ({ value: undefined as { country?: unknown } | undefined }));
-vi.mock("@opennextjs/cloudflare", () => ({ getCloudflareContext: () => ({ cf: cf.value }) }));
+const cf = vi.hoisted(() => ({
+  value: undefined as { country?: unknown } | undefined,
+  throws: false,
+}));
+vi.mock("@opennextjs/cloudflare", () => ({
+  getCloudflareContext: () => {
+    if (cf.throws) throw new Error("no Cloudflare context");
+    return { cf: cf.value };
+  },
+  initOpenNextCloudflareForDev: () => {},
+}));
 
 const ids = (country: string | null) => partnersFor(country).map((p) => p.id);
 const req = (headers: Record<string, string> = {}) =>
   new Request("https://prebell.example/api/partners", { headers });
+
+const DISCLOSURE_EN = "Affiliate links: PreBell may earn a reward if you sign up. Not investment advice.";
+const DISCLOSURE_ZH = "推广链接：通过链接注册，PreBell 可能获得奖励。不构成投资建议。";
 
 describe("partnersFor", () => {
   it("shows nothing in mainland China", () => {
@@ -37,31 +51,34 @@ describe("partnersFor", () => {
 });
 
 describe("countryOf", () => {
-  it("reads and normalizes cf-ipcountry", () => {
-    expect(countryOf(req({ "cf-ipcountry": "ca" }))).toBe("CA");
-    expect(countryOf(req({ "cf-ipcountry": " CN " }))).toBe("CN");
+  it("reads and normalizes the runtime cf country", () => {
+    expect(countryOf(req(), { country: "ca" })).toBe("CA");
+    expect(countryOf(req(), { country: " CN " })).toBe("CN");
+    const withCf = Object.assign(req(), { cf: { country: "US" } });
+    expect(countryOf(withCf)).toBe("US");
   });
-  it("ignores unknown, Tor and empty values", () => {
+  it("prefers the runtime cf country, which the client can't forge, over the header", () => {
+    expect(countryOf(req({ "cf-ipcountry": "US" }), { country: "CN" })).toBe("CN");
+  });
+  it("falls back to a normalized cf-ipcountry header when cf has no country", () => {
+    expect(countryOf(req({ "cf-ipcountry": "ca" }))).toBe("CA");
+    expect(countryOf(req({ "cf-ipcountry": "ca" }), {})).toBe("CA");
+    expect(countryOf(req({ "cf-ipcountry": "CN" }), { country: "XX" })).toBe("CN");
+  });
+  it("ignores unknown, Tor, empty and missing values", () => {
     expect(countryOf(req({ "cf-ipcountry": "XX" }))).toBeNull();
     expect(countryOf(req({ "cf-ipcountry": "T1" }))).toBeNull();
     expect(countryOf(req({ "cf-ipcountry": "" }))).toBeNull();
     expect(countryOf(req())).toBeNull();
-  });
-  it("falls back to the request's cf country", () => {
-    expect(countryOf(req(), { country: "ca" })).toBe("CA");
-    expect(countryOf(req({ "cf-ipcountry": "XX" }), { country: "CN" })).toBe("CN");
-    expect(countryOf(req(), { country: "XX" })).toBeNull();
-    const withCf = Object.assign(req(), { cf: { country: "US" } });
-    expect(countryOf(withCf)).toBe("US");
-  });
-  it("prefers the header over cf", () => {
-    expect(countryOf(req({ "cf-ipcountry": "CN" }), { country: "CA" })).toBe("CN");
+    expect(countryOf(req(), { country: "T1" })).toBeNull();
+    expect(countryOf(req({ "cf-ipcountry": "XX" }), { country: "XX" })).toBeNull();
   });
 });
 
 describe("GET /api/partners", () => {
   beforeEach(() => {
     cf.value = undefined;
+    cf.throws = false;
   });
 
   it("is never cached and returns the grouped links", async () => {
@@ -80,13 +97,14 @@ describe("GET /api/partners", () => {
   });
 
   it("returns empty groups in mainland China", async () => {
-    const res = await GET(req({ "cf-ipcountry": "CN" }));
+    cf.value = { country: "CN" };
+    const res = await GET(req());
     expect(await res.json()).toEqual({ brokers: [], crypto: [] });
   });
 
-  it("falls back to the Cloudflare context country", async () => {
+  it("uses the Cloudflare context country over a forged header", async () => {
     cf.value = { country: "CN" };
-    const res = await GET(req());
+    const res = await GET(req({ "cf-ipcountry": "US" }));
     expect(await res.json()).toEqual({ brokers: [], crypto: [] });
   });
 
@@ -95,52 +113,129 @@ describe("GET /api/partners", () => {
     expect(body.brokers.map((p: { id: string }) => p.id)).toEqual(["moomoo"]);
     expect(body.crypto.map((p: { id: string }) => p.id)).toEqual(["okx", "cryptocom"]);
   });
+
+  it("treats a missing Cloudflare context as no cf country instead of failing", async () => {
+    cf.throws = true;
+    const unknown = await GET(req());
+    expect(unknown.status).toBe(200);
+    expect(unknown.headers.get("Cache-Control")).toBe("private, no-store");
+    expect((await unknown.json()).brokers.map((p: { id: string }) => p.id)).toEqual(["moomoo"]);
+    const cn = await GET(req({ "cf-ipcountry": "CN" }));
+    expect(await cn.json()).toEqual({ brokers: [], crypto: [] });
+  });
+});
+
+describe("next.config headers", () => {
+  const rulesFor = async (path: string) =>
+    (await nextConfig.headers!()).filter((rule) => getPathMatch(rule.source)(path) !== false);
+
+  it("marks /api/partners private, no-store and keeps the cacheable locale rule off it", async () => {
+    const rules = await rulesFor("/api/partners");
+    const values = rules.flatMap((r) => r.headers).filter((h) => h.key.toLowerCase() === "cache-control");
+    expect(values.map((h) => h.value)).toEqual(["private, no-store"]);
+  });
+
+  it("still caches locale pages at the edge", async () => {
+    const rules = await rulesFor("/en/archive");
+    expect(rules.flatMap((r) => r.headers)).toContainEqual({ key: "Cache-Control", value: "public, s-maxage=60" });
+  });
 });
 
 describe("Sidebar", () => {
   const PARTNER_HOSTS = ["moomoo.com", "okx.com", "crypto.com", "wealthsimple.com"];
 
-  it("server-renders no partner link, but the disclosure and TermPocket card", () => {
+  it("server-renders only the TermPocket card: no partner link and no disclosure", () => {
     const out = renderToStaticMarkup(createElement(Sidebar, { locale: "en" }));
     for (const host of PARTNER_HOSTS) expect(out).not.toContain(host);
+    expect(out).not.toContain(DISCLOSURE_EN);
     expect(out).toContain('href="https://www.termpocket.com"');
-    expect(out).toContain("Affiliate links: PreBell may earn a reward if you sign up. Not investment advice.");
     expect(out).toContain("From the PreBell team. Plan your goals and habits with Pocky, your AI assistant.");
   });
 
   it("uses the Chinese copy on ZH pages", () => {
     const out = renderToStaticMarkup(createElement(Sidebar, { locale: "zh" }));
     for (const host of PARTNER_HOSTS) expect(out).not.toContain(host);
-    expect(out).toContain("推广链接：通过链接注册，PreBell 可能获得奖励。不构成投资建议。");
+    expect(out).not.toContain(DISCLOSURE_ZH);
     expect(out).toContain("来自 PreBell 团队。用 AI 助手 Pocky 规划你的目标与习惯。");
   });
 });
 
 describe("PartnerBoxes", () => {
-  const titles = { brokers: "Brokers", crypto: "Crypto exchanges" };
+  const labels = { brokers: "Brokers", crypto: "Crypto exchanges", disclosure: DISCLOSURE_EN };
   const okx = { id: "okx", name: "OKX", url: "https://okx.com/join/AIAFMP3U" };
+  const render = (data: PartnersResponse | null) =>
+    renderToStaticMarkup(createElement(PartnerBoxes, { data, labels }));
 
   it("opens links in a new tab as sponsored", () => {
-    const out = renderToStaticMarkup(
-      createElement(PartnerBoxes, { data: { brokers: [], crypto: [okx] }, titles }),
-    );
+    const out = render({ brokers: [], crypto: [okx] });
     expect(out).toContain('href="https://okx.com/join/AIAFMP3U"');
     expect(out).toContain('target="_blank"');
     expect(out).toContain('rel="sponsored noopener noreferrer"');
   });
 
-  it("drops a box with no links", () => {
-    const out = renderToStaticMarkup(
-      createElement(PartnerBoxes, { data: { brokers: [], crypto: [okx] }, titles }),
-    );
+  it("drops a box with no links and shows the disclosure under the boxes", () => {
+    const out = render({ brokers: [], crypto: [okx] });
     expect(out).toContain("Crypto exchanges");
     expect(out).not.toContain("Brokers");
+    expect(out).toContain(DISCLOSURE_EN);
+    expect(out.indexOf(DISCLOSURE_EN)).toBeGreaterThan(out.indexOf("OKX"));
   });
 
-  it("renders nothing when both groups are empty", () => {
-    const out = renderToStaticMarkup(
-      createElement(PartnerBoxes, { data: { brokers: [], crypto: [] }, titles }),
-    );
-    expect(out).toBe("");
+  it("renders nothing, disclosure included, when both groups are empty", () => {
+    expect(render({ brokers: [], crypto: [] })).toBe("");
+  });
+
+  it("renders nothing before data arrives or after a failed load", () => {
+    expect(render(null)).toBe("");
+  });
+});
+
+describe("loadPartners", () => {
+  const good: PartnersResponse = {
+    brokers: [{ id: "moomoo", name: "moomoo", url: "https://j.moomoo.com/0J1BGf" }],
+    crypto: [],
+  };
+  const json = (body: unknown, status = 200) => Promise.resolve(Response.json(body, { status }));
+
+  // A fresh module per test, so the module-level memo starts empty.
+  const load = async () => (await import("../src/components/PartnerLinks")).loadPartners;
+  beforeEach(() => {
+    vi.resetModules();
+  });
+
+  it("fails closed when the fetch rejects", async () => {
+    const loadPartners = await load();
+    const fetchImpl = vi.fn(() => Promise.reject(new TypeError("offline")));
+    await expect(loadPartners(fetchImpl)).resolves.toBeNull();
+  });
+
+  it("fails closed on a non-OK response or a malformed body", async () => {
+    const loadPartners = await load();
+    await expect(loadPartners(() => json(good, 500))).resolves.toBeNull();
+    await expect(loadPartners(() => json({ brokers: "x" }))).resolves.toBeNull();
+    await expect(loadPartners(() => Promise.resolve(new Response("not json")))).resolves.toBeNull();
+  });
+
+  it("retries on a later mount after a failure", async () => {
+    const loadPartners = await load();
+    const fetchImpl = vi
+      .fn<() => Promise<Response>>()
+      .mockImplementationOnce(() => Promise.reject(new TypeError("offline")))
+      .mockImplementationOnce(() => json(good));
+    await expect(loadPartners(fetchImpl)).resolves.toBeNull();
+    await expect(loadPartners(fetchImpl)).resolves.toEqual(good);
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+  });
+
+  it("fetches once per page load and shares the result across mounts", async () => {
+    const loadPartners = await load();
+    const fetchImpl = vi.fn(() => json(good));
+    const [a, b] = await Promise.all([loadPartners(fetchImpl), loadPartners(fetchImpl)]);
+    const c = await loadPartners(fetchImpl);
+    expect(a).toEqual(good);
+    expect(b).toBe(a);
+    expect(c).toBe(a);
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    expect(fetchImpl).toHaveBeenCalledWith("/api/partners");
   });
 });
