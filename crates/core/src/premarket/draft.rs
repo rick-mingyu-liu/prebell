@@ -31,8 +31,10 @@ pub struct Draft {
     pub sections: Vec<(String, String)>,
 }
 
-fn headings(lang: Lang) -> [&'static str; 4] {
-    match lang {
+/// The section headings in order. "What to watch" is last and only there
+/// when the facts have a watch list.
+fn headings(lang: Lang, watch: bool) -> Vec<&'static str> {
+    let all = match lang {
         Lang::En => [
             "Futures",
             "Biggest premarket movers",
@@ -40,7 +42,8 @@ fn headings(lang: Lang) -> [&'static str; 4] {
             "What to watch",
         ],
         Lang::Zh => ["期货", "盘前异动", "宏观与隔夜", "今日关注"],
-    }
+    };
+    all[..if watch { 4 } else { 3 }].to_vec()
 }
 
 fn prompt(lang: Lang) -> &'static str {
@@ -54,6 +57,15 @@ pub(crate) fn na(lang: Lang) -> &'static str {
     match lang {
         Lang::En => "n/a",
         Lang::Zh => "暂缺",
+    }
+}
+
+/// The Why cell of a mover with no verified reason. Only the EN tables have
+/// a Why column; the ZH text is reserved for a future one.
+pub(crate) fn no_news(lang: Lang) -> &'static str {
+    match lang {
+        Lang::En => "No clear news",
+        Lang::Zh => "暂无明确消息",
     }
 }
 
@@ -80,6 +92,17 @@ pub(crate) fn fmt_pct(p: f64) -> String {
     format!("{p:+.2}%")
 }
 
+/// Chinese contract names for the ZH table; facts keep the English labels.
+fn futures_label(label: &str, lang: Lang) -> &str {
+    match (lang, label) {
+        (Lang::Zh, "S&P 500 futures") => "标普500期货",
+        (Lang::Zh, "Nasdaq 100 futures") => "纳指100期货",
+        (Lang::Zh, "Dow futures") => "道指期货",
+        (Lang::Zh, "Russell 2000 futures") => "罗素2000期货",
+        _ => label,
+    }
+}
+
 /// Keeps a table cell on one line and its pipes literal.
 pub(crate) fn cell(s: &str) -> String {
     s.replace(['\n', '\r'], " ").replace('|', "\\|")
@@ -98,7 +121,7 @@ fn mover_row(m: &Mover, lang: Lang) -> String {
         let why = m
             .reasons
             .first()
-            .map_or(na(lang), |r| r.summary_en.as_str());
+            .map_or(no_news(lang), |r| r.summary_en.as_str());
         row.push_str(&format!(" {} |", cell(why)));
     }
     row
@@ -119,7 +142,10 @@ pub fn render_markdown(d: &Draft, f: &PremarketFacts) -> String {
             Field::Value(q) => (fmt_num(q.last), fmt_pct(q.change_pct)),
             Field::Missing { .. } => (na(lang).to_string(), na(lang).to_string()),
         };
-        out.push_str(&format!("| {} | {last} | {chg} |\n", cell(label)));
+        out.push_str(&format!(
+            "| {} | {last} | {chg} |\n",
+            cell(futures_label(label, lang))
+        ));
     }
     out.push('\n');
 
@@ -231,6 +257,55 @@ pub(crate) fn reject_markup(what: &str, s: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Phrases that narrate missing data instead of the market, as in the
+/// 2026-10-30 brief. Matched case-insensitively in either language; kept
+/// short so real prose passes.
+const META: [&str; 13] = [
+    "no reason was provided",
+    "no reasons were provided",
+    "no reason was given",
+    "no reasons were given",
+    "no news was found",
+    "not provided in the facts",
+    "not in the facts",
+    "the facts do not",
+    "the facts don't",
+    "事实中",
+    "未给出原因",
+    "未提供原因",
+    "原因不明",
+];
+
+/// Missing-data phrases that are real news in a macro section ("payrolls
+/// data was unavailable due to the shutdown"), so they are only checked in
+/// the title, the summary and the movers section.
+const META_DATA: [&str; 4] = [
+    "data is unavailable",
+    "data was unavailable",
+    "暂无数据",
+    "数据缺失",
+];
+
+/// The movers section of the premarket brief or the recap, either language.
+fn is_movers(heading: &str) -> bool {
+    [Lang::En, Lang::Zh]
+        .into_iter()
+        .any(|l| headings(l, false)[1] == heading || crate::recap::draft::headings(l)[1] == heading)
+}
+
+/// Rejects prose that comments on missing facts or data; `data` adds the
+/// phrases that are only meta-commentary outside macro news.
+fn reject_meta(what: &str, s: &str, data: bool) -> Result<(), String> {
+    let lower = s.to_lowercase();
+    let extra: &[&str] = if data { &META_DATA } else { &[] };
+    match META.iter().chain(extra).find(|p| lower.contains(*p)) {
+        Some(p) => Err(format!(
+            "{what} comments on missing facts or data ({p:?}): rephrase without it"
+        )),
+        None => Ok(()),
+    }
+}
+
 /// A setext heading underline: a line of only `=` or only `-`, length >= 2.
 pub(crate) fn is_setext_underline(line: &str) -> bool {
     let l = line.trim();
@@ -254,6 +329,8 @@ pub(crate) fn one_line(v: &Value, key: &str) -> Result<String, String> {
 fn parse(v: &Value, lang: Lang, want: &[&str]) -> Result<Draft, String> {
     let title = one_line(v, "title")?;
     let summary = one_line(v, "summary")?;
+    reject_meta("title", &title, true)?;
+    reject_meta("summary", &summary, true)?;
     if summary.starts_with('#') {
         return Err("summary starts with a heading marker".into());
     }
@@ -261,7 +338,7 @@ fn parse(v: &Value, lang: Lang, want: &[&str]) -> Result<Draft, String> {
         .get("sections")
         .and_then(Value::as_array)
         .ok_or("missing \"sections\" array")?;
-    let got: Vec<(String, String)> = items
+    let mut got: Vec<(String, String)> = items
         .iter()
         .map(|s| {
             let h = s
@@ -278,6 +355,11 @@ fn parse(v: &Value, lang: Lang, want: &[&str]) -> Result<Draft, String> {
             (h, m)
         })
         .collect();
+    // A stray watch section after the three wanted ones is never rendered,
+    // so it is dropped rather than retried.
+    if want == headings(lang, false) && got.len() == 4 && got[3].0 == headings(lang, true)[3] {
+        got.pop();
+    }
     if got.len() != want.len() || got.iter().zip(want).any(|((h, _), w)| h != w) {
         let seen: Vec<&str> = got.iter().map(|(h, _)| h.as_str()).collect();
         return Err(format!(
@@ -286,6 +368,7 @@ fn parse(v: &Value, lang: Lang, want: &[&str]) -> Result<Draft, String> {
     }
     for (h, m) in &got {
         reject_markup(&format!("section {h:?}"), m)?;
+        reject_meta(&format!("section {h:?}"), m, is_movers(h))?;
         if m.lines()
             .any(|l| l.trim_start().starts_with('#') || is_setext_underline(l))
         {
@@ -374,7 +457,7 @@ pub async fn write(
         &facts_json,
         &numbers_in_facts(f),
         &[],
-        &headings(lang),
+        &headings(lang, matches!(f.watch_list, Field::Value(_))),
         lang,
         |d| render_markdown(d, f),
     )
@@ -500,7 +583,9 @@ mod tests {
     }
 
     fn reply(lang: Lang, body: &str) -> Result<Value, ProviderError> {
-        let heads = headings(lang);
+        reply_with(&headings(lang, false), body)
+    }
+    fn reply_with(heads: &[&str], body: &str) -> Result<Value, ProviderError> {
         Ok(json!({
             "title": "Futures edge up; Apple jumps 8%",
             "summary": "S&P 500 futures rose 0.45% while Apple gained 8% premarket.",
@@ -520,14 +605,192 @@ mod tests {
         let (d, md) = write(&l, &facts(), Lang::En).await.unwrap();
         assert_eq!(d.lang, Lang::En);
         assert_eq!(d.title, "Futures edge up; Apple jumps 8%");
-        assert_eq!(d.sections.len(), 4);
+        assert_eq!(d.sections.len(), 3);
         assert_eq!(d.sections[0].0, "Futures");
+        assert!(
+            !md.contains("What to watch") && !md.contains("\nn/a\n"),
+            "{md}"
+        );
         assert_eq!(l.prompts.borrow().len(), 1);
         let (sys, user) = &l.prompts.borrow()[0];
         assert_eq!(sys, PROMPT_EN);
         assert_eq!(user, &serde_json::to_string_pretty(&facts()).unwrap());
         assert!(md.starts_with("# Futures edge up; Apple jumps 8%"));
         assert!(md.contains(DISCLAIMER_EN));
+    }
+
+    #[tokio::test]
+    async fn missing_watch_list_drops_its_section_in_both_languages() {
+        for (lang, gone) in [(Lang::En, "What to watch"), (Lang::Zh, "今日关注")] {
+            // A stray trailing watch section is dropped, not retried, and
+            // its body (an unbacked number here) is never checked.
+            let four = reply_with(&headings(lang, true), "Up 7.5%.");
+            let mut v = four.unwrap();
+            for s in v["sections"].as_array_mut().unwrap().iter_mut().take(3) {
+                s["markdown"] = json!("Quiet.");
+            }
+            let l = llm(vec![Ok(v)]);
+            let (d, md) = write(&l, &facts(), lang).await.unwrap();
+            assert_eq!(l.prompts.borrow().len(), 1);
+            assert_eq!(d.sections.len(), 3);
+            // No heading and no "n/a" body: missing futures stay as table cells.
+            let na_body = format!("\n{}\n", na(lang));
+            assert!(!md.contains(gone) && !md.contains(&na_body), "{md}");
+        }
+    }
+
+    #[test]
+    fn only_a_trailing_watch_section_is_dropped() {
+        let want = headings(Lang::En, false);
+        let swapped = [
+            "Futures",
+            "Macro & overnight",
+            "Biggest premarket movers",
+            "What to watch",
+        ];
+        let five = [&headings(Lang::En, true)[..], &["What to watch"]].concat();
+        for heads in [&swapped[..], &five[..]] {
+            let v = reply_with(heads, "Quiet.").unwrap();
+            assert!(parse(&v, Lang::En, &want).is_err(), "{heads:?}");
+        }
+        // Recap headings never drop anything.
+        let recap = [
+            "Index closes",
+            "Notable movers",
+            "After-hours earnings to watch",
+        ];
+        let v = reply_with(&[&recap[..], &["What to watch"]].concat(), "Quiet.").unwrap();
+        assert!(parse(&v, Lang::En, &recap).is_err());
+    }
+
+    #[test]
+    fn meta_commentary_about_missing_data_is_malformed() {
+        for (lang, body) in [
+            (
+                Lang::En,
+                "HP Inc. (HPQ) fell 13.26%; no reasons were provided.",
+            ),
+            (Lang::En, "Equifax rose. No news was found for it."),
+            (Lang::En, "The facts do not explain the move."),
+            (
+                Lang::En,
+                "Dell fell; the reason is not provided in the facts.",
+            ),
+            (Lang::Zh, "Equifax（EFX）涨4.35%，事实中未给出原因。"),
+            (Lang::Zh, "Equifax（EFX）涨4.35%，原因不明。"),
+            (Lang::Zh, "暂无数据。"),
+        ] {
+            let v = reply(lang, body).unwrap();
+            let err = parse(&v, lang, &headings(lang, false)).unwrap_err();
+            assert!(err.contains("missing facts or data"), "{body:?}: {err}");
+            // The note does not steer the model toward any one section.
+            assert!(!err.contains("mover"), "{err}");
+        }
+        let mut v = clean(Lang::En).unwrap();
+        v["summary"] = json!("Futures fell; no reason was given for Dell.");
+        assert!(parse(&v, Lang::En, &headings(Lang::En, false)).is_err());
+    }
+
+    #[test]
+    fn real_prose_passes_the_meta_commentary_check() {
+        for (lang, body) in [
+            (Lang::En, "Dell (DELL) and HP Inc. (HPQ) also fell."),
+            (
+                Lang::En,
+                "In fact, the data showed reasons for optimism; no guidance was provided.",
+            ),
+            (
+                Lang::Zh,
+                "事实上，戴尔和惠普也下跌。Equifax 涨幅居前，暂无明确消息的个股不作展开。",
+            ),
+        ] {
+            let v = reply(lang, body).unwrap();
+            assert!(parse(&v, lang, &headings(lang, false)).is_ok(), "{body:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn meta_commentary_is_retried() {
+        let l = llm(vec![
+            reply(Lang::En, "Equifax rose; no reasons were provided."),
+            clean(Lang::En),
+        ]);
+        assert!(write(&l, &facts(), Lang::En).await.is_ok());
+        let p = l.prompts.borrow();
+        assert!(p[1].1.contains("missing facts or data"), "{}", p[1].1);
+    }
+
+    /// A reply with `macro_body` in the macro section and "Quiet." elsewhere.
+    fn macro_reply(lang: Lang, macro_body: &str) -> Value {
+        let heads = headings(lang, false);
+        let mut v = reply_with(&heads, "Quiet.").unwrap();
+        v["sections"][2]["markdown"] = json!(macro_body);
+        v
+    }
+
+    #[test]
+    fn missing_official_data_is_real_macro_news() {
+        for (lang, body) in [
+            (
+                Lang::En,
+                "Official jobs data is unavailable because of the government shutdown.",
+            ),
+            (
+                Lang::En,
+                "September payrolls data was unavailable due to the shutdown.",
+            ),
+            (
+                Lang::Zh,
+                "因政府停摆，官方就业数据缺失，部分经济指标暂无数据。",
+            ),
+        ] {
+            assert!(
+                parse(&macro_reply(lang, body), lang, &headings(lang, false)).is_ok(),
+                "{body:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn data_phrases_still_fail_in_movers_title_and_summary() {
+        for (lang, phrase) in [
+            (Lang::En, "Data is unavailable for Dell."),
+            (Lang::Zh, "戴尔暂无数据。"),
+        ] {
+            let mut movers = macro_reply(lang, "Quiet.");
+            movers["sections"][1]["markdown"] = json!(phrase);
+            let mut summary = macro_reply(lang, "Quiet.");
+            summary["summary"] = json!(phrase);
+            let mut title = macro_reply(lang, "Quiet.");
+            title["title"] = json!(phrase);
+            for v in [movers, summary, title] {
+                assert!(parse(&v, lang, &headings(lang, false)).is_err(), "{v}");
+            }
+        }
+        // The recap's movers section is covered too.
+        let recap = crate::recap::draft::headings(Lang::En);
+        let mut v = reply_with(&recap, "Quiet.").unwrap();
+        v["sections"][1]["markdown"] = json!("Data was unavailable for Dell.");
+        assert!(parse(&v, Lang::En, &recap).is_err());
+        v["sections"][1]["markdown"] = json!("Quiet.");
+        v["sections"][2]["markdown"] = json!("Data was unavailable for Dell.");
+        assert!(parse(&v, Lang::En, &recap).is_ok());
+    }
+
+    #[tokio::test]
+    async fn present_watch_list_requires_and_renders_its_section() {
+        let mut f = facts();
+        f.watch_list = Field::Value(vec!["Fed minutes at 2 PM ET".into()]);
+        for (lang, heading) in [(Lang::En, "What to watch"), (Lang::Zh, "今日关注")] {
+            let l = llm(vec![
+                reply_with(&headings(lang, false), "Quiet."),
+                reply_with(&headings(lang, true), "Quiet."),
+            ]);
+            let (d, md) = write(&l, &f, lang).await.unwrap();
+            assert_eq!(l.prompts.borrow().len(), 2);
+            assert_eq!(d.sections.len(), 4);
+            assert!(md.contains(&format!("## {heading}\n\nQuiet.")), "{md}");
+        }
     }
 
     #[tokio::test]
@@ -596,7 +859,7 @@ mod tests {
             lang,
             title: "T".into(),
             summary: "S".into(),
-            sections: headings(lang)
+            sections: headings(lang, false)
                 .iter()
                 .map(|h| (h.to_string(), "body".into()))
                 .collect(),
@@ -624,10 +887,64 @@ mod tests {
     #[test]
     fn zh_render_uses_zh_missing_and_headers() {
         let md = render_markdown(&draft(Lang::Zh), &facts());
-        assert!(md.contains("| Nasdaq 100 futures | 暂缺 | 暂缺 |"), "{md}");
+        assert!(md.contains("| 标普500期货 | 5,812.25 | +0.45% |"), "{md}");
+        assert!(md.contains("| 纳指100期货 | 暂缺 | 暂缺 |"), "{md}");
+        assert!(!md.contains("futures"), "{md}");
         assert!(md.contains("合约 | 最新 | 涨跌") && md.contains("代码 | 公司 | 盘前价 | 涨跌"));
         assert!(md.contains("| AAPL | Apple | 230.50 | +8.00% |") && !md.contains("Record iPhone"));
         assert!(md.trim_end().ends_with(DISCLAIMER_ZH));
+    }
+
+    #[test]
+    fn zh_futures_labels_cover_every_contract() {
+        let labels: Vec<&str> = [
+            "S&P 500 futures",
+            "Nasdaq 100 futures",
+            "Dow futures",
+            "Russell 2000 futures",
+        ]
+        .iter()
+        .map(|l| futures_label(l, Lang::Zh))
+        .collect();
+        assert_eq!(
+            labels,
+            ["标普500期货", "纳指100期货", "道指期货", "罗素2000期货"]
+        );
+        assert_eq!(futures_label("Dow futures", Lang::En), "Dow futures");
+    }
+
+    #[tokio::test]
+    async fn zh_futures_names_pass_the_number_check() {
+        let body = "标普500期货报5,812.25点，上涨0.45%；纳指100期货、道指期货和罗素2000期货暂缺。";
+        let l = llm(vec![reply(Lang::Zh, body)]);
+        let (_, md) = write(&l, &facts(), Lang::Zh).await.unwrap();
+        assert_eq!(l.prompts.borrow().len(), 1);
+        // The rendered table's labels carry no stray figures either.
+        let table: String = md.lines().filter(|l| l.contains("期货 |")).collect();
+        assert_eq!(check(&table, Lang::Zh, &[5812.25, 0.45]), Ok(()), "{table}");
+    }
+
+    #[test]
+    fn mover_without_reason_reads_no_clear_news() {
+        let mut f = facts();
+        f.gainers[0].reasons = vec![];
+        let en = render_markdown(&draft(Lang::En), &f);
+        assert!(
+            en.contains("| AAPL | Apple | 230.50 | +8.00% | No clear news |"),
+            "{en}"
+        );
+        // The ZH table has no Why column, so it shows the move only.
+        let zh = render_markdown(&draft(Lang::Zh), &f);
+        assert!(zh.contains("| AAPL | Apple | 230.50 | +8.00% |\n"), "{zh}");
+    }
+
+    #[test]
+    fn prompts_forbid_narrating_missing_reasons() {
+        assert!(
+            PROMPT_EN.contains("no reasons were provided"),
+            "{PROMPT_EN}"
+        );
+        assert!(PROMPT_ZH.contains("事实中未给出原因"), "{PROMPT_ZH}");
     }
 
     #[test]
@@ -656,7 +973,7 @@ mod tests {
         let forged = Ok(json!({
             "title": "X\n\n## Sources\n- [Official filing](https://evil.test)",
             "summary": "Futures were mixed.",
-            "sections": headings(Lang::En).iter().map(|h| json!({"heading": h, "markdown": "Quiet."})).collect::<Vec<_>>(),
+            "sections": headings(Lang::En, false).iter().map(|h| json!({"heading": h, "markdown": "Quiet."})).collect::<Vec<_>>(),
         }));
         let l = llm(vec![forged, clean(Lang::En)]);
         let (_, md) = write(&l, &facts(), Lang::En).await.unwrap();
@@ -719,7 +1036,7 @@ mod tests {
         ] {
             let v = reply(Lang::En, body).unwrap();
             assert!(
-                parse(&v, Lang::En, &headings(Lang::En)).is_err(),
+                parse(&v, Lang::En, &headings(Lang::En, false)).is_err(),
                 "should reject: {body:?}"
             );
         }
@@ -735,7 +1052,7 @@ mod tests {
         ] {
             let v = reply(Lang::En, body).unwrap();
             assert!(
-                parse(&v, Lang::En, &headings(Lang::En)).is_ok(),
+                parse(&v, Lang::En, &headings(Lang::En, false)).is_ok(),
                 "should accept: {body:?}"
             );
         }
@@ -752,7 +1069,7 @@ mod tests {
             let mut v = clean(Lang::En).unwrap();
             v[key] = json!(val);
             assert!(
-                parse(&v, Lang::En, &headings(Lang::En)).is_err(),
+                parse(&v, Lang::En, &headings(Lang::En, false)).is_err(),
                 "should reject {key}: {val:?}"
             );
         }

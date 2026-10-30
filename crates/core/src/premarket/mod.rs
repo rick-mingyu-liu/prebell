@@ -8,11 +8,12 @@ pub use universe::{company_name, universe, yahoo_symbol};
 
 use std::sync::OnceLock;
 
-use chrono::{DateTime, NaiveDate, Utc};
+use chrono::{DateTime, Duration, NaiveDate, Utc};
 use regex::Regex;
 use serde_json::Value;
 
 use crate::anchor::verify_reason;
+use crate::clock::{et, previous_close};
 use crate::facts::{Field, Mover, NewsReason, PremarketFacts, Quote};
 use crate::premarket::draft::reject_markup;
 use crate::providers::{LlmProvider, MarketData, NewsSearch, ProviderError, SearchHit};
@@ -32,6 +33,17 @@ const MACRO_QUERY: &str = "stock market futures today";
 const MACRO_HITS: usize = 5;
 const MACRO_ITEMS: usize = 3;
 const MAX_CONTENT_CHARS: usize = 6_000;
+/// News older than this (by its published date) is never a reason: a
+/// week-old article cannot explain this session's move. After a weekend or
+/// holiday the window reaches back further, see `news_cutoff`.
+pub(crate) const NEWS_MAX_AGE_HOURS: i64 = 36;
+/// How long before the previous session's close news still counts.
+pub(crate) const PREV_CLOSE_BUFFER_HOURS: i64 = 2;
+/// Added to the mover prompts: what counts as a reason for a move.
+pub(crate) const EVENT_RULE: &str = "A reason must be a specific event that explains this session's move: \
+     earnings, guidance, a deal, an analyst upgrade or downgrade, a filing, or macro news tied to this company. \
+     Trailing performance (\"down over the past month\"), momentum, technical levels and valuation commentary \
+     are not reasons. If that is all the articles offer, return {\"reasons\":[]}.";
 
 /// Counters behind `PremarketFacts::diagnostics` (and the recap's, which
 /// counts index closes in `futures_*`).
@@ -54,6 +66,8 @@ pub(crate) struct Diag {
     pub(crate) kept: usize,
     pub(crate) search_err: usize,
     pub(crate) llm_err: usize,
+    /// Search hits dropped as older than `news_cutoff`.
+    pub(crate) news_stale: usize,
     pub(crate) futures_ok: usize,
     pub(crate) futures_err: usize,
 }
@@ -97,7 +111,10 @@ impl Diag {
                 self.liquid, self.gainers, self.losers
             ),
             format!("reasons proposed={} kept={}", self.proposed, self.kept),
-            format!("search_err={} llm_err={}", self.search_err, self.llm_err),
+            format!(
+                "search_err={} llm_err={} news_stale={}",
+                self.search_err, self.llm_err, self.news_stale
+            ),
             format!("{head} ok={} err={}", self.futures_ok, self.futures_err),
         ]);
         out
@@ -122,8 +139,12 @@ pub(crate) fn articles_prompt(header: &str, hits: &[SearchHit]) -> String {
     let mut out = format!("{header}\n\nArticles:\n");
     for (i, h) in hits.iter().enumerate() {
         let content: String = h.content.chars().take(MAX_CONTENT_CHARS).collect();
+        let published = h
+            .published
+            .map(|p| format!("published: {}\n", p.format("%Y-%m-%d %H:%M UTC")))
+            .unwrap_or_default();
         out.push_str(&format!(
-            "\n<article id=\"{}\">\nurl: {}\ntitle: {}\ncontent: {}\n</article>\n",
+            "\n<article id=\"{}\">\nurl: {}\ntitle: {}\n{published}content: {}\n</article>\n",
             i + 1,
             unclose(&h.url),
             unclose(&h.title),
@@ -141,7 +162,41 @@ pub(crate) fn unclose(s: &str) -> String {
         .into_owned()
 }
 
+/// The oldest publish time that is still fresh at `now`: `NEWS_MAX_AGE_HOURS`
+/// back, or shortly before the previous session's close when that is
+/// earlier (a move is measured from that close, so Friday-evening news
+/// explains Monday's move).
+pub(crate) fn news_cutoff(now: DateTime<Utc>) -> DateTime<Utc> {
+    let by_age = now - Duration::hours(NEWS_MAX_AGE_HOURS);
+    by_age.min(previous_close(now) - Duration::hours(PREV_CLOSE_BUFFER_HOURS))
+}
+
+/// Hits for `query` published at or after `news_cutoff(now)`. Hits with no
+/// known date are kept, after the dated ones.
+pub(crate) async fn fresh_news(
+    ns: &dyn NewsSearch,
+    query: &str,
+    max: usize,
+    now: DateTime<Utc>,
+    d: &mut Diag,
+) -> Result<Vec<SearchHit>, ProviderError> {
+    let since = news_cutoff(now);
+    let mut hits = ns.search_since(query, max, since).await?;
+    let found = hits.len();
+    hits.retain(|h| h.published.is_none_or(|p| p >= since));
+    d.news_stale += found - hits.len();
+    hits.sort_by_key(|h| h.published.is_none());
+    Ok(hits)
+}
+
+/// The extraction prompt's reference time, so the LLM can judge each
+/// article's `published` line against the session.
+pub(crate) fn as_of(now: DateTime<Utc>) -> String {
+    format!("As of: {} ET", et(now).format("%Y-%m-%d %H:%M"))
+}
+
 /// Ask the LLM for reasons and keep only those anchored in a fetched hit.
+/// No hits means no reasons, without an LLM call.
 pub(crate) async fn extract(
     llm: &dyn LlmProvider,
     system: &str,
@@ -150,6 +205,9 @@ pub(crate) async fn extract(
     max: usize,
     d: &mut Diag,
 ) -> Result<Vec<NewsReason>, ProviderError> {
+    if hits.is_empty() {
+        return Ok(vec![]);
+    }
     let v = llm
         .complete_json(system, user)
         .await
@@ -188,20 +246,32 @@ async fn mover_reasons(
     ticker: &str,
     name: &str,
     change_pct: f64,
+    now: DateTime<Utc>,
     d: &mut Diag,
 ) -> Vec<NewsReason> {
-    let Ok(hits) = ns
-        .search(&format!("{name} ({ticker}) stock"), HITS_PER_MOVER)
-        .await
+    let Ok(hits) = fresh_news(
+        ns,
+        &format!("{name} ({ticker}) stock"),
+        HITS_PER_MOVER,
+        now,
+        d,
+    )
+    .await
     else {
         d.search_err += 1;
         return vec![];
     };
-    let system = system_prompt(
-        "explain why a US stock is moving in premarket trading",
-        MOVER_REASONS,
+    let system = format!(
+        "{} {EVENT_RULE}",
+        system_prompt(
+            "explain why a US stock is moving in premarket trading",
+            MOVER_REASONS,
+        )
     );
-    let header = format!("Ticker: {ticker}\nCompany: {name}\nPremarket change: {change_pct:+.2}%");
+    let header = format!(
+        "Ticker: {ticker}\nCompany: {name}\nPremarket change: {change_pct:+.2}%\n{}",
+        as_of(now)
+    );
     extract(
         llm,
         &system,
@@ -217,9 +287,17 @@ async fn mover_reasons(
 async fn macro_items(
     ns: &dyn NewsSearch,
     llm: &dyn LlmProvider,
+    now: DateTime<Utc>,
     d: &mut Diag,
 ) -> Field<Vec<NewsReason>> {
-    let hits = match ns.search(MACRO_QUERY, MACRO_HITS).await {
+    let hits = match fresh_news(ns, MACRO_QUERY, MACRO_HITS, now, d).await {
+        // Missing, not an empty list: the brief then says "n/a" rather
+        // than narrating that no news was found.
+        Ok(h) if h.is_empty() => {
+            return Field::Missing {
+                reason: "no fresh news".into(),
+            }
+        }
         Ok(h) => h,
         Err(e) => {
             d.search_err += 1;
@@ -232,11 +310,14 @@ async fn macro_items(
         "list the overnight and macro news items that matter for today's US stock market open",
         MACRO_ITEMS,
     );
-    let header = "Topic: overnight and macro news ahead of the US stock market open";
+    let header = format!(
+        "Topic: overnight and macro news ahead of the US stock market open\n{}",
+        as_of(now)
+    );
     match extract(
         llm,
         &system,
-        &articles_prompt(header, &hits),
+        &articles_prompt(&header, &hits),
         &hits,
         MACRO_ITEMS,
         d,
@@ -317,13 +398,13 @@ pub async fn build_facts(
 
     let mut gainers = Vec::with_capacity(up.len());
     for q in up {
-        gainers.push(to_mover(ns, llm, q, &mut d).await);
+        gainers.push(to_mover(ns, llm, q, now, &mut d).await);
     }
     let mut losers = Vec::with_capacity(down.len());
     for q in down {
-        losers.push(to_mover(ns, llm, q, &mut d).await);
+        losers.push(to_mover(ns, llm, q, now, &mut d).await);
     }
-    let macro_items = macro_items(ns, llm, &mut d).await;
+    let macro_items = macro_items(ns, llm, now, &mut d).await;
 
     PremarketFacts {
         trading_date,
@@ -339,11 +420,17 @@ pub async fn build_facts(
     }
 }
 
-async fn to_mover(ns: &dyn NewsSearch, llm: &dyn LlmProvider, quote: Quote, d: &mut Diag) -> Mover {
+async fn to_mover(
+    ns: &dyn NewsSearch,
+    llm: &dyn LlmProvider,
+    quote: Quote,
+    now: DateTime<Utc>,
+    d: &mut Diag,
+) -> Mover {
     let name = company_name(&quote.symbol)
         .unwrap_or(&quote.symbol)
         .to_string();
-    let reasons = mover_reasons(ns, llm, &quote.symbol, &name, quote.change_pct, d).await;
+    let reasons = mover_reasons(ns, llm, &quote.symbol, &name, quote.change_pct, now, d).await;
     Mover {
         quote,
         name,
@@ -448,6 +535,14 @@ mod tests {
             url: url.into(),
             title: "Title".into(),
             content: content.into(),
+            published: None,
+        }
+    }
+    /// A hit published `hours` before `now()`.
+    fn dated(url: &str, content: &str, hours: i64) -> SearchHit {
+        SearchHit {
+            published: Some(now() - chrono::Duration::hours(hours)),
+            ..hit(url, content)
         }
     }
     fn ns(items: Vec<(&str, Result<Vec<SearchHit>, ProviderError>)>) -> FakeNs {
@@ -515,6 +610,201 @@ mod tests {
         let (sys, user) = &l.prompts.borrow()[0];
         assert!(sys.contains("verbatim") && sys.contains("ONLY"));
         assert!(user.contains(URL) && user.contains(ARTICLE) && user.contains("Apple"));
+    }
+
+    #[tokio::test]
+    async fn stale_article_is_never_a_reason() {
+        // A week-old piece, as with ARM's Oct 23 article on Oct 30.
+        let m = md(&[q("AAPL", 230.0, 8.0, Some(2_000_000))]);
+        let n = ns(vec![(AAPL_Q, Ok(vec![dated(URL, ARTICLE, 24 * 7)]))]);
+        let l = llm(vec![("AAPL", reasons(URL, QUOTE, "Apple rose."))]);
+        let f = build_facts(&m, &n, &l, date(), now()).await;
+        assert_eq!(f.gainers[0].reasons, vec![]);
+        // Nothing fresh to read, so the mover costs no LLM call.
+        assert!(l.prompts.borrow().iter().all(|(_, u)| !u.contains("AAPL")));
+        assert_eq!(f.diagnostics[3], "search_err=1 llm_err=0 news_stale=1");
+    }
+
+    #[tokio::test]
+    async fn macro_with_only_stale_news_is_missing() {
+        let n = ns(vec![(
+            MACRO_QUERY,
+            Ok(vec![dated(
+                "https://n.test/m",
+                "Futures slid overnight.",
+                24 * 5,
+            )]),
+        )]);
+        let l = llm(vec![]);
+        let f = build_facts(&md(&[]), &n, &l, date(), now()).await;
+        assert_eq!(
+            f.macro_items,
+            Field::Missing {
+                reason: "no fresh news".into()
+            }
+        );
+        assert!(l.prompts.borrow().is_empty());
+    }
+
+    #[tokio::test]
+    async fn fresh_article_is_kept_and_dated_in_the_prompt() {
+        let m = md(&[q("AAPL", 230.0, 8.0, Some(2_000_000))]);
+        let n = ns(vec![(AAPL_Q, Ok(vec![dated(URL, ARTICLE, 10)]))]);
+        let l = llm(vec![("AAPL", reasons(URL, QUOTE, "Apple rose."))]);
+        let f = build_facts(&m, &n, &l, date(), now()).await;
+        assert_eq!(f.gainers[0].reasons.len(), 1);
+        let (_, user) = &l.prompts.borrow()[0];
+        assert!(user.contains("published: 2026-10-29 02:45 UTC"), "{user}");
+        assert!(user.contains("As of: 2026-10-29 08:45 ET"), "{user}");
+    }
+
+    /// Records the `since` each search is asked for.
+    struct SinceNs(RefCell<Vec<DateTime<Utc>>>, Vec<SearchHit>);
+    #[async_trait(?Send)]
+    impl NewsSearch for SinceNs {
+        async fn search(&self, _: &str, _: usize) -> Result<Vec<SearchHit>, ProviderError> {
+            unreachable!("fresh news asks for a start time")
+        }
+        async fn search_since(
+            &self,
+            _: &str,
+            _: usize,
+            since: DateTime<Utc>,
+        ) -> Result<Vec<SearchHit>, ProviderError> {
+            self.0.borrow_mut().push(since);
+            Ok(self.1.clone())
+        }
+    }
+
+    #[tokio::test]
+    async fn fresh_news_cuts_at_36_hours_and_puts_undated_last() {
+        let n = SinceNs(
+            RefCell::new(vec![]),
+            vec![
+                hit("https://n.test/undated", "u"),
+                dated("https://n.test/37h", "old", 37),
+                dated("https://n.test/35h", "fresh", 35),
+            ],
+        );
+        let mut d = Diag::default();
+        let got = fresh_news(&n, "q", 3, now(), &mut d).await.unwrap();
+        assert_eq!(d.news_stale, 1);
+        let urls: Vec<&str> = got.iter().map(|h| h.url.as_str()).collect();
+        assert_eq!(urls, ["https://n.test/35h", "https://n.test/undated"]);
+        // On a Thursday the 36-hour window is the earlier bound.
+        assert_eq!(
+            *n.0.borrow(),
+            vec![now() - chrono::Duration::hours(NEWS_MAX_AGE_HOURS)]
+        );
+        assert_eq!(news_cutoff(now()), n.0.borrow()[0]);
+    }
+
+    #[tokio::test]
+    async fn news_since_the_last_session_survives_weekends_and_holidays() {
+        let t = |s: &str| s.parse::<DateTime<Utc>>().unwrap();
+        for (case, run, published) in [
+            // Friday 17:00 EDT, Monday 09:20 EST premarket.
+            ("monday", "2026-11-02T14:20:00Z", "2026-10-30T21:00:00Z"),
+            // Thursday 16:30 EDT after-close earnings; Good Friday closed.
+            (
+                "good friday",
+                "2026-04-06T13:20:00Z",
+                "2026-04-02T20:30:00Z",
+            ),
+            // Wednesday 18:00 EST; Thanksgiving closed.
+            (
+                "thanksgiving",
+                "2026-11-27T14:20:00Z",
+                "2026-11-25T23:00:00Z",
+            ),
+            // Friday 19:00 EDT, Monday 16:45 EST recap.
+            (
+                "monday recap",
+                "2026-11-02T21:45:00Z",
+                "2026-10-30T23:00:00Z",
+            ),
+        ] {
+            let n = SinceNs(
+                RefCell::new(vec![]),
+                vec![SearchHit {
+                    published: Some(t(published)),
+                    ..hit(URL, ARTICLE)
+                }],
+            );
+            let got = fresh_news(&n, "q", 3, t(run), &mut Diag::default())
+                .await
+                .unwrap();
+            assert_eq!(got.len(), 1, "{case}");
+            assert_eq!(n.0.borrow()[0], news_cutoff(t(run)), "{case}");
+        }
+        // The window opens shortly before the previous close.
+        assert_eq!(
+            news_cutoff(t("2026-11-02T14:20:00Z")),
+            t("2026-10-30T20:00:00Z") - chrono::Duration::hours(PREV_CLOSE_BUFFER_HOURS)
+        );
+    }
+
+    #[tokio::test]
+    async fn only_a_session_event_is_a_reason() {
+        // Both articles are fresh. The fake LLM answers as the prompt asks:
+        // the earnings report explains INTC's move; ARM's article only
+        // describes trailing performance, which is not a reason.
+        let intc = "Intel shares fell after the chipmaker issued a weak fourth-quarter forecast late Thursday.";
+        let arm = "Shares fell sharply over the past week and month, reflecting a hard October pullback for the stock.";
+        let m = md(&[
+            q("INTC", 68.13, -26.0, None),
+            q("ARM", 205.71, -10.08, None),
+        ]);
+        let n = ns(vec![
+            (
+                "Intel (INTC) stock",
+                Ok(vec![dated("https://n.test/intc", intc, 12)]),
+            ),
+            (
+                "Arm Holdings (ARM) stock",
+                Ok(vec![dated("https://n.test/arm", arm, 12)]),
+            ),
+            (
+                MACRO_QUERY,
+                Ok(vec![dated(
+                    "https://n.test/m",
+                    "Futures slid overnight.",
+                    3,
+                )]),
+            ),
+        ]);
+        let l = llm(vec![
+            (
+                "Ticker: INTC",
+                reasons(
+                    "https://n.test/intc",
+                    "Intel shares fell after the chipmaker issued a weak fourth-quarter forecast",
+                    "Weak fourth-quarter forecast.",
+                ),
+            ),
+            ("Ticker: ARM", Ok(json!({"reasons": []}))),
+        ]);
+        let f = build_facts(&m, &n, &l, date(), now()).await;
+        let by = |t: &str| f.losers.iter().find(|m| m.quote.symbol == t).unwrap();
+        assert_eq!(by("INTC").reasons.len(), 1);
+        assert_eq!(by("ARM").reasons, vec![]);
+        let p = l.prompts.borrow();
+        let (sys, _) = p.iter().find(|(_, u)| u.contains("Ticker: ARM")).unwrap();
+        for needle in [
+            "specific event",
+            "this session",
+            "Trailing performance",
+            "valuation",
+        ] {
+            assert!(sys.contains(needle), "{needle}: {sys}");
+        }
+        // Macro news is not held to the mover rule.
+        let (macro_sys, macro_user) = p.iter().find(|(_, u)| u.contains("Topic:")).unwrap();
+        assert!(
+            macro_user.contains("As of: 2026-10-29 08:45 ET"),
+            "{macro_user}"
+        );
+        assert!(!macro_sys.contains("Trailing performance"), "{macro_sys}");
     }
 
     #[tokio::test]
@@ -803,7 +1093,7 @@ mod tests {
                 ),
                 "movers liquid=0 gainers=0 losers=0".to_string(),
                 "reasons proposed=0 kept=0".to_string(),
-                "search_err=1 llm_err=0".to_string(),
+                "search_err=1 llm_err=0 news_stale=0".to_string(),
                 "futures ok=4 err=0".to_string(),
             ]
         );
@@ -840,7 +1130,7 @@ mod tests {
         );
         assert_eq!(f.diagnostics[1], "movers liquid=2 gainers=1 losers=1");
         // Two mover searches and the macro search all fail.
-        assert_eq!(f.diagnostics[3], "search_err=3 llm_err=0");
+        assert_eq!(f.diagnostics[3], "search_err=3 llm_err=0 news_stale=0");
         assert_eq!(f.diagnostics[4], "futures ok=0 err=4");
     }
 
@@ -867,7 +1157,7 @@ mod tests {
         ]);
         let f = build_facts(&m, &n, &l, date(), now()).await;
         assert_eq!(f.diagnostics[2], "reasons proposed=2 kept=1");
-        assert_eq!(f.diagnostics[3], "search_err=1 llm_err=1");
+        assert_eq!(f.diagnostics[3], "search_err=1 llm_err=1 news_stale=0");
     }
 
     #[tokio::test]

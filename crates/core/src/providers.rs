@@ -37,6 +37,8 @@ pub struct SearchHit {
     pub url: String,
     pub title: String,
     pub content: String,
+    /// When the article was published, if the provider knows.
+    pub published: Option<DateTime<Utc>>,
 }
 
 #[async_trait(?Send)]
@@ -167,6 +169,17 @@ pub trait MarketData {
 #[async_trait(?Send)]
 pub trait NewsSearch {
     async fn search(&self, query: &str, max: usize) -> Result<Vec<SearchHit>, ProviderError>;
+    /// `search` for news published at or after `since`. A provider that can
+    /// filter by date should; callers still check `SearchHit::published`.
+    /// The default ignores `since`.
+    async fn search_since(
+        &self,
+        query: &str,
+        max: usize,
+        _since: DateTime<Utc>,
+    ) -> Result<Vec<SearchHit>, ProviderError> {
+        self.search(query, max).await
+    }
 }
 
 #[async_trait(?Send)]

@@ -4,7 +4,7 @@
 pub mod draft;
 
 use async_trait::async_trait;
-use chrono::{DateTime, Datelike, NaiveDate, NaiveTime, Timelike, Utc};
+use chrono::{DateTime, Datelike, Duration, NaiveDate, NaiveTime, Timelike, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::clock::{recap_window, trading_day, DayKind, Window};
@@ -12,7 +12,8 @@ use crate::facts::{quote_numbers, Field, Mover, NewsReason, Quote};
 use crate::numbers::Lang;
 use crate::premarket::draft::Draft;
 use crate::premarket::{
-    articles_prompt, company_name, extract, system_prompt, universe, yahoo_symbol, Diag,
+    articles_prompt, as_of, company_name, extract, fresh_news, system_prompt, universe,
+    yahoo_symbol, Diag, EVENT_RULE,
 };
 use crate::providers::{LlmProvider, MarketData, NewsSearch};
 use crate::run::{tick_content, Content, Hooks, TickOutcome};
@@ -34,6 +35,8 @@ const HITS_PER_MOVER: usize = 3;
 const MOVER_REASONS: usize = 2;
 const AFTER_HOURS_HITS: usize = 5;
 const AFTER_HOURS_ITEMS: usize = 5;
+/// After-hours previews may come from earlier in the week.
+const AFTER_HOURS_MAX_AGE_DAYS: i64 = 7;
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct RecapFacts {
@@ -102,23 +105,31 @@ fn long_date(d: NaiveDate) -> String {
     d.format("%B %-d, %Y").to_string()
 }
 
-async fn mover(ns: &dyn NewsSearch, llm: &dyn LlmProvider, quote: Quote, d: &mut Diag) -> Mover {
+async fn mover(
+    ns: &dyn NewsSearch,
+    llm: &dyn LlmProvider,
+    quote: Quote,
+    now: DateTime<Utc>,
+    d: &mut Diag,
+) -> Mover {
     let name = company_name(&quote.symbol)
         .unwrap_or(&quote.symbol)
         .to_string();
     let ticker = &quote.symbol;
-    let reasons = match ns
-        .search(&format!("{name} ({ticker}) stock"), HITS_PER_MOVER)
-        .await
-    {
+    let query = format!("{name} ({ticker}) stock");
+    let reasons = match fresh_news(ns, &query, HITS_PER_MOVER, now, d).await {
         Ok(hits) => {
-            let system = system_prompt(
-                "explain why a US stock moved in today's regular trading session",
-                MOVER_REASONS,
+            let system = format!(
+                "{} {EVENT_RULE}",
+                system_prompt(
+                    "explain why a US stock moved in today's regular trading session",
+                    MOVER_REASONS,
+                )
             );
             let header = format!(
-                "Ticker: {ticker}\nCompany: {name}\nChange today: {:+.2}%",
-                quote.change_pct
+                "Ticker: {ticker}\nCompany: {name}\nChange today: {:+.2}%\n{}",
+                quote.change_pct,
+                as_of(now)
             );
             extract(
                 llm,
@@ -147,11 +158,19 @@ async fn after_hours(
     ns: &dyn NewsSearch,
     llm: &dyn LlmProvider,
     date: NaiveDate,
+    now: DateTime<Utc>,
     d: &mut Diag,
 ) -> Field<Vec<NewsReason>> {
     let day = long_date(date);
+    // Not held to the news age cutoff: a preview from earlier in the week
+    // still names tonight's reports, and the prompt pins the date.
+    let since = now - Duration::days(AFTER_HOURS_MAX_AGE_DAYS);
     let hits = match ns
-        .search(&format!("earnings after the bell {day}"), AFTER_HOURS_HITS)
+        .search_since(
+            &format!("earnings after the bell {day}"),
+            AFTER_HOURS_HITS,
+            since,
+        )
         .await
     {
         Ok(h) => h,
@@ -273,11 +292,11 @@ pub async fn build_facts(
 
     let mut gainers = Vec::with_capacity(up.len());
     for q in up {
-        gainers.push(mover(ns, llm, q, &mut d).await);
+        gainers.push(mover(ns, llm, q, now, &mut d).await);
     }
     let mut losers = Vec::with_capacity(down.len());
     for q in down {
-        losers.push(mover(ns, llm, q, &mut d).await);
+        losers.push(mover(ns, llm, q, now, &mut d).await);
     }
 
     RecapFacts {
@@ -287,7 +306,7 @@ pub async fn build_facts(
         indexes,
         gainers,
         losers,
-        after_hours: after_hours(ns, llm, trading_date, &mut d).await,
+        after_hours: after_hours(ns, llm, trading_date, now, &mut d).await,
         diagnostics: d.lines_as("indexes"),
     }
 }
@@ -513,6 +532,7 @@ mod tests {
             url: url.into(),
             title: "Title".into(),
             content: content.into(),
+            published: None,
         }
     }
     fn ns(items: Vec<(&str, Result<Vec<SearchHit>, ProviderError>)>) -> FakeNs {
@@ -611,7 +631,7 @@ mod tests {
                 "closes ok=1 other_day=519".to_string(),
                 "movers liquid=1 gainers=1 losers=0".to_string(),
                 "reasons proposed=0 kept=0".to_string(),
-                "search_err=2 llm_err=0".to_string(),
+                "search_err=2 llm_err=0 news_stale=0".to_string(),
                 "indexes ok=4 err=0".to_string(),
             ]
         );
@@ -715,6 +735,33 @@ mod tests {
             .unwrap();
         assert!(sys.contains("regular trading session") && sys.contains("verbatim"));
         assert!(user.contains("Change today: +3.08%"), "{user}");
+        assert!(user.contains("As of: 2026-10-29 16:45 ET"), "{user}");
+    }
+
+    #[tokio::test]
+    async fn stale_article_is_never_a_reason_and_movers_need_an_event() {
+        let stocks = [q("NVDA", 182.35, 3.08, Some(210_000_000))];
+        let stale = SearchHit {
+            published: Some(now() - chrono::Duration::days(6)),
+            ..hit(URL, ARTICLE)
+        };
+        let n = ns(vec![(NVDA_Q, Ok(vec![stale]))]);
+        let l = llm(vec![("NVDA", reasons(URL, QUOTE, "Nvidia rose."))]);
+        let f = build_facts(&md(&stocks), &n, &l, date(), now()).await;
+        assert_eq!(f.gainers[0].reasons, vec![]);
+        assert!(l.prompts.borrow().iter().all(|(_, u)| !u.contains("NVDA")));
+        assert!(
+            f.diagnostics.iter().any(|l| l.ends_with("news_stale=1")),
+            "{:?}",
+            f.diagnostics
+        );
+
+        let n = ns(vec![(NVDA_Q, Ok(vec![hit(URL, ARTICLE)]))]);
+        let f = build_facts(&md(&stocks), &n, &l, date(), now()).await;
+        assert_eq!(f.gainers[0].reasons.len(), 1);
+        let p = l.prompts.borrow();
+        let (sys, _) = p.iter().find(|(_, u)| u.contains("NVDA")).unwrap();
+        assert!(sys.contains("Trailing performance"), "{sys}");
     }
 
     #[tokio::test]
@@ -742,6 +789,34 @@ mod tests {
             "{sys}"
         );
         assert!(user.contains("October 29, 2026"), "{user}");
+    }
+
+    /// Records each `search_since` call; every search finds nothing.
+    struct SinceNs(RefCell<Vec<(String, DateTime<Utc>)>>);
+    #[async_trait(?Send)]
+    impl NewsSearch for SinceNs {
+        async fn search(&self, q: &str, _: usize) -> Result<Vec<SearchHit>, ProviderError> {
+            unreachable!("{q}: recap searches are date-bounded")
+        }
+        async fn search_since(
+            &self,
+            q: &str,
+            _: usize,
+            since: DateTime<Utc>,
+        ) -> Result<Vec<SearchHit>, ProviderError> {
+            self.0.borrow_mut().push((q.into(), since));
+            Err(ProviderError::Empty)
+        }
+    }
+
+    #[tokio::test]
+    async fn after_hours_previews_reach_back_a_week() {
+        let n = SinceNs(RefCell::new(vec![]));
+        build_facts(&md(&[]), &n, &llm(vec![]), date(), now()).await;
+        assert_eq!(
+            *n.0.borrow(),
+            vec![(AH_Q.to_string(), now() - chrono::Duration::days(7))]
+        );
     }
 
     #[tokio::test]
@@ -891,6 +966,7 @@ mod run_tests {
                     url: URL.into(),
                     title: "Nvidia rises".into(),
                     content: ARTICLE.into(),
+                    published: None,
                 }])
             } else {
                 Err(ProviderError::Empty)
@@ -1053,7 +1129,7 @@ mod run_tests {
         let (m, l) = (md(false), llm(true, true));
         let want = "indexes | quotes ok=0 http429=0 http_other=0 empty=0 stale=0 parse=0 net=0 \
                     skipped=0; movers liquid=0 gainers=0 losers=0; reasons proposed=0 kept=0; \
-                    search_err=0 llm_err=0; indexes ok=3 err=1";
+                    search_err=0 llm_err=0 news_stale=0; indexes ok=3 err=1";
         for t in ["2026-11-06T21:45:00Z", "2026-11-06T23:55:00Z"] {
             assert_eq!(
                 tick(utc(t), &s, &m, &FakeNs, &l).await,

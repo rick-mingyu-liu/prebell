@@ -644,6 +644,7 @@ mod tests {
                     url: URL.into(),
                     title: "Apple jumps".into(),
                     content: ARTICLE.into(),
+                    published: None,
                 }])
             } else {
                 Err(ProviderError::Empty)
@@ -681,15 +682,11 @@ mod tests {
         }
     }
     fn draft_reply(zh: bool, ok: bool) -> Value {
-        let heads: [&str; 4] = if zh {
-            ["期货", "盘前异动", "宏观与隔夜", "今日关注"]
+        // The built facts have no watch list, so there is no watch section.
+        let heads: [&str; 3] = if zh {
+            ["期货", "盘前异动", "宏观与隔夜"]
         } else {
-            [
-                "Futures",
-                "Biggest premarket movers",
-                "Macro & overnight",
-                "What to watch",
-            ]
+            ["Futures", "Biggest premarket movers", "Macro & overnight"]
         };
         // 7.5% is not in the facts, so a bad reply fails the number check.
         let body = if ok {
@@ -820,7 +817,7 @@ mod tests {
             "futures, movers | quotes ok=0 http429={n} http_other=0 empty=0 stale=0 parse=0 net=0 \
              skipped=0; \
              movers liquid=0 gainers=0 losers=0; reasons proposed=0 kept=0; \
-             search_err=1 llm_err=0; futures ok=0 err=4"
+             search_err=1 llm_err=0 news_stale=0; futures ok=0 err=4"
         );
         for t in ["2026-10-29T12:30:00Z", "2026-10-29T12:35:00Z"] {
             match tick(utc(t), &s, &m, &FakeNs, &l).await {

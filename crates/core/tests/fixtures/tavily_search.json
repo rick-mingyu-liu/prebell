@@ -1,5 +1,5 @@
 {"query":"premarket news","results":[
-{"title":"Stocks futures rise","url":"https://example.com/a","content":"Short summary A","score":0.91,"raw_content":"Full article text A with more detail."},
-{"title":"Fed holds","url":"https://example.com/b","content":"Summary B","score":0.8,"raw_content":null},
+{"title":"Stocks futures rise","url":"https://example.com/a","content":"Short summary A","score":0.91,"raw_content":"Full article text A with more detail.","published_date":"Thu, 29 Oct 2026 21:05:00 GMT"},
+{"title":"Fed holds","url":"https://example.com/b","content":"Summary B","score":0.8,"raw_content":null,"published_date":null},
 {"title":"No url","url":"","content":"dropped","score":0.5,"raw_content":""}
 ],"response_time":1.2}

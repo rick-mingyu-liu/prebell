@@ -5,7 +5,7 @@
 use crate::facts::{Field, Mover, NewsReason};
 use crate::numbers::{check, Lang};
 use crate::premarket::draft::{
-    blank_names, cell, fmt_num, fmt_pct, na, render_sources, write_with, Draft,
+    blank_names, cell, fmt_num, fmt_pct, na, no_news, render_sources, write_with, Draft,
 };
 use crate::providers::LlmProvider;
 use crate::recap::{numbers_in_facts, RecapFacts};
@@ -60,7 +60,7 @@ fn mover_row(m: &Mover, lang: Lang) -> String {
         let why = m
             .reasons
             .first()
-            .map_or(na(lang), |r| r.summary_en.as_str());
+            .map_or(no_news(lang), |r| r.summary_en.as_str());
         row.push_str(&format!(" {} |", cell(why)));
     }
     row
@@ -407,7 +407,7 @@ mod tests {
             .await
             .unwrap();
         assert!(
-            md.contains("99% run") && md.contains("| MMM | 3M | 130.00 | -2.50% | n/a |"),
+            md.contains("99% run") && md.contains("| MMM | 3M | 130.00 | -2.50% | No clear news |"),
             "{md}"
         );
     }

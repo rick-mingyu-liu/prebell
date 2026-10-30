@@ -1,7 +1,7 @@
 //! Eastern Time clock, NYSE trading calendar, and each content type's
 //! publishing window.
 
-use chrono::{DateTime, Datelike, NaiveDate, NaiveTime, Utc, Weekday};
+use chrono::{DateTime, Datelike, NaiveDate, NaiveTime, TimeZone, Utc, Weekday};
 use chrono_tz::{America::New_York, Tz};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -64,6 +64,25 @@ pub fn trading_day(date: NaiveDate) -> DayKind {
         DayKind::EarlyClose
     } else {
         DayKind::Full
+    }
+}
+
+/// The close (16:00 ET, or 13:00 ET on an early-close day) of the last
+/// trading day before `now_utc`'s ET date.
+pub fn previous_close(now_utc: DateTime<Utc>) -> DateTime<Utc> {
+    let mut day = et(now_utc).date_naive();
+    loop {
+        day = day.pred_opt().expect("date in range");
+        let close = match trading_day(day) {
+            DayKind::Closed => continue,
+            DayKind::EarlyClose => hm(13, 0),
+            DayKind::Full => hm(16, 0),
+        };
+        return New_York
+            .from_local_datetime(&day.and_time(close))
+            .earliest()
+            .expect("the close is never in a DST gap")
+            .with_timezone(&Utc);
     }
 }
 
@@ -139,6 +158,25 @@ mod tests {
     }
     fn d(s: &str) -> NaiveDate {
         NaiveDate::parse_from_str(s, "%Y-%m-%d").unwrap()
+    }
+
+    #[test]
+    fn previous_close_skips_weekends_and_holidays() {
+        for (now, close) in [
+            // Thursday premarket: Wednesday 16:00 EDT.
+            ("2026-10-29T13:20:00Z", "2026-10-28T20:00:00Z"),
+            // Monday premarket and recap (EST): Friday 16:00 EDT.
+            ("2026-11-02T14:20:00Z", "2026-10-30T20:00:00Z"),
+            ("2026-11-02T21:45:00Z", "2026-10-30T20:00:00Z"),
+            // Monday after Good Friday: Thursday.
+            ("2026-04-06T13:20:00Z", "2026-04-02T20:00:00Z"),
+            // Day after Thanksgiving: Wednesday 16:00 EST.
+            ("2026-11-27T14:20:00Z", "2026-11-25T21:00:00Z"),
+            // Monday after the early close: Friday 13:00 EST.
+            ("2026-11-30T14:20:00Z", "2026-11-27T18:00:00Z"),
+        ] {
+            assert_eq!(previous_close(utc(now)), utc(close), "{now}");
+        }
     }
 
     #[test]
