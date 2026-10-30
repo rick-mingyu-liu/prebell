@@ -15,14 +15,17 @@
     "navLabel": "主导航"
   },
   "home": {
-    "latest": "最新盘前简报",
     "recent": "近期文章",
     "empty": "暂无已发布的内容。",
     "allBriefs": "全部文章",
-    "latestRecap": "最新收盘回顾",
-    "latestEarnings": "最新财报速评",
-    "calendar": "财报日历",
-    "noEarnings": "暂无财报速评。"
+    "noEarnings": "暂无财报速评。",
+    "briefTabs": "每日简报",
+    "readFull": "阅读完整简报 →",
+    "tabMovers": "涨跌榜",
+    "tabEarnings": "财报体检",
+    "panelTabs": "涨跌榜与财报体检",
+    "noMovers": "本期暂无涨跌榜。",
+    "allEarnings": "全部财报体检 →"
   },
   "post": {
     "permalink": "本文链接",

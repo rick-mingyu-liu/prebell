@@ -45,7 +45,7 @@ export default async function PostPage({ params }: PageProps<"/[locale]/p/[slug]
     return (
       <article>
         <h1>{pendingTitle(t, post, locale)}</h1>
-        <PendingNotice slug={post.slug} />
+        <PendingNotice slug={post.slug} locale={locale} />
       </article>
     );
   }

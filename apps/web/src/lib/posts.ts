@@ -34,6 +34,8 @@ export interface PostView {
   sources: { url: string; title: string }[];
   /** The other language's translation is published. */
   hasOtherLang: boolean;
+  /** R2 key of the post's facts JSON (`FACTS` bucket), if the generator stored one. */
+  factsKey: string | null;
 }
 
 export interface PostListItem {
@@ -61,14 +63,15 @@ interface Row {
   summary: string | null;
   body_md: string | null;
   other_status: string | null;
+  facts_r2_key: string | null;
 }
 
 // A post is shown in `lang` when that translation is published, or (ZH only)
 // pending while the EN text is published — the page then links to English.
 const VISIBLE = `(t.status = 'published' OR (t.lang = 'zh' AND t.status = 'pending' AND o.status = 'published'))`;
 
-const SELECT_VIEW = `SELECT p.id, p.slug, p.content_type, p.trading_date, p.published_at, t.status, t.title, t.summary, t.body_md,
-  o.status AS other_status
+const SELECT_VIEW = `SELECT p.id, p.slug, p.content_type, p.trading_date, p.published_at, p.facts_r2_key, t.status, t.title,
+  t.summary, t.body_md, o.status AS other_status
 FROM posts p
 JOIN post_translations t ON t.post_id = p.id AND t.lang = ?
 LEFT JOIN post_translations o ON o.post_id = p.id AND o.lang = ?`;
@@ -90,6 +93,7 @@ async function toView(db: D1Like, row: Row | null): Promise<PostView | null> {
     status: row.status === "pending" ? "pending" : "published",
     sources: results.map((s) => ({ url: s.url, title: s.title || s.url })),
     hasOtherLang: row.other_status === "published",
+    factsKey: row.facts_r2_key,
   };
 }
 

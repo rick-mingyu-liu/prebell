@@ -114,6 +114,19 @@ describe("listPosts", () => {
   });
 });
 
+describe("facts key", () => {
+  it("exposes posts.facts_r2_key on the view, null when unset", async () => {
+    const keyed = post(1, "2026-10-29", "published", "pending").replace(
+      "'premarket-2026-10-29',NULL",
+      "'premarket-2026-10-29','premarket/2026-10-29.json'",
+    );
+    const db = memoryD1(keyed + post(2, "2026-10-28", "published", null, "recap"));
+    expect((await getLatestPost(db, "zh", "premarket"))!.factsKey).toBe("premarket/2026-10-29.json");
+    expect((await getPostBySlug(db, "premarket-2026-10-29", "en"))!.factsKey).toBe("premarket/2026-10-29.json");
+    expect((await getLatestPost(db, "en", "recap"))!.factsKey).toBeNull();
+  });
+});
+
 describe("getLatestPremarket", () => {
   it("en returns the newest trading_date", async () => {
     const db = memoryD1(seed);

@@ -15,14 +15,17 @@
     "navLabel": "Main"
   },
   "home": {
-    "latest": "Latest premarket brief",
     "recent": "Recent posts",
     "empty": "Nothing has been published yet.",
     "allBriefs": "All posts",
-    "latestRecap": "Latest after-close recap",
-    "latestEarnings": "Latest earnings checks",
-    "calendar": "Earnings calendar",
-    "noEarnings": "No earnings checks yet."
+    "noEarnings": "No earnings checks yet.",
+    "briefTabs": "Daily brief",
+    "readFull": "Read the full brief →",
+    "tabMovers": "Top movers",
+    "tabEarnings": "Earnings checks",
+    "panelTabs": "Movers and earnings checks",
+    "noMovers": "No movers for this brief.",
+    "allEarnings": "All earnings checks →"
   },
   "post": {
     "permalink": "Permalink",

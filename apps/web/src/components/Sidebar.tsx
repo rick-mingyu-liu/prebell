@@ -5,19 +5,13 @@ import { translator } from "../lib/translator";
 
 /**
  * Right column of `.grid-portal` / `.grid-article`. Only the TermPocket card is server-rendered;
- * the partner boxes and their disclosure come from the client island.
+ * the partner boxes and their disclosure come from the client island, below the card so nothing
+ * above them moves when they load.
  */
 export default function Sidebar({ locale }: { locale: Locale }) {
   const t = translator(locale);
   return (
     <aside className="sidebar">
-      <PartnerLinks
-        labels={{
-          brokers: t("partners.brokers"),
-          crypto: t("partners.crypto"),
-          disclosure: t("partners.disclosure"),
-        }}
-      />
       <div className="tp-card">
         <p className="tp-name">{t("termpocket.name")}</p>
         <p>{t("termpocket.copy")}</p>
@@ -25,6 +19,13 @@ export default function Sidebar({ locale }: { locale: Locale }) {
           {t("termpocket.cta")}
         </a>
       </div>
+      <PartnerLinks
+        labels={{
+          brokers: t("partners.brokers"),
+          crypto: t("partners.crypto"),
+          disclosure: t("partners.disclosure"),
+        }}
+      />
     </aside>
   );
 }
