@@ -12,8 +12,8 @@ use crate::facts::{quote_numbers, Field, Mover, NewsReason, Quote};
 use crate::numbers::Lang;
 use crate::premarket::draft::Draft;
 use crate::premarket::{
-    articles_prompt, company_name, extract, fresh_news, system_prompt, universe, yahoo_symbol,
-    Diag, EVENT_RULE,
+    articles_prompt, as_of, company_name, extract, fresh_news, system_prompt, universe,
+    yahoo_symbol, Diag, EVENT_RULE,
 };
 use crate::providers::{LlmProvider, MarketData, NewsSearch};
 use crate::run::{tick_content, Content, Hooks, TickOutcome};
@@ -117,7 +117,7 @@ async fn mover(
         .to_string();
     let ticker = &quote.symbol;
     let query = format!("{name} ({ticker}) stock");
-    let reasons = match fresh_news(ns, &query, HITS_PER_MOVER, now).await {
+    let reasons = match fresh_news(ns, &query, HITS_PER_MOVER, now, d).await {
         Ok(hits) => {
             let system = format!(
                 "{} {EVENT_RULE}",
@@ -127,8 +127,9 @@ async fn mover(
                 )
             );
             let header = format!(
-                "Ticker: {ticker}\nCompany: {name}\nChange today: {:+.2}%",
-                quote.change_pct
+                "Ticker: {ticker}\nCompany: {name}\nChange today: {:+.2}%\n{}",
+                quote.change_pct,
+                as_of(now)
             );
             extract(
                 llm,
@@ -630,7 +631,7 @@ mod tests {
                 "closes ok=1 other_day=519".to_string(),
                 "movers liquid=1 gainers=1 losers=0".to_string(),
                 "reasons proposed=0 kept=0".to_string(),
-                "search_err=2 llm_err=0".to_string(),
+                "search_err=2 llm_err=0 news_stale=0".to_string(),
                 "indexes ok=4 err=0".to_string(),
             ]
         );
@@ -734,6 +735,7 @@ mod tests {
             .unwrap();
         assert!(sys.contains("regular trading session") && sys.contains("verbatim"));
         assert!(user.contains("Change today: +3.08%"), "{user}");
+        assert!(user.contains("As of: 2026-10-29 16:45 ET"), "{user}");
     }
 
     #[tokio::test]
@@ -748,6 +750,11 @@ mod tests {
         let f = build_facts(&md(&stocks), &n, &l, date(), now()).await;
         assert_eq!(f.gainers[0].reasons, vec![]);
         assert!(l.prompts.borrow().iter().all(|(_, u)| !u.contains("NVDA")));
+        assert!(
+            f.diagnostics.iter().any(|l| l.ends_with("news_stale=1")),
+            "{:?}",
+            f.diagnostics
+        );
 
         let n = ns(vec![(NVDA_Q, Ok(vec![hit(URL, ARTICLE)]))]);
         let f = build_facts(&md(&stocks), &n, &l, date(), now()).await;
@@ -1122,7 +1129,7 @@ mod run_tests {
         let (m, l) = (md(false), llm(true, true));
         let want = "indexes | quotes ok=0 http429=0 http_other=0 empty=0 stale=0 parse=0 net=0 \
                     skipped=0; movers liquid=0 gainers=0 losers=0; reasons proposed=0 kept=0; \
-                    search_err=0 llm_err=0; indexes ok=3 err=1";
+                    search_err=0 llm_err=0 news_stale=0; indexes ok=3 err=1";
         for t in ["2026-11-06T21:45:00Z", "2026-11-06T23:55:00Z"] {
             assert_eq!(
                 tick(utc(t), &s, &m, &FakeNs, &l).await,

@@ -13,7 +13,7 @@ use regex::Regex;
 use serde_json::Value;
 
 use crate::anchor::verify_reason;
-use crate::clock::previous_close;
+use crate::clock::{et, previous_close};
 use crate::facts::{Field, Mover, NewsReason, PremarketFacts, Quote};
 use crate::premarket::draft::reject_markup;
 use crate::providers::{LlmProvider, MarketData, NewsSearch, ProviderError, SearchHit};
@@ -66,6 +66,8 @@ pub(crate) struct Diag {
     pub(crate) kept: usize,
     pub(crate) search_err: usize,
     pub(crate) llm_err: usize,
+    /// Search hits dropped as older than `news_cutoff`.
+    pub(crate) news_stale: usize,
     pub(crate) futures_ok: usize,
     pub(crate) futures_err: usize,
 }
@@ -109,7 +111,10 @@ impl Diag {
                 self.liquid, self.gainers, self.losers
             ),
             format!("reasons proposed={} kept={}", self.proposed, self.kept),
-            format!("search_err={} llm_err={}", self.search_err, self.llm_err),
+            format!(
+                "search_err={} llm_err={} news_stale={}",
+                self.search_err, self.llm_err, self.news_stale
+            ),
             format!("{head} ok={} err={}", self.futures_ok, self.futures_err),
         ]);
         out
@@ -173,12 +178,21 @@ pub(crate) async fn fresh_news(
     query: &str,
     max: usize,
     now: DateTime<Utc>,
+    d: &mut Diag,
 ) -> Result<Vec<SearchHit>, ProviderError> {
     let since = news_cutoff(now);
     let mut hits = ns.search_since(query, max, since).await?;
+    let found = hits.len();
     hits.retain(|h| h.published.is_none_or(|p| p >= since));
+    d.news_stale += found - hits.len();
     hits.sort_by_key(|h| h.published.is_none());
     Ok(hits)
+}
+
+/// The extraction prompt's reference time, so the LLM can judge each
+/// article's `published` line against the session.
+pub(crate) fn as_of(now: DateTime<Utc>) -> String {
+    format!("As of: {} ET", et(now).format("%Y-%m-%d %H:%M"))
 }
 
 /// Ask the LLM for reasons and keep only those anchored in a fetched hit.
@@ -235,7 +249,14 @@ async fn mover_reasons(
     now: DateTime<Utc>,
     d: &mut Diag,
 ) -> Vec<NewsReason> {
-    let Ok(hits) = fresh_news(ns, &format!("{name} ({ticker}) stock"), HITS_PER_MOVER, now).await
+    let Ok(hits) = fresh_news(
+        ns,
+        &format!("{name} ({ticker}) stock"),
+        HITS_PER_MOVER,
+        now,
+        d,
+    )
+    .await
     else {
         d.search_err += 1;
         return vec![];
@@ -247,7 +268,10 @@ async fn mover_reasons(
             MOVER_REASONS,
         )
     );
-    let header = format!("Ticker: {ticker}\nCompany: {name}\nPremarket change: {change_pct:+.2}%");
+    let header = format!(
+        "Ticker: {ticker}\nCompany: {name}\nPremarket change: {change_pct:+.2}%\n{}",
+        as_of(now)
+    );
     extract(
         llm,
         &system,
@@ -266,7 +290,14 @@ async fn macro_items(
     now: DateTime<Utc>,
     d: &mut Diag,
 ) -> Field<Vec<NewsReason>> {
-    let hits = match fresh_news(ns, MACRO_QUERY, MACRO_HITS, now).await {
+    let hits = match fresh_news(ns, MACRO_QUERY, MACRO_HITS, now, d).await {
+        // Missing, not an empty list: the brief then says "n/a" rather
+        // than narrating that no news was found.
+        Ok(h) if h.is_empty() => {
+            return Field::Missing {
+                reason: "no fresh news".into(),
+            }
+        }
         Ok(h) => h,
         Err(e) => {
             d.search_err += 1;
@@ -279,11 +310,14 @@ async fn macro_items(
         "list the overnight and macro news items that matter for today's US stock market open",
         MACRO_ITEMS,
     );
-    let header = "Topic: overnight and macro news ahead of the US stock market open";
+    let header = format!(
+        "Topic: overnight and macro news ahead of the US stock market open\n{}",
+        as_of(now)
+    );
     match extract(
         llm,
         &system,
-        &articles_prompt(header, &hits),
+        &articles_prompt(&header, &hits),
         &hits,
         MACRO_ITEMS,
         d,
@@ -588,6 +622,28 @@ mod tests {
         assert_eq!(f.gainers[0].reasons, vec![]);
         // Nothing fresh to read, so the mover costs no LLM call.
         assert!(l.prompts.borrow().iter().all(|(_, u)| !u.contains("AAPL")));
+        assert_eq!(f.diagnostics[3], "search_err=1 llm_err=0 news_stale=1");
+    }
+
+    #[tokio::test]
+    async fn macro_with_only_stale_news_is_missing() {
+        let n = ns(vec![(
+            MACRO_QUERY,
+            Ok(vec![dated(
+                "https://n.test/m",
+                "Futures slid overnight.",
+                24 * 5,
+            )]),
+        )]);
+        let l = llm(vec![]);
+        let f = build_facts(&md(&[]), &n, &l, date(), now()).await;
+        assert_eq!(
+            f.macro_items,
+            Field::Missing {
+                reason: "no fresh news".into()
+            }
+        );
+        assert!(l.prompts.borrow().is_empty());
     }
 
     #[tokio::test]
@@ -599,6 +655,7 @@ mod tests {
         assert_eq!(f.gainers[0].reasons.len(), 1);
         let (_, user) = &l.prompts.borrow()[0];
         assert!(user.contains("published: 2026-10-29 02:45 UTC"), "{user}");
+        assert!(user.contains("As of: 2026-10-29 08:45 ET"), "{user}");
     }
 
     /// Records the `since` each search is asked for.
@@ -629,7 +686,9 @@ mod tests {
                 dated("https://n.test/35h", "fresh", 35),
             ],
         );
-        let got = fresh_news(&n, "q", 3, now()).await.unwrap();
+        let mut d = Diag::default();
+        let got = fresh_news(&n, "q", 3, now(), &mut d).await.unwrap();
+        assert_eq!(d.news_stale, 1);
         let urls: Vec<&str> = got.iter().map(|h| h.url.as_str()).collect();
         assert_eq!(urls, ["https://n.test/35h", "https://n.test/undated"]);
         // On a Thursday the 36-hour window is the earlier bound.
@@ -672,7 +731,9 @@ mod tests {
                     ..hit(URL, ARTICLE)
                 }],
             );
-            let got = fresh_news(&n, "q", 3, t(run)).await.unwrap();
+            let got = fresh_news(&n, "q", 3, t(run), &mut Diag::default())
+                .await
+                .unwrap();
             assert_eq!(got.len(), 1, "{case}");
             assert_eq!(n.0.borrow()[0], news_cutoff(t(run)), "{case}");
         }
@@ -738,7 +799,11 @@ mod tests {
             assert!(sys.contains(needle), "{needle}: {sys}");
         }
         // Macro news is not held to the mover rule.
-        let (macro_sys, _) = p.iter().find(|(_, u)| u.contains("Topic:")).unwrap();
+        let (macro_sys, macro_user) = p.iter().find(|(_, u)| u.contains("Topic:")).unwrap();
+        assert!(
+            macro_user.contains("As of: 2026-10-29 08:45 ET"),
+            "{macro_user}"
+        );
         assert!(!macro_sys.contains("Trailing performance"), "{macro_sys}");
     }
 
@@ -1028,7 +1093,7 @@ mod tests {
                 ),
                 "movers liquid=0 gainers=0 losers=0".to_string(),
                 "reasons proposed=0 kept=0".to_string(),
-                "search_err=1 llm_err=0".to_string(),
+                "search_err=1 llm_err=0 news_stale=0".to_string(),
                 "futures ok=4 err=0".to_string(),
             ]
         );
@@ -1065,7 +1130,7 @@ mod tests {
         );
         assert_eq!(f.diagnostics[1], "movers liquid=2 gainers=1 losers=1");
         // Two mover searches and the macro search all fail.
-        assert_eq!(f.diagnostics[3], "search_err=3 llm_err=0");
+        assert_eq!(f.diagnostics[3], "search_err=3 llm_err=0 news_stale=0");
         assert_eq!(f.diagnostics[4], "futures ok=0 err=4");
     }
 
@@ -1092,7 +1157,7 @@ mod tests {
         ]);
         let f = build_facts(&m, &n, &l, date(), now()).await;
         assert_eq!(f.diagnostics[2], "reasons proposed=2 kept=1");
-        assert_eq!(f.diagnostics[3], "search_err=1 llm_err=1");
+        assert_eq!(f.diagnostics[3], "search_err=1 llm_err=1 news_stale=0");
     }
 
     #[tokio::test]
