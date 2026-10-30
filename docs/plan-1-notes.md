@@ -115,3 +115,28 @@ ended `Retrying("movers")` without saying why.
   missing, `last_error` is the missing list, then ` | `, then the counters
   joined by `; `, e.g. `movers | quotes ok=0 http429=522 …`. The generator logs
   `diagnostics: …` once per build tick.
+
+## Yahoo live check (2026-10-29, blocked)
+
+Attempted at 20:27 ET on Thursday 2026-10-29 (00:27 UTC on 10-30), from a
+Claude Code cloud session. Outside the 4:00–9:30 ET window, so premarket
+fields would have been stale even if the calls had gone through.
+
+- **Requests that reached Yahoo: 0.** The session's egress proxy refused the
+  CONNECT to `fc.yahoo.com:443` and `query1.finance.yahoo.com:443` with HTTP
+  403 (a network-policy denial, not a Yahoo answer). 8 attempts were made
+  (fc, getcrumb, one 50-symbol v7 batch, one bad-crumb v7, 4 charts), all
+  refused at the proxy.
+- **Nothing was confirmed or refuted.** Assumptions a–h (premarket fields
+  and units, `preMarketTime` in epoch seconds, the regular-market fields,
+  `marketState` values, the earnings-date fields, the `quoteResponse.error`
+  shape and the bad-crumb answer, whether fc.yahoo.com sets A3 directly, and
+  the chart `meta`/`timestamp`/`indicators.quote[0]` shapes) are still
+  unverified.
+- **Nothing changed in the parser or fixtures.** The fixtures stay
+  hand-written.
+- `scripts/yahoo-live-check.sh OUT_DIR` repeats the check (8 requests, 2 s
+  apart, the same User-Agent as `yahoo.rs`) from a network that can reach
+  Yahoo. It prints statuses, Set-Cookie names and the crumb's length and
+  character set, never the cookie or crumb values, and stops at the first
+  429. Run it between 4:00 and 9:30 AM ET to see live premarket fields.
