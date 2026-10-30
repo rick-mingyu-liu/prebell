@@ -133,15 +133,16 @@ fn names_metric(m: Metric, label: &str, after: &str) -> Result<(), String> {
 
 /// A table row's revenue label is the company's total revenue, not a
 /// segment or another total: "Total net sales", "Revenues", "Net
-/// revenues", "Revenue, net", "Total revenues, net of interest expense"
-/// pass; "Products net sales", "Services revenue", "Total cost of
+/// revenues", "Revenue, net", "Total revenues, net of interest expense",
+/// "Total operating revenues", "Total revenues and other income" and
+/// "Total net sales and revenue" pass; "Products net sales", "Services revenue", "Total cost of
 /// revenues" and "Total noninterest revenue" do not.
 fn total_revenue_row(label: &str) -> bool {
     static R: OnceLock<Regex> = OnceLock::new();
     let label = label.trim().trim_end_matches(['$', ':', ' ']).trim();
     R.get_or_init(|| {
         Regex::new(
-            r"(?i)^(?:total\s+)?(?:net\s+)?(?:revenues?|sales)(?:\s*,\s*net(?:\s+of\s+interest\s+expense)?)?$",
+            r"(?i)^(?:total\s+)?(?:net\s+)?(?:operating\s+)?(?:revenues?|sales)(?:\s+and\s+(?:other\s+income|revenues?))?(?:\s*,\s*net(?:\s+of\s+interest\s+expense)?)?$",
         )
         .expect("valid built-in regex")
     })
@@ -608,25 +609,41 @@ mod tests {
 
     #[test]
     fn total_rows_that_are_not_total_revenue_are_rejected() {
-        let t = "(In millions) Total cost of revenues $40,000 $38,000\nTotal noninterest revenue $9,000 $8,000\nTotal revenues, net of interest expense $25,000 $24,000\nTotal net revenue $30,000 $29,000";
-        for (amount, q) in [
-            ("40,000", "Total cost of revenues $40,000 $38,000"),
-            ("9,000", "Total noninterest revenue $9,000 $8,000"),
-        ] {
-            let e = verify_figure(t, Metric::Revenue, &raw(amount, "millions", false, q));
-            assert!(e.is_err(), "{q}");
-        }
-        for (amount, q) in [
+        let rows = [
+            ("40,000", "Total cost of revenues $40,000 $38,000", false),
+            ("9,000", "Total noninterest revenue $9,000 $8,000", false),
+            (
+                "1,000",
+                "Total cost of revenues and other income $1,000 $2,000",
+                false,
+            ),
             (
                 "25,000",
                 "Total revenues, net of interest expense $25,000 $24,000",
+                true,
             ),
-            ("30,000", "Total net revenue $30,000 $29,000"),
-        ] {
-            assert!(
-                verify_figure(t, Metric::Revenue, &raw(amount, "millions", false, q)).is_ok(),
-                "{q}"
-            );
+            ("30,000", "Total net revenue $30,000 $29,000", true),
+            // Telecoms and utilities (VZ, T, DUK, SO), oil majors (XOM,
+            // CVX), GM.
+            ("33,000", "Total operating revenues $33,000 $32,000", true),
+            (
+                "84,000",
+                "Total revenues and other income $84,000 $90,000",
+                true,
+            ),
+            (
+                "48,000",
+                "Total net sales and revenue $48,000 $44,000",
+                true,
+            ),
+        ];
+        let t = format!(
+            "(In millions) {}",
+            rows.iter().map(|r| r.1).collect::<Vec<_>>().join("\n")
+        );
+        for (amount, q, ok) in rows {
+            let r = verify_figure(&t, Metric::Revenue, &raw(amount, "millions", false, q));
+            assert_eq!(r.is_ok(), ok, "{q}: {r:?}");
         }
     }
 
