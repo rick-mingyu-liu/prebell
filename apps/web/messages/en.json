@@ -25,7 +25,8 @@
     "tabEarnings": "Earnings checks",
     "panelTabs": "Movers and earnings checks",
     "noMovers": "No movers for this brief.",
-    "allEarnings": "All earnings checks →"
+    "allEarnings": "All earnings checks →",
+    "moversInBrief": "Movers are in the full brief →"
   },
   "post": {
     "permalink": "Permalink",

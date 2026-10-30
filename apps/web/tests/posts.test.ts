@@ -163,6 +163,17 @@ describe("content types", () => {
     expect(await getLatestPost(memoryD1(post(1, "2026-10-28", "published", null)), "en", "recap")).toBeNull();
   });
 
+  it("getLatestPost reads only the heading: one statement, no body or sources", async () => {
+    const db = memoryD1(mixed);
+    const sql: string[] = [];
+    const spy = { prepare: (q: string) => (sql.push(q), db.prepare(q)) };
+    const p = await getLatestPost(spy, "en", "premarket");
+    expect(sql).toHaveLength(1);
+    expect(sql[0]).not.toContain("body_md");
+    expect(p).not.toHaveProperty("bodyMd");
+    expect(p).not.toHaveProperty("sources");
+  });
+
   it("listPosts filters by type and lists both without one", async () => {
     const db = memoryD1(mixed);
     expect((await listPosts(db, "en", 1, "recap")).map((i) => i.slug)).toEqual([

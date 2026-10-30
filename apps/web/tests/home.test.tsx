@@ -1,9 +1,10 @@
 import { readFileSync } from "node:fs";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
-import HomeView, { selectTab, type HomeViewProps } from "../src/components/HomeView";
+import HomeView, { type HomeViewProps } from "../src/components/HomeView";
 import type { StripDay } from "../src/lib/earnings";
 import { parseFacts } from "../src/lib/facts";
+import { selectTab } from "../src/lib/home";
 import type { PostListItem, PostView } from "../src/lib/posts";
 
 const fixture = (name: string): unknown =>
@@ -124,7 +125,16 @@ describe("HomeView without facts", () => {
     expect(out).toContain("Futures slide as Intel sinks");
     expect(out).toContain("Stock futures are lower before the open.");
     expect(out).toContain('href="/en/p/premarket-2026-10-30"');
+    expect(out).toContain("Movers are in the full brief →");
+    expect(out).not.toContain("No movers for this brief.");
+  });
+
+  it("says there were no movers only when the facts have none", () => {
+    const facts = { ...premarketFacts(), gainers: [], losers: [] };
+    const out = render({ facts });
+    expect(out).toContain('class="big"');
     expect(out).toContain("No movers for this brief.");
+    expect(out).not.toContain("Movers are in the full brief");
   });
 });
 
@@ -132,8 +142,12 @@ describe("HomeView ZH pending", () => {
   it("keeps the numbers and movers, and shows the notice instead of the story", () => {
     const out = render({
       locale: "zh",
-      post: post({ status: "pending", title: "", summary: "", bodyMd: "", hasOtherLang: true }),
+      // A pending row may carry stale text; none of it may show.
+      post: post({ status: "pending", title: "旧标题", summary: "旧摘要", hasOtherLang: true }),
     });
+    expect(out).not.toContain("旧标题");
+    expect(out).not.toContain("旧摘要");
+    expect(out).not.toContain('class="home-sum"');
     expect(out).toContain("标普500期货");
     expect(out).toContain("7,665.50");
     expect(out).toContain("<b>INTC</b>");
@@ -172,6 +186,11 @@ describe("HomeView tabs", () => {
   it("puts movers and earnings checks behind a CSS-only toggle, movers first", () => {
     const out = render();
     expect(out).toMatch(/<input[^>]*type="radio"[^>]*checked=""/);
+    expect(out).toMatch(/role="radiogroup" aria-label="Movers and earnings checks"/);
+    // Headings for the stacked (below 1024px) layout, where the radios are hidden.
+    expect(out).toContain('<h2 class="panel-title">Top movers</h2>');
+    expect(out).toContain('<h2 class="panel-title">Earnings checks</h2>');
+    expect(out.indexOf("panel-movers")).toBeLessThan(out.indexOf("panel-earnings"));
     expect(out).toContain("Top movers");
     expect(out).toContain("Earnings checks");
     expect(out).not.toContain("<script");
@@ -191,7 +210,8 @@ describe("HomeView earnings checks", () => {
   it("says so when there are none (ZH)", () => {
     const out = render({ locale: "zh", earnings: [] });
     expect(out).toContain("暂无财报速评。");
-    expect(out).toContain("财报体检");
+    expect(out).toContain(">财报速评</label>");
+    expect(out).toContain("全部财报速评 →");
     expect(out).toContain('href="/zh/archive?type=earnings"');
   });
 });

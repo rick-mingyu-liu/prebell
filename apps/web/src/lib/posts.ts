@@ -38,6 +38,9 @@ export interface PostView {
   factsKey: string | null;
 }
 
+/** A post's heading data: a `PostView` without the body and its sources. */
+export type PostHead = Omit<PostView, "bodyMd" | "sources">;
+
 export interface PostListItem {
   slug: string;
   contentType: string;
@@ -61,7 +64,7 @@ interface Row {
   status: string;
   title: string | null;
   summary: string | null;
-  body_md: string | null;
+  body_md?: string | null;
   other_status: string | null;
   facts_r2_key: string | null;
 }
@@ -70,11 +73,27 @@ interface Row {
 // pending while the EN text is published — the page then links to English.
 const VISIBLE = `(t.status = 'published' OR (t.lang = 'zh' AND t.status = 'pending' AND o.status = 'published'))`;
 
-const SELECT_VIEW = `SELECT p.id, p.slug, p.content_type, p.trading_date, p.published_at, p.facts_r2_key, t.status, t.title,
-  t.summary, t.body_md, o.status AS other_status
-FROM posts p
+const HEAD_COLUMNS = `p.id, p.slug, p.content_type, p.trading_date, p.published_at, p.facts_r2_key, t.status, t.title,
+  t.summary, o.status AS other_status`;
+const FROM_VIEW = `FROM posts p
 JOIN post_translations t ON t.post_id = p.id AND t.lang = ?
 LEFT JOIN post_translations o ON o.post_id = p.id AND o.lang = ?`;
+const SELECT_VIEW = `SELECT ${HEAD_COLUMNS}, t.body_md ${FROM_VIEW}`;
+const SELECT_HEAD = `SELECT ${HEAD_COLUMNS} ${FROM_VIEW}`;
+
+function toHead(row: Row): PostHead {
+  return {
+    slug: row.slug,
+    contentType: row.content_type,
+    tradingDate: row.trading_date,
+    publishedAt: row.published_at,
+    title: row.title ?? "",
+    summary: row.summary ?? "",
+    status: row.status === "pending" ? "pending" : "published",
+    hasOtherLang: row.other_status === "published",
+    factsKey: row.facts_r2_key,
+  };
+}
 
 async function toView(db: D1Like, row: Row | null): Promise<PostView | null> {
   if (!row) return null;
@@ -83,17 +102,9 @@ async function toView(db: D1Like, row: Row | null): Promise<PostView | null> {
     .bind(row.id)
     .all<{ url: string; title: string | null }>();
   return {
-    slug: row.slug,
-    contentType: row.content_type,
-    tradingDate: row.trading_date,
-    publishedAt: row.published_at,
-    title: row.title ?? "",
-    summary: row.summary ?? "",
+    ...toHead(row),
     bodyMd: row.body_md ?? "",
-    status: row.status === "pending" ? "pending" : "published",
     sources: results.map((s) => ({ url: s.url, title: s.title || s.url })),
-    hasOtherLang: row.other_status === "published",
-    factsKey: row.facts_r2_key,
   };
 }
 
@@ -105,19 +116,19 @@ export async function getPostBySlug(db: D1Like, slug: string, lang: Lang): Promi
   return toView(db, row);
 }
 
-/** The newest visible post of `type` in `lang`. */
-export async function getLatestPost(db: D1Like, lang: Lang, type: ContentType): Promise<PostView | null> {
+/** The newest visible post of `type` in `lang`, without its body (one D1 read). */
+export async function getLatestPost(db: D1Like, lang: Lang, type: ContentType): Promise<PostHead | null> {
   const row = await db
     .prepare(
-      `${SELECT_VIEW} WHERE p.content_type = ? AND ${VISIBLE}
+      `${SELECT_HEAD} WHERE p.content_type = ? AND ${VISIBLE}
        ORDER BY p.trading_date DESC, p.published_at DESC LIMIT 1`,
     )
     .bind(lang, other(lang), type)
     .first<Row>();
-  return toView(db, row);
+  return row && toHead(row);
 }
 
-export function getLatestPremarket(db: D1Like, lang: Lang): Promise<PostView | null> {
+export function getLatestPremarket(db: D1Like, lang: Lang): Promise<PostHead | null> {
   return getLatestPost(db, lang, "premarket");
 }
 

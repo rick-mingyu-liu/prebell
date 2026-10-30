@@ -22,10 +22,11 @@
     "briefTabs": "每日简报",
     "readFull": "阅读完整简报 →",
     "tabMovers": "涨跌榜",
-    "tabEarnings": "财报体检",
-    "panelTabs": "涨跌榜与财报体检",
+    "tabEarnings": "财报速评",
+    "panelTabs": "涨跌榜与财报速评",
     "noMovers": "本期暂无涨跌榜。",
-    "allEarnings": "全部财报体检 →"
+    "allEarnings": "全部财报速评 →",
+    "moversInBrief": "涨跌榜见完整简报 →"
   },
   "post": {
     "permalink": "本文链接",
