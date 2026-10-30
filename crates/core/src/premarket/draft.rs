@@ -80,6 +80,17 @@ pub(crate) fn fmt_pct(p: f64) -> String {
     format!("{p:+.2}%")
 }
 
+/// Chinese contract names for the ZH table; facts keep the English labels.
+fn futures_label(label: &str, lang: Lang) -> &str {
+    match (lang, label) {
+        (Lang::Zh, "S&P 500 futures") => "标普500期货",
+        (Lang::Zh, "Nasdaq 100 futures") => "纳指100期货",
+        (Lang::Zh, "Dow futures") => "道指期货",
+        (Lang::Zh, "Russell 2000 futures") => "罗素2000期货",
+        _ => label,
+    }
+}
+
 /// Keeps a table cell on one line and its pipes literal.
 pub(crate) fn cell(s: &str) -> String {
     s.replace(['\n', '\r'], " ").replace('|', "\\|")
@@ -119,7 +130,10 @@ pub fn render_markdown(d: &Draft, f: &PremarketFacts) -> String {
             Field::Value(q) => (fmt_num(q.last), fmt_pct(q.change_pct)),
             Field::Missing { .. } => (na(lang).to_string(), na(lang).to_string()),
         };
-        out.push_str(&format!("| {} | {last} | {chg} |\n", cell(label)));
+        out.push_str(&format!(
+            "| {} | {last} | {chg} |\n",
+            cell(futures_label(label, lang))
+        ));
     }
     out.push('\n');
 
@@ -624,10 +638,41 @@ mod tests {
     #[test]
     fn zh_render_uses_zh_missing_and_headers() {
         let md = render_markdown(&draft(Lang::Zh), &facts());
-        assert!(md.contains("| Nasdaq 100 futures | 暂缺 | 暂缺 |"), "{md}");
+        assert!(md.contains("| 标普500期货 | 5,812.25 | +0.45% |"), "{md}");
+        assert!(md.contains("| 纳指100期货 | 暂缺 | 暂缺 |"), "{md}");
+        assert!(!md.contains("futures"), "{md}");
         assert!(md.contains("合约 | 最新 | 涨跌") && md.contains("代码 | 公司 | 盘前价 | 涨跌"));
         assert!(md.contains("| AAPL | Apple | 230.50 | +8.00% |") && !md.contains("Record iPhone"));
         assert!(md.trim_end().ends_with(DISCLAIMER_ZH));
+    }
+
+    #[test]
+    fn zh_futures_labels_cover_every_contract() {
+        let labels: Vec<&str> = [
+            "S&P 500 futures",
+            "Nasdaq 100 futures",
+            "Dow futures",
+            "Russell 2000 futures",
+        ]
+        .iter()
+        .map(|l| futures_label(l, Lang::Zh))
+        .collect();
+        assert_eq!(
+            labels,
+            ["标普500期货", "纳指100期货", "道指期货", "罗素2000期货"]
+        );
+        assert_eq!(futures_label("Dow futures", Lang::En), "Dow futures");
+    }
+
+    #[tokio::test]
+    async fn zh_futures_names_pass_the_number_check() {
+        let body = "标普500期货报5,812.25点，上涨0.45%；纳指100期货、道指期货和罗素2000期货暂缺。";
+        let l = llm(vec![reply(Lang::Zh, body)]);
+        let (_, md) = write(&l, &facts(), Lang::Zh).await.unwrap();
+        assert_eq!(l.prompts.borrow().len(), 1);
+        // The rendered table's labels carry no stray figures either.
+        let table: String = md.lines().filter(|l| l.contains("期货 |")).collect();
+        assert_eq!(check(&table, Lang::Zh, &[5812.25, 0.45]), Ok(()), "{table}");
     }
 
     #[test]
