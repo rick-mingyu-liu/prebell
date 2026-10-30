@@ -220,6 +220,32 @@ mod tests {
         assert_eq!(jobs_for_cron("* * * * *"), None);
     }
 
+    /// The `[[queues.consumers]]` block of `queue` in wrangler.toml.
+    fn consumer(queue: &str) -> String {
+        WRANGLER
+            .split("[[queues.consumers]]")
+            .skip(1)
+            .map(|b| b.split("\n[").next().unwrap_or(b))
+            .find(|b| b.contains(&format!("queue = \"{queue}\"")))
+            .unwrap_or_default()
+            .to_string()
+    }
+
+    #[test]
+    fn earnings_consumer_is_serial_and_retries_once() {
+        let c = consumer("prebell-earnings");
+        let setting = |k: &str| {
+            c.lines()
+                .find(|l| l.trim_start().starts_with(k))
+                .and_then(|l| l.split('=').nth(1))
+                .map(|v| v.trim().to_string())
+        };
+        assert_eq!(setting("max_batch_size").as_deref(), Some("1"), "{c}");
+        assert_eq!(setting("max_concurrency").as_deref(), Some("1"), "{c}");
+        // A poll killed for CPU is redelivered once, not 3 times.
+        assert_eq!(setting("max_retries").as_deref(), Some("1"), "{c}");
+    }
+
     #[test]
     fn each_cron_maps_to_its_job() {
         let want: [(&str, &[&str]); 3] = [

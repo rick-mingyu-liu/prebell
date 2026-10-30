@@ -48,6 +48,9 @@ queue = "prebell-earnings"
 queue = "prebell-earnings"
 max_batch_size = 1
 max_concurrency = 1
+# Redeliver a failed message once, not the default 3 times: a poll killed for
+# CPU would only fail again, and the next firing polls anyway.
+max_retries = 1
 
 [vars]
 # LLM_PROVIDER: "claude" (default; secret ANTHROPIC_API_KEY) or "deepseek" (fallback; secret DEEPSEEK_API_KEY).
