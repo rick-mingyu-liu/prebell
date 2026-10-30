@@ -20,7 +20,7 @@ The first site worked but looked like a default blog. Every number on it is veri
 - No crypto content section. The crypto exchanges appear only as sidebar invite links.
 - No AI articles, FIRE calculator or other AlphaLab tool sections (possible later).
 - No backend changes except the optional chart, which is deferred below. The generator, D1 schema, crons and number checks don't change.
-- No company logos for now. Tickers are shown as text chips.
+- Company and partner logos are bundled static files (see `docs/runbook.md` → Logos); a ticker without a licensed logo shows a text chip. Logos identify companies only (nominative use) and are never fetched from third parties at runtime.
 
 ## Anti-goals (would make this a failure even if it "works")
 
