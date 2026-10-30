@@ -10,10 +10,12 @@ command = "worker-build --release"
 # the two in sync); `clock` and `core::competitor` decide what each firing means in ET.
 # Three crons: the Free Workers plan allows 5 per account. Day names, not numbers
 # (Cloudflare numbers weekdays 1-7 starting on Sunday), and no comma lists.
-# - "*/5 12-23 * * MON-FRI": premarket and recap (both windows, ZH retries)
-# - "*/5 0-3 * * TUE-SAT": the EST recap tail to 19:00 ET and recap ZH retries to 22:00 ET
+# - "*/5 10-23 * * MON-FRI": earnings polling from 06:00 ET (both offsets), premarket
+#   and recap (both windows, ZH retries)
+# - "*/5 0-3 * * TUE-SAT": the EST recap tail to 19:00 ET, recap ZH retries and
+#   earnings polling to 22:00 ET
 # - "31 11-12 * * *": competitor at 07:31 ET in either offset
-crons = ["*/5 12-23 * * MON-FRI", "*/5 0-3 * * TUE-SAT", "31 11-12 * * *"]
+crons = ["*/5 10-23 * * MON-FRI", "*/5 0-3 * * TUE-SAT", "31 11-12 * * *"]
 
 [[d1_databases]]
 binding = "DB"
@@ -35,6 +37,21 @@ queue = "prebell-jobs"
 # budget with another job.
 max_batch_size = 1
 
+# Earnings jobs on their own queue: one consumer and one message per batch,
+# so EDGAR is never hit in parallel (fair access, one build per filing) and
+# a build never delays the premarket job.
+[[queues.producers]]
+binding = "EARNINGS"
+queue = "prebell-earnings"
+
+[[queues.consumers]]
+queue = "prebell-earnings"
+max_batch_size = 1
+max_concurrency = 1
+# Redeliver a failed message once, not the default 3 times: a poll killed for
+# CPU would only fail again, and the next firing polls anyway.
+max_retries = 1
+
 [vars]
 # LLM_PROVIDER: "claude" (default; secret ANTHROPIC_API_KEY) or "deepseek" (fallback; secret DEEPSEEK_API_KEY).
 # Optional LLM_MODEL overrides the provider's default model (claude-sonnet-5-5 / deepseek-chat).
@@ -43,3 +60,6 @@ max_batch_size = 1
 LLM_PROVIDER = "claude"
 LLM_EFFORT = "low"
 SEC_CONTACT = "placeholder@example.com"
+# Earnings calendar seeding: "yahoo" (Yahoo v7 quote earnings dates, the default)
+# or "off" (only company announcements and EDGAR filings).
+EARNINGS_CALENDAR_SEED = "yahoo"

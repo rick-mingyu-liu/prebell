@@ -6,14 +6,18 @@
     "archive": "Archive",
     "about": "About",
     "otherLang": "中文",
-    "otherLangLabel": "Read in Chinese"
+    "otherLangLabel": "Read in Chinese",
+    "earnings": "Earnings"
   },
   "home": {
     "latest": "Latest premarket brief",
     "recent": "Recent posts",
     "empty": "Nothing has been published yet.",
     "allBriefs": "All posts",
-    "latestRecap": "Latest after-close recap"
+    "latestRecap": "Latest after-close recap",
+    "latestEarnings": "Latest earnings checks",
+    "calendar": "Earnings calendar",
+    "noEarnings": "No earnings checks yet."
   },
   "post": {
     "permalink": "Permalink",
@@ -44,6 +48,29 @@
   "disclaimer": "Content on this site is generated automatically from public data for information only. It is not investment advice.",
   "types": {
     "premarket": "Premarket brief",
-    "recap": "After-close recap"
+    "recap": "After-close recap",
+    "earnings": "Earnings check"
+  },
+  "earnings": {
+    "calendarTitle": "Earnings calendar",
+    "weekOf": "Week of {date}",
+    "timesEt": "Times US Eastern",
+    "legend": "Confirmed: the company announced the date. Unconfirmed: the date comes from an aggregator and may change. Reported: the results are filed with the SEC.",
+    "bmo": "Before open",
+    "amc": "After close",
+    "timeUnknown": "Time n/a",
+    "unconfirmed": "Unconfirmed",
+    "confirmed": "Confirmed",
+    "reported": "Reported",
+    "none": "No reports.",
+    "prevWeek": "Previous week",
+    "nextWeek": "Next week",
+    "tickerTitle": "{ticker} earnings",
+    "checks": "Earnings checks",
+    "noChecks": "No earnings checks yet.",
+    "dates": "Report dates",
+    "readCheck": "Read the check",
+    "charts": "Charts (GAAP)",
+    "chartsNote": "Charts show GAAP figures from SEC filings; the last bar marked 8-K is this release. A gap means the company did not report that quarter separately."
   }
 }

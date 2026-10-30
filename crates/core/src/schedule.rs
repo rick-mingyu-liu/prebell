@@ -2,8 +2,14 @@
 //! what a firing means in ET. Day-of-week uses names because Cloudflare
 //! numbers days 1-7 from Sunday, unlike most cron dialects.
 
-/// Every job name the queue consumer understands.
-pub const JOBS: &[&str] = &["premarket", "recap", "competitor"];
+/// Every job a cron queues.
+pub const JOBS: &[&str] = &["premarket", "recap", "competitor", "earnings"];
+
+/// Queue binding for the earnings jobs: one consumer, one message at a time,
+/// so EDGAR is never hit in parallel and a build never delays a brief.
+pub const EARNINGS_QUEUE: &str = "EARNINGS";
+/// Queue binding for every other job.
+pub const JOBS_QUEUE: &str = "JOBS";
 
 /// A content job: a `run::Content` tick that needs the market, news and LLM
 /// providers.
@@ -13,12 +19,37 @@ pub enum ContentJob {
     Recap,
 }
 
+/// One step of the earnings pipeline, each its own queue message (and so
+/// its own invocation and subrequest budget).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EarningsStep {
+    /// `earnings`, from the cron: read EDGAR's current 8-K feed back to
+    /// the last poll.
+    Poll,
+    /// `earnings:build`, queued by a poll: build at most one filing.
+    Build,
+    /// `earnings:calendar`, queued by a poll once per ET day.
+    Calendar,
+}
+
+impl EarningsStep {
+    /// The queue message's `job` value.
+    pub fn job(self) -> &'static str {
+        match self {
+            EarningsStep::Poll => "earnings",
+            EarningsStep::Build => "earnings:build",
+            EarningsStep::Calendar => "earnings:calendar",
+        }
+    }
+}
+
 /// What a queue message's `job` runs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum JobKind {
     Content(ContentJob),
     /// The competitor watch; it needs no LLM.
     Competitor,
+    Earnings(EarningsStep),
 }
 
 impl JobKind {
@@ -27,8 +58,19 @@ impl JobKind {
             "premarket" => Some(JobKind::Content(ContentJob::Premarket)),
             "recap" => Some(JobKind::Content(ContentJob::Recap)),
             "competitor" => Some(JobKind::Competitor),
+            "earnings" => Some(JobKind::Earnings(EarningsStep::Poll)),
+            "earnings:build" => Some(JobKind::Earnings(EarningsStep::Build)),
+            "earnings:calendar" => Some(JobKind::Earnings(EarningsStep::Calendar)),
             _ => None,
         }
+    }
+}
+
+/// The queue binding a job is sent to.
+pub fn queue_for(job: &str) -> &'static str {
+    match JobKind::parse(job) {
+        Some(JobKind::Earnings(_)) => EARNINGS_QUEUE,
+        _ => JOBS_QUEUE,
     }
 }
 
@@ -37,14 +79,17 @@ impl JobKind {
 /// may queue several jobs; each job's clock (and `Content::zh_retry_due`)
 /// decides what the firing means for it, so extra firings cost a D1 read.
 pub const CRONS: &[(&str, &[&str])] = &[
-    // 12:00-23:55Z weekdays. Premarket 08:30-09:25 ET under both offsets
-    // (12:30Z EDT, 13:30Z EST) and its ZH retries to the 18:00 ET give-up;
-    // the recap window from 13:45 ET (early close) or 16:45 ET to 19:00 ET
-    // EDT (23:00Z), with its ZH retries.
-    ("*/5 12-23 * * MON-FRI", &["premarket", "recap"]),
+    // 10:00-23:55Z weekdays. Earnings polling from 06:00 ET under both
+    // offsets (10:00Z EDT, 11:00Z EST), on its own queue. Premarket
+    // 08:30-09:25 ET (12:30Z EDT, 13:30Z EST) and its ZH retries to the
+    // 18:00 ET give-up; the recap window from 13:45 ET (early close) or
+    // 16:45 ET to 19:00 ET EDT (23:00Z), with its ZH retries. The clock
+    // gates the earlier firings: they read D1 and do nothing.
+    ("*/5 10-23 * * MON-FRI", &["premarket", "recap", "earnings"]),
     // 00:00-03:55Z the next UTC day: the EST recap tail to 19:00 ET
-    // (00:00Z) and recap ZH retries to the 22:00 ET give-up.
-    ("*/5 0-3 * * TUE-SAT", &["recap"]),
+    // (00:00Z) and recap ZH retries to the 22:00 ET give-up; earnings
+    // polling to 22:00 ET (02:00Z EDT, 03:00Z EST).
+    ("*/5 0-3 * * TUE-SAT", &["recap", "earnings"]),
     // Competitor watch, daily: 07:31 ET under either offset (11:31Z EDT,
     // 12:31Z EST); `competitor_decision` picks the firing that counts.
     // Minute 31 so no other job fires with it.
@@ -176,11 +221,37 @@ mod tests {
         assert_eq!(jobs_for_cron("* * * * *"), None);
     }
 
+    /// The `[[queues.consumers]]` block of `queue` in wrangler.toml.
+    fn consumer(queue: &str) -> String {
+        WRANGLER
+            .split("[[queues.consumers]]")
+            .skip(1)
+            .map(|b| b.split("\n[").next().unwrap_or(b))
+            .find(|b| b.contains(&format!("queue = \"{queue}\"")))
+            .unwrap_or_default()
+            .to_string()
+    }
+
+    #[test]
+    fn earnings_consumer_is_serial_and_retries_once() {
+        let c = consumer("prebell-earnings");
+        let setting = |k: &str| {
+            c.lines()
+                .find(|l| l.trim_start().starts_with(k))
+                .and_then(|l| l.split('=').nth(1))
+                .map(|v| v.trim().to_string())
+        };
+        assert_eq!(setting("max_batch_size").as_deref(), Some("1"), "{c}");
+        assert_eq!(setting("max_concurrency").as_deref(), Some("1"), "{c}");
+        // A poll killed for CPU is redelivered once, not 3 times.
+        assert_eq!(setting("max_retries").as_deref(), Some("1"), "{c}");
+    }
+
     #[test]
     fn each_cron_maps_to_its_job() {
         let want: [(&str, &[&str]); 3] = [
-            ("*/5 12-23 * * MON-FRI", &["premarket", "recap"]),
-            ("*/5 0-3 * * TUE-SAT", &["recap"]),
+            ("*/5 10-23 * * MON-FRI", &["premarket", "recap", "earnings"]),
+            ("*/5 0-3 * * TUE-SAT", &["recap", "earnings"]),
             ("31 11-12 * * *", &["competitor"]),
         ];
         for (cron, jobs) in want {
@@ -205,8 +276,19 @@ mod tests {
         );
         assert_eq!(JobKind::parse("competitor"), Some(JobKind::Competitor));
         assert_eq!(JobKind::parse("nope"), None);
+        for step in [
+            EarningsStep::Poll,
+            EarningsStep::Build,
+            EarningsStep::Calendar,
+        ] {
+            assert_eq!(JobKind::parse(step.job()), Some(JobKind::Earnings(step)));
+            assert_eq!(queue_for(step.job()), EARNINGS_QUEUE);
+        }
+        for j in ["premarket", "recap", "competitor", "nope"] {
+            assert_eq!(queue_for(j), JOBS_QUEUE, "{j}");
+        }
         let kinds: Vec<JobKind> = JOBS.iter().map(|j| JobKind::parse(j).unwrap()).collect();
-        assert_eq!(kinds.len(), 3);
+        assert_eq!(kinds.len(), 4);
         for (i, k) in kinds.iter().enumerate() {
             assert!(!kinds[..i].contains(k), "{k:?}");
         }
@@ -307,6 +389,86 @@ mod tests {
                 }
                 if fires("recap", t) {
                     assert_eq!(recap_decision(t), SlotDecision::NotToday, "{t}");
+                }
+            }
+        }
+    }
+
+    /// Every 5-minute ET slot of the earnings window (weekdays 06:00-22:00
+    /// ET, holidays included: EDGAR accepts filings on exchange holidays)
+    /// has an earnings firing, under EDT and EST; outside it no firing
+    /// polls, because `in_window` gates each one.
+    #[test]
+    fn earnings_window_covered_on_edt_est_dst_and_holidays() {
+        use crate::earnings::in_window;
+        // EDT Thu/Fri, the DST Sunday, EST Mon/Fri, Thanksgiving, Christmas Eve.
+        let days = [
+            "2026-10-29",
+            "2026-10-30",
+            "2026-11-01",
+            "2026-11-02",
+            "2026-11-06",
+            "2026-11-26",
+            "2026-12-24",
+        ];
+        for date in days {
+            let d: NaiveDate = date.parse().unwrap();
+            let mut slots = 0;
+            for t in minutes(date) {
+                let local = et(t);
+                if local.date_naive() != d || !local.minute().is_multiple_of(5) {
+                    continue;
+                }
+                if in_window(t) {
+                    slots += 1;
+                    assert!(fires("earnings", t), "earnings: no firing at {t} ({local})");
+                }
+            }
+            // 16 hours of 5-minute slots on a weekday; none on Sunday.
+            let want = if d.weekday() == Weekday::Sun {
+                0
+            } else {
+                16 * 12
+            };
+            assert_eq!(slots, want, "{date}");
+        }
+        // The first and last slots under each offset.
+        for t in [
+            "2026-10-30T10:00:00Z", // 06:00 EDT
+            "2026-10-31T01:55:00Z", // Fri 21:55 EDT
+            "2026-11-02T11:00:00Z", // 06:00 EST
+            "2026-11-03T02:55:00Z", // Mon 21:55 EST
+        ] {
+            let t: DateTime<Utc> = t.parse().unwrap();
+            assert!(in_window(t) && fires("earnings", t), "{t}");
+        }
+        // Before 06:00 ET a firing (EDT 10:00Z is EST 05:00) is a no-op.
+        let early: DateTime<Utc> = "2026-11-02T10:00:00Z".parse().unwrap();
+        assert!(fires("earnings", early) && !in_window(early));
+    }
+
+    /// Premarket and recap firings before their windows (the widened
+    /// 10:00-11:55Z hours) are clock-gated: nothing builds.
+    #[test]
+    fn early_firings_never_build_premarket_or_recap() {
+        for date in DAYS {
+            let d: NaiveDate = date.parse().unwrap();
+            for t in minutes(date) {
+                let l = et(t);
+                if l.date_naive() != d || l.hour() >= 8 {
+                    continue;
+                }
+                if fires("premarket", t) {
+                    assert!(
+                        !matches!(premarket_decision(t), SlotDecision::InWindow { .. }),
+                        "{t}"
+                    );
+                }
+                if fires("recap", t) {
+                    assert!(
+                        !matches!(recap_decision(t), SlotDecision::InWindow { .. }),
+                        "{t}"
+                    );
                 }
             }
         }

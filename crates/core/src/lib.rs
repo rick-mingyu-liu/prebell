@@ -3,6 +3,8 @@ pub mod claude;
 pub mod clock;
 pub mod competitor;
 pub mod deepseek;
+pub mod earnings;
+pub mod edgar;
 pub mod facts;
 pub mod jobs;
 pub mod llm;
@@ -15,5 +17,6 @@ pub mod schedule;
 pub mod store;
 pub mod tavily;
 pub mod yahoo;
+pub mod yahoo_calendar;
 
 pub use numbers::Lang;

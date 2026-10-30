@@ -1,0 +1,21 @@
+{
+  "fiscal_period": {"quarter": 4, "fiscal_year": 2026, "quote": "financial results for its fiscal 2026 fourth quarter ended September 26, 2026"},
+  "metrics": {
+    "revenue": {"amount": "$102.5 billion", "scale": "units", "negative": false, "quote": "The Company posted quarterly revenue of $102.5 billion, up 8 percent year over year"},
+    "net_income": {"amount": "27,466", "scale": "millions", "negative": false, "quote": "Net income $27,466 $14,736"},
+    "eps_gaap_diluted": {"amount": "$1.85", "scale": "units", "negative": false, "quote": "quarterly diluted earnings per share of $1.85, up 91 percent year over year"},
+    "eps_non_gaap_diluted": null,
+    "gross_margin_pct": {"amount": "47.2 percent", "scale": "units", "negative": false, "quote": "Gross margin percentage was 47.2 percent for the quarter."},
+    "operating_margin_pct": {"amount": "33.5%", "scale": "units", "negative": false, "quote": "Operating margin was a record 33.5% for the quarter."},
+    "operating_cash_flow": {"amount": "$29.7 billion", "scale": "units", "negative": false, "quote": "Operating cash flow was $29.7 billion for the quarter"},
+    "free_cash_flow": null
+  },
+  "guidance": [
+    {"quote": "the Company expects total revenue to grow 10 to 12 percent year over year and gross margin to be between 47 and 48 percent", "summary_en": "Apple expects December-quarter revenue to grow 10 to 12 percent, with gross margin of 47 to 48 percent."},
+    {"quote": "the Company expects total revenue to grow 10 to 12 percent year over year", "summary_en": "Revenue should grow 15 percent."}
+  ],
+  "highlights": [
+    {"quote": "declared a cash dividend of $0.27 per share of the Company's common stock", "summary_en": "The board declared a dividend of $0.27 per share."},
+    {"quote": "We returned over $24 billion to shareholders.", "summary_en": "See https://evil.test for details."}
+  ]
+}

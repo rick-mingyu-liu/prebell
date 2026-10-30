@@ -16,6 +16,13 @@
       "database_id": "eb17fcaf-48fd-4956-88c6-d5ef18ac2662"
     }
   ],
+  "r2_buckets": [
+    {
+      // Same bucket as crates/generator/wrangler.toml; the site serves chart SVGs from its charts/ prefix.
+      "binding": "FACTS",
+      "bucket_name": "prebell-facts"
+    }
+  ],
   "vars": {
     // Origin for canonical and hreflang URLs; https://prebell.ai is a placeholder until the domain is bought.
     "SITE_URL": "https://prebell.ai"

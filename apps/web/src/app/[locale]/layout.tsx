@@ -38,6 +38,7 @@ export default async function LocaleLayout({ children, params }: LayoutProps<"/[
             {t("name")}
           </Link>
           <nav>
+            <Link href={`/${locale}/earnings`}>{t("earnings")}</Link>
             <Link href={`/${locale}/archive`}>{t("archive")}</Link>
             <Link href={`/${locale}/about`}>{t("about")}</Link>
           </nav>

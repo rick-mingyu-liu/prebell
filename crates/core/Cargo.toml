@@ -15,6 +15,7 @@ async-trait = "0.1"
 regex = "1"
 thiserror = "2"
 futures = { version = "0.3", default-features = false, features = ["alloc"] }
+plotters = { version = "0.3", default-features = false, features = ["svg_backend"] }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt"] }

@@ -24,8 +24,8 @@ fn decode_entity(name: &str) -> Option<char> {
     }
 }
 
-/// Decode entities, unify curly quotes, collapse whitespace, trim.
-fn normalize(s: &str) -> String {
+/// Decodes HTML entities (`&amp;`, `&#8217;`, `&#x27;`, ...); unknown ones stay as written.
+pub(crate) fn decode_entities(s: &str) -> String {
     let mut decoded = String::with_capacity(s.len());
     let mut rest = s;
     while let Some(i) = rest.find('&') {
@@ -47,7 +47,12 @@ fn normalize(s: &str) -> String {
         }
     }
     decoded.push_str(rest);
-    let mapped: String = decoded
+    decoded
+}
+
+/// Decode entities, unify curly quotes, collapse whitespace, trim.
+pub(crate) fn normalize(s: &str) -> String {
+    let mapped: String = decode_entities(s)
         .chars()
         .map(|c| match c {
             '\u{2018}' | '\u{2019}' => '\'',
@@ -56,6 +61,20 @@ fn normalize(s: &str) -> String {
         })
         .collect();
     mapped.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// `needle` occurs in `hay` (ASCII case-insensitive) with no letter or
+/// digit right before or after it: "Intuit" is not in "Intuitive".
+pub(crate) fn has_word(hay: &str, needle: &str) -> bool {
+    if needle.is_empty() {
+        return false;
+    }
+    let (h, n) = (hay.to_ascii_lowercase(), needle.to_ascii_lowercase());
+    h.match_indices(&n).any(|(i, _)| {
+        let before = h[..i].chars().next_back();
+        let after = h[i + n.len()..].chars().next();
+        !before.is_some_and(char::is_alphanumeric) && !after.is_some_and(char::is_alphanumeric)
+    })
 }
 
 /// True if `quote` (>= 20 chars) appears verbatim in `source_text` after normalization.

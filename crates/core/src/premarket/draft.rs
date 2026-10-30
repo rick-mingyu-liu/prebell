@@ -232,13 +232,13 @@ pub(crate) fn reject_markup(what: &str, s: &str) -> Result<(), String> {
 }
 
 /// A setext heading underline: a line of only `=` or only `-`, length >= 2.
-fn is_setext_underline(line: &str) -> bool {
+pub(crate) fn is_setext_underline(line: &str) -> bool {
     let l = line.trim();
     l.len() >= 2 && (l.bytes().all(|b| b == b'=') || l.bytes().all(|b| b == b'-'))
 }
 
 /// A one-line string: whitespace runs (newlines included) become one space.
-fn one_line(v: &Value, key: &str) -> Result<String, String> {
+pub(crate) fn one_line(v: &Value, key: &str) -> Result<String, String> {
     let s = v
         .get(key)
         .and_then(Value::as_str)

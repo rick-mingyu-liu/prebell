@@ -1,14 +1,14 @@
-//! Runs one queue message. A content job whose providers cannot be built
-//! (a bad `LLM_PROVIDER` or `LLM_EFFORT`) never reaches `tick`, so no run row
-//! exists and `skip` never alerts: the config error alerts instead, once per
-//! job per ET date.
+//! Runs one queue message. A content or earnings job whose providers cannot
+//! be built (a bad `LLM_PROVIDER` or `LLM_EFFORT`, a placeholder
+//! `SEC_CONTACT`) never reaches its tick, so no run row exists and `skip`
+//! never alerts: the config error alerts instead, once per job per ET date.
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 
 use crate::clock::et;
 use crate::run::TickOutcome;
-use crate::schedule::{ContentJob, JobKind};
+use crate::schedule::{ContentJob, EarningsStep, JobKind};
 use crate::store::Store;
 
 /// What the Worker supplies to run a job.
@@ -20,6 +20,9 @@ pub trait JobRunner {
     async fn content(&self, job: ContentJob) -> Result<TickOutcome, String>;
     /// The competitor watch; its outcome as a log line.
     async fn competitor(&self) -> String;
+    /// One earnings step. `Ok` is a log line; `Err` is a config error, as
+    /// for `content`.
+    async fn earnings(&self, step: EarningsStep) -> Result<String, String>;
 }
 
 /// Alert text is at most this many characters.
@@ -36,42 +39,47 @@ pub async fn run_job(
         Some(JobKind::Competitor) => Ok(format!("job {job}: {}", runner.competitor().await)),
         Some(JobKind::Content(c)) => match runner.content(c).await {
             Ok(o) => Ok(format!("job {job}: {o:?}")),
-            Err(e) => {
-                let note = match config_alert(now, job, &e, store).await {
-                    Ok(true) => "alerted",
-                    Ok(false) => "already alerted today",
-                    Err(se) => {
-                        return Err(format!("job {job}: config error: {e}; alert failed: {se}"))
-                    }
-                };
-                Err(format!("job {job}: config error ({note}): {e}"))
-            }
+            Err(e) => Err(config_error(now, job, &e, store).await),
+        },
+        Some(JobKind::Earnings(step)) => match runner.earnings(step).await {
+            Ok(line) => Ok(format!("job {job}: {line}")),
+            // One alert per day for every earnings step: they share the config.
+            Err(e) => Err(config_error(now, "earnings", &e, store).await),
         },
         None => Err(format!("job {job}: unknown job, dropped")),
     }
 }
 
-/// Adds the `config:<job>:<ET date>` error alert unless it exists. Returns
-/// whether it added one.
-async fn config_alert(
+/// Alerts a config error once per ET day; the error log line.
+async fn config_error(now: DateTime<Utc>, job: &str, e: &str, store: &dyn Store) -> String {
+    let msg = format!("{job}: config error: {e}");
+    let note = match alert_once_today(now, &format!("config:{job}"), "error", &msg, store).await {
+        Ok(true) => "alerted",
+        Ok(false) => "already alerted today",
+        Err(se) => return format!("job {job}: config error: {e}; alert failed: {se}"),
+    };
+    format!("job {job}: config error ({note}): {e}")
+}
+
+/// Adds the `<key>:<ET date>` alert unless it exists, as one line of at most
+/// `MAX_ALERT_CHARS` characters. Returns whether it added one.
+pub async fn alert_once_today(
     now: DateTime<Utc>,
-    job: &str,
-    err: &str,
+    key: &str,
+    level: &str,
+    msg: &str,
     store: &dyn Store,
 ) -> Result<bool, String> {
-    let key = format!("config:{job}:{}", et(now).format("%Y-%m-%d"));
+    let key = format!("{key}:{}", et(now).format("%Y-%m-%d"));
     if store.has_alert(&key).await? {
         return Ok(false);
     }
-    let one_line: String = err
+    let msg: String = msg
         .chars()
         .map(|c| if c.is_control() { ' ' } else { c })
-        .collect();
-    let msg: String = format!("{job}: config error: {one_line}")
-        .chars()
         .take(MAX_ALERT_CHARS)
         .collect();
-    store.add_alert(&key, "error", &msg).await?;
+    store.add_alert(&key, level, &msg).await?;
     Ok(true)
 }
 
@@ -96,6 +104,7 @@ mod tests {
         content_err: Option<String>,
         content_calls: RefCell<Vec<ContentJob>>,
         competitor_calls: Cell<usize>,
+        earnings_calls: RefCell<Vec<EarningsStep>>,
     }
     #[async_trait(?Send)]
     impl JobRunner for FakeRunner {
@@ -110,6 +119,13 @@ mod tests {
             self.competitor_calls.set(self.competitor_calls.get() + 1);
             "AlreadyDone".into()
         }
+        async fn earnings(&self, step: EarningsStep) -> Result<String, String> {
+            self.earnings_calls.borrow_mut().push(step);
+            match &self.content_err {
+                Some(e) => Err(e.clone()),
+                None => Ok("polled".into()),
+            }
+        }
     }
     /// A runner whose LLM config has `LLM_EFFORT=hgih`, with the error text
     /// redacted the way the Worker does.
@@ -121,6 +137,7 @@ mod tests {
             content_err: Some(redact(&raw, &[KEY, ""])),
             content_calls: RefCell::new(vec![]),
             competitor_calls: Cell::new(0),
+            earnings_calls: RefCell::new(vec![]),
         }
     }
     fn utc(s: &str) -> DateTime<Utc> {
@@ -205,6 +222,7 @@ mod tests {
             content_err: None,
             content_calls: RefCell::new(vec![]),
             competitor_calls: Cell::new(0),
+            earnings_calls: RefCell::new(vec![]),
         };
         let now = utc("2026-10-29T12:30:00Z");
         assert_eq!(
@@ -217,6 +235,82 @@ mod tests {
             Err("job nope: unknown job, dropped".to_string())
         );
         assert!(s.alerts.borrow().is_empty());
+    }
+
+    #[tokio::test]
+    async fn earnings_steps_share_one_config_alert_per_day() {
+        let s = MemStore::default();
+        let r = FakeRunner {
+            content_err: Some("SEC_CONTACT is the placeholder".into()),
+            content_calls: RefCell::new(vec![]),
+            competitor_calls: Cell::new(0),
+            earnings_calls: RefCell::new(vec![]),
+        };
+        for (t, job) in [
+            ("2026-10-29T12:30:00Z", "earnings"),
+            ("2026-10-29T12:35:00Z", "earnings:build"),
+            ("2026-10-29T12:40:00Z", "earnings:calendar"),
+        ] {
+            let out = run_job(utc(t), job, &s, &r).await;
+            assert!(
+                matches!(&out, Err(e) if e.contains("config error")),
+                "{out:?}"
+            );
+        }
+        assert_eq!(
+            *r.earnings_calls.borrow(),
+            [
+                EarningsStep::Poll,
+                EarningsStep::Build,
+                EarningsStep::Calendar
+            ]
+        );
+        let alerts = s.alerts.borrow();
+        assert_eq!(alerts.len(), 1, "{alerts:?}");
+        assert_eq!(alerts[0].0, "config:earnings:2026-10-29");
+        assert!(alerts[0].2.contains("SEC_CONTACT"), "{}", alerts[0].2);
+    }
+
+    #[tokio::test]
+    async fn earnings_ok_is_a_log_line() {
+        let s = MemStore::default();
+        let r = FakeRunner {
+            content_err: None,
+            content_calls: RefCell::new(vec![]),
+            competitor_calls: Cell::new(0),
+            earnings_calls: RefCell::new(vec![]),
+        };
+        let out = run_job(utc("2026-10-29T12:30:00Z"), "earnings", &s, &r).await;
+        assert_eq!(out, Ok("job earnings: polled".to_string()));
+        assert!(s.alerts.borrow().is_empty());
+    }
+
+    #[tokio::test]
+    async fn alert_once_today_dedupes_by_key_and_et_date() {
+        let s = MemStore::default();
+        let t = utc("2026-10-29T20:00:00Z");
+        assert_eq!(
+            alert_once_today(t, "sec-throttled", "warn", "a\nb", &s).await,
+            Ok(true)
+        );
+        assert_eq!(
+            alert_once_today(t, "sec-throttled", "warn", "c", &s).await,
+            Ok(false)
+        );
+        // 23:30 ET is still 10-29; the next ET day alerts again.
+        let late = utc("2026-10-30T03:30:00Z");
+        assert_eq!(
+            alert_once_today(late, "sec-throttled", "warn", "c", &s).await,
+            Ok(false)
+        );
+        let next = utc("2026-10-30T12:00:00Z");
+        assert_eq!(
+            alert_once_today(next, "sec-throttled", "warn", "c", &s).await,
+            Ok(true)
+        );
+        let a = s.alerts.borrow();
+        assert_eq!(a[0].0, "sec-throttled:2026-10-29");
+        assert_eq!((a[0].1.as_str(), a[0].2.as_str()), ("warn", "a b"));
     }
 
     #[test]
@@ -235,6 +329,7 @@ mod tests {
             content_err: Some(format!("line one\nline two {}", "x".repeat(1000))),
             content_calls: RefCell::new(vec![]),
             competitor_calls: Cell::new(0),
+            earnings_calls: RefCell::new(vec![]),
         };
         run_job(utc("2026-10-29T12:30:00Z"), "premarket", &s, &r)
             .await

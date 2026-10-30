@@ -2,11 +2,13 @@ import type { Metadata } from "next";
 import { notFound } from "next/navigation";
 import { cache } from "react";
 import { getTranslations, setRequestLocale } from "next-intl/server";
+import Charts from "@/components/Charts";
 import LangSwitch from "@/components/LangSwitch";
 import PendingNotice from "@/components/PendingNotice";
 import PostBody from "@/components/PostBody";
 import type { Locale } from "@/i18n/routing";
 import { getDb } from "@/lib/db";
+import { getPostCharts } from "@/lib/earnings";
 import { pendingTitle } from "@/lib/labels";
 import { getPostBySlug } from "@/lib/posts";
 import { pairedAlternates } from "@/lib/seo";
@@ -59,6 +61,7 @@ export default async function PostPage({ params }: PageProps<"/[locale]/p/[slug]
         {post.hasOtherLang && <LangSwitch locale={locale} path={`/p/${post.slug}`} />}
       </div>
       <PostBody markdown={post.bodyMd} sources={post.sources.map((s) => s.url)} />
+      <Charts charts={await getPostCharts(getDb(), post.slug, locale)} />
     </article>
   );
 }

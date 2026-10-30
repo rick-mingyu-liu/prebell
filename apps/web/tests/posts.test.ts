@@ -49,6 +49,7 @@ describe("getPostBySlug", () => {
     const p = await getPostBySlug(db, "premarket-2026-10-29", "en");
     expect(p).toMatchObject({
       slug: "premarket-2026-10-29",
+      contentType: "premarket",
       tradingDate: "2026-10-29",
       publishedAt: "2026-10-29T12:34:00Z",
       title: "EN 2026-10-29",
