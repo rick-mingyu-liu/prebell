@@ -1,110 +1,110 @@
-//! Which filings in a submissions document are new earnings releases.
+//! Which current-filings feed entries are new earnings releases of the
+//! watchlist.
+
+use std::collections::HashMap;
 
 use chrono::{DateTime, Duration, Utc};
 
-use crate::earnings::WatchEntry;
-use crate::edgar::{RecentFiling, Submissions};
+use crate::earnings::{watchlist, Filer, WatchEntry};
+use crate::edgar::FeedEntry;
 
 /// A 2.02 8-K accepted longer ago than this is history, not news. Long
 /// enough to pick up a Saturday filing on Monday morning.
 pub const MAX_AGE_HOURS: i64 = 96;
 
-/// Original 8-K filings with Item 2.02, accepted within `MAX_AGE_HOURS`.
-pub fn earnings_filings(sub: &Submissions, now: DateTime<Utc>) -> Vec<&RecentFiling> {
-    sub.recent
-        .iter()
-        .filter(|f| f.form == "8-K")
-        .filter(|f| f.items.split(',').any(|i| i.trim() == "2.02"))
-        .filter(|f| now - f.accepted_at <= Duration::hours(MAX_AGE_HOURS))
+/// The domestic (8-K filing) watchlist companies by CIK.
+pub fn domestic_by_cik() -> HashMap<u64, WatchEntry> {
+    watchlist()
+        .into_iter()
+        .filter(|e| e.filer == Filer::Domestic)
+        .map(|e| (e.cik, e))
         .collect()
 }
 
-/// The submissions document lists the watchlist ticker (`BRK.B` = `BRK-B`),
-/// guarding against a wrong CIK in the data file.
-pub fn ticker_matches(sub: &Submissions, entry: &WatchEntry) -> bool {
-    let want = entry.ticker.replace('.', "-");
-    sub.tickers
+/// Original 8-K filings (not `8-K/A`) with Item 2.02 by a domestic
+/// watchlist company, accepted within `MAX_AGE_HOURS`, with their entry.
+pub fn earnings_entries<'a>(
+    entries: &'a [FeedEntry],
+    watch: &HashMap<u64, WatchEntry>,
+    now: DateTime<Utc>,
+) -> Vec<(&'a FeedEntry, WatchEntry)> {
+    entries
         .iter()
-        .any(|t| t.replace('.', "-").eq_ignore_ascii_case(&want))
+        .filter(|f| f.form == "8-K")
+        .filter(|f| f.items.iter().any(|i| i == "2.02"))
+        .filter(|f| now - f.accepted_at <= Duration::hours(MAX_AGE_HOURS))
+        .filter_map(|f| Some((f, watch.get(&f.cik)?.clone())))
+        .collect()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::earnings::find;
-    use crate::edgar::{parse_submissions, tests::SUBMISSIONS};
+    use crate::edgar::{parse_current_feed, tests::FEED};
 
     fn utc(s: &str) -> DateTime<Utc> {
         s.parse().unwrap()
     }
-    fn filing(form: &str, items: &str, accepted: &str) -> RecentFiling {
-        RecentFiling {
-            accession: format!("0000000001-26-{:06}", items.len() + form.len()),
+    fn entry(cik: u64, form: &str, items: &[&str], accepted: &str) -> FeedEntry {
+        FeedEntry {
             form: form.into(),
-            items: items.into(),
+            cik,
+            company: "X".into(),
+            accession: format!("0000000001-26-{:06}", items.len() + form.len()),
             filing_date: "2026-10-30".into(),
-            report_date: "2026-10-30".into(),
+            items: items.iter().map(|i| i.to_string()).collect(),
             accepted_at: utc(accepted),
-            primary_doc: "x.htm".into(),
-        }
-    }
-    fn sub(recent: Vec<RecentFiling>) -> Submissions {
-        Submissions {
-            cik: 1,
-            name: "X".into(),
-            tickers: vec!["BRK-B".into(), "BRK-A".into()],
-            recent,
+            index_url: "https://www.sec.gov/Archives/edgar/data/1/x-index.htm".into(),
         }
     }
 
     #[test]
-    fn fixture_detects_only_the_new_original_202() {
-        let s = parse_submissions(SUBMISSIONS).unwrap();
-        let got = earnings_filings(&s, utc("2026-10-30T21:00:00Z"));
-        let accs: Vec<_> = got.iter().map(|f| f.accession.as_str()).collect();
-        // 8-K/A (…069), 5.07 and 8.01 8-Ks, Form 4, 10-Q and the July 2.02 are ignored.
-        assert_eq!(accs, vec!["0000320193-26-000070"]);
+    fn fixture_keeps_only_the_watchlist_202() {
+        let f = parse_current_feed(FEED).unwrap();
+        let got = earnings_entries(&f, &domestic_by_cik(), utc("2026-10-30T21:00:00Z"));
+        // KOSS files a 2.02 but is not on the watchlist; Meta (on it) filed
+        // no 2.02; the 8-K/A is not an original.
+        let keys: Vec<_> = got
+            .iter()
+            .map(|(f, w)| (w.ticker, f.accession.as_str()))
+            .collect();
+        assert_eq!(keys, [("AAPL", "0000320193-26-000070")]);
     }
 
     #[test]
-    fn item_matching_is_exact() {
+    fn item_matching_is_exact_and_amendments_are_ignored() {
+        let w = domestic_by_cik();
         let t = "2026-10-30T20:00:00Z";
         let now = utc("2026-10-30T21:00:00Z");
         for (items, hit) in [
-            ("2.02", true),
-            ("2.02,9.01", true),
-            ("7.01, 2.02", true),
-            ("2.020", false),
-            ("12.02", false),
-            ("5.02", false),
-            ("", false),
+            (&["2.02"][..], true),
+            (&["2.02", "9.01"][..], true),
+            (&["7.01", "2.02"][..], true),
+            (&["2.020"][..], false),
+            (&["12.02"][..], false),
+            (&["5.02"][..], false),
+            (&[][..], false),
         ] {
-            let s = sub(vec![filing("8-K", items, t)]);
+            let e = [entry(320193, "8-K", items, t)];
             assert_eq!(
-                earnings_filings(&s, now).len(),
+                earnings_entries(&e, &w, now).len(),
                 usize::from(hit),
                 "{items:?}"
             );
         }
-        let s = sub(vec![filing("8-K/A", "2.02", t)]);
-        assert!(earnings_filings(&s, now).is_empty());
+        assert!(earnings_entries(&[entry(320193, "8-K/A", &["2.02"], t)], &w, now).is_empty());
+        // A foreign (6-K) filer on the watchlist is calendar only.
+        let tm = crate::earnings::find("TM").unwrap().cik;
+        assert!(earnings_entries(&[entry(tm, "8-K", &["2.02"], t)], &w, now).is_empty());
     }
 
     #[test]
     fn age_limit() {
+        let w = domestic_by_cik();
         let now = utc("2026-11-02T12:00:00Z");
-        let s = sub(vec![filing("8-K", "2.02", "2026-10-29T11:59:59Z")]); // 96h + 1s
-        assert!(earnings_filings(&s, now).is_empty());
-        let s = sub(vec![filing("8-K", "2.02", "2026-10-29T12:00:00Z")]); // exactly 96h
-        assert_eq!(earnings_filings(&s, now).len(), 1);
-    }
-
-    #[test]
-    fn ticker_guard() {
-        let s = sub(vec![]);
-        assert!(ticker_matches(&s, &find("BRK.B").unwrap()));
-        assert!(!ticker_matches(&s, &find("AAPL").unwrap()));
-        let apple = parse_submissions(SUBMISSIONS).unwrap();
-        assert!(ticker_matches(&apple, &find("AAPL").unwrap()));
+        let old = [entry(320193, "8-K", &["2.02"], "2026-10-29T11:59:59Z")]; // 96h + 1s
+        assert!(earnings_entries(&old, &w, now).is_empty());
+        let edge = [entry(320193, "8-K", &["2.02"], "2026-10-29T12:00:00Z")]; // exactly 96h
+        assert_eq!(earnings_entries(&edge, &w, now).len(), 1);
     }
 }

@@ -270,7 +270,10 @@ pub(crate) mod tests {
     }
     #[async_trait(?Send)]
     impl Filings for ConceptFilings {
-        async fn submissions(&self, _: u64) -> Result<crate::edgar::Submissions, ProviderError> {
+        async fn current_filings(
+            &self,
+            _: usize,
+        ) -> Result<Vec<crate::edgar::FeedEntry>, ProviderError> {
             unreachable!()
         }
         async fn filing_docs(

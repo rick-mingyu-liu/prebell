@@ -1,5 +1,5 @@
-//! SEC EDGAR behind the `Filings` trait: company submissions, filing
-//! indexes, filed documents and XBRL `companyconcept` documents.
+//! SEC EDGAR behind the `Filings` trait: the current 8-K filings feed,
+//! filing indexes, filed documents and XBRL `companyconcept` documents.
 //!
 //! Fair access (https://www.sec.gov/os/webmaster-faq#developers): every
 //! request carries a descriptive User-Agent with a contact address, and
@@ -29,25 +29,22 @@ const ARCHIVES: &str = "https://www.sec.gov/Archives/edgar/data/";
 /// being read (and parsed) in full.
 pub const MAX_BYTES: usize = 2 * 1024 * 1024;
 
-/// One row of a submissions document's `filings.recent` table.
+/// One entry of EDGAR's current-filings feed (`getcurrent`, Atom).
 #[derive(Debug, Clone, PartialEq)]
-pub struct RecentFiling {
-    pub accession: String,
+pub struct FeedEntry {
+    /// `8-K` or `8-K/A`.
     pub form: String,
-    /// Comma-separated 8-K items, e.g. `"2.02,9.01"`; empty for other forms.
-    pub items: String,
-    pub filing_date: String,
-    pub report_date: String,
-    pub accepted_at: DateTime<Utc>,
-    pub primary_doc: String,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct Submissions {
     pub cik: u64,
-    pub name: String,
-    pub tickers: Vec<String>,
-    pub recent: Vec<RecentFiling>,
+    pub company: String,
+    pub accession: String,
+    /// EDGAR's filing date, `YYYY-MM-DD`.
+    pub filing_date: String,
+    /// 8-K item numbers, e.g. `["2.02", "9.01"]`.
+    pub items: Vec<String>,
+    /// The entry's `updated`: the acceptance time (ET with its offset).
+    pub accepted_at: DateTime<Utc>,
+    /// The filing index page.
+    pub index_url: String,
 }
 
 /// A document listed in a filing index.
@@ -90,7 +87,9 @@ pub struct FactEntry {
 
 #[async_trait(?Send)]
 pub trait Filings {
-    async fn submissions(&self, cik: u64) -> Result<Submissions, ProviderError>;
+    /// One page (`FEED_PAGE` entries from `start`, newest first) of the
+    /// current 8-K filings feed.
+    async fn current_filings(&self, start: usize) -> Result<Vec<FeedEntry>, ProviderError>;
     async fn filing_docs(&self, cik: u64, accession: &str)
         -> Result<Vec<FilingDoc>, ProviderError>;
     /// A filed document as plain text (`html_to_text`).
@@ -160,115 +159,89 @@ pub fn filing_url(cik: u64, accession: &str) -> String {
     )
 }
 
-#[derive(Deserialize)]
-struct SubRoot {
-    cik: serde_json::Value,
-    #[serde(default)]
-    name: String,
-    #[serde(default)]
-    tickers: Vec<String>,
-    filings: SubFilings,
-}
-#[derive(Deserialize)]
-struct SubFilings {
-    recent: Recent,
-}
-/// Rows of `filings.recent` kept (newest first). The rest of each column is
-/// skipped without allocating: a big filer lists 1,000 rows, and 34 such
-/// documents per poll must fit the Free plan's CPU budget.
-pub const MAX_RECENT_ROWS: usize = 100;
+/// Entries per page of the current-filings feed.
+pub const FEED_PAGE: usize = 100;
 
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct Recent {
-    #[serde(deserialize_with = "newest")]
-    accession_number: Vec<String>,
-    #[serde(deserialize_with = "newest")]
-    form: Vec<String>,
-    #[serde(default, deserialize_with = "newest")]
-    items: Vec<String>,
-    #[serde(deserialize_with = "newest")]
-    filing_date: Vec<String>,
-    #[serde(default, deserialize_with = "newest")]
-    report_date: Vec<String>,
-    #[serde(deserialize_with = "newest")]
-    acceptance_date_time: Vec<String>,
-    #[serde(default, deserialize_with = "newest")]
-    primary_document: Vec<String>,
+/// The current 8-K filings feed, newest first, `FEED_PAGE` entries from `start`.
+pub fn current_feed_url(start: usize) -> String {
+    format!(
+        "https://www.sec.gov/cgi-bin/browse-edgar?action=getcurrent&type=8-K&company=&dateb=&owner=include&start={start}&count={FEED_PAGE}&output=atom"
+    )
 }
 
-/// The first `MAX_RECENT_ROWS` strings of a JSON array; later ones are
-/// skipped unparsed.
-fn newest<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<String>, D::Error> {
-    struct V;
-    impl<'de> serde::de::Visitor<'de> for V {
-        type Value = Vec<String>;
-        fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-            f.write_str("an array of strings")
-        }
-        fn visit_seq<A: serde::de::SeqAccess<'de>>(
-            self,
-            mut seq: A,
-        ) -> Result<Self::Value, A::Error> {
-            let mut out = Vec::new();
-            while out.len() < MAX_RECENT_ROWS {
-                match seq.next_element::<String>()? {
-                    Some(v) => out.push(v),
-                    None => return Ok(out),
-                }
-            }
-            while seq.next_element::<serde::de::IgnoredAny>()?.is_some() {}
-            Ok(out)
-        }
+/// The text between `<tag ...>` and `</tag>` in `s`.
+fn element<'a>(s: &'a str, tag: &str) -> Option<&'a str> {
+    let open = s.find(&format!("<{tag}"))?;
+    let body = open + s[open..].find('>')? + 1;
+    let end = body + s[body..].find(&format!("</{tag}>"))?;
+    Some(&s[body..end])
+}
+
+/// The value of `attr="..."` in `s`.
+fn attr<'a>(s: &'a str, attr: &str) -> Option<&'a str> {
+    let key = format!("{attr}=\"");
+    let at = s.find(&key)? + key.len();
+    Some(&s[at..at + s[at..].find('"')?])
+}
+
+/// One `<entry>`; `None` when a field is missing or malformed.
+fn feed_entry(e: &str) -> Option<FeedEntry> {
+    // "8-K - Apple Inc. (0000320193) (Filer)"
+    let title = decode_entities(element(e, "title")?);
+    let (form, rest) = title.split_once(" - ")?;
+    let open = rest
+        .rfind(" (Filer)")
+        .and_then(|end| rest[..end].rfind(" (").map(|o| (o, end)))?;
+    let cik = rest[open.0 + 2..open.1].strip_suffix(')')?.parse().ok()?;
+    let company = rest[..open.0].trim().to_string();
+    let summary = decode_entities(element(e, "summary")?);
+    let filed = summary
+        .split("Filed:</b>")
+        .nth(1)?
+        .split_whitespace()
+        .next()?;
+    let items = summary
+        .split("Item ")
+        .skip(1)
+        .filter_map(|s| s.split(':').next())
+        .map(str::trim)
+        .filter(|i| !i.is_empty() && i.chars().all(|c| c.is_ascii_digit() || c == '.'))
+        .map(String::from)
+        .collect();
+    let id = element(e, "id")?;
+    let accession = id.split("accession-number=").nth(1)?.trim().to_string();
+    let accepted_at = DateTime::parse_from_rfc3339(element(e, "updated")?.trim())
+        .ok()?
+        .with_timezone(&Utc);
+    let link = e.find("<link")?;
+    let index_url = attr(&e[link..], "href")?.to_string();
+    if !index_url.starts_with(ARCHIVES) || accession.len() != 20 {
+        return None;
     }
-    d.deserialize_seq(V)
-}
-
-/// EDGAR's `acceptanceDateTime` is RFC 3339 UTC (`2026-07-30T20:30:28.000Z`
-/// is Apple's 4:30 PM EDT release); callers convert to ET for dates.
-fn parse_accepted(s: &str) -> Option<DateTime<Utc>> {
-    DateTime::parse_from_rfc3339(s)
-        .ok()
-        .map(|t| t.with_timezone(&Utc))
-}
-
-pub fn parse_submissions(body: &str) -> Result<Submissions, ProviderError> {
-    let root: SubRoot =
-        serde_json::from_str(body).map_err(|e| ProviderError::Parse(e.to_string()))?;
-    let cik = match &root.cik {
-        serde_json::Value::String(s) => s.parse().ok(),
-        serde_json::Value::Number(n) => n.as_u64(),
-        _ => None,
-    }
-    .ok_or_else(|| ProviderError::Parse("submissions: bad cik".into()))?;
-    let r = root.filings.recent;
-    let col = |v: &Vec<String>, i: usize| v.get(i).cloned().unwrap_or_default();
-    let mut recent = Vec::with_capacity(r.accession_number.len());
-    for i in 0..r.accession_number.len() {
-        // A row without a readable acceptance time cannot be dated; skip it.
-        let Some(accepted_at) = r
-            .acceptance_date_time
-            .get(i)
-            .and_then(|s| parse_accepted(s))
-        else {
-            continue;
-        };
-        recent.push(RecentFiling {
-            accession: col(&r.accession_number, i),
-            form: col(&r.form, i),
-            items: col(&r.items, i),
-            filing_date: col(&r.filing_date, i),
-            report_date: col(&r.report_date, i),
-            accepted_at,
-            primary_doc: col(&r.primary_document, i),
-        });
-    }
-    Ok(Submissions {
+    Some(FeedEntry {
+        form: form.trim().to_string(),
         cik,
-        name: root.name,
-        tickers: root.tickers,
-        recent,
+        company,
+        accession,
+        filing_date: filed.to_string(),
+        items,
+        accepted_at,
+        index_url,
     })
+}
+
+/// Entries of one current-filings feed page, in feed order. Plain string
+/// scanning of a ~70 KB page: no JSON or XML tree, so a poll's CPU stays
+/// well inside the Free plan's 10 ms.
+pub fn parse_current_feed(xml: &str) -> Result<Vec<FeedEntry>, ProviderError> {
+    if !xml.contains("<feed") {
+        return Err(ProviderError::Parse("not an Atom feed".into()));
+    }
+    Ok(xml
+        .split("<entry>")
+        .skip(1)
+        .filter_map(|e| feed_entry(e.split("</entry>").next()?))
+        .collect())
 }
 
 fn re(p: &str) -> Regex {
@@ -373,9 +346,8 @@ pub fn html_to_text(html: &str) -> String {
 
 #[async_trait(?Send)]
 impl<H: Http, T: Timer> Filings for Edgar<H, T> {
-    async fn submissions(&self, cik: u64) -> Result<Submissions, ProviderError> {
-        let url = format!("https://data.sec.gov/submissions/CIK{}.json", cik10(cik));
-        parse_submissions(&self.get(&url).await?)
+    async fn current_filings(&self, start: usize) -> Result<Vec<FeedEntry>, ProviderError> {
+        parse_current_feed(&self.get(&current_feed_url(start)).await?)
     }
 
     async fn filing_docs(
@@ -424,8 +396,7 @@ pub(crate) mod tests {
     use std::cell::RefCell;
     use std::collections::HashMap;
 
-    pub(crate) const SUBMISSIONS: &str =
-        include_str!("../tests/fixtures/edgar_submissions_AAPL.json");
+    pub(crate) const FEED: &str = include_str!("../tests/fixtures/edgar_current_8k.atom");
     pub(crate) const INDEX: &str = include_str!("../tests/fixtures/edgar_index_AAPL.htm");
     pub(crate) const EX991: &str = include_str!("../tests/fixtures/edgar_ex991_AAPL.htm");
 
@@ -482,7 +453,7 @@ pub(crate) mod tests {
         }
     }
 
-    const SUB_URL: &str = "https://data.sec.gov/submissions/CIK0000320193.json";
+    const FEED_URL: &str = "https://www.sec.gov/cgi-bin/browse-edgar?action=getcurrent&type=8-K&company=&dateb=&owner=include&start=0&count=100&output=atom";
     const IDX_URL: &str = "https://www.sec.gov/Archives/edgar/data/320193/000032019326000070/0000320193-26-000070-index.htm";
     const EX_URL: &str = "https://www.sec.gov/Archives/edgar/data/320193/000032019326000070/a8-kex991q4202609262026.htm";
     const CC_URL: &str = "https://data.sec.gov/api/xbrl/companyconcept/CIK0000320193/us-gaap/EarningsPerShareDiluted.json";
@@ -498,79 +469,68 @@ pub(crate) mod tests {
         Edgar::new(http, RecTimer::default(), "ops@prebell.ai").unwrap()
     }
 
-    #[tokio::test]
-    async fn submissions_zip_columns() {
-        let e = edgar(&[(SUB_URL, 200, SUBMISSIONS)]);
-        let s = e.submissions(320193).await.unwrap();
-        assert_eq!(s.cik, 320193);
-        assert_eq!(s.tickers, vec!["AAPL"]);
-        assert_eq!(s.recent.len(), 7);
-        let f = &s.recent[1];
-        assert_eq!(f.accession, "0000320193-26-000070");
-        assert_eq!(f.form, "8-K");
-        assert_eq!(f.items, "2.02,9.01");
-        assert_eq!(f.primary_doc, "aapl-20261030.htm");
-        // EDGAR's acceptanceDateTime is UTC: 20:30:41Z is 16:30:41 EDT.
+    #[test]
+    fn feed_entries_parse() {
+        let f = parse_current_feed(FEED).unwrap();
+        assert_eq!(f.len(), 4);
+        let a = &f[0];
+        assert_eq!(a.form, "8-K");
+        assert_eq!(a.cik, 320193);
+        assert_eq!(a.company, "Apple Inc.");
+        assert_eq!(a.accession, "0000320193-26-000070");
+        assert_eq!(a.filing_date, "2026-10-30");
+        assert_eq!(a.items, ["2.02", "9.01"]);
+        assert_eq!(a.index_url, IDX_URL);
+        // `updated` is the acceptance time in ET with its offset: 16:30:41
+        // EDT is 20:30:41Z (it matches the index page's "Accepted").
         assert_eq!(
-            f.accepted_at,
+            a.accepted_at,
             "2026-10-30T20:30:41Z".parse::<DateTime<Utc>>().unwrap()
         );
-    }
-
-    #[test]
-    fn acceptance_time_is_utc() {
-        let et_time = |s: &str| {
-            crate::clock::et(parse_accepted(s).unwrap())
-                .format("%Y-%m-%d %H:%M:%S")
-                .to_string()
-        };
-        // Apple's 4:30 PM ET releases, as EDGAR lists them (EDT, then EST).
-        assert_eq!(et_time("2026-07-30T20:30:28.000Z"), "2026-07-30 16:30:28");
-        assert_eq!(et_time("2026-01-29T21:30:33.000Z"), "2026-01-29 16:30:33");
-        // After 8 PM ET the UTC date is the next day; the ET date is not.
-        assert_eq!(et_time("2026-10-31T00:45:00.000Z"), "2026-10-30 20:45:00");
+        // Real entries: Meta (no 2.02), an 8-K/A, an entity decoded.
+        let meta = &f[2];
         assert_eq!(
-            parse_accepted("2026-10-31T00:45:00.000Z"),
-            Some("2026-10-31T00:45:00Z".parse().unwrap())
+            (meta.cik, meta.company.as_str()),
+            (1326801, "Meta Platforms, Inc.")
         );
-        assert_eq!(parse_accepted("2026-10-31 00:45"), None);
+        assert_eq!(meta.items, ["1.01", "3.03", "5.03", "9.01"]);
+        assert_eq!(
+            meta.accepted_at,
+            "2026-10-29T21:08:00Z".parse::<DateTime<Utc>>().unwrap()
+        );
+        assert_eq!(f[3].form, "8-K/A");
+        let w = parse_current_feed(&FEED.replace("KOSS CORP", "W&amp;T OFFSHORE INC")).unwrap();
+        assert_eq!(w[1].company, "W&T OFFSHORE INC");
     }
 
     #[test]
-    fn submissions_keep_only_the_newest_rows() {
-        // Big filers list up to 1,000 recent rows; only the newest matter
-        // (the detection window is 96 h), and the rest are skipped unparsed
-        // to stay inside the Free plan's CPU budget.
-        let n = MAX_RECENT_ROWS + 50;
-        let col = |f: &dyn Fn(usize) -> String| {
-            let v: Vec<String> = (0..n).map(f).collect();
-            serde_json::to_string(&v).unwrap()
-        };
-        let body = format!(
-            r#"{{"cik":"1","name":"X","tickers":["X"],"filings":{{"recent":{{
-            "accessionNumber":{},"form":{},"items":{},"filingDate":{},"reportDate":{},
-            "acceptanceDateTime":{},"primaryDocument":{}}}}}}}"#,
-            col(&|i| format!("0000000001-26-{i:06}")),
-            col(&|_| "4".into()),
-            col(&|_| String::new()),
-            col(&|_| "2026-10-30".into()),
-            col(&|_| "2026-10-30".into()),
-            col(&|_| "2026-10-30T20:30:41.000Z".into()),
-            col(&|_| "x.htm".into()),
-        );
-        let s = parse_submissions(&body).unwrap();
-        assert_eq!(s.recent.len(), MAX_RECENT_ROWS);
-        assert_eq!(s.recent[0].accession, "0000000001-26-000000");
+    fn feed_shapes() {
+        // An empty page is fine; a page that is not a feed is an error.
+        let empty = "<?xml version=\"1.0\"?><feed xmlns=\"http://www.w3.org/2005/Atom\"><title>Latest Filings</title></feed>";
+        assert_eq!(parse_current_feed(empty), Ok(vec![]));
+        assert!(matches!(
+            parse_current_feed("<html>maintenance</html>"),
+            Err(ProviderError::Parse(_))
+        ));
+        // An entry missing a field is skipped, not guessed.
+        let broken = FEED.replacen("<updated>2026-10-30T16:30:41-04:00</updated>", "", 1);
+        assert_eq!(parse_current_feed(&broken).unwrap().len(), 3);
+    }
+
+    #[test]
+    fn feed_url_pages() {
+        assert_eq!(current_feed_url(0), FEED_URL);
+        assert!(current_feed_url(200).contains("&start=200&count=100&"));
     }
 
     #[tokio::test]
     async fn user_agent_and_pacing() {
         let e = edgar(&[
-            (SUB_URL, 200, SUBMISSIONS),
+            (FEED_URL, 200, FEED),
             (IDX_URL, 200, INDEX),
             (EX_URL, 200, EX991),
         ]);
-        e.submissions(320193).await.unwrap();
+        assert_eq!(e.current_filings(0).await.unwrap().len(), 4);
         e.filing_docs(320193, "0000320193-26-000070").await.unwrap();
         e.document_text(EX_URL).await.unwrap();
         let seen = e.http.seen.borrow();
@@ -586,22 +546,22 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn oversized_bodies_are_not_read() {
         let big = "x".repeat(MAX_BYTES + 1);
-        let e = edgar(&[(SUB_URL, 200, &big)]);
+        let e = edgar(&[(FEED_URL, 200, &big)]);
         assert_eq!(
-            e.submissions(320193).await,
+            e.current_filings(0).await,
             Err(ProviderError::TooLarge(MAX_BYTES))
         );
     }
 
     #[tokio::test]
     async fn http_errors() {
-        let e = edgar(&[(SUB_URL, 403, "Request Rate Threshold Exceeded")]);
-        assert_eq!(e.submissions(320193).await, Err(ProviderError::Http(403)));
-        let e = edgar(&[(SUB_URL, 429, "")]);
-        assert_eq!(e.submissions(320193).await, Err(ProviderError::Http(429)));
-        let e = edgar(&[(SUB_URL, 200, "<html>maintenance</html>")]);
+        let e = edgar(&[(FEED_URL, 403, "Request Rate Threshold Exceeded")]);
+        assert_eq!(e.current_filings(0).await, Err(ProviderError::Http(403)));
+        let e = edgar(&[(FEED_URL, 429, "")]);
+        assert_eq!(e.current_filings(0).await, Err(ProviderError::Http(429)));
+        let e = edgar(&[(FEED_URL, 200, "<html>maintenance</html>")]);
         assert!(matches!(
-            e.submissions(320193).await,
+            e.current_filings(0).await,
             Err(ProviderError::Parse(_))
         ));
     }

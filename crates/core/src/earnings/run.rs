@@ -1,6 +1,7 @@
 //! The earnings run state machine. Every 5-minute firing in the polling
-//! window runs `poll_job` (detect new 8-K Item 2.02 filings for one batch of
-//! the watchlist), which asks for follow-up messages: `build_tick` (write at
+//! window runs `poll_job` (read EDGAR's current 8-K feed back to the last
+//! poll and detect watchlist Item 2.02 filings), which asks for follow-up
+//! messages: `build_tick` (write at
 //! most one queued filing, or retry its Chinese draft) and the daily
 //! calendar refresh, each in its own invocation with its own subrequest
 //! budget. The run key `earnings:{TICKER}:{accession}` is the idempotency
@@ -10,15 +11,16 @@ use chrono::{DateTime, Duration, SecondsFormat, Utc};
 
 use crate::clock::et;
 use crate::earnings::charts::{charts, r2_key};
-use crate::earnings::detect::{earnings_filings, ticker_matches};
+use crate::earnings::detect::{domestic_by_cik, earnings_entries};
 use crate::earnings::draft::{slug, write, CONTENT_TYPE, TEMPLATE_ID};
 use crate::earnings::extract::{extract, Extracted};
 use crate::earnings::facts::{missing_required, EarningsFacts, Metrics};
 use crate::earnings::store::{ChartRow, EarningsStore, FilingRow};
 use crate::earnings::xbrl::fetch_trend;
-use crate::earnings::{find, in_window, poll_batch};
-use crate::edgar::{exhibit_991, filing_url, Filings};
+use crate::earnings::{find, in_window, WatchEntry};
+use crate::edgar::{exhibit_991, filing_url, FeedEntry, Filings, FEED_PAGE};
 use crate::facts::{Field, NewsReason};
+use crate::jobs::alert_once_today;
 use crate::numbers::Lang;
 use crate::providers::{LlmProvider, ProviderError};
 use crate::run::TickOutcome;
@@ -36,13 +38,20 @@ const LATE_DETECTION_HOURS: i64 = 1;
 /// Chinese retries stop this long after acceptance.
 const ZH_DEADLINE_HOURS: i64 = 24;
 /// A poll message older than one firing interval is dropped: after a
-/// backlog the next firing polls its own batch.
+/// backlog the next firing reads the feed anyway.
 pub const MAX_POLL_LAG_MINUTES: i64 = 5;
+/// Feed pages one poll reads at most (300 filings, far more than EDGAR
+/// accepts in 5 minutes even at the peak of earnings season).
+pub const MAX_FEED_PAGES: usize = 3;
+/// kv key: the newest feed acceptance time a poll read (RFC 3339).
+pub const KV_FEED_WATERMARK: &str = "edgar_feed_watermark";
 
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct PollOutcome {
-    /// Companies whose submissions were read.
+    /// Feed entries read.
     pub checked: usize,
+    /// Feed pages read.
+    pub pages: usize,
     /// Run keys of newly detected filings.
     pub detected: Vec<String>,
     /// Per-company problems (provider errors, ticker mismatches).
@@ -69,9 +78,33 @@ fn parse_iso(s: &str) -> Option<DateTime<Utc>> {
         .map(|t| t.with_timezone(&Utc))
 }
 
-/// Polls the watchlist batch of the firing at `now` for new earnings filings. A provider
-/// error skips that company; 403/429 (SEC throttling) stops the batch. A
-/// store error aborts the tick.
+/// The filing row for a detected feed entry.
+fn filing_row(f: &FeedEntry, w: &WatchEntry, now: DateTime<Utc>) -> FilingRow {
+    FilingRow {
+        accession: f.accession.clone(),
+        cik: f.cik,
+        ticker: w.ticker.to_string(),
+        form: f.form.clone(),
+        items: f.items.join(","),
+        filing_date: f.filing_date.clone(),
+        // The feed has no period of report; nothing reads it.
+        report_date: f.filing_date.clone(),
+        accepted_at: iso(f.accepted_at),
+        primary_doc: String::new(),
+        run_key: run_key(w.ticker, &f.accession),
+        state: "open".into(),
+        detected_at: iso(now),
+    }
+}
+
+/// Reads EDGAR's current 8-K feed, newest first, back to the watermark (the
+/// newest acceptance time the last poll read): further pages only while a
+/// full page is still newer than it, at most `MAX_FEED_PAGES`. Without a
+/// watermark one page is read. Watchlist Item 2.02 filings are recorded
+/// (the accession is the idempotency key). The watermark advances when the
+/// read reached it or hit the page cap (logged as a possible gap); after an
+/// error (403/429 stops the poll) it stays, so the next poll re-reads the
+/// range. A store error aborts the tick.
 pub async fn poll_tick(
     now: DateTime<Utc>,
     es: &dyn EarningsStore,
@@ -82,61 +115,70 @@ pub async fn poll_tick(
     if !in_window(now) {
         return Ok(out);
     }
-    for entry in poll_batch(now) {
-        let sub = match filings.submissions(entry.cik).await {
-            Ok(s) => s,
+    let watermark = es
+        .kv_get(KV_FEED_WATERMARK)
+        .await?
+        .and_then(|t| parse_iso(&t));
+    let mut entries: Vec<FeedEntry> = Vec::new();
+    let mut complete = false;
+    for page in 0..MAX_FEED_PAGES {
+        let list = match filings.current_filings(page * FEED_PAGE).await {
+            Ok(l) => l,
             Err(e) => {
-                out.errors.push(format!("{}: {e}", entry.ticker));
-                if matches!(e, ProviderError::Http(403 | 429)) {
-                    out.throttled = true;
-                    break;
-                }
-                continue;
+                out.errors.push(format!("current filings page {page}: {e}"));
+                out.throttled = matches!(e, ProviderError::Http(403 | 429));
+                break;
             }
         };
-        out.checked += 1;
-        if !ticker_matches(&sub, &entry) {
+        out.pages += 1;
+        out.checked += list.len();
+        let full = list.len() >= FEED_PAGE;
+        let oldest = list.iter().map(|f| f.accepted_at).min();
+        entries.extend(list);
+        let more = match (watermark, oldest) {
+            (Some(w), Some(o)) => full && o > w,
+            _ => false,
+        };
+        if !more {
+            complete = true;
+            break;
+        }
+        if page + 1 == MAX_FEED_PAGES {
             out.errors.push(format!(
-                "{}: CIK {} lists tickers {:?}; fix data/watchlist.tsv",
-                entry.ticker, entry.cik, sub.tickers
+                "current filings: {MAX_FEED_PAGES} pages did not reach the last poll; older filings may be missed"
             ));
+            complete = true;
+        }
+    }
+    let watch = domestic_by_cik();
+    for (f, w) in earnings_entries(&entries, &watch, now) {
+        let row = filing_row(f, &w, now);
+        let key = row.run_key.clone();
+        // Calendar first and on every sighting (idempotent), so a failed
+        // write after the insert cannot leave the calendar unmarked.
+        crate::earnings::calendar::record_filing(es, &row, now).await?;
+        if !es.insert_filing(&row).await? {
             continue;
         }
-        for f in earnings_filings(&sub, now) {
-            let key = run_key(entry.ticker, &f.accession);
-            let row = FilingRow {
-                accession: f.accession.clone(),
-                cik: entry.cik,
-                ticker: entry.ticker.to_string(),
-                form: f.form.clone(),
-                items: f.items.clone(),
-                filing_date: f.filing_date.clone(),
-                report_date: f.report_date.clone(),
-                accepted_at: iso(f.accepted_at),
-                primary_doc: f.primary_doc.clone(),
-                run_key: key.clone(),
-                state: "open".into(),
-                detected_at: iso(now),
-            };
-            // Calendar first and on every sighting (idempotent), so a failed
-            // write after the insert cannot leave the calendar unmarked.
-            crate::earnings::calendar::record_filing(es, &row, now).await?;
-            if !es.insert_filing(&row).await? {
-                continue;
-            }
-            if store.get_run(&key).await?.is_none() {
-                store.upsert_run(&new_run(&row, now)).await?;
-            }
-            out.detected.push(key);
+        if store.get_run(&key).await?.is_none() {
+            store.upsert_run(&new_run(&row, now)).await?;
+        }
+        out.detected.push(key);
+    }
+    let newest = entries.iter().map(|f| f.accepted_at).max();
+    if let (true, Some(n)) = (complete, newest) {
+        if watermark.is_none_or(|w| n > w) {
+            es.kv_set(KV_FEED_WATERMARK, &iso(n), &iso(now)).await?;
         }
     }
     Ok(out)
 }
 
-/// One `earnings` queue message: drops it when stale, else polls the batch
-/// of its firing time `fired` and lists the follow-up messages: one build
-/// per new filing (or one while any filing is still open, for retries and
-/// Chinese drafts) and the calendar refresh until it ran today.
+/// One `earnings` queue message: drops it when stale, else polls the feed,
+/// alerts once per ET day when SEC refuses (403/429), and lists the
+/// follow-up messages: one build per new filing (or one while any filing is
+/// still open, for retries and Chinese drafts) and the calendar refresh
+/// until it ran today.
 pub async fn poll_job(
     now: DateTime<Utc>,
     fired: Option<DateTime<Utc>>,
@@ -151,7 +193,14 @@ pub async fn poll_job(
             ..Default::default()
         });
     }
-    let mut out = poll_tick(fired, es, store, filings).await?;
+    let mut out = poll_tick(now, es, store, filings).await?;
+    if out.throttled {
+        let msg = format!(
+            "SEC EDGAR refused requests (403/429); polling stopped for this firing: {}",
+            out.errors.last().cloned().unwrap_or_default()
+        );
+        alert_once_today(now, "sec-throttled", "error", &msg, store).await?;
+    }
     if !in_window(now) {
         return Ok(out);
     }
@@ -728,10 +777,8 @@ mod tests {
     use crate::earnings::draft::tests::reply;
     use crate::earnings::store::MemEarningsStore;
     use crate::earnings::xbrl::tests::aapl_concept;
-    use crate::edgar::tests::{EX991, INDEX, SUBMISSIONS};
-    use crate::edgar::{
-        html_to_text, parse_filing_index, parse_submissions, Concept, FilingDoc, Submissions,
-    };
+    use crate::edgar::tests::{EX991, FEED, INDEX};
+    use crate::edgar::{html_to_text, parse_current_feed, parse_filing_index, Concept, FilingDoc};
     use crate::store::MemStore;
     use async_trait::async_trait;
     use serde_json::Value;
@@ -747,31 +794,25 @@ mod tests {
         s.parse().unwrap()
     }
 
-    /// Serves the AAPL fixtures for CIK 320193; every other CIK has no
-    /// filings, or the configured error.
+    /// Serves feed pages by start offset (the fixture at 0 unless set;
+    /// later pages empty) and the AAPL filing documents; records each page
+    /// requested.
     #[derive(Default)]
     struct FakeFilings {
-        sub_calls: RefCell<Vec<u64>>,
-        errors: HashMap<u64, ProviderError>,
+        pages: RefCell<HashMap<usize, Result<String, ProviderError>>>,
+        page_calls: RefCell<Vec<usize>>,
         no_exhibit: Cell<bool>,
     }
     #[async_trait(?Send)]
     impl Filings for FakeFilings {
-        async fn submissions(&self, cik: u64) -> Result<Submissions, ProviderError> {
-            self.sub_calls.borrow_mut().push(cik);
-            if let Some(e) = self.errors.get(&cik) {
-                return Err(e.clone());
-            }
-            if cik == 320193 {
-                return parse_submissions(SUBMISSIONS);
-            }
-            let e = crate::earnings::by_cik(cik).unwrap();
-            Ok(Submissions {
-                cik,
-                name: e.name.into(),
-                tickers: vec![e.ticker.replace('.', "-")],
-                recent: vec![],
-            })
+        async fn current_filings(&self, start: usize) -> Result<Vec<FeedEntry>, ProviderError> {
+            self.page_calls.borrow_mut().push(start);
+            let body = match self.pages.borrow().get(&start).cloned() {
+                Some(r) => r?,
+                None if start == 0 => FEED.to_string(),
+                None => feed(&[]),
+            };
+            parse_current_feed(&body)
         }
         async fn filing_docs(&self, _: u64, _: &str) -> Result<Vec<FilingDoc>, ProviderError> {
             if self.no_exhibit.get() {
@@ -789,6 +830,41 @@ mod tests {
         ) -> Result<Option<Concept>, ProviderError> {
             Ok(aapl_concept(tag))
         }
+    }
+
+    /// An Atom page in the feed's shape: `(cik, accession, accepted, items)`.
+    fn feed(entries: &[(u64, String, DateTime<Utc>, &str)]) -> String {
+        let mut out = String::from("<?xml version=\"1.0\"?><feed xmlns=\"http://www.w3.org/2005/Atom\"><title>Latest Filings</title>\n");
+        for (cik, acc, at, items) in entries {
+            let nodash = acc.replace('-', "");
+            let lines: String = items
+                .split(',')
+                .filter(|i| !i.is_empty())
+                .map(|i| format!("&lt;br&gt;Item {i}: Something\n"))
+                .collect();
+            out.push_str(&format!(
+                "<entry>\n<title>8-K - Co (00{cik:08}) (Filer)</title>\n<link rel=\"alternate\" type=\"text/html\" href=\"https://www.sec.gov/Archives/edgar/data/{cik}/{nodash}/{acc}-index.htm\"/>\n<summary type=\"html\">\n &lt;b&gt;Filed:&lt;/b&gt; {} &lt;b&gt;AccNo:&lt;/b&gt; {acc}\n{lines}</summary>\n<updated>{}</updated>\n<id>urn:tag:sec.gov,2008:accession-number={acc}</id>\n</entry>\n",
+                et(*at).format("%Y-%m-%d"),
+                at.to_rfc3339()
+            ));
+        }
+        out.push_str("</feed>");
+        out
+    }
+
+    /// A full page of non-watchlist filings, one a minute back from `newest`.
+    fn full_page(newest: DateTime<Utc>, tag: usize) -> String {
+        let e: Vec<_> = (0..FEED_PAGE)
+            .map(|i| {
+                (
+                    1_u64,
+                    format!("0000000001-26-{tag}{i:05}"),
+                    newest - Duration::minutes(i as i64),
+                    "8.01",
+                )
+            })
+            .collect();
+        feed(&e)
     }
 
     struct FakeLlm {
@@ -831,16 +907,9 @@ mod tests {
         (base, es)
     }
 
-    /// A firing (from ET 16:45 on Fri 2026-10-30) whose batch contains AAPL.
+    /// 16:45 ET on Fri 2026-10-30, after the fixture's AAPL filing.
     fn poll_time() -> DateTime<Utc> {
-        let mut t = utc("2026-10-30T20:45:00Z");
-        while !crate::earnings::poll_batch(t)
-            .iter()
-            .any(|e| e.ticker == "AAPL")
-        {
-            t += Duration::minutes(5);
-        }
-        t
+        utc("2026-10-30T20:45:00Z")
     }
 
     #[tokio::test]
@@ -850,11 +919,19 @@ mod tests {
         let t = poll_time();
         let o = poll_tick(t, &es, base.as_ref(), &fl).await.unwrap();
         assert_eq!(o.detected, vec![KEY.to_string()]);
-        assert!(o.checked <= crate::earnings::watchlist::BATCH);
-        assert_eq!(fl.sub_calls.borrow().len(), o.checked);
+        // No watermark yet: one page.
+        assert_eq!((o.pages, o.checked), (1, 4));
         assert_eq!(base.runs.borrow()[KEY].status, "pending");
         assert_eq!(base.runs.borrow()[KEY].trading_date, "2026-10-30");
-        // Next cycle: same accession, nothing new.
+        let f = es.filings.borrow()[ACC].clone();
+        assert_eq!((f.ticker.as_str(), f.items.as_str()), ("AAPL", "2.02,9.01"));
+        assert_eq!(f.accepted_at, "2026-10-30T20:30:41Z");
+        // The watermark is the newest acceptance read.
+        assert_eq!(
+            es.kv_get(KV_FEED_WATERMARK).await.unwrap().as_deref(),
+            Some("2026-10-30T20:30:41Z")
+        );
+        // Next firing: the same accession again, nothing new.
         let o = poll_tick(t + Duration::minutes(5), &es, base.as_ref(), &fl)
             .await
             .unwrap();
@@ -871,26 +948,117 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn an_entry_on_two_pages_is_one_filing() {
+        // Entries shift between pages while EDGAR adds filings.
+        let (base, es) = stores();
+        let t = poll_time();
+        es.kv_set(KV_FEED_WATERMARK, "2026-10-30T10:00:00Z", "x")
+            .await
+            .unwrap();
+        let fl = FakeFilings::default();
+        let aapl = (
+            320193_u64,
+            ACC.to_string(),
+            utc("2026-10-30T20:30:41Z"),
+            "2.02,9.01",
+        );
+        let mut first: Vec<_> = (0..FEED_PAGE - 1)
+            .map(|i| {
+                (
+                    1_u64,
+                    format!("0000000001-26-9{i:05}"),
+                    t - Duration::seconds(i as i64),
+                    "8.01",
+                )
+            })
+            .collect();
+        first.push(aapl.clone());
+        fl.pages.borrow_mut().insert(0, Ok(feed(&first)));
+        fl.pages.borrow_mut().insert(FEED_PAGE, Ok(feed(&[aapl])));
+        let o = poll_tick(t, &es, base.as_ref(), &fl).await.unwrap();
+        assert_eq!(o.pages, 2);
+        assert_eq!(o.detected, [KEY]);
+        assert_eq!(es.filings.borrow().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn pages_back_to_the_watermark_and_at_most_three() {
+        let t = poll_time();
+        // The watermark is inside page 2: pages 1 and 2 are read.
+        let (base, es) = stores();
+        es.kv_set(KV_FEED_WATERMARK, &iso(t - Duration::minutes(150)), "x")
+            .await
+            .unwrap();
+        let fl = FakeFilings::default();
+        fl.pages.borrow_mut().insert(0, Ok(full_page(t, 1)));
+        fl.pages
+            .borrow_mut()
+            .insert(FEED_PAGE, Ok(full_page(t - Duration::minutes(100), 2)));
+        let o = poll_tick(t, &es, base.as_ref(), &fl).await.unwrap();
+        assert_eq!(*fl.page_calls.borrow(), [0, FEED_PAGE]);
+        assert_eq!((o.pages, o.checked), (2, 2 * FEED_PAGE));
+        assert!(o.errors.is_empty(), "{:?}", o.errors);
+        assert_eq!(es.kv_get(KV_FEED_WATERMARK).await.unwrap(), Some(iso(t)));
+        // A watermark older than 3 full pages: 3 pages, then a logged gap;
+        // the watermark still moves to the newest filing read.
+        let (base, es) = stores();
+        es.kv_set(KV_FEED_WATERMARK, &iso(t - Duration::hours(12)), "x")
+            .await
+            .unwrap();
+        let fl = FakeFilings::default();
+        for p in 0..4 {
+            fl.pages.borrow_mut().insert(
+                p * FEED_PAGE,
+                Ok(full_page(t - Duration::minutes(100 * p as i64), p)),
+            );
+        }
+        let o = poll_tick(t, &es, base.as_ref(), &fl).await.unwrap();
+        assert_eq!(*fl.page_calls.borrow(), [0, FEED_PAGE, 2 * FEED_PAGE]);
+        assert!(o.errors[0].contains("may be missed"), "{:?}", o.errors);
+        assert_eq!(es.kv_get(KV_FEED_WATERMARK).await.unwrap(), Some(iso(t)));
+    }
+
+    #[tokio::test]
+    async fn throttling_stops_the_poll_keeps_the_watermark_and_alerts_once_a_day() {
+        let (base, es) = stores();
+        let t = poll_time();
+        let wm = iso(t - Duration::hours(2));
+        es.kv_set(KV_FEED_WATERMARK, &wm, "x").await.unwrap();
+        let fl = FakeFilings::default();
+        fl.pages.borrow_mut().insert(0, Ok(full_page(t, 1)));
+        fl.pages
+            .borrow_mut()
+            .insert(FEED_PAGE, Err(ProviderError::Http(403)));
+        let o = poll_job(t, Some(t), &es, base.as_ref(), &fl).await.unwrap();
+        assert!(o.throttled);
+        assert_eq!(
+            *fl.page_calls.borrow(),
+            [0, FEED_PAGE],
+            "no request after the 403"
+        );
+        // The range is re-read next time.
+        assert_eq!(es.kv_get(KV_FEED_WATERMARK).await.unwrap(), Some(wm));
+        fl.pages
+            .borrow_mut()
+            .insert(0, Err(ProviderError::Http(429)));
+        let later = t + Duration::minutes(5);
+        let o = poll_job(later, Some(later), &es, base.as_ref(), &fl)
+            .await
+            .unwrap();
+        assert!(o.throttled);
+        let alerts = base.alerts.borrow();
+        assert_eq!(alerts.len(), 1, "{alerts:?}");
+        assert_eq!(alerts[0].0, "sec-throttled:2026-10-30");
+        assert_eq!(alerts[0].1, "error");
+    }
+
+    #[tokio::test]
     async fn a_filing_after_8pm_et_keeps_its_et_date() {
         // 20:45 ET on Fri 2026-10-30 is 00:45Z on Saturday.
         let (base, es) = stores();
-        let mut sub = parse_submissions(SUBMISSIONS).unwrap();
-        sub.recent[1].accepted_at = utc("2026-10-31T00:45:00Z");
-        let f = earnings_filings(&sub, utc("2026-10-31T00:50:00Z"))[0].clone();
-        let row = FilingRow {
-            accession: f.accession.clone(),
-            cik: 320193,
-            ticker: "AAPL".into(),
-            form: f.form.clone(),
-            items: f.items.clone(),
-            filing_date: f.filing_date.clone(),
-            report_date: f.report_date.clone(),
-            accepted_at: iso(f.accepted_at),
-            primary_doc: f.primary_doc.clone(),
-            run_key: KEY.into(),
-            state: "open".into(),
-            detected_at: "2026-10-31T00:50:00Z".into(),
-        };
+        let mut f = parse_current_feed(FEED).unwrap()[0].clone();
+        f.accepted_at = utc("2026-10-31T00:45:00Z");
+        let row = filing_row(&f, &find("AAPL").unwrap(), utc("2026-10-31T00:50:00Z"));
         assert_eq!(trading_date(&row), "2026-10-30");
         crate::earnings::calendar::record_filing(&es, &row, utc("2026-10-31T00:50:00Z"))
             .await
@@ -917,12 +1085,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_poll_sends_at_most_34_requests_and_queues_one_build_per_filing() {
+    async fn a_poll_reads_the_feed_and_queues_one_build_per_filing() {
         let (base, es) = stores();
         let fl = FakeFilings::default();
         let t = poll_time();
         let o = poll_job(t, Some(t), &es, base.as_ref(), &fl).await.unwrap();
-        assert!(fl.sub_calls.borrow().len() <= 34);
+        assert!(fl.page_calls.borrow().len() <= MAX_FEED_PAGES);
         assert_eq!(o.detected, vec![KEY.to_string()]);
         // One build per new filing, plus the day's calendar refresh.
         assert_eq!(o.follow_ups, [EarningsStep::Build, EarningsStep::Calendar]);
@@ -958,27 +1126,15 @@ mod tests {
             .await
             .unwrap();
         assert!(o.stale);
-        assert!(fl.sub_calls.borrow().is_empty());
+        assert!(fl.page_calls.borrow().is_empty());
         assert!(o.follow_ups.is_empty());
-        // Within the lag it polls the batch of its firing time.
+        // Within the lag it polls.
         let now = fired + Duration::minutes(MAX_POLL_LAG_MINUTES);
         let o = poll_job(now, Some(fired), &es, base.as_ref(), &fl)
             .await
             .unwrap();
         assert!(!o.stale);
         assert_eq!(o.detected.len(), 1);
-    }
-
-    #[tokio::test]
-    async fn poll_stops_on_403_for_the_rest_of_the_invocation() {
-        let (base, es) = stores();
-        let t = poll_time();
-        let batch = crate::earnings::poll_batch(t);
-        let mut fl = FakeFilings::default();
-        fl.errors.insert(batch[2].cik, ProviderError::Http(403));
-        let o = poll_job(t, Some(t), &es, base.as_ref(), &fl).await.unwrap();
-        assert_eq!(fl.sub_calls.borrow().len(), 3);
-        assert!(o.throttled);
     }
 
     /// Counts every LLM call (each is one fetch subrequest).
@@ -1048,31 +1204,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(o, PollOutcome::default());
-        assert!(fl.sub_calls.borrow().is_empty());
-    }
-
-    #[tokio::test]
-    async fn one_company_error_does_not_stop_the_batch_but_throttling_does() {
-        let (base, es) = stores();
-        let t = poll_time();
-        let batch = crate::earnings::poll_batch(t);
-        let other = batch.iter().find(|e| e.ticker != "AAPL").unwrap().cik;
-        let mut fl = FakeFilings::default();
-        fl.errors
-            .insert(other, ProviderError::Network("reset".into()));
-        let o = poll_tick(t, &es, base.as_ref(), &fl).await.unwrap();
-        assert_eq!(o.errors.len(), 1);
-        assert_eq!(o.checked, batch.len() - 1);
-        assert_eq!(o.detected.len(), 1);
-
-        let (base, es) = stores();
-        let first = batch[0].cik;
-        let mut fl = FakeFilings::default();
-        fl.errors.insert(first, ProviderError::Http(429));
-        let o = poll_tick(t, &es, base.as_ref(), &fl).await.unwrap();
-        assert_eq!(fl.sub_calls.borrow().len(), 1, "stop after SEC throttles");
-        assert!(o.throttled);
-        assert_eq!(o.checked, 0);
+        assert!(fl.page_calls.borrow().is_empty());
     }
 
     async fn detected() -> (Rc<MemStore>, MemEarningsStore, FakeFilings) {

@@ -12,7 +12,7 @@ use prebell_core::competitor::run_competitor;
 use prebell_core::earnings::calendar::{refresh_tick, yahoo_seeding, CalendarSource};
 use prebell_core::earnings::run::{build_tick, poll_job};
 use prebell_core::edgar::Edgar;
-use prebell_core::jobs::{alert_once_today, redact, run_job, JobRunner};
+use prebell_core::jobs::{redact, run_job, JobRunner};
 use prebell_core::llm::{api_key_var, llm_from_env, unknown_provider};
 use prebell_core::providers::CountingHttp;
 use prebell_core::providers::LlmProvider;
@@ -217,16 +217,6 @@ impl JobRunner for Runner<'_> {
                 for e in &o.errors {
                     console_warn!("earnings poll: {e}");
                 }
-                if o.throttled {
-                    let msg = format!(
-                        "SEC EDGAR refused requests (403/429); polling stopped for this firing: {}",
-                        o.errors.last().cloned().unwrap_or_default()
-                    );
-                    if let Err(e) = alert_once_today(t, "sec-throttled", "error", &msg, store).await
-                    {
-                        console_error!("alert sec-throttled: {e}");
-                    }
-                }
                 let queue = env.queue(EARNINGS_QUEUE).map_err(|e| e.to_string());
                 for next in &o.follow_ups {
                     let sent = match &queue {
@@ -244,7 +234,8 @@ impl JobRunner for Runner<'_> {
                     }
                 }
                 Ok(format!(
-                    "checked {}, new {:?}, queued {:?}",
+                    "pages {}, entries {}, new {:?}, queued {:?}",
+                    o.pages,
                     o.checked,
                     o.detected,
                     o.follow_ups.iter().map(|s| s.job()).collect::<Vec<_>>()
