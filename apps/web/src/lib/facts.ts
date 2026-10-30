@@ -1,4 +1,4 @@
-import { dirOf, type Dir } from "./format";
+import { dirOf, round2, type Dir } from "./format";
 
 export type { Dir };
 
@@ -6,7 +6,7 @@ export interface QuoteView {
   symbol: string;
   last: number;
   changePct: number;
-  /** `last - prev_close`, 2 decimals. The only derived number the UI shows. */
+  /** `last - prev_close`, 2 decimals. The only derived number the UI shows. Display it with `fmtPoint(pointChange, dir)`. */
   pointChange: number;
   dir: Dir;
 }
@@ -43,10 +43,14 @@ export interface R2Like {
 
 type Kind = FactsView["kind"];
 
-/** Symbols per slot, lead first. The recap generator quotes ^NDX for Nasdaq. */
+/**
+ * Accepted symbols per slot, lead first; the first is the generator's own
+ * (the recap quotes ^NDX for Nasdaq) and names a Missing entry, which carries
+ * no symbol. A present quote always reports the symbol it actually has.
+ */
 const SLOTS: Record<Kind, string[][]> = {
   premarket: [["ES=F"], ["NQ=F"], ["YM=F"], ["RTY=F"]],
-  recap: [["^GSPC"], ["^IXIC", "^NDX"], ["^DJI"], ["^RUT"]],
+  recap: [["^GSPC"], ["^NDX", "^IXIC"], ["^DJI"], ["^RUT"]],
 };
 const LIST_KEY: Record<Kind, string> = { premarket: "futures", recap: "indexes" };
 
@@ -68,8 +72,6 @@ function str(v: unknown, what: string): string {
 function finite(v: unknown, what: string): number {
   return typeof v === "number" && Number.isFinite(v) ? v : fail(what);
 }
-
-const round2 = (n: number): number => Math.round(n * 100) / 100;
 
 function quoteView(v: unknown): QuoteView {
   const q = obj(v, "quote");
@@ -95,7 +97,7 @@ function indexViews(kind: Kind, list: unknown[]): IndexView[] {
   });
   return SLOTS[kind].map((symbols, i) => {
     const quote = entries.find((q) => q !== null && symbols.includes(q.symbol)) ?? entries[i] ?? null;
-    return { symbol: symbols[0], quote };
+    return { symbol: quote && symbols.includes(quote.symbol) ? quote.symbol : symbols[0], quote };
   });
 }
 
@@ -106,12 +108,13 @@ function moverView(v: unknown): MoverView {
   const r = first === undefined ? null : obj(first, "reason");
   const summary = r ? str(r.summary_en, "summary_en").trim() : "";
   const url = r ? str(r.url, "url") : "";
+  const safeUrl = /^https?:\/\//i.test(url) ? url : null;
   return {
     symbol: quote.symbol,
     name: str(m.name, "name"),
     quote,
     reason: summary || null,
-    reasonUrl: summary && url ? url : null,
+    reasonUrl: summary ? safeUrl : null,
   };
 }
 
@@ -135,14 +138,31 @@ export function parseFacts(kind: Kind, json: unknown): FactsView | null {
   }
 }
 
-/** Reads and parses one facts object. Never throws: any failure is null (callers fall back to markdown). */
-export async function loadFacts(bucket: R2Like | undefined, key: string | null, kind: Kind): Promise<FactsView | null> {
+/**
+ * Reads and parses one facts object. Never throws: any failure is null
+ * (callers fall back to markdown). `onError` hears about R2 errors, bad JSON
+ * and shape errors, so an outage or schema drift leaves a trace; a missing
+ * object or key is normal and silent. A throwing `onError` is ignored.
+ */
+export async function loadFacts(
+  bucket: R2Like | undefined,
+  key: string | null,
+  kind: Kind,
+  onError?: (error: unknown) => void,
+): Promise<FactsView | null> {
   if (!bucket || !key) return null;
+  const report = (e: unknown): null => {
+    try {
+      onError?.(e);
+    } catch {}
+    return null;
+  };
   try {
     const object = await bucket.get(key);
     if (!object) return null;
-    return parseFacts(kind, JSON.parse(await object.text()));
-  } catch {
-    return null;
+    const view = parseFacts(kind, JSON.parse(await object.text()));
+    return view ?? report(new Error(`facts ${key}: unexpected shape for ${kind}`));
+  } catch (e) {
+    return report(e);
   }
 }

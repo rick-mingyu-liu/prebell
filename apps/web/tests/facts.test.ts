@@ -67,6 +67,27 @@ describe("parseFacts premarket", () => {
     expect(r.others[0].quote!.last).toBe(28769.75);
   });
 
+  it("never yields negative zero point changes", () => {
+    const j = premarket();
+    const q = (j.futures as [string, { Value: Record<string, number> }][])[0][1].Value;
+    q.last = q.prev_close - 0.001;
+    const r = parseFacts("premarket", j)!;
+    expect(Object.is(r.lead.quote!.pointChange, 0)).toBe(true);
+  });
+
+  it("keeps only http(s) reason URLs", () => {
+    const j = premarket();
+    const g = j.gainers as { reasons: { url: string }[] }[];
+    g[0].reasons[0].url = "javascript:alert(1)";
+    g[1].reasons[0].url = "data:text/html,x";
+    g[2].reasons[0].url = "HTTP://example.com/a";
+    const r = parseFacts("premarket", j)!;
+    expect(r.gainers[0].reason).toBeTruthy();
+    expect(r.gainers[0].reasonUrl).toBeNull();
+    expect(r.gainers[1].reasonUrl).toBeNull();
+    expect(r.gainers[2].reasonUrl).toBe("HTTP://example.com/a");
+  });
+
   it("gives a mover without reasons null reason fields", () => {
     const j = premarket();
     (j.gainers as { reasons: unknown[] }[])[0].reasons = [];
@@ -87,9 +108,26 @@ describe("parseFacts recap", () => {
     expect(v.lead.quote!.dir).toBe("up");
     expect(v.lead.quote!.pointChange).toBe(39.72);
     expect(v.others).toHaveLength(3);
+    expect(v.others.map((o) => o.symbol)).toEqual(["^NDX", "^DJI", "^RUT"]);
+    expect(v.others.map((o) => o.quote!.symbol)).toEqual(["^NDX", "^DJI", "^RUT"]);
     expect(v.others[0].quote!.last).toBe(25410.55);
     expect(v.others[1].quote!.dir).toBe("flat");
     expect(v.others[2].quote!.dir).toBe("down");
+  });
+
+  it("reports the symbol the facts carry, so an ^IXIC entry stays ^IXIC", () => {
+    const j = recap();
+    ((j.indexes as [string, { Value: Record<string, unknown> }][])[1][1].Value).symbol = "^IXIC";
+    const r = parseFacts("recap", j)!;
+    expect(r.others[0].symbol).toBe("^IXIC");
+    expect(r.others[0].quote!.symbol).toBe("^IXIC");
+  });
+
+  it("names a Missing Nasdaq slot ^NDX, the generator's symbol", () => {
+    const j = recap();
+    const idx = j.indexes as [string, unknown][];
+    idx[1] = [idx[1][0], { Missing: { reason: "x" } }];
+    expect(parseFacts("recap", j)!.others[0]).toEqual({ symbol: "^NDX", quote: null });
   });
 
   it("reads movers", () => {
@@ -111,6 +149,12 @@ describe("preview facts", () => {
 });
 
 describe("parseFacts errors", () => {
+  it("returns null when a number is null (serde writes NaN as null)", () => {
+    const j = premarket();
+    (j.futures as [string, { Value: Record<string, unknown> }][])[0][1].Value.change_pct = null;
+    expect(parseFacts("premarket", j)).toBeNull();
+  });
+
   it("returns null on any shape error", () => {
     expect(parseFacts("premarket", null)).toBeNull();
     expect(parseFacts("premarket", "x")).toBeNull();
@@ -157,6 +201,23 @@ describe("loadFacts", () => {
     expect(await loadFacts(b, "k", "premarket")).toBeNull();
     const sync: R2Like = { get: () => { throw new Error("r2 down"); } };
     expect(await loadFacts(sync, "k", "premarket")).toBeNull();
+  });
+  it("reports R2 errors, bad JSON and shape errors to onError, but not a missing object", async () => {
+    const errs: unknown[] = [];
+    const onError = (e: unknown) => errs.push(e);
+    const boom = new Error("r2 down");
+    await loadFacts({ get: async () => { throw boom; } }, "k", "premarket", onError);
+    await loadFacts(bucket("{not json"), "k", "premarket", onError);
+    await loadFacts(bucket("{}"), "k", "premarket", onError);
+    expect(errs).toHaveLength(3);
+    expect(errs[0]).toBe(boom);
+    await loadFacts(bucket(null), "k", "premarket", onError);
+    await loadFacts(bucket("{}"), null, "premarket", onError);
+    expect(errs).toHaveLength(3);
+  });
+  it("still returns null when onError throws", async () => {
+    const onError = () => { throw new Error("logger broke"); };
+    expect(await loadFacts(bucket("{not json"), "k", "premarket", onError)).toBeNull();
   });
   it("returns null without a key or bucket", async () => {
     expect(await loadFacts(bucket("{}"), null, "premarket")).toBeNull();
