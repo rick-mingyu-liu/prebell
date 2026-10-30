@@ -23,7 +23,8 @@ pub enum ContentJob {
 /// its own invocation and subrequest budget).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EarningsStep {
-    /// `earnings`, from the cron: poll one watchlist batch on EDGAR.
+    /// `earnings`, from the cron: read EDGAR's current 8-K feed back to
+    /// the last poll.
     Poll,
     /// `earnings:build`, queued by a poll: build at most one filing.
     Build,

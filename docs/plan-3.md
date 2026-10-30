@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** When a watchlist company files an 8-K with Item 2.02 on EDGAR, the generator finds it within minutes, pulls the Exhibit 99.1 press release, extracts the headline figures with verbatim quotes that code checks against the exhibit, adds GAAP history from XBRL `companyfacts`, draws GAAP-only SVG charts, and publishes an English + Simplified Chinese "earnings health check" that passes the number check. A calendar page shows upcoming report dates, marked confirmed only with primary proof.
+**Goal:** When a watchlist company files an 8-K with Item 2.02 on EDGAR, the generator finds it within minutes, pulls the Exhibit 99.1 press release, extracts the headline figures with verbatim quotes that code checks against the exhibit, adds GAAP history from XBRL `companyconcept`, draws GAAP-only SVG charts, and publishes an English + Simplified Chinese "earnings health check" that passes the number check. A calendar page shows upcoming report dates, marked confirmed only with primary proof.
 
 **Split:** Plan 3a = Tasks 1–7 and 10 (watchlist, EDGAR, detection, extraction, drafting, run state machine, Worker wiring). Plan 3b = Tasks 8, 9 and 11–12 (XBRL trend, charts, calendar, web pages). Both ship on `feat/plan-3-earnings`.
 
@@ -53,7 +53,7 @@ where a task says otherwise, this section wins.
 ## Global Constraints
 
 - Everything from Plan 1's Global Constraints (languages, ET schedule, UTC storage, missing data never guessed, EN-first/ZH-pending, no AlphaLab content, secrets only via `wrangler secret put`).
-- **SEC fair access:** every EDGAR request sends `User-Agent: PreBell/0.1 (+https://prebell.ai; <SEC_CONTACT>)` where `SEC_CONTACT` is the existing wrangler var. Requests are sequential with a pause of at least **125 ms** between them (≤ 8 req/s per invocation). Polling is spread: one tick polls one batch of at most **21** CIKs, so the 102 domestic watchlist companies cycle in 5 one-minute ticks.
+- **SEC fair access:** every EDGAR request sends `User-Agent: PreBell/0.1 (+https://prebell.ai; <SEC_CONTACT>)` where `SEC_CONTACT` is the existing wrangler var. Requests are sequential with a pause of at least **125 ms** between them (≤ 8 req/s per invocation). A poll reads EDGAR's current 8-K feed (`browse-edgar?action=getcurrent&type=8-K&count=100&output=atom`), newest first, back to the previous poll: 1-3 requests cover all 102 domestic watchlist companies every 5 minutes.
 - **Polling window:** weekdays **06:00 ≤ ET < 22:00** (spec: ~6 AM–9 PM, plus one hour of slack for late filers). Builds and ZH retries run in the same window.
 - **Detection rule:** form exactly `8-K` (not `8-K/A`), `items` contains `2.02`, accepted within the last **96 h** (covers a Saturday filing picked up Monday), accession not seen before. 6-K/20-F filers are `foreign` in the watchlist: calendar only, never polled, never auto-written.
 - **Quote-anchored figures:** a press-release figure is kept only if (a) its quote is ≥ 20 chars and appears in the fetched exhibit text (`anchor::verify_quote`), (b) its `amount` string appears inside that quote, and (c) `amount` parses to exactly one number. Anything else is `Missing { reason }`. A negative value needs a parenthesised amount, a minus sign, or the word "loss" in the quote.
@@ -82,7 +82,7 @@ where a task says otherwise, this section wins.
 
 ## Review Focus
 
-1. **Fair access and subrequest budget:** never more than 21 submissions requests per tick, ≥ 125 ms apart, descriptive UA on every EDGAR request (Task 3, 7).
+1. **Fair access and subrequest budget:** at most 3 current-feed requests per poll, ≥ 125 ms apart, descriptive UA on every EDGAR request (Task 3, 7).
 2. **No duplicate posts:** two ticks seeing the same accession, queue redelivery, or a re-run → one `earnings_filings` row, one post (Task 7).
 3. **Quote anchoring is the only path to a published figure:** a figure whose quote is paraphrased, whose amount is not in the quote, or whose scale is wrong never reaches facts (Task 5).
 4. **GAAP-only charts and the same-quarter trap:** when the company files its 10-Q the same day (e.g. Microsoft), the latest XBRL quarter *is* the current quarter and the release point must not be added twice (Task 8).
@@ -99,15 +99,15 @@ crates/core/
   data/watchlist.tsv                  # S&P 100 + a few foreign filers: ticker, CIK, filer kind, name, domains
   prompts/earnings_extract_v1.md      # figure extraction (quote-anchored)
   prompts/earnings_v1_en.md, earnings_v1_zh.md
-  src/edgar.rs                        # Filings trait + Edgar<H> (submissions, filing index, documents, companyfacts), Pause
+  src/edgar.rs                        # Filings trait + Edgar<H, T: Timer> (current 8-K feed, filing index, documents, companyconcept)
   src/yahoo_calendar.rs               # CalendarSource impl over Yahoo's earnings calendar HTML
   src/earnings/
-    mod.rs          # window, batches, re-exports
-    watchlist.rs    # WatchEntry, watchlist(), poll_batch()
-    detect.rs       # new 8-K Item 2.02 filings from a submissions doc
+    mod.rs          # re-exports
+    watchlist.rs    # WatchEntry, watchlist(), in_window()
+    detect.rs       # watchlist 8-K Item 2.02 entries of the feed; filer-name guard
     facts.rs        # EarningsFacts, Figure, gate, numbers allow-list
     extract.rs      # LLM extraction + verification against the exhibit text
-    xbrl.rs         # GAAP quarterly trend from companyfacts
+    xbrl.rs         # GAAP quarterly trend from companyconcept
     charts.rs       # SVG charts (plotters)
     draft.rs        # EN/ZH drafting with number check and markup filter
     store.rs        # EarningsStore trait, rows, MemEarningsStore
@@ -148,13 +148,12 @@ apps/web/
 **Files:** Create `crates/core/data/watchlist.tsv`, `src/earnings/mod.rs`, `src/earnings/watchlist.rs`.
 
 **Interfaces:**
-- `enum Filer { Domestic, Foreign }`; `struct WatchEntry { ticker: &'static str, cik: u64, filer: Filer, name: &'static str, domains: Vec<&'static str> }`
+- `enum Filer { Domestic, Foreign }`; `struct WatchEntry { ticker: &'static str, cik: u64, filer: Filer, name: &'static str, domains: Vec<&'static str>, sec: Option<&'static str> }` (`sec`: the EDGAR filer name when `name` starts differently)
 - `fn watchlist() -> Vec<WatchEntry>`; `fn find(ticker: &str) -> Option<WatchEntry>`; `fn by_cik(cik: u64) -> Option<WatchEntry>`
 - `fn cik10(cik: u64) -> String` (`320193` → `"0000320193"`)
 - `fn in_window(now: DateTime<Utc>) -> bool` — Mon–Fri, 06:00 ≤ ET < 22:00.
-- `fn poll_batch(now: DateTime<Utc>) -> Vec<WatchEntry>` — domestic entries chunked by `BATCH = 21`; chunk index = (minutes since ET midnight) mod chunk count.
 
-- [ ] **Step 1: Failing tests:** watchlist has ≥ 100 domestic entries, unique tickers and CIKs, every domestic entry has a domain; `cik10(320193) == "0000320193"`; `in_window` false at 05:59 ET and 22:00 ET and Saturday, true at 06:00 ET on both sides of the DST change (2026-10-30 10:00Z EDT, 2026-11-02 11:00Z EST); five consecutive minutes' `poll_batch` cover every domestic entry exactly once and no batch exceeds 21; foreign entries (e.g. `TM`) never appear in a batch.
+- [ ] **Step 1: Failing tests:** watchlist has ≥ 100 domestic entries, unique tickers and CIKs, every domestic entry has a domain; `cik10(320193) == "0000320193"`; `in_window` false at 05:59 ET and 22:00 ET and Saturday, true at 06:00 ET on both sides of the DST change (2026-10-30 10:00Z EDT, 2026-11-02 11:00Z EST).
 - [ ] **Step 2–4:** FAIL → implement → `cargo test -p prebell-core earnings::watchlist` PASS.
 - [ ] **Step 5: Commit** `feat(core): earnings watchlist and polling window`.
 
@@ -162,18 +161,18 @@ apps/web/
 
 ### Task 3: EDGAR provider (`core::edgar`)
 
-**Files:** Create `src/edgar.rs`; fixtures `tests/fixtures/edgar_submissions_AAPL.json`, `edgar_index_AAPL.htm`, `edgar_ex991_AAPL.htm`, `edgar_companyfacts_AAPL.json` (hand-written in the documented shapes; see the PR for why they are not recorded).
+**Files:** Create `src/edgar.rs`; fixtures `tests/fixtures/edgar_current_8k.atom` (a trimmed real feed page plus a synthetic Apple entry), `edgar_index_AAPL.htm`, `edgar_ex991_AAPL.htm` and `edgar_concept_AAPL_*.json` (synthetic, in the real shapes).
 
 **Interfaces:**
-- `#[async_trait(?Send)] trait Pause { async fn pause(&self, ms: u64); }`
-- `struct RecentFiling { accession: String, form: String, items: String, filing_date: String, report_date: String, accepted_at: DateTime<Utc>, primary_doc: String }`; `struct Submissions { cik: u64, name: String, tickers: Vec<String>, recent: Vec<RecentFiling> }`
+- Pacing uses `providers::Timer`; every request goes through `Http::get_capped` (2 MB).
+- `struct FeedEntry { form: String, cik: u64, company: String, accession: String, filing_date: String, items: Vec<String>, accepted_at: DateTime<Utc>, index_url: String }` — one Atom entry: title `8-K - COMPANY (CIK) (Filer)`, summary `Filed:` / `AccNo:` / `Item 2.02: ...`, `updated` (the acceptance time with its ET offset).
 - `struct FilingDoc { name: String, doc_type: String, url: String }`
-- `#[async_trait(?Send)] trait Filings { async fn submissions(&self, cik: u64) -> Result<Submissions, ProviderError>; async fn filing_docs(&self, cik: u64, accession: &str) -> Result<Vec<FilingDoc>, ProviderError>; async fn document_text(&self, url: &str) -> Result<String, ProviderError>; async fn company_facts(&self, cik: u64) -> Result<CompanyFacts, ProviderError>; }`
-- `struct Edgar<H: Http, P: Pause> { http, pause, user_agent }` with `Edgar::new(http, pause, contact) -> Result<Self, ProviderError>` (empty contact → `Parse("SEC_CONTACT is empty")`). URLs: `https://data.sec.gov/submissions/CIK{cik10}.json`, `https://www.sec.gov/Archives/edgar/data/{cik}/{acc-no-dashes}/{acc}-index.htm`, `https://data.sec.gov/api/xbrl/companyfacts/CIK{cik10}.json`.
+- `#[async_trait(?Send)] trait Filings { async fn current_filings(&self, start: usize) -> Result<Vec<FeedEntry>, ProviderError>; async fn filing_docs(&self, cik: u64, accession: &str) -> Result<Vec<FilingDoc>, ProviderError>; async fn document_text(&self, url: &str) -> Result<String, ProviderError>; async fn company_concept(&self, cik: u64, tag: &str) -> Result<Option<Concept>, ProviderError>; }`
+- `struct Edgar<H: Http, T: Timer> { http, timer, user_agent }` with `Edgar::new(http, timer, contact) -> Result<Self, ProviderError>` (empty contact → `Parse("SEC_CONTACT is empty")`). URLs: `current_feed_url(start)`, `https://www.sec.gov/Archives/edgar/data/{cik}/{acc-no-dashes}/{acc}-index.htm`, `https://data.sec.gov/api/xbrl/companyconcept/CIK{cik10}/us-gaap/{tag}.json`.
 - `fn filing_url(cik, accession) -> String` (the `-index.htm` page, linked from posts); `fn exhibit_991(docs: &[FilingDoc]) -> Option<&FilingDoc>` (type `EX-99.1`, else the first `EX-99*` HTML/text exhibit); `fn html_to_text(html: &str) -> String` (drops `<script>/<style>`, turns block tags and `<td>` into separators, decodes entities via the anchor normaliser rules, collapses whitespace).
-- `CompanyFacts` keeps only the concepts Task 8 needs (typed serde struct; other concepts are skipped without allocation — the real file is several MB).
+- `Concept` keeps only the unit tables of one `companyconcept` document (`companyfacts` is never fetched: it is several MB).
 
-- [ ] **Step 1: Failing tests (FakeHttp):** submissions fixture → `recent` zipped from the columnar arrays, `accepted_at` parsed; every request carries the UA with the contact and goes through `pause(≥125)` except the first; 403/429 → `Http(status)`; HTML index fixture → `exhibit_991` finds `EX-99.1` with an absolute URL; `html_to_text` keeps "Total net sales 94,930" as one line of text and decodes `&#8217;` and `&nbsp;`; empty contact → error.
+- [ ] **Step 1: Failing tests (FakeHttp):** the feed fixture parses into entries (form, CIK, company, accession, items, UTC acceptance); a non-feed body is a parse error and an entry missing a field is skipped; every request carries the UA with the contact and sleeps ≥ 125 ms except the first; 403/429 → `Http(status)`; an oversized body → `TooLarge`; HTML index fixture → `exhibit_991` finds `EX-99.1` with an absolute URL; `html_to_text` keeps "Total net sales 94,930" as one line of text and decodes `&#8217;` and `&nbsp;`; empty contact → error.
 - [ ] **Step 2–4:** FAIL → implement → `cargo test -p prebell-core edgar` PASS.
 - [ ] **Step 5: Commit** `feat(core): EDGAR filings provider`.
 
@@ -184,10 +183,10 @@ apps/web/
 **Files:** Create `src/earnings/detect.rs`.
 
 **Interfaces:**
-- `fn earnings_filings(sub: &Submissions, now: DateTime<Utc>) -> Vec<&RecentFiling>` — form `8-K`, items split on `,` contains exactly `2.02`, `now - accepted_at ≤ 96h`.
-- `fn ticker_matches(sub: &Submissions, entry: &WatchEntry) -> bool` — the submissions doc lists the watchlist ticker (BRK.B ↔ `BRK-B`), guarding a wrong CIK in the data file.
+- `fn earnings_entries(entries: &[FeedEntry], watch: &HashMap<u64, WatchEntry>, now) -> Vec<(&FeedEntry, WatchEntry)>` — form exactly `8-K`, items contain exactly `2.02`, a domestic watchlist CIK whose filer name matches the row, `now - accepted_at ≤ 96h`.
+- `fn same_company(filer, ours) -> bool` and `fn name_mismatches(entries, watch)` — the wrong-CIK guard: the filer name and the row's name (or SEC name) start with the same significant word after lowercasing, dropping punctuation and legal suffixes (inc, corp, co, ltd, plc, holdings, the), also across a space ("EXXON MOBIL" = "ExxonMobil"). A mismatch is skipped and alerted once a day.
 
-- [ ] **Step 1: Failing tests:** an `8-K/A` with 2.02 is ignored; items `"2.020"`/`"12.02"` are not 2.02; a 2.02 8-K accepted 97 h ago is ignored; `"2.02,9.01"` is detected; ticker mismatch is reported.
+- [ ] **Step 1: Failing tests:** in the feed fixture only the watchlist's original 2.02 8-K is kept (a non-watchlist 2.02, a watchlist non-2.02 and an `8-K/A` are not); items `"2.020"`/`"12.02"` are not 2.02; a 2.02 8-K accepted 97 h ago is ignored; a foreign filer is never kept; real filer names match their rows and a wrong CIK is skipped.
 - [ ] **Step 2–4:** FAIL → implement → PASS. **Step 5: Commit** `feat(core): detect 8-K Item 2.02 filings`.
 
 ---
@@ -237,11 +236,11 @@ apps/web/
 **Interfaces:**
 - Rows: `FilingRow` (mirrors `earnings_filings`), `ChartRow` (mirrors `post_charts`), `CalendarRow` (mirrors `earnings_calendar`).
 - `#[async_trait(?Send)] trait EarningsStore { insert_filing(&FilingRow) -> Result<bool /*inserted*/>; open_filings() -> Result<Vec<FilingRow>>; set_filing_state(accession, state); slug_owner(slug) -> Result<Option<String /*run_key*/>>; set_charts(post_id, &[ChartRow]); calendar_for(ticker) -> Result<Vec<CalendarRow>>; calendar_between(from, to) -> Result<Vec<CalendarRow>>; upsert_calendar(&CalendarRow); delete_calendar(ticker, date); kv_get(key); kv_set(key, value, now) }`, all `Result<_, String>`; `MemEarningsStore` for tests.
-- `async fn poll_tick(now, es: &dyn EarningsStore, store: &dyn Store, filings: &dyn Filings) -> PollOutcome { checked, detected: Vec<String>, errors: Vec<String> }` — outside window ⇒ nothing; for each `poll_batch` entry: submissions → ticker guard → each detected filing: `insert_filing` (INSERT OR IGNORE), create the `pending` run, mark the calendar entry `reported`. One company's error never stops the batch.
-- `async fn build_tick(now, es, store, filings, llm) -> Vec<(String, TickOutcome)>` — for each open filing (oldest first; at most **1 build and 1 ZH retry** per tick, budgeted separately so a failing ZH draft never holds up new posts; ZH retries ≥ 5 min apart; a stale `building` run past the deadline fails with one alert instead of rebuilding; the build deadline is 6 h after acceptance but at least 1 h after detection; the caller gates it to the polling window): run `published` & ZH `pending` ⇒ ZH retry (24 h cap); run `building` and fresh (< 15 min) ⇒ skip; `pending` and last attempt < 5 min ago ⇒ skip; else build: docs → EX-99.1 → text → extract → companyfacts trend → facts → gate (missing ⇒ `pending` or, past 6 h, `failed` + alert) → charts → EN/ZH → write post, translations, sources (8-K + exhibit), charts, facts JSON → run `published`; filing `done` when EN and ZH are final (published/failed) or the run failed.
+- `async fn poll_tick(now, es, store, filings) -> PollOutcome { checked, pages, detected, errors, throttled, .. }` — outside window ⇒ nothing; read feed pages newest first while a full page is newer than the `edgar_feed_watermark` kv (at most 3; 1 without a watermark); 403/429 stops and keeps the watermark; name mismatches alert once a day; each detected filing: `insert_filing` (INSERT OR IGNORE), create the `pending` run, mark the calendar entry `reported`; the watermark moves to the newest acceptance read. `poll_job` wraps it: drops a message older than 5 min, alerts SEC throttling once a day, and lists the follow-up `earnings:build` / `earnings:calendar` messages.
+- `async fn build_tick(now, es, store, filings, llm) -> Vec<(String, TickOutcome)>` — for each open filing (oldest first; at most **1 build and 1 ZH retry** per tick, budgeted separately so a failing ZH draft never holds up new posts; ZH retries ≥ 5 min apart; a stale `building` run past the deadline fails with one alert instead of rebuilding; the build deadline is 6 h after acceptance but at least 1 h after detection; the caller gates it to the polling window): run `published` & ZH `pending` ⇒ ZH retry (24 h cap); run `building` and fresh (< 15 min) ⇒ skip; `pending` and last attempt < 5 min ago ⇒ skip; else build: docs → EX-99.1 → text → extract → companyconcept trend → facts → gate (missing ⇒ `pending` or, past 6 h, `failed` + alert) → charts → EN/ZH → write post, translations, sources (8-K + exhibit), charts, facts JSON → run `published`; filing `done` when EN and ZH are final (published/failed) or the run failed.
 - Uses Plan 1's `TickOutcome`.
 
-- [ ] **Step 1: Failing tests (MemStore + MemEarningsStore + fakes):** same accession seen by two polls ⇒ one filing row, one run; a fake that 429s one CIK still checks the rest; a full build publishes one post with slug, template `earnings:v1`, two charts, sources = [8-K, EX-99.1], both translations; rebuild of the same filing does not create a second post; missing revenue at +5 h ⇒ `pending`, at +6 h ⇒ `failed` + one alert; EN ok + ZH bad ⇒ ZH `pending` and next tick fills it; a slug collision with another run gets the accession suffix; at most one build per tick.
+- [ ] **Step 1: Failing tests (MemStore + MemEarningsStore + fakes):** same accession seen by two polls (or on two pages) ⇒ one filing row, one run; pages stop at the watermark and at 3; a 403/429 stops the poll, keeps the watermark and alerts once a day; a full build publishes one post with slug, template `earnings:v1`, two charts, sources = [8-K, EX-99.1], both translations; rebuild of the same filing does not create a second post; missing revenue at +5 h ⇒ `pending`, at +6 h ⇒ `failed` + one alert; EN ok + ZH bad ⇒ ZH `pending` and next tick fills it; a slug collision with another run gets the accession suffix; at most one build per tick.
 - [ ] **Step 2–4:** FAIL → implement → PASS. **Step 5: Commit** `feat(core): earnings run state machine`.
 
 ---
@@ -251,11 +250,11 @@ apps/web/
 **Files:** Create `src/earnings/xbrl.rs`.
 
 **Interfaces:**
-- `fn trend(cf: &CompanyFacts) -> Trend` — revenue from the first of `Revenues`, `RevenueFromContractWithCustomerExcludingAssessedTax`, `RevenuesNetOfInterestExpense`, `SalesRevenueNet` with ≥ 1 discrete quarter (most recent period end wins ties); EPS from `EarningsPerShareDiluted` (`USD/shares`); net income from `NetIncomeLoss`. Discrete quarter = `start`..`end` of 80–100 days, form `10-Q` or `10-K`(/A); per `end` keep the latest `filed`. Last 8 quarters, ascending.
+- `fn trend(revenue: &[Concept], eps: Option<&Concept>, net_income: Option<&Concept>) -> Trend` and `async fn fetch_trend(filings, cik, filing_date)` — revenue tags `Revenues`, `RevenueFromContractWithCustomerExcludingAssessedTax`, `RevenuesNetOfInterestExpense` fetched in order until one is current (merged by period end, the first-listed tag winning), then `EarningsPerShareDiluted` and `NetIncomeLoss`: at most 5 `companyconcept` requests; GAAP-only 80-100-day quarters from 10-Q/10-K, latest filing wins, last 8 each.
 - `fn release_already_in_trend(points: &[QuarterPoint], filing_date: NaiveDate) -> bool` — per series: the latest point was `filed ≥ filing_date` and ended ≤ 75 days before it (a late amendment of an older quarter does not count). Revenue merges the candidate tags by period end (first-listed tag wins a quarter both report).
 
 - [ ] **Step 1: Failing tests:** 9-month YTD and annual facts are ignored; a restated quarter keeps the latest `filed`; no Q4 is derived; a company with only `RevenueFromContract…` uses it; same-day 10-Q ⇒ `release_already_in_trend == true`.
-- [ ] **Step 2–4:** FAIL → implement → PASS. **Step 5: Commit** `feat(core): GAAP quarterly trend from companyfacts`.
+- [ ] **Step 2–4:** FAIL → implement → PASS. **Step 5: Commit** `feat(core): GAAP quarterly trend from companyconcept`.
 
 ---
 
@@ -280,9 +279,9 @@ apps/web/
 
 **Interfaces:**
 - `impl EarningsStore for D1Store` (SQL per Task 1 tables; `insert_filing` is `INSERT … ON CONFLICT(accession) DO NOTHING RETURNING accession`).
-- `struct WorkerPause` (`worker::Delay`).
-- `scheduled`: cron `"* * * * *"` ⇒ if `earnings::in_window(now)` send `Job { job: "earnings", at: <cron time> }` to a **separate queue** `prebell-earnings` (binding `EARNINGS`, consumer `max_batch_size = 1`, `max_concurrency = 1`), so a minutes-long build never delays the premarket job and never runs twice in parallel against EDGAR; other crons ⇒ `"premarket"` on `JOBS` as before. `Job` gains an optional `at` (the cron time picks the poll batch; a message older than 3 min polls the current minute's batch instead). Earnings refuse to run with the placeholder `SEC_CONTACT` and raise one error alert per ET day; SEC 403/429 on a poll raises one alert per day too.
-- `queue`: `"premarket"` ⇒ Plan 1 `tick`; `"earnings"` ⇒ `poll_tick`, then `calendar::refresh_tick`, then `build_tick`; alerts delivered after the batch as before. A warning is logged when `SEC_CONTACT` is the placeholder.
+- `struct WorkerTimer` (`worker::Delay`), the base's `providers::Timer`.
+- `scheduled`: each cron queues the jobs `schedule::jobs_for_cron` names, with `at` = the firing time; `earnings` goes to its own queue `prebell-earnings` (binding `EARNINGS`, consumer `max_batch_size = 1`, `max_concurrency = 1`, `max_retries = 1`), so a build never delays the premarket job and never runs in parallel against EDGAR. Earnings refuse to run with the placeholder `SEC_CONTACT` (a config error, one alert per ET day); SEC 403/429 on a poll raises one alert per day too.
+- `queue`: every message goes through `jobs::run_job`: `earnings` ⇒ `poll_job` (then queues its follow-ups), `earnings:build` ⇒ `build_tick`, `earnings:calendar` ⇒ `calendar::refresh_tick`; alerts are delivered after the message within the invocation's remaining subrequest budget.
 
 - [ ] **Step 1:** `worker-build --release` → builds. `cargo clippy --workspace --all-targets -- -D warnings` clean.
 - [ ] **Step 2: Commit** `feat(generator): earnings poll, build and calendar jobs`.

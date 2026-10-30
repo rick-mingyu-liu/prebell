@@ -37,8 +37,8 @@ const PLACEHOLDER_CONTACT: &str = "placeholder@example.com";
 #[derive(Serialize, Deserialize, Debug)]
 struct Job {
     job: String,
-    /// When the cron fired (RFC 3339): an earnings poll picks its watchlist
-    /// batch by it.
+    /// When the cron fired (RFC 3339): an earnings poll older than one
+    /// firing interval is dropped.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     at: Option<String>,
 }

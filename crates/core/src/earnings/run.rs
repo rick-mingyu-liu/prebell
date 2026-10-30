@@ -54,9 +54,9 @@ pub struct PollOutcome {
     pub pages: usize,
     /// Run keys of newly detected filings.
     pub detected: Vec<String>,
-    /// Per-company problems (provider errors, ticker mismatches).
+    /// Problems: feed errors, a page-cap gap, watchlist name mismatches.
     pub errors: Vec<String>,
-    /// SEC answered 403/429 (blocked or rate-limited) and the batch stopped.
+    /// SEC answered 403/429 (blocked or rate-limited) and the poll stopped.
     pub throttled: bool,
     /// The message was older than `MAX_POLL_LAG_MINUTES` and did nothing.
     pub stale: bool,
@@ -1152,7 +1152,7 @@ mod tests {
     #[tokio::test]
     async fn a_stale_poll_message_is_dropped() {
         // After a backlog the message is older than one firing interval: the
-        // next firing polls its own batch, so this one does nothing.
+        // next firing reads the feed anyway, so this one does nothing.
         let (base, es) = stores();
         let fl = FakeFilings::default();
         let fired = poll_time();
