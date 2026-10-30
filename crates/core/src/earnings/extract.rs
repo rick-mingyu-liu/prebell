@@ -112,6 +112,13 @@ fn names_metric(m: Metric, label: &str, after: &str) -> Result<(), String> {
         return Err("a dividend per share is not earnings per share".into());
     }
     let near_after: String = after.chars().take(30).collect();
+    if m == Metric::NetIncome
+        && ["per share", "per diluted share", "per basic share"]
+            .iter()
+            .any(|w| has_word(label, w) || has_word(&near_after, w))
+    {
+        return Err("a per share figure is not net income".into());
+    }
     let per_share_after = matches!(m, Metric::EpsGaap | Metric::EpsNonGaap)
         && (has_word(&near_after, "per share") || has_word(&near_after, "per diluted share"));
     let words = label_keywords(m);
@@ -124,18 +131,21 @@ fn names_metric(m: Metric, label: &str, after: &str) -> Result<(), String> {
     ))
 }
 
-/// A table row's revenue label is the total, not a segment: "Total net
-/// sales", "Revenues", "Net revenues", "Revenue, net" pass; "Products net
-/// sales" and "Services revenue" do not.
+/// A table row's revenue label is the company's total revenue, not a
+/// segment or another total: "Total net sales", "Revenues", "Net
+/// revenues", "Revenue, net", "Total revenues, net of interest expense"
+/// pass; "Products net sales", "Services revenue", "Total cost of
+/// revenues" and "Total noninterest revenue" do not.
 fn total_revenue_row(label: &str) -> bool {
     static R: OnceLock<Regex> = OnceLock::new();
     let label = label.trim().trim_end_matches(['$', ':', ' ']).trim();
-    has_word(label, "total")
-        || R.get_or_init(|| {
-            Regex::new(r"(?i)^(?:net\s+)?(?:revenues?|sales)(?:\s*,\s*net)?$")
-                .expect("valid built-in regex")
-        })
-        .is_match(label)
+    R.get_or_init(|| {
+        Regex::new(
+            r"(?i)^(?:total\s+)?(?:net\s+)?(?:revenues?|sales)(?:\s*,\s*net(?:\s+of\s+interest\s+expense)?)?$",
+        )
+        .expect("valid built-in regex")
+    })
+    .is_match(label)
 }
 
 /// Applies the quote-anchoring rules: the quote is in the exhibit; it starts
@@ -566,6 +576,52 @@ mod tests {
         for (amount, q) in [
             ("102,466", "Total net sales $102,466 $94,930"),
             ("9,000", "Net revenues $9,000 $8,000"),
+        ] {
+            assert!(
+                verify_figure(t, Metric::Revenue, &raw(amount, "millions", false, q)).is_ok(),
+                "{q}"
+            );
+        }
+    }
+
+    #[test]
+    fn net_income_is_never_a_per_share_row() {
+        let t = "(In millions, except per-share amounts) Net loss per share $(0.25) $(0.10)\nNet income per diluted share $1.85 $0.97\nNet loss $(25) $(10)";
+        for (amount, q) in [
+            ("(0.25)", "Net loss per share $(0.25) $(0.10)"),
+            ("1.85", "Net income per diluted share $1.85 $0.97"),
+        ] {
+            let e = verify_figure(t, Metric::NetIncome, &raw(amount, "millions", true, q));
+            assert!(e.unwrap_err().contains("per share"), "{q}");
+        }
+        assert_eq!(
+            verify_figure(
+                t,
+                Metric::NetIncome,
+                &raw("(25)", "millions", true, "Net loss $(25) $(10)")
+            )
+            .unwrap()
+            .value,
+            -25e6
+        );
+    }
+
+    #[test]
+    fn total_rows_that_are_not_total_revenue_are_rejected() {
+        let t = "(In millions) Total cost of revenues $40,000 $38,000\nTotal noninterest revenue $9,000 $8,000\nTotal revenues, net of interest expense $25,000 $24,000\nTotal net revenue $30,000 $29,000";
+        for (amount, q) in [
+            ("40,000", "Total cost of revenues $40,000 $38,000"),
+            ("9,000", "Total noninterest revenue $9,000 $8,000"),
+        ] {
+            let e = verify_figure(t, Metric::Revenue, &raw(amount, "millions", false, q));
+            assert!(e.is_err(), "{q}");
+        }
+        for (amount, q) in [
+            (
+                "25,000",
+                "Total revenues, net of interest expense $25,000 $24,000",
+            ),
+            ("30,000", "Total net revenue $30,000 $29,000"),
         ] {
             assert!(
                 verify_figure(t, Metric::Revenue, &raw(amount, "millions", false, q)).is_ok(),
