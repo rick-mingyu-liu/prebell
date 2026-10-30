@@ -89,11 +89,11 @@ The generator runs on the Workers Free plan for now. The limits that matter:
 
 ### Reading `subrequests=`
 
-After each queue message, `pnpm exec wrangler tail` in `crates/generator` shows one line like `subrequests=27 job=premarket`. Alert delivery logs its own line, `subrequests=N job=alerts`. Add the two lines to get the invocation's total. Most firings show `subrequests=0`: the clock decides nothing is due, and only D1 is read.
+After each queue message, `pnpm exec wrangler tail` in `crates/generator` shows one line like `subrequests=27 job=premarket`. Alert delivery logs its own line, `subrequests=N job=alerts`. Add the two lines to get the invocation's total. Delivery posts at most 45 minus what the job used; the other alerts stay unsent for the next invocation. Most firings show `subrequests=0`: the clock decides nothing is due, and only D1 is read.
 
 - A premarket build is about 1 Yahoo cookie, 1 crumb, 11 v7 batches and 4 futures charts, plus 1 Tavily search and 1 LLM call per mover, 1 macro search and its LLM call, and 2-4 draft calls.
 - A recap build is 4 index charts, the cookie, the crumb and 11 v7 batches, plus the same news and LLM work.
-- An earnings poll (`job=earnings`) is at most 34 EDGAR submissions requests. A build (`job=earnings:build`) is the filing index, the exhibit, up to 5 XBRL `companyconcept` documents, the extraction and 2-4 draft calls: about 12, at most about 14 with a Chinese retry. The calendar (`job=earnings:calendar`) is the Yahoo cookie, crumb and 3 v7 batches plus up to 5 announcement searches with an LLM call each: about 15.
+- An earnings poll (`job=earnings`) is 1-3 requests for EDGAR's current 8-K feed (usually 1: it reads back only to the previous poll). A build (`job=earnings:build`) is the filing index, the exhibit, up to 5 XBRL `companyconcept` documents, the extraction and 2-4 draft calls: about 12, at most about 14 with a Chinese retry. The calendar (`job=earnings:calendar`) is the Yahoo cookie, crumb and 3 v7 batches plus up to 5 announcement searches with an LLM call each: about 15.
 - When a run retries, `runs.last_error` ends with `subrequests=N`: the count when the facts were built, before the drafts. Read it with `pnpm exec wrangler d1 execute prebell --remote --command "select run_key,last_error from runs order by updated_at desc limit 3"`.
 - Redirect hops count toward the 50 but are not visible here, so treat 45 or more as at the limit. Past 50, fetches fail with a network error, and the build shows them as `net=` or `search_err=` in its diagnostics.
 
@@ -103,7 +103,9 @@ An invocation over 10 ms of CPU is killed. In `wrangler tail` it shows with outc
 
 ## Earnings
 
-- Create the queue before the first deploy: `pnpm exec wrangler queues create prebell-earnings`. Earnings run only on it (one consumer, one message at a time), so EDGAR is never hit in parallel.
+- Before the first deploy, apply the D1 migrations: `pnpm exec wrangler d1 migrations apply prebell --remote` (in `crates/generator`). It applies `0003_earnings.sql` even though `0004_competitor.sql` is already applied: D1 tracks each migration by name.
+- Create the queue before the first deploy: `pnpm exec wrangler queues create prebell-earnings`. Earnings run only on it (one consumer, one message at a time, one retry), so EDGAR is never hit in parallel.
+- On the first deploy, check one detected filing's time: compare `earnings_filings.accepted_at` (UTC) with the "Accepted" time on its `-index.htm` page (ET). They should differ by exactly the ET offset (4 h EDT, 5 h EST). The feed's time was checked once against an index page before the merge.
 - `SEC_CONTACT` must be a real contact email: SEC blocks anonymous clients. With the placeholder, every earnings step is a config error with one `error` alert per ET day, keyed `config:earnings:<date>`.
 - SEC answering 403/429 stops that poll and raises one `error` alert per ET day (`sec-throttled:<date>`); the next firing tries again.
 - `EARNINGS_CALENDAR_SEED = "off"` stops reading Yahoo for calendar dates (for example while Yahoo throttles; a 429 shows as `yahoo_429=N` in the `job=earnings:calendar` log line). Company announcements and EDGAR filings still update the calendar.

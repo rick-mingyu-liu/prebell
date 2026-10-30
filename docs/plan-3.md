@@ -25,17 +25,21 @@ where a task says otherwise, this section wins.
   `earnings` (see `core::schedule`), on its own single-consumer `EARNINGS`
   queue; premarket and recap stay clock-gated.
 - **Jobs:** `earnings` is a `JobKind` run through `jobs::run_job`. A poll
-  (`earnings`) sends at most **34** submissions requests (102 companies every
-  15 minutes over 3 firings), 125 ms apart, stopping on 403/429; it queues one
-  `earnings:build` message per detected filing (one while any filing is open)
-  and `earnings:calendar` once per ET day. Each message is its own invocation
-  and budget; a poll message older than 5 minutes is dropped. Config errors
+  (`earnings`) reads EDGAR's current 8-K feed (`getcurrent`, Atom, 100 entries
+  a page) newest first back to a D1 watermark: 1-3 requests, 125 ms apart,
+  stopping on 403/429 (alerted once per ET day). It keeps domestic watchlist
+  CIKs with Item 2.02 on an original 8-K, so all 102 companies are covered
+  every 5 minutes; no per-company submissions requests. It queues one
+  `earnings:build` message per detected filing (one while any filing is
+  open) and `earnings:calendar` once per ET day. Each message is its own
+  invocation and budget; a poll message older than 5 minutes is dropped,
+  and the earnings consumer retries a failed message once. Config errors
   (placeholder `SEC_CONTACT`, bad LLM config) alert once per ET day.
 - **XBRL:** never `companyfacts` (multi-MB, too much CPU). `xbrl::fetch_trend`
   reads `companyconcept` per concept (revenue tags in order until one is
   current, then `EarningsPerShareDiluted`, `NetIncomeLoss`; at most 5
   requests, 2 MB cap each). A build is about 12 subrequests.
-- **EDGAR time:** `acceptanceDateTime` is UTC; ET dates come from it.
+- **EDGAR time:** the feed's `updated` is the acceptance time with its ET offset (it matches the index page's "Accepted"); ET dates come from it.
 - **Calendar:** seeded from Yahoo's v7 quote earnings fields
   (`earningsTimestamp*`, `isEarningsDateEstimate`; about 5 requests), not
   calendar HTML pages. `EARNINGS_CALENDAR_SEED = "yahoo" | "off"`. On a
