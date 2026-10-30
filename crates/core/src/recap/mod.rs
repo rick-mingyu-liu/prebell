@@ -4,7 +4,7 @@
 pub mod draft;
 
 use async_trait::async_trait;
-use chrono::{DateTime, Datelike, NaiveDate, NaiveTime, Timelike, Utc};
+use chrono::{DateTime, Datelike, Duration, NaiveDate, NaiveTime, Timelike, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::clock::{recap_window, trading_day, DayKind, Window};
@@ -35,6 +35,8 @@ const HITS_PER_MOVER: usize = 3;
 const MOVER_REASONS: usize = 2;
 const AFTER_HOURS_HITS: usize = 5;
 const AFTER_HOURS_ITEMS: usize = 5;
+/// After-hours previews may come from earlier in the week.
+const AFTER_HOURS_MAX_AGE_DAYS: i64 = 7;
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct RecapFacts {
@@ -155,13 +157,19 @@ async fn after_hours(
     ns: &dyn NewsSearch,
     llm: &dyn LlmProvider,
     date: NaiveDate,
+    now: DateTime<Utc>,
     d: &mut Diag,
 ) -> Field<Vec<NewsReason>> {
     let day = long_date(date);
     // Not held to the news age cutoff: a preview from earlier in the week
     // still names tonight's reports, and the prompt pins the date.
+    let since = now - Duration::days(AFTER_HOURS_MAX_AGE_DAYS);
     let hits = match ns
-        .search(&format!("earnings after the bell {day}"), AFTER_HOURS_HITS)
+        .search_since(
+            &format!("earnings after the bell {day}"),
+            AFTER_HOURS_HITS,
+            since,
+        )
         .await
     {
         Ok(h) => h,
@@ -297,7 +305,7 @@ pub async fn build_facts(
         indexes,
         gainers,
         losers,
-        after_hours: after_hours(ns, llm, trading_date, &mut d).await,
+        after_hours: after_hours(ns, llm, trading_date, now, &mut d).await,
         diagnostics: d.lines_as("indexes"),
     }
 }
@@ -774,6 +782,34 @@ mod tests {
             "{sys}"
         );
         assert!(user.contains("October 29, 2026"), "{user}");
+    }
+
+    /// Records each `search_since` call; every search finds nothing.
+    struct SinceNs(RefCell<Vec<(String, DateTime<Utc>)>>);
+    #[async_trait(?Send)]
+    impl NewsSearch for SinceNs {
+        async fn search(&self, q: &str, _: usize) -> Result<Vec<SearchHit>, ProviderError> {
+            unreachable!("{q}: recap searches are date-bounded")
+        }
+        async fn search_since(
+            &self,
+            q: &str,
+            _: usize,
+            since: DateTime<Utc>,
+        ) -> Result<Vec<SearchHit>, ProviderError> {
+            self.0.borrow_mut().push((q.into(), since));
+            Err(ProviderError::Empty)
+        }
+    }
+
+    #[tokio::test]
+    async fn after_hours_previews_reach_back_a_week() {
+        let n = SinceNs(RefCell::new(vec![]));
+        build_facts(&md(&[]), &n, &llm(vec![]), date(), now()).await;
+        assert_eq!(
+            *n.0.borrow(),
+            vec![(AH_Q.to_string(), now() - chrono::Duration::days(7))]
+        );
     }
 
     #[tokio::test]

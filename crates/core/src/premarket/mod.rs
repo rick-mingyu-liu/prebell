@@ -13,6 +13,7 @@ use regex::Regex;
 use serde_json::Value;
 
 use crate::anchor::verify_reason;
+use crate::clock::previous_close;
 use crate::facts::{Field, Mover, NewsReason, PremarketFacts, Quote};
 use crate::premarket::draft::reject_markup;
 use crate::providers::{LlmProvider, MarketData, NewsSearch, ProviderError, SearchHit};
@@ -33,8 +34,11 @@ const MACRO_HITS: usize = 5;
 const MACRO_ITEMS: usize = 3;
 const MAX_CONTENT_CHARS: usize = 6_000;
 /// News older than this (by its published date) is never a reason: a
-/// week-old article cannot explain this session's move.
+/// week-old article cannot explain this session's move. After a weekend or
+/// holiday the window reaches back further, see `news_cutoff`.
 pub(crate) const NEWS_MAX_AGE_HOURS: i64 = 36;
+/// How long before the previous session's close news still counts.
+pub(crate) const PREV_CLOSE_BUFFER_HOURS: i64 = 2;
 /// Added to the mover prompts: what counts as a reason for a move.
 pub(crate) const EVENT_RULE: &str = "A reason must be a specific event that explains this session's move: \
      earnings, guidance, a deal, an analyst upgrade or downgrade, a filing, or macro news tied to this company. \
@@ -153,15 +157,24 @@ pub(crate) fn unclose(s: &str) -> String {
         .into_owned()
 }
 
-/// Hits for `query` published within `NEWS_MAX_AGE_HOURS` of `now`. Hits
-/// with no known date are kept, after the dated ones.
+/// The oldest publish time that is still fresh at `now`: `NEWS_MAX_AGE_HOURS`
+/// back, or shortly before the previous session's close when that is
+/// earlier (a move is measured from that close, so Friday-evening news
+/// explains Monday's move).
+pub(crate) fn news_cutoff(now: DateTime<Utc>) -> DateTime<Utc> {
+    let by_age = now - Duration::hours(NEWS_MAX_AGE_HOURS);
+    by_age.min(previous_close(now) - Duration::hours(PREV_CLOSE_BUFFER_HOURS))
+}
+
+/// Hits for `query` published at or after `news_cutoff(now)`. Hits with no
+/// known date are kept, after the dated ones.
 pub(crate) async fn fresh_news(
     ns: &dyn NewsSearch,
     query: &str,
     max: usize,
     now: DateTime<Utc>,
 ) -> Result<Vec<SearchHit>, ProviderError> {
-    let since = now - Duration::hours(NEWS_MAX_AGE_HOURS);
+    let since = news_cutoff(now);
     let mut hits = ns.search_since(query, max, since).await?;
     hits.retain(|h| h.published.is_none_or(|p| p >= since));
     hits.sort_by_key(|h| h.published.is_none());
@@ -619,9 +632,54 @@ mod tests {
         let got = fresh_news(&n, "q", 3, now()).await.unwrap();
         let urls: Vec<&str> = got.iter().map(|h| h.url.as_str()).collect();
         assert_eq!(urls, ["https://n.test/35h", "https://n.test/undated"]);
+        // On a Thursday the 36-hour window is the earlier bound.
         assert_eq!(
             *n.0.borrow(),
             vec![now() - chrono::Duration::hours(NEWS_MAX_AGE_HOURS)]
+        );
+        assert_eq!(news_cutoff(now()), n.0.borrow()[0]);
+    }
+
+    #[tokio::test]
+    async fn news_since_the_last_session_survives_weekends_and_holidays() {
+        let t = |s: &str| s.parse::<DateTime<Utc>>().unwrap();
+        for (case, run, published) in [
+            // Friday 17:00 EDT, Monday 09:20 EST premarket.
+            ("monday", "2026-11-02T14:20:00Z", "2026-10-30T21:00:00Z"),
+            // Thursday 16:30 EDT after-close earnings; Good Friday closed.
+            (
+                "good friday",
+                "2026-04-06T13:20:00Z",
+                "2026-04-02T20:30:00Z",
+            ),
+            // Wednesday 18:00 EST; Thanksgiving closed.
+            (
+                "thanksgiving",
+                "2026-11-27T14:20:00Z",
+                "2026-11-25T23:00:00Z",
+            ),
+            // Friday 19:00 EDT, Monday 16:45 EST recap.
+            (
+                "monday recap",
+                "2026-11-02T21:45:00Z",
+                "2026-10-30T23:00:00Z",
+            ),
+        ] {
+            let n = SinceNs(
+                RefCell::new(vec![]),
+                vec![SearchHit {
+                    published: Some(t(published)),
+                    ..hit(URL, ARTICLE)
+                }],
+            );
+            let got = fresh_news(&n, "q", 3, t(run)).await.unwrap();
+            assert_eq!(got.len(), 1, "{case}");
+            assert_eq!(n.0.borrow()[0], news_cutoff(t(run)), "{case}");
+        }
+        // The window opens shortly before the previous close.
+        assert_eq!(
+            news_cutoff(t("2026-11-02T14:20:00Z")),
+            t("2026-10-30T20:00:00Z") - chrono::Duration::hours(PREV_CLOSE_BUFFER_HOURS)
         );
     }
 

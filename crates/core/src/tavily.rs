@@ -2,8 +2,10 @@ use std::sync::OnceLock;
 
 use crate::providers::{Http, NewsSearch, ProviderError, SearchHit};
 use async_trait::async_trait;
-use chrono::{DateTime, NaiveDate, NaiveTime, TimeZone, Utc};
+use chrono::{DateTime, Days, NaiveDate, NaiveTime, TimeZone, Utc};
 use chrono_tz::America::New_York;
+
+use crate::clock::et;
 use regex::Regex;
 use serde_json::{json, Value};
 
@@ -30,35 +32,38 @@ fn body(query: &str, max: usize) -> Value {
     })
 }
 
+/// The end of `day` in New York (the next midnight there), so a day-only
+/// date never makes an article look older than it is.
+fn ny_day_end(day: NaiveDate) -> Option<DateTime<Utc>> {
+    New_York
+        .from_local_datetime(&day.succ_opt()?.and_time(NaiveTime::MIN))
+        .earliest()
+        .map(|t| t.with_timezone(&Utc))
+}
+
 /// RFC 2822 (Tavily's documented example: "Tue, 11 Mar 2025 17:00:00 GMT"),
-/// RFC 3339, or a bare date read as midnight UTC.
+/// RFC 3339, or a bare date read as the end of that day in New York.
 fn parse_date(s: &str) -> Option<DateTime<Utc>> {
     let s = s.trim();
     DateTime::parse_from_rfc2822(s)
         .or_else(|_| DateTime::parse_from_rfc3339(s))
         .map(|d| d.with_timezone(&Utc))
         .ok()
-        .or_else(|| {
-            NaiveDate::parse_from_str(s, "%Y-%m-%d")
-                .ok()
-                .map(|d| d.and_time(NaiveTime::MIN).and_utc())
-        })
+        .or_else(|| ny_day_end(NaiveDate::parse_from_str(s, "%Y-%m-%d").ok()?))
 }
 
-/// The end (New York midnight) of a `/2026/10/23/` or `/2026-10-23/` date in
-/// the URL path, so a day-only date never makes an article look older.
+/// The end of the day in a `/2026/10/23/` or `/2026-10-23/` path segment.
+/// Heuristic: news sites put the publish date there; an event page dated
+/// that way reads as older, which errs toward dropping it.
 fn url_date(url: &str) -> Option<DateTime<Utc>> {
     static R: OnceLock<Regex> = OnceLock::new();
     let c = R
         .get_or_init(|| {
-            Regex::new(r"/(20\d{2})[/-](\d{2})[/-](\d{2})(?:[/-]|$)").expect("valid built-in regex")
+            Regex::new(r"/(20\d{2}/\d{2}/\d{2}|20\d{2}-\d{2}-\d{2})(?:/|$)")
+                .expect("valid built-in regex")
         })
         .captures(url)?;
-    let day = NaiveDate::from_ymd_opt(c[1].parse().ok()?, c[2].parse().ok()?, c[3].parse().ok()?)?;
-    New_York
-        .from_local_datetime(&day.succ_opt()?.and_time(NaiveTime::MIN))
-        .earliest()
-        .map(|t| t.with_timezone(&Utc))
+    ny_day_end(NaiveDate::parse_from_str(&c[1].replace('/', "-"), "%Y-%m-%d").ok()?)
 }
 
 /// Tavily's `published_date` is its best estimate and "can be later than the
@@ -129,14 +134,16 @@ impl<H: Http> Tavily<H> {
 
 #[async_trait(?Send)]
 impl<H: Http> NewsSearch for Tavily<H> {
+    /// No date filter: the earnings calendar looks for announcements made
+    /// weeks before the report.
     async fn search(&self, query: &str, max: usize) -> Result<Vec<SearchHit>, ProviderError> {
-        let mut b = body(query, max);
-        b["days"] = json!(2);
-        self.post(&b).await
+        self.post(&body(query, max)).await
     }
 
     /// `start_date` (YYYY-MM-DD) filters on the publish or last-updated
-    /// date; results with no detectable date are kept.
+    /// date; results with no detectable date are kept. The docs give no
+    /// timezone, so it is the day before `since`'s New York date: the
+    /// precise cut is the caller's.
     async fn search_since(
         &self,
         query: &str,
@@ -144,7 +151,8 @@ impl<H: Http> NewsSearch for Tavily<H> {
         since: DateTime<Utc>,
     ) -> Result<Vec<SearchHit>, ProviderError> {
         let mut b = body(query, max);
-        b["start_date"] = json!(since.date_naive().format("%Y-%m-%d").to_string());
+        let day = et(since).date_naive() - Days::new(1);
+        b["start_date"] = json!(day.format("%Y-%m-%d").to_string());
         self.post(&b).await
     }
 }
@@ -221,7 +229,10 @@ mod tests {
         assert_eq!(body["query"], "q");
         assert_eq!(body["max_results"], 7);
         assert_eq!(body["topic"], "news");
-        assert_eq!(body["days"], 2);
+        // No date filter: the earnings calendar needs weeks-old announcements.
+        for k in ["days", "time_range", "start_date"] {
+            assert!(body.get(k).is_none(), "{k}: {body}");
+        }
         assert_eq!(body["include_raw_content"], true);
     }
 
@@ -238,12 +249,16 @@ mod tests {
     #[tokio::test]
     async fn search_since_sends_start_date_instead_of_days() {
         let t = tavily(200, FIX);
+        // 21:20 EDT on the 28th; the server filter is a day looser than ours.
         let since = "2026-10-29T01:20:00Z".parse().unwrap();
         t.search_since("q", 3, since).await.unwrap();
         let seen = t.http.seen.borrow();
         let body = &seen[0].2;
-        assert_eq!(body["start_date"], "2026-10-29");
-        assert!(body.get("days").is_none(), "{body}");
+        assert_eq!(body["start_date"], "2026-10-27");
+        assert!(
+            body.get("days").is_none() && body.get("time_range").is_none(),
+            "{body}"
+        );
         assert_eq!(body["topic"], "news");
         assert_eq!(body["max_results"], 3);
     }
@@ -261,7 +276,8 @@ mod tests {
         );
         assert_eq!(
             p("2025-03-11").as_deref(),
-            Some("2025-03-11T00:00:00+00:00")
+            // A bare date is the end of that day in New York, like a URL date.
+            Some("2025-03-12T04:00:00+00:00")
         );
         assert_eq!(p("last week"), None);
         // The URL day ends at midnight New York time (EDT here).
@@ -274,8 +290,32 @@ mod tests {
             end("https://www.bloomberg.com/news/articles/2026-10-29/stock-market-today").as_deref(),
             Some("2026-10-30T04:00:00+00:00")
         );
+        // EST after the November 1 DST end.
+        assert_eq!(
+            end("https://n.test/news/2026/11/02/x").as_deref(),
+            Some("2026-11-03T05:00:00+00:00")
+        );
+        assert_eq!(
+            end("https://n.test/2026/10/30").as_deref(),
+            Some("2026-10-31T04:00:00+00:00")
+        );
         assert_eq!(end("https://www.benzinga.com/26/10/62726972/x"), None);
         assert_eq!(end("https://n.test/2026/13/40/x"), None);
+        // Only whole /YYYY/MM/DD/ or /YYYY-MM-DD/ segments.
+        assert_eq!(end("https://n.test/2026-10-29-slug"), None);
+        assert_eq!(end("https://n.test/2026/10-29/x"), None);
+        assert_eq!(end("https://n.test/x2026/10/29/x"), None);
+    }
+
+    #[test]
+    fn date_only_evening_report_is_fresh_the_next_morning() {
+        // Intel reported after the close on the 29th; the run is 09:20 EDT on the 30th.
+        let run = "2026-10-30T13:20:00Z".parse().unwrap();
+        let published = parse_date("2026-10-29").unwrap();
+        assert!(
+            published >= crate::premarket::news_cutoff(run),
+            "{published}"
+        );
     }
 
     #[tokio::test]
