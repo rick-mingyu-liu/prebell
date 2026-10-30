@@ -1,13 +1,14 @@
-import { getTranslations } from "next-intl/server";
-import type { PostChart } from "@/lib/earnings";
+import type { Locale } from "../i18n/routing";
+import type { PostChart } from "../lib/earnings";
+import { translator } from "../lib/translator";
 
 /** A post's GAAP charts, served from R2 by /charts/... (never foreign URLs). */
-export default async function Charts({ charts }: { charts: PostChart[] }) {
+export default function Charts({ charts, locale }: { charts: PostChart[]; locale: Locale }) {
   if (charts.length === 0) return null;
-  const t = await getTranslations("earnings");
+  const t = translator(locale);
   return (
     <section className="charts" aria-labelledby="charts">
-      <h2 id="charts">{t("charts")}</h2>
+      <h2 id="charts">{t("earnings.charts")}</h2>
       {charts.map((c) => (
         <figure key={c.name}>
           {/* A static same-site SVG; next/image would add nothing here. */}
@@ -16,7 +17,7 @@ export default async function Charts({ charts }: { charts: PostChart[] }) {
           <figcaption>{c.alt}</figcaption>
         </figure>
       ))}
-      <p className="muted">{t("chartsNote")}</p>
+      <p className="muted">{t("earnings.chartsNote")}</p>
     </section>
   );
 }

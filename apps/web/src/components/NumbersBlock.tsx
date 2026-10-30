@@ -92,8 +92,10 @@ export default function NumbersBlock({
   const Item = variant === "home" ? Tile : IndexRow;
   return (
     <div className={`numbers numbers-${variant}`}>
-      <Lead index={facts.lead} name={name(facts.lead)} time={formatEtTime(facts.asOfUtc, locale)} asOf={facts.asOfUtc} />
-      <div className="chart-slot" aria-hidden="true"></div>
+      <div className="numbers-lead">
+        <Lead index={facts.lead} name={name(facts.lead)} time={formatEtTime(facts.asOfUtc, locale)} asOf={facts.asOfUtc} />
+        <div className="chart-slot" aria-hidden="true"></div>
+      </div>
       <div className={variant === "home" ? "tiles" : "index-rows"}>
         {facts.others.map((i) => (
           <Item key={i.symbol} index={i} name={name(i)} />

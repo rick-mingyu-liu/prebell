@@ -52,6 +52,11 @@ export interface PostListItem {
 
 export const PAGE_SIZE = 20;
 
+/** The briefs published just before and just after one, in its language. */
+export interface AdjacentPosts {
+  prev: PostListItem | null;
+  next: PostListItem | null;
+}
 
 const other = (lang: Lang): Lang => (lang === "en" ? "zh" : "en");
 
@@ -80,6 +85,26 @@ JOIN post_translations t ON t.post_id = p.id AND t.lang = ?
 LEFT JOIN post_translations o ON o.post_id = p.id AND o.lang = ?`;
 const SELECT_VIEW = `SELECT ${HEAD_COLUMNS}, t.body_md ${FROM_VIEW}`;
 const SELECT_HEAD = `SELECT ${HEAD_COLUMNS} ${FROM_VIEW}`;
+
+interface ListRow {
+  slug: string;
+  content_type: string;
+  trading_date: string;
+  published_at: string | null;
+  title: string | null;
+  summary: string | null;
+}
+
+function toListItem(r: ListRow): PostListItem {
+  return {
+    slug: r.slug,
+    contentType: r.content_type,
+    tradingDate: r.trading_date,
+    publishedAt: r.published_at,
+    title: r.title ?? "",
+    summary: r.summary ?? "",
+  };
+}
 
 function toHead(row: Row): PostHead {
   return {
@@ -152,20 +177,42 @@ export async function listPosts(
        LIMIT ? OFFSET ?`,
     )
     .bind(lang, type ?? "premarket", type ?? "recap", PAGE_SIZE, (p - 1) * PAGE_SIZE)
-    .all<{
-      slug: string;
-      content_type: string;
-      trading_date: string;
-      published_at: string | null;
-      title: string | null;
-      summary: string | null;
-    }>();
-  return results.map((r) => ({
-    slug: r.slug,
-    contentType: r.content_type,
-    tradingDate: r.trading_date,
-    publishedAt: r.published_at,
-    title: r.title ?? "",
-    summary: r.summary ?? "",
-  }));
+    .all<ListRow>();
+  return results.map(toListItem);
+}
+
+/**
+ * The published premarket or recap briefs in `lang` right before and after `publishedAt`, by
+ * publish time, in one D1 read. Earnings checks and unpublished translations are skipped.
+ */
+export async function getAdjacentPosts(db: D1Like, lang: Lang, publishedAt: string | null): Promise<AdjacentPosts> {
+  if (!publishedAt) return { prev: null, next: null };
+  const side = (dir: "prev" | "next") =>
+    `SELECT * FROM (
+       SELECT '${dir}' AS dir, p.slug, p.content_type, p.trading_date, p.published_at, t.title, t.summary
+       FROM posts p JOIN post_translations t ON t.post_id = p.id AND t.lang = ?
+       WHERE t.status = 'published' AND p.content_type IN ('premarket', 'recap')
+         AND p.published_at ${dir === "prev" ? "<" : ">"} ?
+       ORDER BY p.published_at ${dir === "prev" ? "DESC" : "ASC"} LIMIT 1)`;
+  const { results } = await db
+    .prepare(`${side("prev")} UNION ALL ${side("next")}`)
+    .bind(lang, publishedAt, lang, publishedAt)
+    .all<ListRow & { dir: "prev" | "next" }>();
+  const pick = (dir: "prev" | "next") => {
+    const row = results.find((r) => r.dir === dir);
+    return row ? toListItem(row) : null;
+  };
+  return { prev: pick("prev"), next: pick("next") };
+}
+
+/** Whether `slug` has a published translation in `lang` (one small D1 read). */
+export async function isPublishedIn(db: D1Like, slug: string, lang: Lang): Promise<boolean> {
+  const row = await db
+    .prepare(
+      `SELECT 1 AS hit FROM posts p JOIN post_translations t ON t.post_id = p.id AND t.lang = ?
+       WHERE p.slug = ? AND t.status = 'published'`,
+    )
+    .bind(lang, slug)
+    .first<{ hit: number }>();
+  return row !== null;
 }

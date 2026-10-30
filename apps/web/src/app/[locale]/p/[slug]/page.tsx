@@ -1,18 +1,16 @@
 import type { Metadata } from "next";
-import { notFound } from "next/navigation";
+import { notFound, redirect } from "next/navigation";
 import { cache } from "react";
+import { getCloudflareContext } from "@opennextjs/cloudflare";
 import { getTranslations, setRequestLocale } from "next-intl/server";
-import Charts from "@/components/Charts";
-import LangSwitch from "@/components/LangSwitch";
-import PendingNotice from "@/components/PendingNotice";
-import PostBody from "@/components/PostBody";
+import BriefView from "@/components/BriefView";
 import type { Locale } from "@/i18n/routing";
+import { loadBrief } from "@/lib/brief";
 import { getDb } from "@/lib/db";
-import { getPostCharts } from "@/lib/earnings";
+import { todayEt } from "@/lib/earnings";
 import { pendingTitle } from "@/lib/labels";
-import { getPostBySlug } from "@/lib/posts";
+import { getPostBySlug, isPublishedIn } from "@/lib/posts";
 import { pairedAlternates } from "@/lib/seo";
-import { formatEt } from "@/lib/time";
 
 // One D1 read shared by generateMetadata and the page.
 const load = cache((slug: string, locale: Locale) => getPostBySlug(getDb(), slug, locale));
@@ -37,31 +35,16 @@ export default async function PostPage({ params }: PageProps<"/[locale]/p/[slug]
   const { slug } = await params;
   const locale = (await params).locale as Locale;
   setRequestLocale(locale);
+  const db = getDb();
   const post = await load(slug, locale);
-  if (!post) notFound();
-  const t = await getTranslations();
-
-  if (post.status === "pending") {
-    return (
-      <article>
-        <h1>{pendingTitle(t, post, locale)}</h1>
-        <PendingNotice slug={post.slug} locale={locale} />
-      </article>
-    );
+  if (!post) {
+    // The header's language switch keeps the path, so it lands here for a post whose text in this
+    // language failed; that reader goes to this language's home page instead of a 404.
+    if (await isPublishedIn(db, slug, locale === "en" ? "zh" : "en")) redirect(`/${locale}`);
+    notFound();
   }
-
-  return (
-    <article>
-      <div className="page-tools">
-        <p className="meta">
-          <time dateTime={post.publishedAt ?? undefined}>
-            {t("post.published", { time: formatEt(post.publishedAt, locale) })}
-          </time>
-        </p>
-        {post.hasOtherLang && <LangSwitch locale={locale} path={`/p/${post.slug}`} />}
-      </div>
-      <PostBody markdown={post.bodyMd} sources={post.sources.map((s) => s.url)} />
-      <Charts charts={await getPostCharts(getDb(), post.slug, locale)} />
-    </article>
+  const data = await loadBrief(db, getCloudflareContext().env.FACTS, post, locale, (e) =>
+    console.error(`post facts ${post.factsKey}:`, e),
   );
+  return <BriefView locale={locale} today={todayEt()} {...data} />;
 }

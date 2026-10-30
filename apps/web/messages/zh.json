@@ -110,5 +110,15 @@
     "name": "TermPocket",
     "copy": "来自 PreBell 团队。用 AI 助手 Pocky 规划你的目标与习惯。",
     "cta": "试用 TermPocket →"
+  },
+  "brief": {
+    "crumbLabel": "当前位置",
+    "premarket": "盘前",
+    "recap": "收盘",
+    "checked": "✓ 数字已与源数据核对",
+    "movers": "涨跌榜",
+    "adjacent": "更多简报",
+    "prev": "上一篇",
+    "next": "下一篇"
   }
 }

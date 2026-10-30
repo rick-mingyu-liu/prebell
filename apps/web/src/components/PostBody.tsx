@@ -39,15 +39,74 @@ function components(sources: ReadonlySet<string>): Components {
   };
 }
 
+/** A hast node, as far as `colorSigned` needs one. */
+interface HastNode {
+  type: string;
+  tagName?: string;
+  value?: string;
+  properties?: Record<string, unknown>;
+  children?: HastNode[];
+}
+
+/** An explicitly signed percentage ("+1.2%", "-1.2%", "−1.2%"); not the "-7%" of "5-7%". */
+const SIGNED_PCT = /(?<![\w.,%+\-−])([+\-−])(\d[\d,]*(?:\.\d+)?)%/g;
+
+/** A text node split so each signed percentage sits in a `.num` span colored by its own sign. */
+function splitSigned(value: string): HastNode[] {
+  const out: HastNode[] = [];
+  let last = 0;
+  for (const m of value.matchAll(SIGNED_PCT)) {
+    // A value that rounds to 0.00 is flat, whatever its sign.
+    const dir = Math.abs(Number(m[2].replace(/,/g, ""))) < 0.005 ? "flat" : m[1] === "+" ? "up" : "down";
+    if (m.index > last) out.push({ type: "text", value: value.slice(last, m.index) });
+    out.push({
+      type: "element",
+      tagName: "span",
+      properties: { className: ["num", dir] },
+      children: [{ type: "text", value: m[0] }],
+    });
+    last = m.index + m[0].length;
+  }
+  if (last === 0) return [{ type: "text", value }];
+  if (last < value.length) out.push({ type: "text", value: value.slice(last) });
+  return out;
+}
+
+function colorSignedIn(nodes: HastNode[]): HastNode[] {
+  return nodes.flatMap((n) => {
+    if (n.type === "text") return splitSigned(n.value ?? "");
+    if (n.children && n.tagName !== "code" && n.tagName !== "pre") n.children = colorSignedIn(n.children);
+    return [n];
+  });
+}
+
+/** Rehype plugin: only text changes (into text and spans), so links, images and raw HTML are untouched. */
+const rehypeColorSigned = () => (tree: HastNode) => {
+  tree.children = colorSignedIn(tree.children ?? []);
+};
+
 /**
  * Renders a post's markdown on the server. Raw HTML is not rendered (no rehype-raw),
  * the default urlTransform drops unsafe URLs such as `javascript:`, links are limited
- * to `sources` and same-site paths, and images are dropped.
+ * to `sources` and same-site paths, and images are dropped. `colorSigned` colors explicitly
+ * signed percentages green or red; unsigned ones stay plain.
  */
-export default function PostBody({ markdown, sources }: { markdown: string; sources: readonly string[] }) {
+export default function PostBody({
+  markdown,
+  sources,
+  colorSigned = false,
+}: {
+  markdown: string;
+  sources: readonly string[];
+  colorSigned?: boolean;
+}) {
   return (
     <div className="post-body">
-      <Markdown remarkPlugins={[remarkGfm]} components={components(new Set(sources))}>
+      <Markdown
+        remarkPlugins={[remarkGfm]}
+        rehypePlugins={colorSigned ? [rehypeColorSigned] : []}
+        components={components(new Set(sources))}
+      >
         {markdown}
       </Markdown>
     </div>

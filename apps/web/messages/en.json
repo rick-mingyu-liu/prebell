@@ -110,5 +110,15 @@
     "name": "TermPocket",
     "copy": "From the PreBell team. Plan your goals and habits with Pocky, your AI assistant.",
     "cta": "Try TermPocket →"
+  },
+  "brief": {
+    "crumbLabel": "Breadcrumb",
+    "premarket": "Premarket",
+    "recap": "Recap",
+    "checked": "✓ Numbers checked against source data",
+    "movers": "Top movers",
+    "adjacent": "More briefs",
+    "prev": "Previous",
+    "next": "Next"
   }
 }
