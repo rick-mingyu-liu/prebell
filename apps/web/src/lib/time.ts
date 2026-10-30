@@ -32,3 +32,15 @@ export function formatDate(date: string, lang: Lang): string {
     dateStyle: lang === "en" ? "medium" : "long",
   }).format(d);
 }
+
+const enTime = new Intl.DateTimeFormat("en-US", { timeZone: TZ, timeStyle: "short" });
+const zhTime = new Intl.DateTimeFormat("zh-CN", { timeZone: TZ, hour: "numeric", minute: "2-digit", hour12: true });
+
+/** A UTC ISO timestamp as a time of day in US Eastern, e.g. "8:34 AM ET". */
+export function formatEtTime(iso: string | null | undefined, lang: Lang): string {
+  if (!iso) return "";
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "";
+  if (lang === "en") return `${enTime.format(d).replace(/[  ]/g, " ")} ET`;
+  return `${zhTime.format(d).replace(/[  ]/g, " ")}（美东）`;
+}

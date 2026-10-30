@@ -77,5 +77,19 @@
     "readCheck": "Read the check",
     "charts": "Charts (GAAP)",
     "chartsNote": "Charts show GAAP figures from SEC filings; the last bar marked 8-K is this release. A gap means the company did not report that quarter separately."
+  },
+  "index": {
+    "es": "S&P 500 futures",
+    "nq": "Nasdaq 100 futures",
+    "ym": "Dow futures",
+    "rty": "Russell 2000 futures",
+    "gspc": "S&P 500",
+    "ndx": "Nasdaq 100",
+    "ixic": "Nasdaq Composite",
+    "dji": "Dow",
+    "rut": "Russell 2000"
+  },
+  "movers": {
+    "noNews": "No clear news"
   }
 }
