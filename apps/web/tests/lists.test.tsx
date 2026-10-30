@@ -35,7 +35,7 @@ describe("CalendarWeek", () => {
       date: "2026-11-02",
       entries: [
         { ticker: "AMD", date: "2026-11-02", slot: "amc", status: "confirmed", postSlug: null },
-        { ticker: "PFE", date: "2026-11-02", slot: "bmo", status: "unconfirmed", postSlug: null },
+        { ticker: "UNH", date: "2026-11-02", slot: "bmo", status: "unconfirmed", postSlug: null },
         { ticker: "INTC", date: "2026-11-02", slot: "bmo", status: "reported", postSlug: "intc-q3" },
         { ticker: "UBER", date: "2026-11-02", slot: "unknown", status: "unconfirmed", postSlug: null },
       ],
@@ -46,7 +46,7 @@ describe("CalendarWeek", () => {
   it("groups chips by slot, writes the status on each chip and links reported ones to the post", () => {
     const out = renderToStaticMarkup(<CalendarWeek days={days} locale="en" />);
     expect(out.indexOf("Before open")).toBeLessThan(out.indexOf("After close"));
-    expect(out).toContain('class="cal-chip cal-unconfirmed" href="/en/t/PFE"');
+    expect(out).toContain('class="cal-chip cal-unconfirmed" href="/en/t/UNH"');
     expect(out).toContain('class="cal-chip cal-reported" href="/en/p/intc-q3"');
     expect(out).toContain('class="cal-chip cal-confirmed" href="/en/t/AMD"');
     expect(out).toContain(">Confirmed<");
@@ -60,7 +60,7 @@ describe("CalendarWeek", () => {
   it("shows a logo on chips that have one and keeps the plain chip otherwise", () => {
     const out = renderToStaticMarkup(<CalendarWeek days={days} locale="en" />);
     expect(out).toMatch(/href="\/en\/t\/AMD"><img class="tlogo" src="\/logos\/companies\/AMD.svg" alt=""[^>]*\/><b>AMD<\/b>/);
-    expect(out).toContain('href="/en/t/PFE"><b>PFE</b>');
+    expect(out).toContain('href="/en/t/UNH"><b>UNH</b>');
   });
 
   it("names each day's region by its heading, once", () => {

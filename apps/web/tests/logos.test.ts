@@ -15,7 +15,7 @@ describe("companyLogo", () => {
     expect(companyLogo(" aapl ")).toBe("/logos/companies/AAPL.svg");
   });
   it("is null for tickers without a logo, unknown tickers and odd input", () => {
-    expect(companyLogo("MSFT")).toBeNull();
+    expect(companyLogo("AVGO")).toBeNull();
     expect(companyLogo("BRK.B")).toBeNull();
     expect(companyLogo("ZZZZ")).toBeNull();
     expect(companyLogo("")).toBeNull();
@@ -25,11 +25,16 @@ describe("companyLogo", () => {
 });
 
 describe("logo manifest", () => {
-  it("only maps watchlist tickers, each to an SVG that exists", () => {
+  it("only maps watchlist tickers, each to an SVG or PNG tile that exists", () => {
     for (const [ticker, path] of Object.entries(COMPANY_LOGOS)) {
       expect(watchlist).toContain(ticker);
-      expect(path).toBe(`/logos/companies/${ticker}.svg`);
-      expect(readFileSync(publicFile(path), "utf8")).toMatch(/^<svg xmlns="http:\/\/www\.w3\.org\/2000\/svg"/);
+      expect(path).toMatch(new RegExp(`^/logos/companies/${ticker.replace(".", "\\.")}\\.(svg|png)$`));
+      const file = readFileSync(publicFile(path));
+      if (path.endsWith(".svg")) expect(file.toString("utf8")).toMatch(/^<svg xmlns="http:\/\/www\.w3\.org\/2000\/svg"/);
+      else {
+        expect(file.subarray(0, 8).toString("hex")).toBe("89504e470d0a1a0a");
+        expect([file.readUInt32BE(16), file.readUInt32BE(20)]).toEqual([64, 64]); // the IHDR size
+      }
     }
   });
   it("has no stray files and every file has a licence entry", () => {
@@ -45,9 +50,9 @@ describe("logo manifest", () => {
       for (const f of readdirSync(publicFile(dir))) {
         const path = publicFile(`${dir}/${f}`);
         bytes += statSync(path).size;
-        const svg = readFileSync(path, "utf8");
-        expect(svg).not.toMatch(/<script|href=|on\w+=/i);
+        if (f.endsWith(".svg")) expect(readFileSync(path, "utf8")).not.toMatch(/<script|href=|on\w+=/i);
+        else expect(f).toMatch(/\.png$/);
       }
-    expect(bytes).toBeLessThan(300_000);
+    expect(bytes).toBeLessThan(500_000);
   });
 });

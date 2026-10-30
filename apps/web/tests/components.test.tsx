@@ -262,7 +262,7 @@ describe("EarningsStrip", () => {
   it("shows a logo on chips that have one and keeps the plain chip otherwise", () => {
     const out = renderToStaticMarkup(<EarningsStrip day={day} locale="en" today="2026-10-31" />);
     expect(out).toMatch(/<a class="estrip-chip" href="\/en\/p\/ko-2026-11-02-earnings"><img class="tlogo" src="\/logos\/companies\/KO.svg" alt=""[^>]*\/>KO<\/a>/);
-    expect(out).toContain('<a class="estrip-chip" href="/en/t/MSFT">MSFT</a>');
+    expect(out).toMatch(/<a class="estrip-chip" href="\/en\/t\/MSFT"><img class="tlogo" src="\/logos\/companies\/MSFT.png" alt=""[^>]*\/>MSFT<\/a>/);
     expect(out).toContain('<a class="estrip-chip" href="/en/t/BRK.B">BRK.B</a>');
     expect(out).not.toContain("tlogo-none");
   });

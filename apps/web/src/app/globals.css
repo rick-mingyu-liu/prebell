@@ -152,7 +152,8 @@ main:not(.wrap) { max-width: 46rem; margin: 0 auto; padding: 1.5rem 16px 3rem; }
 .side-box a { display: flex; justify-content: space-between; align-items: center; padding: 0.55rem 0.75rem; font-size: 0.8125rem; font-weight: 700; text-decoration: none; }
 .side-box a:hover, .side-box a:focus-visible { background: var(--tile); }
 .side-box a span { color: var(--muted); font-weight: 400; }
-.side-logo img { display: block; height: 16px; width: auto; }
+.side-box .side-name { display: flex; align-items: center; gap: 0.5rem; color: inherit; font-weight: inherit; }
+.side-logo img { display: block; width: 18px; height: 18px; border-radius: 5px; } /* the same tile as company logos */
 .side-disc { font-size: 0.6875rem; line-height: 1.4; color: var(--muted); margin: 0 0 0.75rem; }
 .tp-card { background: linear-gradient(135deg, #0e1b2b, #1f3b5a); color: #fff; padding: 0.9rem; border-radius: 10px; margin-bottom: 0.75rem; }
 .tp-card p { font-size: 0.75rem; line-height: 1.45; margin: 0.35rem 0 0.7rem; opacity: 0.85; }

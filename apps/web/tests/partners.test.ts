@@ -87,18 +87,22 @@ describe("GET /api/partners", () => {
     expect(res.headers.get("Cache-Control")).toBe("private, no-store");
     expect(await res.json()).toEqual({
       brokers: [
-        { id: "moomoo", name: "moomoo", url: "https://j.moomoo.com/0J1BGf" },
-        { id: "wealthsimple", name: "Wealthsimple", url: "https://wealthsimple.com/invite/QDBQ5Z" },
+        { id: "moomoo", name: "moomoo", url: "https://j.moomoo.com/0J1BGf", logo: "/logos/partners/moomoo.png" },
+        {
+          id: "wealthsimple",
+          name: "Wealthsimple",
+          url: "https://wealthsimple.com/invite/QDBQ5Z",
+          logo: "/logos/partners/wealthsimple.png",
+        },
       ],
       crypto: [
+        { id: "okx", name: "OKX", url: "https://okx.com/join/AIAFMP3U", logo: "/logos/partners/okx.svg" },
         {
-          id: "okx",
-          name: "OKX",
-          url: "https://okx.com/join/AIAFMP3U",
-          logo: "/logos/partners/okx.svg",
-          logoDark: "/logos/partners/okx-dark.svg",
+          id: "cryptocom",
+          name: "Crypto.com",
+          url: "https://crypto.com/app/smqqda7396",
+          logo: "/logos/partners/cryptocom.png",
         },
-        { id: "cryptocom", name: "Crypto.com", url: "https://crypto.com/app/smqqda7396" },
       ],
     });
   });
@@ -188,22 +192,21 @@ describe("PartnerBoxes", () => {
     expect(out.indexOf(DISCLOSURE_EN)).toBeGreaterThan(out.indexOf("OKX"));
   });
 
-  it("shows a partner's logo with its name as alt text, switching file in dark mode", () => {
+  it("shows a partner's logo tile before its name, switching file in dark mode when there is a dark one", () => {
     const out = render({
       brokers: [],
       crypto: [{ ...okx, logo: "/logos/partners/okx.svg", logoDark: "/logos/partners/okx-dark.svg" }],
     });
     expect(out).toContain('<source srcSet="/logos/partners/okx-dark.svg" media="(prefers-color-scheme: dark)"/>');
-    expect(out).toContain('<img src="/logos/partners/okx.svg" alt="OKX"');
-    expect(out).not.toContain(">OKX<");
+    expect(out).toMatch(/<img src="\/logos\/partners\/okx.svg" alt="" width="18" height="18"\/><\/picture>OKX<\/span>/);
   });
 
-  it("falls back to the name as text without a logo, and needs no dark variant", () => {
+  it("shows the name alone without a logo, and needs no dark variant", () => {
     const named = render({ brokers: [], crypto: [okx] });
-    expect(named).toContain(">OKX<");
+    expect(named).toContain('<span class="side-name">OKX</span>');
     expect(named).not.toContain("<img");
     const lightOnly = render({ brokers: [], crypto: [{ ...okx, logo: "/logos/partners/okx.svg" }] });
-    expect(lightOnly).toContain('alt="OKX"');
+    expect(lightOnly).toContain(">OKX</span>");
     expect(lightOnly).not.toContain("<source");
   });
 
