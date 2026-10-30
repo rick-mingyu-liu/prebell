@@ -12,7 +12,8 @@ use crate::facts::{quote_numbers, Field, Mover, NewsReason, Quote};
 use crate::numbers::Lang;
 use crate::premarket::draft::Draft;
 use crate::premarket::{
-    articles_prompt, company_name, extract, system_prompt, universe, yahoo_symbol, Diag,
+    articles_prompt, company_name, extract, fresh_news, system_prompt, universe, yahoo_symbol,
+    Diag, EVENT_RULE,
 };
 use crate::providers::{LlmProvider, MarketData, NewsSearch};
 use crate::run::{tick_content, Content, Hooks, TickOutcome};
@@ -102,19 +103,26 @@ fn long_date(d: NaiveDate) -> String {
     d.format("%B %-d, %Y").to_string()
 }
 
-async fn mover(ns: &dyn NewsSearch, llm: &dyn LlmProvider, quote: Quote, d: &mut Diag) -> Mover {
+async fn mover(
+    ns: &dyn NewsSearch,
+    llm: &dyn LlmProvider,
+    quote: Quote,
+    now: DateTime<Utc>,
+    d: &mut Diag,
+) -> Mover {
     let name = company_name(&quote.symbol)
         .unwrap_or(&quote.symbol)
         .to_string();
     let ticker = &quote.symbol;
-    let reasons = match ns
-        .search(&format!("{name} ({ticker}) stock"), HITS_PER_MOVER)
-        .await
-    {
+    let query = format!("{name} ({ticker}) stock");
+    let reasons = match fresh_news(ns, &query, HITS_PER_MOVER, now).await {
         Ok(hits) => {
-            let system = system_prompt(
-                "explain why a US stock moved in today's regular trading session",
-                MOVER_REASONS,
+            let system = format!(
+                "{} {EVENT_RULE}",
+                system_prompt(
+                    "explain why a US stock moved in today's regular trading session",
+                    MOVER_REASONS,
+                )
             );
             let header = format!(
                 "Ticker: {ticker}\nCompany: {name}\nChange today: {:+.2}%",
@@ -150,6 +158,8 @@ async fn after_hours(
     d: &mut Diag,
 ) -> Field<Vec<NewsReason>> {
     let day = long_date(date);
+    // Not held to the news age cutoff: a preview from earlier in the week
+    // still names tonight's reports, and the prompt pins the date.
     let hits = match ns
         .search(&format!("earnings after the bell {day}"), AFTER_HOURS_HITS)
         .await
@@ -273,11 +283,11 @@ pub async fn build_facts(
 
     let mut gainers = Vec::with_capacity(up.len());
     for q in up {
-        gainers.push(mover(ns, llm, q, &mut d).await);
+        gainers.push(mover(ns, llm, q, now, &mut d).await);
     }
     let mut losers = Vec::with_capacity(down.len());
     for q in down {
-        losers.push(mover(ns, llm, q, &mut d).await);
+        losers.push(mover(ns, llm, q, now, &mut d).await);
     }
 
     RecapFacts {
@@ -513,6 +523,7 @@ mod tests {
             url: url.into(),
             title: "Title".into(),
             content: content.into(),
+            published: None,
         }
     }
     fn ns(items: Vec<(&str, Result<Vec<SearchHit>, ProviderError>)>) -> FakeNs {
@@ -718,6 +729,27 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn stale_article_is_never_a_reason_and_movers_need_an_event() {
+        let stocks = [q("NVDA", 182.35, 3.08, Some(210_000_000))];
+        let stale = SearchHit {
+            published: Some(now() - chrono::Duration::days(6)),
+            ..hit(URL, ARTICLE)
+        };
+        let n = ns(vec![(NVDA_Q, Ok(vec![stale]))]);
+        let l = llm(vec![("NVDA", reasons(URL, QUOTE, "Nvidia rose."))]);
+        let f = build_facts(&md(&stocks), &n, &l, date(), now()).await;
+        assert_eq!(f.gainers[0].reasons, vec![]);
+        assert!(l.prompts.borrow().iter().all(|(_, u)| !u.contains("NVDA")));
+
+        let n = ns(vec![(NVDA_Q, Ok(vec![hit(URL, ARTICLE)]))]);
+        let f = build_facts(&md(&stocks), &n, &l, date(), now()).await;
+        assert_eq!(f.gainers[0].reasons.len(), 1);
+        let p = l.prompts.borrow();
+        let (sys, _) = p.iter().find(|(_, u)| u.contains("NVDA")).unwrap();
+        assert!(sys.contains("Trailing performance"), "{sys}");
+    }
+
+    #[tokio::test]
     async fn after_hours_items_are_anchored() {
         let src = "Intel and Amazon are scheduled to report quarterly results after the bell on Thursday, October 29.";
         let n = ns(vec![(AH_Q, Ok(vec![hit("https://news.test/ah", src)]))]);
@@ -891,6 +923,7 @@ mod run_tests {
                     url: URL.into(),
                     title: "Nvidia rises".into(),
                     content: ARTICLE.into(),
+                    published: None,
                 }])
             } else {
                 Err(ProviderError::Empty)

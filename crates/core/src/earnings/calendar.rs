@@ -877,6 +877,7 @@ mod tests {
             url: url.into(),
             title: "t".into(),
             content: content.into(),
+            published: None,
         }
     }
     const PR: &str = "CUPERTINO, California -- Apple will report results for its fiscal fourth quarter on Thursday, October 30, 2026 after the market closes.";

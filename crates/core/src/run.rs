@@ -644,6 +644,7 @@ mod tests {
                     url: URL.into(),
                     title: "Apple jumps".into(),
                     content: ARTICLE.into(),
+                    published: None,
                 }])
             } else {
                 Err(ProviderError::Empty)
