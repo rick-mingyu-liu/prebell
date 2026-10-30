@@ -82,6 +82,33 @@ describe("NumbersBlock", () => {
     expect(page).not.toContain('class="tile"');
   });
 
+  it("colors tiles and rows by direction", () => {
+    const facts: FactsView = { ...premarket() };
+    const q = (symbol: string, changePct: number) => ({
+      symbol,
+      last: 100,
+      changePct,
+      pointChange: changePct,
+      dir: dirOf(changePct),
+    });
+    facts.others = [
+      { symbol: "NQ=F", quote: q("NQ=F", 1.5) },
+      { symbol: "YM=F", quote: q("YM=F", -1.5) },
+      { symbol: "RTY=F", quote: q("RTY=F", 0) },
+    ];
+    for (const variant of ["home", "page"] as const) {
+      const out = renderToStaticMarkup(<NumbersBlock facts={facts} variant={variant} locale="en" />);
+      expect(out).toMatch(/class="num up">\+1\.50%</);
+      expect(out).toMatch(/class="num down">−1\.50%</);
+      expect(out).toMatch(/class="num flat">0\.00%</);
+    }
+  });
+
+  it("puts the as-of timestamp on the time element", () => {
+    const out = renderToStaticMarkup(<NumbersBlock facts={premarket()} variant="home" locale="en" />);
+    expect(out).toMatch(/<time dateTime="2026-10-30T13:20:43\.115Z">/);
+  });
+
   it("renders a missing index as a grey dash", () => {
     const facts: FactsView = { ...premarket() };
     facts.others = [{ symbol: "NQ=F", quote: null }, ...facts.others.slice(1)];
@@ -129,6 +156,9 @@ describe("MoversList", () => {
   it("says 'No clear news' on EN when there is no reason", () => {
     const out = renderToStaticMarkup(<MoversList movers={[mover({ reason: null })]} locale="en" />);
     expect(out).toContain("No clear news");
+    expect(out).not.toContain("muted\">No clear news");
+    const blank = renderToStaticMarkup(<MoversList movers={[mover({ reason: "" })]} locale="en" />);
+    expect(blank).toContain("No clear news");
   });
 
   it("shows no reason line on ZH", () => {
@@ -155,7 +185,7 @@ describe("MoversList", () => {
     expect(out).toContain("<b>A</b>");
     expect(out).toContain("<b>B</b>");
     expect(out).not.toContain("<b>C</b>");
-    expect(out).toContain("1,234.50");
+    expect(out).toContain("$1,234.50");
     const noPrice = renderToStaticMarkup(<MoversList movers={movers} locale="en" />);
     expect(noPrice).not.toContain("1,234.50");
   });

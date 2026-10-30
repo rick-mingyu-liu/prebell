@@ -5,9 +5,7 @@ import { formatEtTime } from "../lib/time";
 import { translator } from "../lib/translator";
 
 /** `=` and `^` are awkward in message keys, so symbols map to `index.*` keys here. */
-type NameKey = "index.es" | "index.nq" | "index.ym" | "index.rty" | "index.gspc" | "index.ndx" | "index.ixic" | "index.dji" | "index.rut";
-
-const NAME_KEY: Record<string, NameKey> = {
+const NAME_KEY = {
   "ES=F": "index.es",
   "NQ=F": "index.nq",
   "YM=F": "index.ym",
@@ -17,24 +15,25 @@ const NAME_KEY: Record<string, NameKey> = {
   "^IXIC": "index.ixic",
   "^DJI": "index.dji",
   "^RUT": "index.rut",
-};
+} as const;
+type NameKey = (typeof NAME_KEY)[keyof typeof NAME_KEY];
 
 type Translate = ReturnType<typeof translator>;
 
 function indexName(t: Translate, symbol: string): string {
-  const key = NAME_KEY[symbol];
+  const key = (NAME_KEY as Record<string, NameKey | undefined>)[symbol];
   return key ? t(key) : symbol;
 }
 
 /** The lead index as a big number with its point change and percent; a Missing value is a grey dash. */
-function Lead({ index, name, time }: { index: IndexView; name: string; time: string }) {
+function Lead({ index, name, time, asOf }: { index: IndexView; name: string; time: string; asOf: string }) {
   const q = index.quote;
   return (
     <>
       <p className="lbl">
         {name}
         {time && " · "}
-        {time && <time>{time}</time>}
+        {time && <time dateTime={asOf}>{time}</time>}
       </p>
       {q ? (
         <>
@@ -93,7 +92,7 @@ export default function NumbersBlock({
   const Item = variant === "home" ? Tile : IndexRow;
   return (
     <div className={`numbers numbers-${variant}`}>
-      <Lead index={facts.lead} name={name(facts.lead)} time={formatEtTime(facts.asOfUtc, locale)} />
+      <Lead index={facts.lead} name={name(facts.lead)} time={formatEtTime(facts.asOfUtc, locale)} asOf={facts.asOfUtc} />
       <div className="chart-slot" aria-hidden="true"></div>
       <div className={variant === "home" ? "tiles" : "index-rows"}>
         {facts.others.map((i) => (

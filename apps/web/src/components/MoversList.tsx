@@ -28,11 +28,11 @@ export default function MoversList({
               <b>{m.symbol}</b> <span className="muted">{m.name}</span>
             </div>
             {locale === "en" && (
-              <div className="why">{m.reason ?? <span className="muted">{t("movers.noNews")}</span>}</div>
+              <div className="why">{m.reason || t("movers.noNews")}</div>
             )}
           </div>
           <div className="mover-end">
-            {showPrice && <span className="num">{fmtPrice(m.quote.last)}</span>}
+            {showPrice && <span className="num">${fmtPrice(m.quote.last)}</span>}
             <Pill pct={m.quote.changePct} />
           </div>
         </li>
