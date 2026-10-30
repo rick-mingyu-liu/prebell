@@ -29,4 +29,4 @@ Reply with JSON exactly in this shape and nothing else:
   2. "Biggest premarket movers"
   3. "Macro & overnight"
   4. "What to watch", only when `watch_list` is not `Missing`. When `watch_list` is `Missing`, leave this section out entirely: reply with exactly the first three sections.
-- Each `markdown` is the section body in Markdown, without its heading. A section whose facts are `Missing` says "n/a".
+- Each `markdown` is the section body in Markdown, without its heading. A section whose facts are `Missing` says "n/a", except "What to watch", which is omitted.

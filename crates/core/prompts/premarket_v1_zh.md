@@ -33,4 +33,4 @@
   2. "盘前异动"
   3. "宏观与隔夜"
   4. "今日关注"，仅当 `watch_list` 不是 `Missing` 时才写。`watch_list` 为 `Missing` 时完全省略这一部分，只回复前三个部分。
-- 每个 `markdown` 是该部分正文（Markdown 格式，不含标题）。事实为 `Missing` 的部分写“暂缺”。
+- 每个 `markdown` 是该部分正文（Markdown 格式，不含标题）。事实为 `Missing` 的部分写“暂缺”，但“今日关注”除外：它直接省略。
