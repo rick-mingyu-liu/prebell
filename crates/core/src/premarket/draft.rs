@@ -260,14 +260,12 @@ pub(crate) fn reject_markup(what: &str, s: &str) -> Result<(), String> {
 /// Phrases that narrate missing data instead of the market, as in the
 /// 2026-10-30 brief. Matched case-insensitively in either language; kept
 /// short so real prose passes.
-const META: [&str; 17] = [
+const META: [&str; 13] = [
     "no reason was provided",
     "no reasons were provided",
     "no reason was given",
     "no reasons were given",
     "no news was found",
-    "data is unavailable",
-    "data was unavailable",
     "not provided in the facts",
     "not in the facts",
     "the facts do not",
@@ -276,16 +274,33 @@ const META: [&str; 17] = [
     "未给出原因",
     "未提供原因",
     "原因不明",
+];
+
+/// Missing-data phrases that are real news in a macro section ("payrolls
+/// data was unavailable due to the shutdown"), so they are only checked in
+/// the title, the summary and the movers section.
+const META_DATA: [&str; 4] = [
+    "data is unavailable",
+    "data was unavailable",
     "暂无数据",
     "数据缺失",
 ];
 
-/// Rejects prose that comments on missing reasons or data.
-fn reject_meta(what: &str, s: &str) -> Result<(), String> {
+/// The movers section of the premarket brief or the recap, either language.
+fn is_movers(heading: &str) -> bool {
+    [Lang::En, Lang::Zh]
+        .into_iter()
+        .any(|l| headings(l, false)[1] == heading || crate::recap::draft::headings(l)[1] == heading)
+}
+
+/// Rejects prose that comments on missing facts or data; `data` adds the
+/// phrases that are only meta-commentary outside macro news.
+fn reject_meta(what: &str, s: &str, data: bool) -> Result<(), String> {
     let lower = s.to_lowercase();
-    match META.iter().find(|p| lower.contains(*p)) {
+    let extra: &[&str] = if data { &META_DATA } else { &[] };
+    match META.iter().chain(extra).find(|p| lower.contains(*p)) {
         Some(p) => Err(format!(
-            "{what} narrates missing data ({p:?}): give a mover without a reason just its move"
+            "{what} comments on missing facts or data ({p:?}): rephrase without it"
         )),
         None => Ok(()),
     }
@@ -314,8 +329,8 @@ pub(crate) fn one_line(v: &Value, key: &str) -> Result<String, String> {
 fn parse(v: &Value, lang: Lang, want: &[&str]) -> Result<Draft, String> {
     let title = one_line(v, "title")?;
     let summary = one_line(v, "summary")?;
-    reject_meta("title", &title)?;
-    reject_meta("summary", &summary)?;
+    reject_meta("title", &title, true)?;
+    reject_meta("summary", &summary, true)?;
     if summary.starts_with('#') {
         return Err("summary starts with a heading marker".into());
     }
@@ -353,7 +368,7 @@ fn parse(v: &Value, lang: Lang, want: &[&str]) -> Result<Draft, String> {
     }
     for (h, m) in &got {
         reject_markup(&format!("section {h:?}"), m)?;
-        reject_meta(&format!("section {h:?}"), m)?;
+        reject_meta(&format!("section {h:?}"), m, is_movers(h))?;
         if m.lines()
             .any(|l| l.trim_start().starts_with('#') || is_setext_underline(l))
         {
@@ -667,7 +682,9 @@ mod tests {
         ] {
             let v = reply(lang, body).unwrap();
             let err = parse(&v, lang, &headings(lang, false)).unwrap_err();
-            assert!(err.contains("missing data"), "{body:?}: {err}");
+            assert!(err.contains("missing facts or data"), "{body:?}: {err}");
+            // The note does not steer the model toward any one section.
+            assert!(!err.contains("mover"), "{err}");
         }
         let mut v = clean(Lang::En).unwrap();
         v["summary"] = json!("Futures fell; no reason was given for Dell.");
@@ -700,7 +717,64 @@ mod tests {
         ]);
         assert!(write(&l, &facts(), Lang::En).await.is_ok());
         let p = l.prompts.borrow();
-        assert!(p[1].1.contains("missing data"), "{}", p[1].1);
+        assert!(p[1].1.contains("missing facts or data"), "{}", p[1].1);
+    }
+
+    /// A reply with `macro_body` in the macro section and "Quiet." elsewhere.
+    fn macro_reply(lang: Lang, macro_body: &str) -> Value {
+        let heads = headings(lang, false);
+        let mut v = reply_with(&heads, "Quiet.").unwrap();
+        v["sections"][2]["markdown"] = json!(macro_body);
+        v
+    }
+
+    #[test]
+    fn missing_official_data_is_real_macro_news() {
+        for (lang, body) in [
+            (
+                Lang::En,
+                "Official jobs data is unavailable because of the government shutdown.",
+            ),
+            (
+                Lang::En,
+                "September payrolls data was unavailable due to the shutdown.",
+            ),
+            (
+                Lang::Zh,
+                "因政府停摆，官方就业数据缺失，部分经济指标暂无数据。",
+            ),
+        ] {
+            assert!(
+                parse(&macro_reply(lang, body), lang, &headings(lang, false)).is_ok(),
+                "{body:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn data_phrases_still_fail_in_movers_title_and_summary() {
+        for (lang, phrase) in [
+            (Lang::En, "Data is unavailable for Dell."),
+            (Lang::Zh, "戴尔暂无数据。"),
+        ] {
+            let mut movers = macro_reply(lang, "Quiet.");
+            movers["sections"][1]["markdown"] = json!(phrase);
+            let mut summary = macro_reply(lang, "Quiet.");
+            summary["summary"] = json!(phrase);
+            let mut title = macro_reply(lang, "Quiet.");
+            title["title"] = json!(phrase);
+            for v in [movers, summary, title] {
+                assert!(parse(&v, lang, &headings(lang, false)).is_err(), "{v}");
+            }
+        }
+        // The recap's movers section is covered too.
+        let recap = crate::recap::draft::headings(Lang::En);
+        let mut v = reply_with(&recap, "Quiet.").unwrap();
+        v["sections"][1]["markdown"] = json!("Data was unavailable for Dell.");
+        assert!(parse(&v, Lang::En, &recap).is_err());
+        v["sections"][1]["markdown"] = json!("Quiet.");
+        v["sections"][2]["markdown"] = json!("Data was unavailable for Dell.");
+        assert!(parse(&v, Lang::En, &recap).is_ok());
     }
 
     #[tokio::test]
