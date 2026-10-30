@@ -155,9 +155,10 @@ describe("next.config headers", () => {
 describe("Sidebar", () => {
   const PARTNER_HOSTS = ["moomoo.com", "okx.com", "crypto.com", "wealthsimple.com"];
 
-  it("server-renders only the TermPocket card: no partner link and no disclosure", () => {
+  it("server-renders only the TermPocket card: no partner link, logo or disclosure", () => {
     const out = renderToStaticMarkup(createElement(Sidebar, { locale: "en" }));
     for (const host of PARTNER_HOSTS) expect(out).not.toContain(host);
+    expect(out).not.toContain("/logos/partners/");
     expect(out).not.toContain(DISCLOSURE_EN);
     expect(out).toContain('href="https://www.termpocket.com"');
     expect(out).toContain("From the PreBell team. Plan your goals and habits with Pocky, your AI assistant.");
@@ -166,6 +167,7 @@ describe("Sidebar", () => {
   it("uses the Chinese copy on ZH pages", () => {
     const out = renderToStaticMarkup(createElement(Sidebar, { locale: "zh" }));
     for (const host of PARTNER_HOSTS) expect(out).not.toContain(host);
+    expect(out).not.toContain("/logos/partners/");
     expect(out).not.toContain(DISCLOSURE_ZH);
     expect(out).toContain("来自 PreBell 团队。用 AI 助手 Pocky 规划你的目标与习惯。");
   });

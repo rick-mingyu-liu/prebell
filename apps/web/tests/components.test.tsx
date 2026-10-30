@@ -176,8 +176,10 @@ describe("MoversList", () => {
 
   it("escapes the reason text", () => {
     const evil = '<img src=x onerror=alert(1)><script>alert(1)</script>';
-    const out = renderToStaticMarkup(<MoversList movers={[mover({ reason: evil })]} locale="en" />);
-    expect(out).not.toMatch(/<img[^>]*onerror/);
+    // A ticker without a logo, so any <img> in the markup could only have come from the reason.
+    const out = renderToStaticMarkup(<MoversList movers={[mover({ symbol: "ZZZ", reason: evil })]} locale="en" />);
+    expect(out).not.toContain("<img");
+    expect(out).toContain("&lt;img src=x onerror=alert(1)&gt;");
     expect(out).not.toContain("<script");
     expect(out).toContain("&lt;script&gt;");
   });

@@ -7,11 +7,15 @@
 //   public/logos/companies/*, public/logos/partners/*
 //   src/lib/logos.generated.ts            the ticker -> file manifest read by src/lib/logos.ts
 //   public/logos/LICENSES.md              source, date and licence for every file
-// Downloads are cached in node_modules/.cache/logos (delete it to refetch). Requests go out one per
+// Everything is built in node_modules/.cache/logos-build and moved into place only when the whole run
+// succeeds, so a failed run leaves the committed files alone. Definitive answers (2xx, and 4xx other
+// than 408/429) are cached in node_modules/.cache/logos; delete it to refetch. Requests go out one per
 // second with a User-Agent naming the project, per the Wikimedia policy. Run `pnpm logos` in apps/web
 // after changing a mapping below or bumping simple-icons. See docs/runbook.md.
+//   --offline       use only the cache (no requests)
+//   --allow-shrink  accept a manifest that drops tickers the committed one has
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -21,6 +25,11 @@ const require = createRequire(import.meta.url);
 const WEB = join(dirname(fileURLToPath(import.meta.url)), "..");
 const WATCHLIST = join(WEB, "../../crates/core/data/watchlist.tsv");
 const CACHE = join(WEB, "node_modules/.cache/logos");
+const BUILD = join(WEB, "node_modules/.cache/logos-build");
+const LOGOS = join(WEB, "public/logos");
+const MANIFEST = join(WEB, "src/lib/logos.generated.ts");
+const OFFLINE = process.argv.includes("--offline");
+const ALLOW_SHRINK = process.argv.includes("--allow-shrink");
 const SI_ROOT = join(dirname(require.resolve("simple-icons/icons.json")), "..");
 const SI_VERSION = JSON.parse(readFileSync(join(SI_ROOT, "package.json"), "utf8")).version;
 const SI_DATA = require("simple-icons/icons.json");
@@ -134,37 +143,53 @@ const PARTNERS = {
 let lastRequest = 0;
 const today = () => new Date().toISOString().slice(0, 10);
 
+/** A 2xx, or a 4xx a retry won't change (not 408 timeout or 429 rate limit): safe to cache. */
+const definitive = (status) => (status >= 200 && status < 300) || (status >= 400 && status < 500 && status !== 408 && status !== 429);
+/** Company-site URLs that failed in a way a retry could fix; reported at the end, never cached. */
+const retryable = [];
+
 /**
- * GET with an on-disk cache. Returns { body, type, url, fetched }, or null. Failures (HTTP errors,
- * timeouts, refused bots) are cached too, so a rerun gives the same result; clear the cache to retry.
+ * GET with an on-disk cache. Returns { body, type, url, fetched }, or null. Only definitive answers
+ * are cached. A network error, timeout, 408, 429 or 5xx is not: for a `required` source (Wikidata,
+ * Commons, a partner file) it stops the run, since a missing answer would silently drop logos; for a
+ * company site it is reported, and the shrink check at the end catches any logo it cost.
  */
-async function get(url) {
+async function get(url, required = false) {
   mkdirSync(CACHE, { recursive: true });
   const key = join(CACHE, createHash("sha1").update(url).digest("hex"));
-  if (existsSync(`${key}.json`)) {
-    const meta = JSON.parse(readFileSync(`${key}.json`, "utf8"));
-    return meta.ok ? { ...meta, body: readFileSync(key) } : null;
+  const cached = existsSync(`${key}.json`) && JSON.parse(readFileSync(`${key}.json`, "utf8"));
+  // Older caches also hold transient failures (no status, or a retryable one): those don't count.
+  if (cached && definitive(cached.status ?? (cached.ok ? 200 : 0))) return cached.ok ? { ...cached, body: readFileSync(key) } : null;
+  if (retryable.includes(url)) return null; // already failed this run
+  let why = "not cached (--offline)";
+  if (!OFFLINE) {
+    await new Promise((r) => setTimeout(r, Math.max(0, lastRequest + 1000 - Date.now())));
+    lastRequest = Date.now();
+    try {
+      const res = await fetch(url, { headers: { "User-Agent": UA }, signal: AbortSignal.timeout(20_000) });
+      const meta = { ok: res.ok, status: res.status, url: res.url, type: res.headers.get("content-type") ?? "", fetched: today() };
+      const body = Buffer.from(await res.arrayBuffer());
+      if (definitive(res.status)) {
+        writeFileSync(`${key}.json`, JSON.stringify(meta));
+        if (res.ok) writeFileSync(key, body);
+        if (!res.ok) console.warn(`  ${url}: HTTP ${res.status}`);
+        return res.ok ? { ...meta, body } : null;
+      }
+      why = `HTTP ${res.status}`;
+    } catch (e) {
+      why = e.cause?.code ?? e.name;
+    }
   }
-  await new Promise((r) => setTimeout(r, Math.max(0, lastRequest + 1000 - Date.now())));
-  lastRequest = Date.now();
-  let meta;
-  let body;
-  try {
-    const res = await fetch(url, { headers: { "User-Agent": UA }, signal: AbortSignal.timeout(20_000) });
-    meta = { ok: res.ok, status: res.status, url: res.url, type: res.headers.get("content-type") ?? "", fetched: today() };
-    body = Buffer.from(await res.arrayBuffer());
-  } catch (e) {
-    meta = { ok: false, error: e.cause?.code ?? e.name, url, fetched: today() };
-  }
-  if (!meta.ok) console.warn(`  ${url}: ${meta.error ?? `HTTP ${meta.status}`}`);
-  writeFileSync(`${key}.json`, JSON.stringify(meta));
-  if (meta.ok) writeFileSync(key, body);
-  return meta.ok ? { ...meta, body } : null;
+  if (required) throw new Error(`${url}: ${why}. Nothing was written; run again later.`);
+  console.warn(`  ${url}: ${why} (not cached)`);
+  retryable.push(url);
+  return null;
 }
 
 const getJson = async (url) => {
-  const r = await get(url);
-  return r ? JSON.parse(r.body.toString("utf8")) : null;
+  const res = await get(url, true);
+  if (!res) throw new Error(`${url}: no answer`);
+  return JSON.parse(res.body.toString("utf8"));
 };
 
 // ---------------------------------------------------------------------------------------------
@@ -176,7 +201,7 @@ async function wikidataItems(rows) {
   const query = `SELECT ?cik ?item WHERE { VALUES ?cik { ${ciks} } ?item wdt:P5531 ?cik. }`;
   const res = await getJson(`https://query.wikidata.org/sparql?format=json&query=${encodeURIComponent(query)}`);
   const byCik = {};
-  for (const b of res?.results.bindings ?? []) byCik[b.cik.value] ??= b.item.value.split("/").pop();
+  for (const b of res.results.bindings) byCik[b.cik.value] ??= b.item.value.split("/").pop();
   return Object.fromEntries(rows.map((r) => [r.ticker, WIKIDATA[r.ticker] ?? byCik[r.cik.padStart(10, "0")]]));
 }
 
@@ -195,7 +220,7 @@ async function entities(ids) {
   for (let i = 0; i < ids.length; i += 50) {
     const batch = ids.slice(i, i + 50).join("|");
     const res = await getJson(`https://www.wikidata.org/w/api.php?action=wbgetentities&format=json&props=claims&ids=${batch}`);
-    for (const [id, e] of Object.entries(res?.entities ?? {}))
+    for (const [id, e] of Object.entries(res.entities))
       out[id] = { icons: current(e.claims?.P8972), logos: current(e.claims?.P154), sites: current(e.claims?.P856) };
   }
   return out;
@@ -205,19 +230,34 @@ const plain = (html = "") => html.replace(/<[^>]+>/g, "").replace(/\s+/g, " ").t
 /** Free licences accepted from Commons: public domain (incl. PD-textlogo, PD-shape), CC0, CC BY, CC BY-SA. */
 const FREE = /^(public domain|pd\b|cc0|cc by(-sa)? \d)/i;
 
-/** Commons file name -> { url, page, licence, licenceUrl, artist, attribution }, 50 files a request. */
+/** A Commons licence tag that says why a file is free, e.g. PD-textlogo or PD-shape (not the layout helpers). */
+const TAG = /^Template:(PD-(?!Layout|generic)[^/]+|CC-zero)$/i;
+
+/**
+ * Commons file name -> { url, page, licence, licenceUrl, artist, attribution, tags }, 50 files a
+ * request. `tags` are the file's licence templates, following the API's continuation.
+ */
 async function commonsInfo(names) {
   const out = {};
   for (let i = 0; i < names.length; i += 50) {
     const batch = names.slice(i, i + 50);
-    const titles = batch.map((n) => `File:${n}`).join("|");
+    const titles = encodeURIComponent(batch.map((n) => `File:${n}`).join("|"));
     const res = await getJson(
       "https://commons.wikimedia.org/w/api.php?action=query&format=json&prop=imageinfo&iiprop=url|extmetadata" +
-        `&iiextmetadatafilter=LicenseShortName|LicenseUrl|Artist|Attribution&titles=${encodeURIComponent(titles)}`,
+        `&iiextmetadatafilter=LicenseShortName|LicenseUrl|Artist|Attribution&titles=${titles}`,
     );
+    const tags = {};
+    for (let more = ""; more !== null; ) {
+      const t = await getJson(
+        `https://commons.wikimedia.org/w/api.php?action=query&format=json&prop=templates&tlnamespace=10&tllimit=max&titles=${titles}${more}`,
+      );
+      for (const page of Object.values(t.query.pages))
+        (tags[page.title] ??= []).push(...(page.templates ?? []).map((x) => x.title).filter((x) => TAG.test(x)).map((x) => x.slice(9)));
+      more = t.continue ? `&${new URLSearchParams(t.continue)}` : null;
+    }
     const title = Object.fromEntries(batch.map((n) => [`File:${n}`, n]));
-    for (const { from, to } of res?.query?.normalized ?? []) title[to] = title[from];
-    for (const page of Object.values(res?.query?.pages ?? {})) {
+    for (const { from, to } of res.query.normalized ?? []) title[to] = title[from];
+    for (const page of Object.values(res.query.pages)) {
       const info = page.imageinfo?.[0];
       const name = title[page.title];
       if (!info || !name) continue;
@@ -229,6 +269,7 @@ async function commonsInfo(names) {
         licenceUrl: m.LicenseUrl?.value,
         artist: plain(m.Artist?.value),
         attribution: plain(m.Attribution?.value),
+        tags: tags[page.title] ?? [],
       };
     }
   }
@@ -430,12 +471,11 @@ const tickers = watchlist.map((w) => w.ticker);
 for (const t of [...Object.keys(COMPANIES), ...Object.keys(SKIP), ...Object.keys(WIKIDATA)])
   if (!tickers.includes(t)) throw new Error(`${t} is not on the watchlist`);
 
-const companiesDir = join(WEB, "public/logos/companies");
-const partnersDir = join(WEB, "public/logos/partners");
-for (const dir of [companiesDir, partnersDir]) {
-  rmSync(dir, { recursive: true, force: true });
-  mkdirSync(dir, { recursive: true });
-}
+// Built here, moved into public/logos and src/lib at the very end.
+rmSync(BUILD, { recursive: true, force: true });
+const companiesDir = join(BUILD, "companies");
+const partnersDir = join(BUILD, "partners");
+for (const dir of [companiesDir, partnersDir]) mkdirSync(dir, { recursive: true });
 
 const rows = [];
 const row = (file, mark, source, fetched, licence) => rows.push(`| \`${file}\` | ${mark} | ${source} | ${fetched} | ${licence} |`);
@@ -478,7 +518,7 @@ for (const w of rest) {
       console.warn(`  ${w.ticker}: skip ${name} (${info?.licence || "no licence"})`);
       continue;
     }
-    const file = await get(info.url);
+    const file = await get(info.url, true);
     const art = file && (await artwork(file.body).catch((e) => console.warn(`  ${info.url}: ${e.message}`)));
     if (!art || art.blank) continue;
     const found = { kind: "commons", art, info, name, prop, fetched: file.fetched };
@@ -507,7 +547,8 @@ for (const w of rest) {
       w.name,
       `Wikimedia Commons [${pick.name}](${info.page}) (${pick.prop === "hand" ? "chosen by hand in the script" : `Wikidata [${qid}](https://www.wikidata.org/wiki/${qid}) ${pick.prop}`})`,
       pick.fetched,
-      `${info.licence}${info.licenceUrl ? ` (${info.licenceUrl})` : ""}${by}`,
+      `${info.licence}${/^public domain/i.test(info.licence) && info.tags.length ? ` (${info.tags.join(", ")})` : ""}` +
+        `${info.licenceUrl ? ` (${info.licenceUrl})` : ""}${by}`,
     );
     tier.commons.push(w.ticker);
   } else {
@@ -523,7 +564,7 @@ for (const [id, p] of Object.entries(PARTNERS)) {
     row(`partners/${id}.svg`, i.title, siSource(i), FETCHED, siLicence(i));
     continue;
   }
-  const file = await get(p.url);
+  const file = await get(p.url, true);
   if (!file) throw new Error(`partner ${id}: could not fetch ${p.url}`);
   writeFileSync(join(partnersDir, `${id}.png`), await pngTile(await artwork(file.body)));
   row(
@@ -536,7 +577,7 @@ for (const [id, p] of Object.entries(PARTNERS)) {
 }
 
 writeFileSync(
-  join(WEB, "src/lib/logos.generated.ts"),
+  join(BUILD, "logos.generated.ts"),
   `// Generated by scripts/build-logos.mjs. Do not edit; run \`pnpm logos\`.\n` +
     `export const COMPANY_LOGOS: Readonly<Record<string, string>> = ${JSON.stringify(manifest, null, 2)};\n`,
 );
@@ -546,7 +587,7 @@ const bytes = [companiesDir, partnersDir]
   .flatMap((d) => readdirSync(d).map((f) => readFileSync(join(d, f)).length))
   .reduce((a, b) => a + b, 0);
 writeFileSync(
-  join(WEB, "public/logos/LICENSES.md"),
+  join(BUILD, "LICENSES.md"),
   `# Logo sources and licences
 
 Generated by \`apps/web/scripts/build-logos.mjs\`; edit the script, not this file. Every file below is
@@ -584,8 +625,24 @@ Total size of the files above: ${bytes} bytes.
 `,
 );
 
+// A regeneration must not quietly lose logos (a site that was down, a file renamed upstream).
+const committed = existsSync(MANIFEST) ? JSON.parse(readFileSync(MANIFEST, "utf8").match(/= (\{[\s\S]*\});/)[1]) : {};
+const lost = Object.keys(committed).filter((t) => !(t in manifest));
+if (lost.length && !ALLOW_SHRINK)
+  throw new Error(`these tickers would lose their logo: ${lost.join(" ")}. Nothing was written; pass --allow-shrink if that is intended.`);
+
+for (const dir of ["companies", "partners"]) {
+  rmSync(join(LOGOS, dir), { recursive: true, force: true });
+  renameSync(join(BUILD, dir), join(LOGOS, dir));
+}
+renameSync(join(BUILD, "LICENSES.md"), join(LOGOS, "LICENSES.md"));
+renameSync(join(BUILD, "logos.generated.ts"), MANIFEST);
+
 console.log(
   `${Object.keys(manifest).length} company logos (simple-icons ${tier.simpleIcons.length}, Commons ${tier.commons.length}, ` +
     `site icon ${tier.site.length}), ${missing.length} without: ${missing.join(" ")}; ${bytes} bytes`,
 );
 console.log(`Commons: ${tier.commons.join(" ")}\nSite icon: ${tier.site.join(" ")}`);
+if (lost.length) console.warn(`Dropped (--allow-shrink): ${lost.join(" ")}`);
+if (retryable.length)
+  console.warn(`${retryable.length} company-site requests failed in a way a retry could fix (not cached); run again to retry them.`);

@@ -12,7 +12,7 @@ export default function TickerLogo({ ticker, placeholder = false }: { ticker: st
         {ticker.charAt(0)}
       </span>
     ) : null;
-  // A static SVG from /public: nothing for the image optimizer to do, and it stays off the Worker.
+  // A static SVG or PNG tile from /public: nothing for the image optimizer to do, and it stays off the Worker.
   // eslint-disable-next-line @next/next/no-img-element
   return <img className="tlogo" src={src} alt="" width={18} height={18} loading="lazy" decoding="async" />;
 }
