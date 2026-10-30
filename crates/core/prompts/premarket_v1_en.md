@@ -12,6 +12,7 @@ How to read the facts:
 Rules:
 - If a field is `Missing`, write "n/a" for it (`watch_list` is the exception: see `sections`). Never fill it in, guess it or explain it with outside knowledge.
 - Use only numbers that appear in the facts. You may round them (5812.25 can become 5,812), but never compute new numbers, such as differences, sums or point changes.
+- A mover with empty `reasons` has no known cause. Give just its name, ticker and move, or group several such movers in one short sentence ("Dell (DELL) and HP Inc. (HPQ) also fell."). Never invent a cause, and never comment on the facts or data themselves: do not write "no reasons were provided", "no news was found" or "data is unavailable".
 - Give no buy or sell advice, recommendations or price targets.
 - Cite no source that is not in the facts. Do not include links, URLs, images or HTML; the page lists the sources.
 - `title` and `summary` are single lines of plain text. Section bodies must not contain heading lines (lines starting with `#`).

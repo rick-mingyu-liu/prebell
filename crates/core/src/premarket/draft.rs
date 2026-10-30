@@ -60,6 +60,14 @@ pub(crate) fn na(lang: Lang) -> &'static str {
     }
 }
 
+/// The Why cell of a mover with no verified reason.
+pub(crate) fn no_news(lang: Lang) -> &'static str {
+    match lang {
+        Lang::En => "No clear news",
+        Lang::Zh => "暂无明确消息",
+    }
+}
+
 /// Two decimals with thousands separators: 5812.25 -> "5,812.25".
 pub(crate) fn fmt_num(v: f64) -> String {
     let s = format!("{:.2}", v.abs());
@@ -112,7 +120,7 @@ fn mover_row(m: &Mover, lang: Lang) -> String {
         let why = m
             .reasons
             .first()
-            .map_or(na(lang), |r| r.summary_en.as_str());
+            .map_or(no_news(lang), |r| r.summary_en.as_str());
         row.push_str(&format!(" {} |", cell(why)));
     }
     row
@@ -713,6 +721,29 @@ mod tests {
         // The rendered table's labels carry no stray figures either.
         let table: String = md.lines().filter(|l| l.contains("期货 |")).collect();
         assert_eq!(check(&table, Lang::Zh, &[5812.25, 0.45]), Ok(()), "{table}");
+    }
+
+    #[test]
+    fn mover_without_reason_reads_no_clear_news() {
+        let mut f = facts();
+        f.gainers[0].reasons = vec![];
+        let en = render_markdown(&draft(Lang::En), &f);
+        assert!(
+            en.contains("| AAPL | Apple | 230.50 | +8.00% | No clear news |"),
+            "{en}"
+        );
+        // The ZH table has no Why column, so it shows the move only.
+        let zh = render_markdown(&draft(Lang::Zh), &f);
+        assert!(zh.contains("| AAPL | Apple | 230.50 | +8.00% |\n"), "{zh}");
+    }
+
+    #[test]
+    fn prompts_forbid_narrating_missing_reasons() {
+        assert!(
+            PROMPT_EN.contains("no reasons were provided"),
+            "{PROMPT_EN}"
+        );
+        assert!(PROMPT_ZH.contains("事实中未给出原因"), "{PROMPT_ZH}");
     }
 
     #[test]
