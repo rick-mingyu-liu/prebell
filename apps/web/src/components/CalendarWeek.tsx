@@ -1,4 +1,5 @@
 import Link from "next/link";
+import TickerLogo from "./TickerLogo";
 import type { Locale } from "../i18n/routing";
 import type { CalendarDay, CalendarEntry, Slot } from "../lib/earnings";
 import { formatDayShort } from "../lib/time";
@@ -47,6 +48,7 @@ export default function CalendarWeek({ days, locale }: { days: CalendarDay[]; lo
                                   : `/${locale}/t/${encodeURIComponent(e.ticker)}`
                               }
                             >
+                              <TickerLogo ticker={e.ticker} />
                               <b>{e.ticker}</b>
                               <span className={`badge badge-${e.status}`}>{statusLabel[e.status]}</span>
                             </Link>

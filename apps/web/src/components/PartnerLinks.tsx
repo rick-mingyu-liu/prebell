@@ -41,7 +41,14 @@ export function PartnerBoxes({ data, labels }: { data: PartnersResponse | null; 
             {data[g].map((p) => (
               <li key={p.id}>
                 <a href={p.url} target="_blank" rel="sponsored noopener noreferrer">
-                  {p.name}
+                  {p.logo ? (
+                    <picture className="side-logo">
+                      {p.logoDark && <source srcSet={p.logoDark} media="(prefers-color-scheme: dark)" />}
+                      <img src={p.logo} alt={p.name} height={16} />
+                    </picture>
+                  ) : (
+                    p.name
+                  )}
                   <span aria-hidden="true">↗</span>
                 </a>
               </li>

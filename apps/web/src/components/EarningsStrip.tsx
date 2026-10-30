@@ -1,4 +1,5 @@
 import Link from "next/link";
+import TickerLogo from "./TickerLogo";
 import type { Locale } from "../i18n/routing";
 import { todayEt, type CalendarEntry, type StripDay } from "../lib/earnings";
 import { formatDayShort } from "../lib/time";
@@ -43,6 +44,7 @@ export default function EarningsStrip({
                     className="estrip-chip"
                     href={e.postSlug ? `/${locale}/p/${e.postSlug}` : `/${locale}/t/${encodeURIComponent(e.ticker)}`}
                   >
+                    <TickerLogo ticker={e.ticker} />
                     {e.ticker}
                   </Link>
                 ))}

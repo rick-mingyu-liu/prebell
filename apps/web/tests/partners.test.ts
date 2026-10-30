@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { getPathMatch } from "next/dist/shared/lib/router/utils/path-match";
@@ -90,7 +91,13 @@ describe("GET /api/partners", () => {
         { id: "wealthsimple", name: "Wealthsimple", url: "https://wealthsimple.com/invite/QDBQ5Z" },
       ],
       crypto: [
-        { id: "okx", name: "OKX", url: "https://okx.com/join/AIAFMP3U" },
+        {
+          id: "okx",
+          name: "OKX",
+          url: "https://okx.com/join/AIAFMP3U",
+          logo: "/logos/partners/okx.svg",
+          logoDark: "/logos/partners/okx-dark.svg",
+        },
         { id: "cryptocom", name: "Crypto.com", url: "https://crypto.com/app/smqqda7396" },
       ],
     });
@@ -179,6 +186,31 @@ describe("PartnerBoxes", () => {
     expect(out).not.toContain("Brokers");
     expect(out).toContain(DISCLOSURE_EN);
     expect(out.indexOf(DISCLOSURE_EN)).toBeGreaterThan(out.indexOf("OKX"));
+  });
+
+  it("shows a partner's logo with its name as alt text, switching file in dark mode", () => {
+    const out = render({
+      brokers: [],
+      crypto: [{ ...okx, logo: "/logos/partners/okx.svg", logoDark: "/logos/partners/okx-dark.svg" }],
+    });
+    expect(out).toContain('<source srcSet="/logos/partners/okx-dark.svg" media="(prefers-color-scheme: dark)"/>');
+    expect(out).toContain('<img src="/logos/partners/okx.svg" alt="OKX"');
+    expect(out).not.toContain(">OKX<");
+  });
+
+  it("falls back to the name as text without a logo, and needs no dark variant", () => {
+    const named = render({ brokers: [], crypto: [okx] });
+    expect(named).toContain(">OKX<");
+    expect(named).not.toContain("<img");
+    const lightOnly = render({ brokers: [], crypto: [{ ...okx, logo: "/logos/partners/okx.svg" }] });
+    expect(lightOnly).toContain('alt="OKX"');
+    expect(lightOnly).not.toContain("<source");
+  });
+
+  it("keeps every bundled partner logo on disk", () => {
+    for (const p of partnersFor("CA"))
+      for (const path of [p.logo, p.logoDark].filter(Boolean))
+        expect(existsSync(new URL(`../public${path}`, import.meta.url))).toBe(true);
   });
 
   it("renders nothing, disclosure included, when both groups are empty", () => {

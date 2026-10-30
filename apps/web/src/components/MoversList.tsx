@@ -1,4 +1,5 @@
 import Pill from "./Pill";
+import TickerLogo from "./TickerLogo";
 import type { Locale } from "../i18n/routing";
 import type { MoverView } from "../lib/facts";
 import { fmtPrice } from "../lib/format";
@@ -25,6 +26,7 @@ export default function MoversList({
         <li key={m.symbol} className="row">
           <div className="mover-main">
             <div>
+              <TickerLogo ticker={m.symbol} placeholder />
               <b>{m.symbol}</b> <span className="muted">{m.name}</span>
             </div>
             {locale === "en" && (

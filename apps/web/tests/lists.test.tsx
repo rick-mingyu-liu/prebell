@@ -57,6 +57,12 @@ describe("CalendarWeek", () => {
     expect(out).toContain("No reports.");
   });
 
+  it("shows a logo on chips that have one and keeps the plain chip otherwise", () => {
+    const out = renderToStaticMarkup(<CalendarWeek days={days} locale="en" />);
+    expect(out).toMatch(/href="\/en\/t\/AMD"><img class="tlogo" src="\/logos\/companies\/AMD.svg" alt=""[^>]*\/><b>AMD<\/b>/);
+    expect(out).toContain('href="/en/t/PFE"><b>PFE</b>');
+  });
+
   it("names each day's region by its heading, once", () => {
     const out = renderToStaticMarkup(<CalendarWeek days={days} locale="en" />);
     expect(out).toContain('<section class="cal-day" aria-labelledby="cal-2026-11-02"><h2 class="cal-date" id="cal-2026-11-02">');

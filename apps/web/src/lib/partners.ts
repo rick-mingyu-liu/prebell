@@ -9,11 +9,14 @@ export interface Partner {
   name: string;
   url: string;
   group: PartnerGroup;
+  /** Logo under /public, drawn for the light sidebar; `logoDark` replaces it on the dark one. Without one the name shows as text. */
+  logo?: string;
+  logoDark?: string;
   /** `country` is an ISO 3166 alpha-2 code, or null when Cloudflare doesn't know it. */
   allowedIn(country: string | null): boolean;
 }
 
-export type PartnerLink = Pick<Partner, "id" | "name" | "url">;
+export type PartnerLink = Pick<Partner, "id" | "name" | "url" | "logo" | "logoDark">;
 export type PartnersResponse = Record<PartnerGroup, PartnerLink[]>;
 
 const notInChina = (country: string | null) => country !== "CN";
@@ -27,7 +30,15 @@ const PARTNERS: Partner[] = [
     group: "brokers",
     allowedIn: (country) => country === "CA",
   },
-  { id: "okx", name: "OKX", url: "https://okx.com/join/AIAFMP3U", group: "crypto", allowedIn: notInChina },
+  {
+    id: "okx",
+    name: "OKX",
+    url: "https://okx.com/join/AIAFMP3U",
+    group: "crypto",
+    logo: "/logos/partners/okx.svg",
+    logoDark: "/logos/partners/okx-dark.svg",
+    allowedIn: notInChina,
+  },
   {
     id: "cryptocom",
     name: "Crypto.com",
@@ -45,7 +56,8 @@ export function partnersFor(country: string | null): Partner[] {
 
 export function groupedPartners(country: string | null): PartnersResponse {
   const out: PartnersResponse = { brokers: [], crypto: [] };
-  for (const { id, name, url, group } of partnersFor(country)) out[group].push({ id, name, url });
+  for (const { id, name, url, group, logo, logoDark } of partnersFor(country))
+    out[group].push({ id, name, url, ...(logo && { logo }), ...(logoDark && { logoDark }) });
   return out;
 }
 
