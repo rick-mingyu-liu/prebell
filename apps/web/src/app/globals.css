@@ -6,15 +6,18 @@
   --muted: #6b6b6b;
   --line: #ececec;
   --tile: #f4f4f4;
-  /* Text colors: the darker shades keep contrast on white. Pills use the bright shades with black text. */
-  --up: #00a804;
-  --down: #e64800;
+  /* Text colors: #00C805/#FF5000 darkened at the same hue to pass WCAG AA (4.5:1) for small text,
+     on white and on --tile: #008203 = 5.01:1 on #fff, 4.55:1 on #f4f4f4; #ca3f00 = 4.97:1, 4.52:1.
+     (--muted #6b6b6b = 5.33:1, 4.85:1.) Pills keep the bright shades with black text: 9.26:1 and 6.40:1. */
+  --up: #008203;
+  --down: #ca3f00;
   --up-pill: #00c805;
   --down-pill: #ff5000;
-  --accent: #00a804;
+  --accent: #008203;
   --notice: #fff8e1;
   --header-bg: #000;
   --header-fg: #fff;
+  --header-line: transparent;
   --sans: var(--font-inter), system-ui, -apple-system, "Segoe UI", Roboto, "PingFang SC", "Hiragino Sans GB",
     "Microsoft YaHei", "Noto Sans SC", sans-serif;
   --cjk: "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans SC", sans-serif;
@@ -26,10 +29,12 @@
     --muted: #9a9a9a;
     --line: #262626;
     --tile: #141414;
+    /* On #000: #00c805 = 9.26:1, #ff5000 = 6.40:1, --muted #9a9a9a = 7.46:1. */
     --up: #00c805;
     --down: #ff5000;
     --accent: #00c805;
     --notice: #2b2616;
+    --header-line: #262626; /* the header is as black as the page */
   }
 }
 
@@ -55,14 +60,14 @@ main p { max-width: 75ch; }
 .wrap { max-width: 1200px; margin: 0 auto; padding: 0 16px; }
 main.wrap { padding-top: 1.5rem; padding-bottom: 3rem; }
 main:not(.wrap) { max-width: 46rem; margin: 0 auto; padding: 1.5rem 16px 3rem; } /* admin and global not-found */
-.site-header { background: var(--header-bg); color: var(--header-fg); border-bottom: 1px solid var(--line); }
+.site-header { background: var(--header-bg); color: var(--header-fg); border-bottom: 1px solid var(--header-line); }
 .site-header .wrap { display: flex; align-items: center; justify-content: space-between; gap: 0.5rem 1.5rem; flex-wrap: wrap; padding-top: 12px; padding-bottom: 12px; }
 .wordmark { color: var(--header-fg); text-decoration: none; font-weight: 800; font-size: 1.2rem; letter-spacing: -0.02em; line-height: 1.1; }
 .wordmark b { color: var(--up-pill); font-weight: 800; }
 .wordmark small { display: block; font-size: 0.65rem; font-weight: 500; letter-spacing: 0.1em; opacity: 0.65; }
 .site-nav { display: flex; align-items: center; gap: 0.25rem 1.25rem; flex-wrap: wrap; font-size: 0.875rem; }
 .site-nav a { color: var(--header-fg); text-decoration: none; opacity: 0.85; }
-.site-nav a:hover, .site-nav a:focus-visible { opacity: 1; text-decoration: underline; }
+.site-nav a:not(.lang-pill):hover, .site-nav a:not(.lang-pill):focus-visible { opacity: 1; text-decoration: underline; }
 .lang-pill { display: inline-block; border: 1px solid currentColor; border-radius: 99px; padding: 0.1rem 0.7rem; font-size: 0.8125rem; line-height: 1.5; text-decoration: none; color: var(--fg); white-space: nowrap; }
 .site-nav .lang-pill { color: var(--header-fg); opacity: 1; }
 .site-footer { border-top: 1px solid var(--line); margin-top: 2rem; padding: 1.25rem 0 2rem; }
@@ -118,7 +123,7 @@ th { font-weight: 600; }
 .pager { display: flex; justify-content: space-between; margin-top: 1.5rem; }
 .pager a { color: var(--accent); font-weight: 700; text-decoration: none; }
 .filters { display: flex; gap: 0.5rem; flex-wrap: wrap; margin: 0 0 1rem; }
-.filters a { border: 1px solid var(--fg); padding: 0.3rem 0.8rem; font-size: 0.8125rem; font-weight: 700; text-decoration: none; }
+.filters a { border: 1px solid var(--fg); border-radius: 99px; padding: 0.3rem 0.8rem; font-size: 0.8125rem; font-weight: 700; text-decoration: none; }
 .filters a[aria-current] { background: var(--fg); color: var(--bg); }
 .charts figure { margin: 1.5rem 0; }
 .charts img { display: block; width: 100%; height: auto; max-width: 640px; }

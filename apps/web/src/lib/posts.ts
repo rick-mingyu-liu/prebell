@@ -117,7 +117,10 @@ export function getLatestPremarket(db: D1Like, lang: Lang): Promise<PostView | n
   return getLatestPost(db, lang, "premarket");
 }
 
-/** Published posts in `lang`, newest first, optionally of one `type`; `page` starts at 1. */
+/**
+ * Published posts in `lang`, newest first, of one `type`, or the daily briefs (premarket and recap)
+ * without one; `page` starts at 1.
+ */
 export async function listPosts(
   db: D1Like,
   lang: Lang,
@@ -129,11 +132,11 @@ export async function listPosts(
     .prepare(
       `SELECT p.slug, p.content_type, p.trading_date, p.published_at, t.title, t.summary
        FROM posts p JOIN post_translations t ON t.post_id = p.id AND t.lang = ?
-       WHERE t.status = 'published' AND (? IS NULL OR p.content_type = ?)
+       WHERE t.status = 'published' AND p.content_type IN (?, ?)
        ORDER BY p.trading_date DESC, p.published_at DESC, p.id DESC
        LIMIT ? OFFSET ?`,
     )
-    .bind(lang, type, type, PAGE_SIZE, (p - 1) * PAGE_SIZE)
+    .bind(lang, type ?? "premarket", type ?? "recap", PAGE_SIZE, (p - 1) * PAGE_SIZE)
     .all<{
       slug: string;
       content_type: string;

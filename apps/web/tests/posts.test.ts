@@ -183,4 +183,10 @@ describe("content types", () => {
     expect((await listPosts(db, "en", 1, "earnings")).map((i) => i.slug)).toEqual(["earnings-2026-10-29"]);
     expect((await listPosts(db, "zh", 1, "earnings")).map((i) => i.contentType)).toEqual(["earnings"]);
   });
+
+  it("listPosts without a type lists briefs only, never earnings checks", async () => {
+    const db = memoryD1(mixed + post(5, "2026-10-29", "published", "published", "earnings"));
+    const all = await listPosts(db, "en", 1);
+    expect(all.map((i) => i.contentType).sort()).toEqual(["premarket", "premarket", "recap", "recap"]);
+  });
 });

@@ -24,7 +24,7 @@ export default async function LangSwitch({
         target={target}
         hrefLang={htmlLang(target)}
         label={t("otherLang")}
-        ariaLabel={t("otherLangLabel")}
+        title={t("otherLangLabel")}
         className={className}
       />
     );
@@ -34,7 +34,7 @@ export default async function LangSwitch({
       href={`/${target}${path}`}
       hrefLang={htmlLang(target)}
       lang={htmlLang(target)}
-      aria-label={t("otherLangLabel")}
+      title={t("otherLangLabel")}
     >
       {t("otherLang")}
     </Link>

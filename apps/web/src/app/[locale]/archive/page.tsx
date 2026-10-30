@@ -51,7 +51,7 @@ export default async function Archive({ params, searchParams }: PageProps<"/[loc
           {type && <span className="muted"> · {typeLabel(t, type)}</span>}
           {page > 1 && <span className="muted"> · {t("archive.page", { page })}</span>}
         </h1>
-        <LangSwitch locale={locale} path={archivePath(type, page)} />
+        <LangSwitch locale={locale} path={archivePath(type, 1)} />
       </div>
       <nav className="filters" aria-label={t("archive.filter")}>
         {[null, ...CONTENT_TYPES].map((ty) => (
