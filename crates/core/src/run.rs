@@ -681,15 +681,11 @@ mod tests {
         }
     }
     fn draft_reply(zh: bool, ok: bool) -> Value {
-        let heads: [&str; 4] = if zh {
-            ["期货", "盘前异动", "宏观与隔夜", "今日关注"]
+        // The built facts have no watch list, so there is no watch section.
+        let heads: [&str; 3] = if zh {
+            ["期货", "盘前异动", "宏观与隔夜"]
         } else {
-            [
-                "Futures",
-                "Biggest premarket movers",
-                "Macro & overnight",
-                "What to watch",
-            ]
+            ["Futures", "Biggest premarket movers", "Macro & overnight"]
         };
         // 7.5% is not in the facts, so a bad reply fails the number check.
         let body = if ok {

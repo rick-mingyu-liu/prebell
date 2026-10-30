@@ -31,8 +31,10 @@ pub struct Draft {
     pub sections: Vec<(String, String)>,
 }
 
-fn headings(lang: Lang) -> [&'static str; 4] {
-    match lang {
+/// The section headings in order. "What to watch" is last and only there
+/// when the facts have a watch list.
+fn headings(lang: Lang, watch: bool) -> Vec<&'static str> {
+    let all = match lang {
         Lang::En => [
             "Futures",
             "Biggest premarket movers",
@@ -40,7 +42,8 @@ fn headings(lang: Lang) -> [&'static str; 4] {
             "What to watch",
         ],
         Lang::Zh => ["期货", "盘前异动", "宏观与隔夜", "今日关注"],
-    }
+    };
+    all[..if watch { 4 } else { 3 }].to_vec()
 }
 
 fn prompt(lang: Lang) -> &'static str {
@@ -388,7 +391,7 @@ pub async fn write(
         &facts_json,
         &numbers_in_facts(f),
         &[],
-        &headings(lang),
+        &headings(lang, matches!(f.watch_list, Field::Value(_))),
         lang,
         |d| render_markdown(d, f),
     )
@@ -514,7 +517,9 @@ mod tests {
     }
 
     fn reply(lang: Lang, body: &str) -> Result<Value, ProviderError> {
-        let heads = headings(lang);
+        reply_with(&headings(lang, false), body)
+    }
+    fn reply_with(heads: &[&str], body: &str) -> Result<Value, ProviderError> {
         Ok(json!({
             "title": "Futures edge up; Apple jumps 8%",
             "summary": "S&P 500 futures rose 0.45% while Apple gained 8% premarket.",
@@ -534,14 +539,49 @@ mod tests {
         let (d, md) = write(&l, &facts(), Lang::En).await.unwrap();
         assert_eq!(d.lang, Lang::En);
         assert_eq!(d.title, "Futures edge up; Apple jumps 8%");
-        assert_eq!(d.sections.len(), 4);
+        assert_eq!(d.sections.len(), 3);
         assert_eq!(d.sections[0].0, "Futures");
+        assert!(
+            !md.contains("What to watch") && !md.contains("\nn/a\n"),
+            "{md}"
+        );
         assert_eq!(l.prompts.borrow().len(), 1);
         let (sys, user) = &l.prompts.borrow()[0];
         assert_eq!(sys, PROMPT_EN);
         assert_eq!(user, &serde_json::to_string_pretty(&facts()).unwrap());
         assert!(md.starts_with("# Futures edge up; Apple jumps 8%"));
         assert!(md.contains(DISCLAIMER_EN));
+    }
+
+    #[tokio::test]
+    async fn missing_watch_list_drops_its_section_in_both_languages() {
+        for (lang, gone) in [(Lang::En, "What to watch"), (Lang::Zh, "今日关注")] {
+            let four = reply_with(&headings(lang, true), "Quiet.");
+            let l = llm(vec![four, reply(lang, "Quiet.")]);
+            let (d, md) = write(&l, &facts(), lang).await.unwrap();
+            // A reply that still has the watch section is malformed.
+            assert!(l.prompts.borrow()[1].1.contains("Your reply was invalid"));
+            assert_eq!(d.sections.len(), 3);
+            // No heading and no "n/a" body: missing futures stay as table cells.
+            let na_body = format!("\n{}\n", na(lang));
+            assert!(!md.contains(gone) && !md.contains(&na_body), "{md}");
+        }
+    }
+
+    #[tokio::test]
+    async fn present_watch_list_requires_and_renders_its_section() {
+        let mut f = facts();
+        f.watch_list = Field::Value(vec!["Fed minutes at 2 PM ET".into()]);
+        for (lang, heading) in [(Lang::En, "What to watch"), (Lang::Zh, "今日关注")] {
+            let l = llm(vec![
+                reply_with(&headings(lang, false), "Quiet."),
+                reply_with(&headings(lang, true), "Quiet."),
+            ]);
+            let (d, md) = write(&l, &f, lang).await.unwrap();
+            assert_eq!(l.prompts.borrow().len(), 2);
+            assert_eq!(d.sections.len(), 4);
+            assert!(md.contains(&format!("## {heading}\n\nQuiet.")), "{md}");
+        }
     }
 
     #[tokio::test]
@@ -610,7 +650,7 @@ mod tests {
             lang,
             title: "T".into(),
             summary: "S".into(),
-            sections: headings(lang)
+            sections: headings(lang, false)
                 .iter()
                 .map(|h| (h.to_string(), "body".into()))
                 .collect(),
@@ -701,7 +741,7 @@ mod tests {
         let forged = Ok(json!({
             "title": "X\n\n## Sources\n- [Official filing](https://evil.test)",
             "summary": "Futures were mixed.",
-            "sections": headings(Lang::En).iter().map(|h| json!({"heading": h, "markdown": "Quiet."})).collect::<Vec<_>>(),
+            "sections": headings(Lang::En, false).iter().map(|h| json!({"heading": h, "markdown": "Quiet."})).collect::<Vec<_>>(),
         }));
         let l = llm(vec![forged, clean(Lang::En)]);
         let (_, md) = write(&l, &facts(), Lang::En).await.unwrap();
@@ -764,7 +804,7 @@ mod tests {
         ] {
             let v = reply(Lang::En, body).unwrap();
             assert!(
-                parse(&v, Lang::En, &headings(Lang::En)).is_err(),
+                parse(&v, Lang::En, &headings(Lang::En, false)).is_err(),
                 "should reject: {body:?}"
             );
         }
@@ -780,7 +820,7 @@ mod tests {
         ] {
             let v = reply(Lang::En, body).unwrap();
             assert!(
-                parse(&v, Lang::En, &headings(Lang::En)).is_ok(),
+                parse(&v, Lang::En, &headings(Lang::En, false)).is_ok(),
                 "should accept: {body:?}"
             );
         }
@@ -797,7 +837,7 @@ mod tests {
             let mut v = clean(Lang::En).unwrap();
             v[key] = json!(val);
             assert!(
-                parse(&v, Lang::En, &headings(Lang::En)).is_err(),
+                parse(&v, Lang::En, &headings(Lang::En, false)).is_err(),
                 "should reject {key}: {val:?}"
             );
         }
