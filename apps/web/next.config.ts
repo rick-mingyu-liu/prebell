@@ -16,6 +16,11 @@ const nextConfig: NextConfig = {
         headers: [{ key: "Cache-Control", value: "public, s-maxage=60" }],
       },
       {
+        // Partner links depend on the visitor's country, so no shared cache may keep them.
+        source: "/api/partners",
+        headers: [{ key: "Cache-Control", value: "private, no-store" }],
+      },
+      {
         // Internal pages: the token is in the URL, so never cache, index or leak it as a referrer.
         source: "/admin/:path*",
         headers: [

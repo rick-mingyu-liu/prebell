@@ -91,5 +91,15 @@
   },
   "movers": {
     "noNews": "No clear news"
+  },
+  "partners": {
+    "brokers": "Brokers",
+    "crypto": "Crypto exchanges",
+    "disclosure": "Affiliate links: PreBell may earn a reward if you sign up. Not investment advice."
+  },
+  "termpocket": {
+    "name": "TermPocket",
+    "copy": "From the PreBell team. Plan your goals and habits with Pocky, your AI assistant.",
+    "cta": "Try TermPocket →"
   }
 }

@@ -119,6 +119,22 @@ main:not(.wrap) { max-width: 46rem; margin: 0 auto; padding: 1.5rem 16px 3rem; }
 .more { color: var(--accent); font-weight: 700; font-size: 0.875rem; text-decoration: none; }
 .more:hover, .more:focus-visible { text-decoration: underline; }
 
+/* Sidebar: partner boxes (client island), affiliate disclosure, TermPocket card. */
+.sidebar { min-width: 0; }
+.side-box { border: 1px solid var(--line); border-radius: 10px; overflow: hidden; margin-bottom: 0.75rem; }
+.side-box h2 { margin: 0; padding: 0.5rem 0.75rem; background: var(--header-bg); color: var(--header-fg); font-size: 0.75rem; font-weight: 700; }
+.side-box ul { list-style: none; margin: 0; padding: 0; }
+.side-box li + li { border-top: 1px solid var(--line); }
+.side-box a { display: flex; justify-content: space-between; align-items: center; padding: 0.55rem 0.75rem; font-size: 0.8125rem; font-weight: 700; text-decoration: none; }
+.side-box a:hover, .side-box a:focus-visible { background: var(--tile); }
+.side-box a span { color: var(--muted); font-weight: 400; }
+.side-disc { font-size: 0.6875rem; line-height: 1.4; color: var(--muted); margin: 0 0 0.75rem; }
+.tp-card { background: linear-gradient(135deg, #0e1b2b, #1f3b5a); color: #fff; padding: 0.9rem; border-radius: 10px; }
+.tp-card p { font-size: 0.75rem; line-height: 1.45; margin: 0.35rem 0 0.7rem; opacity: 0.85; }
+.tp-card .tp-name { font-size: 0.95rem; font-weight: 800; margin: 0; opacity: 1; }
+.tp-cta { display: inline-block; background: #fff; color: #0e1b2b; font-size: 0.75rem; font-weight: 700; padding: 0.3rem 0.75rem; border-radius: 99px; text-decoration: none; }
+.tp-cta:hover, .tp-cta:focus-visible { text-decoration: underline; }
+
 /* Existing pages (restyled in a later pass); kept readable on the wider shell. */
 .prose, .post-body, .post-list, .notice { max-width: 46rem; }
 .page-tools { display: flex; justify-content: space-between; align-items: baseline; gap: 1rem; flex-wrap: wrap; }

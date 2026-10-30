@@ -91,5 +91,15 @@
   },
   "movers": {
     "noNews": "暂无明确消息"
+  },
+  "partners": {
+    "brokers": "券商",
+    "crypto": "加密交易所",
+    "disclosure": "推广链接：通过链接注册，PreBell 可能获得奖励。不构成投资建议。"
+  },
+  "termpocket": {
+    "name": "TermPocket",
+    "copy": "来自 PreBell 团队。用 AI 助手 Pocky 规划你的目标与习惯。",
+    "cta": "试用 TermPocket →"
   }
 }
