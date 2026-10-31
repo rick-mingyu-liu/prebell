@@ -117,12 +117,18 @@ main:not(.wrap) { max-width: 46rem; margin: 0 auto; padding: 1.5rem 16px 3rem; }
 .tile .num { font-size: 0.75rem; }
 .row-end { display: flex; gap: 0.75rem; align-items: baseline; }
 
+/* Company logos: a bundled tile (32px SVG or 64px PNG; white, or near-black for pale marks) shown at 18px, so
+   one file reads on both themes. Tickers without one get no tile in chips, a lettered tile in rows. */
+.tlogo { width: 18px; height: 18px; flex: none; border-radius: 5px; }
+.tlogo-none { display: inline-flex; align-items: center; justify-content: center; background: var(--tile); border: 1px solid var(--line); color: var(--muted); font-size: 0.625rem; font-weight: 700; line-height: 1; }
+
 /* Movers list. */
 .movers { list-style: none; margin: 0; padding: 0; }
 .mover-main { min-width: 0; }
 .mover-main > div:first-child { line-height: 1.35; }
 .mover-main b { font-weight: 700; }
-.why { font-size: 0.8125rem; color: var(--muted); line-height: 1.4; }
+.why { font-size: 0.8125rem; color: var(--muted); line-height: 1.4; padding-left: calc(18px + 0.45rem); } /* under the ticker, past the logo */
+.movers .tlogo { margin-right: 0.45rem; vertical-align: -4px; }
 .mover-end { display: flex; align-items: center; gap: 0.75rem; flex: none; }
 @media (max-width: 640px) {
   /* Ticker and name beside price and pill, the reason under both at full width. */
@@ -146,6 +152,8 @@ main:not(.wrap) { max-width: 46rem; margin: 0 auto; padding: 1.5rem 16px 3rem; }
 .side-box a { display: flex; justify-content: space-between; align-items: center; padding: 0.55rem 0.75rem; font-size: 0.8125rem; font-weight: 700; text-decoration: none; }
 .side-box a:hover, .side-box a:focus-visible { background: var(--tile); }
 .side-box a span { color: var(--muted); font-weight: 400; }
+.side-box .side-name { display: flex; align-items: center; gap: 0.5rem; color: inherit; font-weight: inherit; }
+.side-logo img { display: block; width: 18px; height: 18px; border-radius: 5px; } /* the same tile as company logos */
 .side-disc { font-size: 0.6875rem; line-height: 1.4; color: var(--muted); margin: 0 0 0.75rem; }
 .tp-card { background: linear-gradient(135deg, #0e1b2b, #1f3b5a); color: #fff; padding: 0.9rem; border-radius: 10px; margin-bottom: 0.75rem; }
 .tp-card p { font-size: 0.75rem; line-height: 1.45; margin: 0.35rem 0 0.7rem; opacity: 0.85; }
@@ -165,7 +173,8 @@ main:not(.wrap) { max-width: 46rem; margin: 0 auto; padding: 1.5rem 16px 3rem; }
 .estrip-title::before { content: "\25CF"; color: var(--up); margin-right: 0.35rem; }
 .estrip-group { display: flex; align-items: center; gap: 0.4rem; }
 .estrip-slot { color: var(--muted); margin-left: 0.4rem; white-space: nowrap; }
-.estrip-chip { border: 1px solid var(--chip-line); background: var(--bg); color: var(--fg); border-radius: 6px; padding: 0.15rem 0.5rem; font-weight: 700; font-size: 0.75rem; text-decoration: none; white-space: nowrap; }
+.estrip-chip { display: inline-flex; align-items: center; gap: 0.3rem; height: 1.625rem; border: 1px solid var(--chip-line); background: var(--bg); color: var(--fg); border-radius: 6px; padding: 0 0.5rem; font-weight: 700; font-size: 0.75rem; text-decoration: none; white-space: nowrap; }
+.estrip-chip:has(.tlogo) { padding-left: 0.2rem; }
 .estrip-chip:hover { border-color: var(--accent); }
 .estrip-chip:focus-visible, .estrip-all:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .estrip-more { color: var(--muted); }
@@ -320,7 +329,8 @@ th { font-weight: 600; }
 .cal-slots { display: flex; flex-direction: column; gap: 0.75rem; min-width: 0; }
 .cal-slot .lbl { margin: 0 0 0.35rem; }
 .cal-chips { list-style: none; margin: 0; padding: 0; display: flex; flex-wrap: wrap; gap: 0.4rem; }
-.cal-chip { display: inline-flex; align-items: center; gap: 0.45rem; border: 1px solid var(--chip-line); background: var(--bg); color: var(--fg); border-radius: 6px; padding: 0.2rem 0.55rem; font-size: 0.8125rem; text-decoration: none; white-space: nowrap; }
+.cal-chip { display: inline-flex; align-items: center; gap: 0.45rem; height: 1.875rem; border: 1px solid var(--chip-line); background: var(--bg); color: var(--fg); border-radius: 6px; padding: 0.2rem 0.55rem; font-size: 0.8125rem; text-decoration: none; white-space: nowrap; }
+.cal-chip:has(.tlogo) { padding-left: 0.25rem; gap: 0.35rem; }
 .cal-chip:hover { border-color: var(--accent); }
 .cal-chip:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .cal-chip.cal-unconfirmed { border-style: dashed; }

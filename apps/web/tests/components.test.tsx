@@ -176,10 +176,20 @@ describe("MoversList", () => {
 
   it("escapes the reason text", () => {
     const evil = '<img src=x onerror=alert(1)><script>alert(1)</script>';
-    const out = renderToStaticMarkup(<MoversList movers={[mover({ reason: evil })]} locale="en" />);
+    // A ticker without a logo, so any <img> in the markup could only have come from the reason.
+    const out = renderToStaticMarkup(<MoversList movers={[mover({ symbol: "ZZZ", reason: evil })]} locale="en" />);
     expect(out).not.toContain("<img");
+    expect(out).toContain("&lt;img src=x onerror=alert(1)&gt;");
     expect(out).not.toContain("<script");
     expect(out).toContain("&lt;script&gt;");
+  });
+
+  it("puts the logo tile before the ticker, or a lettered placeholder without one", () => {
+    const out = renderToStaticMarkup(<MoversList movers={[mover(), mover({ symbol: "ZZZ" })]} locale="en" />);
+    expect(out).toContain('<img class="tlogo" src="/logos/companies/AAPL.svg" alt=""');
+    expect(out.indexOf("AAPL.svg")).toBeLessThan(out.indexOf("<b>AAPL</b>"));
+    expect(out).toContain('<span class="tlogo tlogo-none" aria-hidden="true">Z</span>');
+    expect(out).toContain("<b>ZZZ</b>");
   });
 
   it("honours limit and showPrice", () => {
@@ -250,6 +260,13 @@ describe("EarningsStrip", () => {
     expect(out).not.toContain("Before open");
     expect(out).not.toContain("Time TBD");
     expect(out).toContain("After close");
+  });
+  it("shows a logo on chips that have one and keeps the plain chip otherwise", () => {
+    const out = renderToStaticMarkup(<EarningsStrip day={day} locale="en" today="2026-10-31" />);
+    expect(out).toMatch(/<a class="estrip-chip" href="\/en\/p\/ko-2026-11-02-earnings"><img class="tlogo" src="\/logos\/companies\/KO.svg" alt=""[^>]*\/>KO<\/a>/);
+    expect(out).toMatch(/<a class="estrip-chip" href="\/en\/t\/MSFT"><img class="tlogo" src="\/logos\/companies\/MSFT.png" alt=""[^>]*\/>MSFT<\/a>/);
+    expect(out).toContain('<a class="estrip-chip" href="/en/t/BRK.B">BRK.B</a>');
+    expect(out).not.toContain("tlogo-none");
   });
   it("caps chips per group and links the overflow to the calendar", () => {
     const many: StripDay = {

@@ -9,30 +9,49 @@ export interface Partner {
   name: string;
   url: string;
   group: PartnerGroup;
+  /** A square logo tile under /public, shown before the name; `logoDark` replaces it on the dark sidebar. Optional. */
+  logo?: string;
+  logoDark?: string;
   /** `country` is an ISO 3166 alpha-2 code, or null when Cloudflare doesn't know it. */
   allowedIn(country: string | null): boolean;
 }
 
-export type PartnerLink = Pick<Partner, "id" | "name" | "url">;
+export type PartnerLink = Pick<Partner, "id" | "name" | "url" | "logo" | "logoDark">;
 export type PartnersResponse = Record<PartnerGroup, PartnerLink[]>;
 
 const notInChina = (country: string | null) => country !== "CN";
 
 const PARTNERS: Partner[] = [
-  { id: "moomoo", name: "moomoo", url: "https://j.moomoo.com/0J1BGf", group: "brokers", allowedIn: notInChina },
+  {
+    id: "moomoo",
+    name: "moomoo",
+    url: "https://j.moomoo.com/0J1BGf",
+    group: "brokers",
+    logo: "/logos/partners/moomoo.png",
+    allowedIn: notInChina,
+  },
   {
     id: "wealthsimple",
     name: "Wealthsimple",
     url: "https://wealthsimple.com/invite/QDBQ5Z",
     group: "brokers",
+    logo: "/logos/partners/wealthsimple.png",
     allowedIn: (country) => country === "CA",
   },
-  { id: "okx", name: "OKX", url: "https://okx.com/join/AIAFMP3U", group: "crypto", allowedIn: notInChina },
+  {
+    id: "okx",
+    name: "OKX",
+    url: "https://okx.com/join/AIAFMP3U",
+    group: "crypto",
+    logo: "/logos/partners/okx.svg",
+    allowedIn: notInChina,
+  },
   {
     id: "cryptocom",
     name: "Crypto.com",
     url: "https://crypto.com/app/smqqda7396",
     group: "crypto",
+    logo: "/logos/partners/cryptocom.png",
     allowedIn: notInChina,
   },
 ];
@@ -45,7 +64,8 @@ export function partnersFor(country: string | null): Partner[] {
 
 export function groupedPartners(country: string | null): PartnersResponse {
   const out: PartnersResponse = { brokers: [], crypto: [] };
-  for (const { id, name, url, group } of partnersFor(country)) out[group].push({ id, name, url });
+  for (const { id, name, url, group, logo, logoDark } of partnersFor(country))
+    out[group].push({ id, name, url, ...(logo && { logo }), ...(logoDark && { logoDark }) });
   return out;
 }
 

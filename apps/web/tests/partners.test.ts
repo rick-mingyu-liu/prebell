@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { getPathMatch } from "next/dist/shared/lib/router/utils/path-match";
@@ -86,12 +87,22 @@ describe("GET /api/partners", () => {
     expect(res.headers.get("Cache-Control")).toBe("private, no-store");
     expect(await res.json()).toEqual({
       brokers: [
-        { id: "moomoo", name: "moomoo", url: "https://j.moomoo.com/0J1BGf" },
-        { id: "wealthsimple", name: "Wealthsimple", url: "https://wealthsimple.com/invite/QDBQ5Z" },
+        { id: "moomoo", name: "moomoo", url: "https://j.moomoo.com/0J1BGf", logo: "/logos/partners/moomoo.png" },
+        {
+          id: "wealthsimple",
+          name: "Wealthsimple",
+          url: "https://wealthsimple.com/invite/QDBQ5Z",
+          logo: "/logos/partners/wealthsimple.png",
+        },
       ],
       crypto: [
-        { id: "okx", name: "OKX", url: "https://okx.com/join/AIAFMP3U" },
-        { id: "cryptocom", name: "Crypto.com", url: "https://crypto.com/app/smqqda7396" },
+        { id: "okx", name: "OKX", url: "https://okx.com/join/AIAFMP3U", logo: "/logos/partners/okx.svg" },
+        {
+          id: "cryptocom",
+          name: "Crypto.com",
+          url: "https://crypto.com/app/smqqda7396",
+          logo: "/logos/partners/cryptocom.png",
+        },
       ],
     });
   });
@@ -144,9 +155,10 @@ describe("next.config headers", () => {
 describe("Sidebar", () => {
   const PARTNER_HOSTS = ["moomoo.com", "okx.com", "crypto.com", "wealthsimple.com"];
 
-  it("server-renders only the TermPocket card: no partner link and no disclosure", () => {
+  it("server-renders only the TermPocket card: no partner link, logo or disclosure", () => {
     const out = renderToStaticMarkup(createElement(Sidebar, { locale: "en" }));
     for (const host of PARTNER_HOSTS) expect(out).not.toContain(host);
+    expect(out).not.toContain("/logos/partners/");
     expect(out).not.toContain(DISCLOSURE_EN);
     expect(out).toContain('href="https://www.termpocket.com"');
     expect(out).toContain("From the PreBell team. Plan your goals and habits with Pocky, your AI assistant.");
@@ -155,6 +167,7 @@ describe("Sidebar", () => {
   it("uses the Chinese copy on ZH pages", () => {
     const out = renderToStaticMarkup(createElement(Sidebar, { locale: "zh" }));
     for (const host of PARTNER_HOSTS) expect(out).not.toContain(host);
+    expect(out).not.toContain("/logos/partners/");
     expect(out).not.toContain(DISCLOSURE_ZH);
     expect(out).toContain("来自 PreBell 团队。用 AI 助手 Pocky 规划你的目标与习惯。");
   });
@@ -179,6 +192,30 @@ describe("PartnerBoxes", () => {
     expect(out).not.toContain("Brokers");
     expect(out).toContain(DISCLOSURE_EN);
     expect(out.indexOf(DISCLOSURE_EN)).toBeGreaterThan(out.indexOf("OKX"));
+  });
+
+  it("shows a partner's logo tile before its name, switching file in dark mode when there is a dark one", () => {
+    const out = render({
+      brokers: [],
+      crypto: [{ ...okx, logo: "/logos/partners/okx.svg", logoDark: "/logos/partners/okx-dark.svg" }],
+    });
+    expect(out).toContain('<source srcSet="/logos/partners/okx-dark.svg" media="(prefers-color-scheme: dark)"/>');
+    expect(out).toMatch(/<img src="\/logos\/partners\/okx.svg" alt="" width="18" height="18"\/><\/picture>OKX<\/span>/);
+  });
+
+  it("shows the name alone without a logo, and needs no dark variant", () => {
+    const named = render({ brokers: [], crypto: [okx] });
+    expect(named).toContain('<span class="side-name">OKX</span>');
+    expect(named).not.toContain("<img");
+    const lightOnly = render({ brokers: [], crypto: [{ ...okx, logo: "/logos/partners/okx.svg" }] });
+    expect(lightOnly).toContain(">OKX</span>");
+    expect(lightOnly).not.toContain("<source");
+  });
+
+  it("keeps every bundled partner logo on disk", () => {
+    for (const p of partnersFor("CA"))
+      for (const path of [p.logo, p.logoDark].filter(Boolean))
+        expect(existsSync(new URL(`../public${path}`, import.meta.url))).toBe(true);
   });
 
   it("renders nothing, disclosure included, when both groups are empty", () => {

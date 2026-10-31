@@ -9,7 +9,8 @@
     "typecheck": "next typegen && tsc --noEmit",
     "test": "vitest run",
     "cf:build": "opennextjs-cloudflare build",
-    "preview": "opennextjs-cloudflare build && opennextjs-cloudflare preview --persist-to ../../crates/generator/.wrangler/state"
+    "preview": "opennextjs-cloudflare build && opennextjs-cloudflare preview --persist-to ../../crates/generator/.wrangler/state",
+    "logos": "node scripts/build-logos.mjs"
   },
   "dependencies": {
     "@fontsource-variable/inter": "^5.3.0",
@@ -29,6 +30,8 @@
     "better-sqlite3": "^13.0.3",
     "eslint": "^10.13.0",
     "eslint-config-next": "^16.4.3",
+    "sharp": "0.35.5",
+    "simple-icons": "16.36.0",
     "typescript": "5.9.3",
     "vitest": "^5.0.5",
     "wrangler": "^4.154.0"
