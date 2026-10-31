@@ -52,7 +52,7 @@ where a task says otherwise, this section wins.
 
 ## Global Constraints
 
-- Everything from Plan 1's Global Constraints (languages, ET schedule, UTC storage, missing data never guessed, EN-first/ZH-pending, no AlphaLab content, secrets only via `wrangler secret put`).
+- Everything from Plan 1's Global Constraints (languages, ET schedule, UTC storage, missing data never guessed, EN-first/ZH-pending, secrets only via `wrangler secret put`).
 - **SEC fair access:** every EDGAR request sends `User-Agent: PreBell/0.1 (+https://prebell.ai; <SEC_CONTACT>)` where `SEC_CONTACT` is the existing wrangler var. Requests are sequential with a pause of at least **125 ms** between them (≤ 8 req/s per invocation). A poll reads EDGAR's current 8-K feed (`browse-edgar?action=getcurrent&type=8-K&count=100&output=atom`), newest first, back to the previous poll: 1-3 requests cover all 102 domestic watchlist companies every 5 minutes.
 - **Polling window:** weekdays **06:00 ≤ ET < 22:00** (spec: ~6 AM–9 PM, plus one hour of slack for late filers). Builds and ZH retries run in the same window.
 - **Detection rule:** form exactly `8-K` (not `8-K/A`), `items` contains `2.02`, accepted within the last **96 h** (covers a Saturday filing picked up Monday), accession not seen before. 6-K/20-F filers are `foreign` in the watchlist: calendar only, never polled, never auto-written.

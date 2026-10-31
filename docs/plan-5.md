@@ -12,7 +12,7 @@
 
 ## Global Constraints
 
-- Everything in Plan 1's Global Constraints still holds. In particular: every number an article publishes must pass `numbers::check`; missing data is never guessed; never use AlphaLab content.
+- Everything in Plan 1's Global Constraints still holds. In particular: every number an article publishes must pass `numbers::check`; missing data is never guessed.
 - Endpoint: `POST https://api.anthropic.com/v1/messages`. Headers: `x-api-key: <ANTHROPIC_API_KEY>`, `anthropic-version: 2026-10-21`, `content-type: application/json`.
 - Request body: exactly `model`, `max_tokens`, `system`, `messages: [{"role":"user","content": <user>}]` and `output_config: {"effort": <LLM_EFFORT>}`. `LLM_EFFORT` (Worker var) is `low` (default) | `medium` | `high`; `none` omits `output_config` for models without effort support; any other value is an error at queue start. No `temperature` (Claude Sonnet 5.5 rejects non-default sampling values; API version `2026-10-21` rejects the field outright), no `thinking`, no beta headers, so the body stays valid for any configured model.
 - `max_tokens = 16000`: current models think adaptively by default and thinking counts toward `max_tokens`; 16000 keeps a non-streaming request well inside HTTP timeouts while leaving room for a long ZH draft.

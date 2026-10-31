@@ -4,13 +4,13 @@ Status: draft for owner review, 2026-10-30. Scope: `apps/web` only.
 
 ## Why
 
-The first site worked but looked like a default blog. Every number on it is verified, yet gains and losses looked the same and the page didn't show the market at a glance. The owner's direction: **Robinhood's clean look with green/red numbers, arranged like AlphaLab's portal** (earnings strip under the header, daily brief as the main block, partner links in a right sidebar). The reference mockups are in `.superpowers/brainstorm/98568-1793328857/content/` (`homepage-portal-v2.html`, `brief-page.html`; earlier options in the same folder).
+The first site worked but looked like a default blog. Every number on it is verified, yet gains and losses looked the same and the page didn't show the market at a glance. The owner's direction: **Robinhood's clean look with green/red numbers, in a portal layout: earnings strip under the header, daily brief as the main block, partner links in a right sidebar.** The reference mockups are in `.superpowers/brainstorm/98568-1793328857/content/` (`homepage-portal-v2.html`, `brief-page.html`; earlier options in the same folder).
 
 ## Goals
 
 - A reader sees the market in about five seconds: index futures, the top movers with green/red pills, and the reason for each move.
 - The brief page reads in this order: **numbers, then movers, then the story** (owner's choice).
-- PreBell looks like its own brand (black/white plus Robinhood green #00C805 / red #FF5000). It borrows AlphaLab's *structure*, not its black-and-yellow look.
+- PreBell looks like its own brand (black/white plus Robinhood green #00C805 / red #FF5000). It borrows a portal *structure*, not another site's look.
 - Partner revenue: broker and crypto invite links in the sidebar, shown only where they are allowed, with a clear affiliate disclosure.
 - Cross-promotion for TermPocket (the owner's other product).
 - English and Simplified Chinese stay full equals in layout.
@@ -18,7 +18,7 @@ The first site worked but looked like a default blog. Every number on it is veri
 ## Non-goals
 
 - No crypto content section. The crypto exchanges appear only as sidebar invite links.
-- No AI articles, FIRE calculator or other AlphaLab tool sections (possible later).
+- No AI articles, FIRE calculator or other tool sections (possible later).
 - No backend changes except the optional chart, which is deferred below. The generator, D1 schema, crons and number checks don't change.
 - Company and partner logos are bundled static files (see `docs/runbook.md` → Logos); a ticker without a licensed logo shows a text chip. Logos identify companies only (nominative use) and are never fetched from third parties at runtime.
 
@@ -28,7 +28,7 @@ The first site worked but looked like a default blog. Every number on it is veri
 - Crypto or broker invite links shown to visitors in mainland China, or Wealthsimple shown outside Canada.
 - Affiliate links without the disclosure, or without `rel="sponsored"`.
 - Pages that become slow or break the Workers Free limits (each page view must stay a handful of D1/R2 reads).
-- Copying AlphaLab's visual identity (black/yellow, their wording, their logos).
+- Copying another site's visual identity, wording or logos.
 
 ## Data the pages use
 
@@ -78,7 +78,7 @@ Three columns on desktop (main-left, main-middle, sidebar); single column on mob
 6. Earnings-check posts keep their current layout (charts), restyled with the new tokens.
 
 ### Other pages
-Archive, Earnings calendar, ticker pages (`/t/[ticker]`), About and not-found use the new shell, typography and colors, and lists use the movers-row style where it fits. The admin competitor page only needs to keep working.
+Archive, Earnings calendar, ticker pages (`/t/[ticker]`), About and not-found use the new shell, typography and colors, and lists use the movers-row style where it fits.
 
 ## Visual system
 - **Theme:** follows the reader's system setting.

@@ -10,7 +10,7 @@
 
 **Spec:** `docs/spec.md`. Executors read both.
 
-**Later plans (not this one):** Plan 2 after-close recap · Plan 3 earnings detection (EDGAR 8-K Item 2.02) + health checks + charts + calendar · Plan 4 competitor watch · Plan 5 switch to Claude API.
+**Later plans (not this one):** Plan 2 after-close recap · Plan 3 earnings detection (EDGAR 8-K Item 2.02) + health checks + charts + calendar · Plan 5 switch to Claude API.
 
 ## Global Constraints
 
@@ -26,7 +26,6 @@
 - LLM: DeepSeek first (`https://api.deepseek.com/chat/completions`, model `deepseek-chat`, JSON output). Provider chosen by env var `LLM_PROVIDER=deepseek`.
 - Data: Yahoo Finance unofficial endpoints behind the `MarketData` trait; Tavily behind `NewsSearch`.
 - Every page shows a "not investment advice" disclaimer in its language. No Google Fonts or Google Analytics: self-hosted fonts, Cloudflare Web Analytics.
-- Never use AlphaLab content in any prompt or output.
 - Secrets only via `wrangler secret put` / `.dev.vars` (git-ignored): `DEEPSEEK_API_KEY`, `TAVILY_API_KEY`, `ALERT_WEBHOOK_URL`.
 
 ## Review Focus

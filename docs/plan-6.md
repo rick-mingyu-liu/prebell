@@ -200,7 +200,7 @@
   - ZH pending keeps the numbers and movers, and the notice replaces the story.
 
 - [ ] Step 1: Failing tests:
-  - `trimStory` on the real 2026-10-30 EN and ZH bodies (copy them into fixtures from `/private/tmp/claude-501/-Users-rickliu-Desktop-alpha-site-reverse/7ffb16ce-f4b3-4095-99c7-6853b8ebc731/scratchpad/live-2026-10-30.md`) leaves no `|` table rows, no `# ` title and no summary paragraph, but keeps `## Futures`, `## Sources` with all links, and the disclaimer.
+  - `trimStory` on the real 2026-10-30 EN and ZH bodies (copy them into fixtures from `<scratchpad>/live-2026-10-30.md`) leaves no `|` table rows, no `# ` title and no summary paragraph, but keeps `## Futures`, `## Sources` with all links, and the disclaimer.
   - "rose 0.42%" is not colored; "-1.14%" is colored down.
   - the source-link allowlist is still enforced after trimming.
   - adjacent posts work.
@@ -237,7 +237,7 @@
 - [ ] Step 3: Take headless Chrome screenshots (`"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" --headless=new --hide-scrollbars --window-size=W,H --screenshot=...`, with `--force-dark-mode` and `--blink-settings=preferredColorScheme=0` for dark) of:
   - `/en`, `/zh`, `/en/p/premarket-2026-10-30`, `/zh/p/premarket-2026-10-30`, `/zh/p/premarket-2026-10-28` (pending), `/en/archive?type=earnings`, `/en/earnings`;
   - at 1280px and 390px, in light and dark.
-  - Save to `/private/tmp/claude-501/-Users-rickliu-Desktop-alpha-site-reverse/7ffb16ce-f4b3-4095-99c7-6853b8ebc731/scratchpad/qa/`.
+  - Save to `<scratchpad>/qa/`.
 - [ ] Step 4: Compare against `.superpowers/brainstorm/98568-1793328857/content/homepage-portal-v2.html` and `brief-page.html`. Fix:
   - overflow or horizontal scroll at 390px;
   - contrast problems;
