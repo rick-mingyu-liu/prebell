@@ -42,7 +42,7 @@ What defines it:
 - Publishing a number the data doesn't support, or one where the model filled in a gap. Missing data is shown as missing, never guessed, and this is enforced in code.
 - Reading as investment advice. Every page carries a "not investment advice" disclaimer in its language.
 - Silent failure: a job that fails must not publish a half-empty post; it alerts instead.
-- Republishing third-party text. Articles are written from our own stored facts; news sources are quoted only as short attributed excerpts in the reasons, never reproduced or paraphrased as our content.
+- Republishing third-party text. Articles are written from our own stored facts; news sources are cited and quoted only as short attributed excerpts; their text is never reproduced as our content.
 
 ## 6. Owner's decisions (as stated)
 
