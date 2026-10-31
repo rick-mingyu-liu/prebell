@@ -1,14 +1,12 @@
 //! Generator Worker: cron -> queue -> `tick`, backed by D1 + R2.
 
 mod alerts;
-mod competitor;
 mod earnings_store;
 mod http;
 mod store;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use prebell_core::competitor::run_competitor;
 use prebell_core::earnings::calendar::{refresh_tick, yahoo_seeding, CalendarSource};
 use prebell_core::earnings::run::{build_tick, poll_job};
 use prebell_core::edgar::Edgar;
@@ -194,11 +192,6 @@ impl JobRunner for Runner<'_> {
                 recap::tick_with_hooks(at, store, &md, &ns, llm.as_ref(), &hooks).await
             }
         })
-    }
-
-    async fn competitor(&self) -> String {
-        let outcome = run_competitor(now(self.env), &self.http, &WorkerTimer, self.store).await;
-        format!("{outcome:?}")
     }
 
     /// One earnings step, each its own message and so its own subrequest

@@ -3,7 +3,7 @@
 //! numbers days 1-7 from Sunday, unlike most cron dialects.
 
 /// Every job a cron queues.
-pub const JOBS: &[&str] = &["premarket", "recap", "competitor", "earnings"];
+pub const JOBS: &[&str] = &["premarket", "recap", "earnings"];
 
 /// Queue binding for the earnings jobs: one consumer, one message at a time,
 /// so EDGAR is never hit in parallel and a build never delays a brief.
@@ -47,8 +47,6 @@ impl EarningsStep {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum JobKind {
     Content(ContentJob),
-    /// The competitor watch; it needs no LLM.
-    Competitor,
     Earnings(EarningsStep),
 }
 
@@ -57,7 +55,6 @@ impl JobKind {
         match job {
             "premarket" => Some(JobKind::Content(ContentJob::Premarket)),
             "recap" => Some(JobKind::Content(ContentJob::Recap)),
-            "competitor" => Some(JobKind::Competitor),
             "earnings" => Some(JobKind::Earnings(EarningsStep::Poll)),
             "earnings:build" => Some(JobKind::Earnings(EarningsStep::Build)),
             "earnings:calendar" => Some(JobKind::Earnings(EarningsStep::Calendar)),
@@ -75,7 +72,7 @@ pub fn queue_for(job: &str) -> &'static str {
 }
 
 /// `(cron, jobs)`. Must match `crons` in `crates/generator/wrangler.toml`.
-/// Three crons because the Free Workers plan allows 5 per account. A firing
+/// Two crons because the Free Workers plan allows 5 per account. A firing
 /// may queue several jobs; each job's clock (and `Content::zh_retry_due`)
 /// decides what the firing means for it, so extra firings cost a D1 read.
 pub const CRONS: &[(&str, &[&str])] = &[
@@ -90,10 +87,6 @@ pub const CRONS: &[(&str, &[&str])] = &[
     // (00:00Z) and recap ZH retries to the 22:00 ET give-up; earnings
     // polling to 22:00 ET (02:00Z EDT, 03:00Z EST).
     ("*/5 0-3 * * TUE-SAT", &["recap", "earnings"]),
-    // Competitor watch, daily: 07:31 ET under either offset (11:31Z EDT,
-    // 12:31Z EST); `competitor_decision` picks the firing that counts.
-    // Minute 31 so no other job fires with it.
-    ("31 11-12 * * *", &["competitor"]),
 ];
 
 /// The jobs for a firing of `cron`, or `None` when the cron is unknown (the
@@ -214,8 +207,8 @@ mod tests {
         for (_, jobs) in CRONS {
             assert!(!jobs.is_empty() && jobs.iter().all(|j| JOBS.contains(j)));
         }
-        // Free Workers plan: at most 5 cron triggers per account; keep 3.
-        assert_eq!(CRONS.len(), 3);
+        // Free Workers plan: at most 5 cron triggers per account; keep 2.
+        assert_eq!(CRONS.len(), 2);
         // No comma lists: one cron, one pattern per field.
         assert!(CRONS.iter().all(|(c, _)| !c.contains(',')));
         assert_eq!(jobs_for_cron("* * * * *"), None);
@@ -249,10 +242,9 @@ mod tests {
 
     #[test]
     fn each_cron_maps_to_its_job() {
-        let want: [(&str, &[&str]); 3] = [
+        let want: [(&str, &[&str]); 2] = [
             ("*/5 10-23 * * MON-FRI", &["premarket", "recap", "earnings"]),
             ("*/5 0-3 * * TUE-SAT", &["recap", "earnings"]),
-            ("31 11-12 * * *", &["competitor"]),
         ];
         for (cron, jobs) in want {
             assert_eq!(jobs_for_cron(cron), Some(jobs), "{cron}");
@@ -274,7 +266,6 @@ mod tests {
             JobKind::parse("recap"),
             Some(JobKind::Content(ContentJob::Recap))
         );
-        assert_eq!(JobKind::parse("competitor"), Some(JobKind::Competitor));
         assert_eq!(JobKind::parse("nope"), None);
         for step in [
             EarningsStep::Poll,
@@ -284,45 +275,13 @@ mod tests {
             assert_eq!(JobKind::parse(step.job()), Some(JobKind::Earnings(step)));
             assert_eq!(queue_for(step.job()), EARNINGS_QUEUE);
         }
-        for j in ["premarket", "recap", "competitor", "nope"] {
+        for j in ["premarket", "recap", "nope"] {
             assert_eq!(queue_for(j), JOBS_QUEUE, "{j}");
         }
         let kinds: Vec<JobKind> = JOBS.iter().map(|j| JobKind::parse(j).unwrap()).collect();
-        assert_eq!(kinds.len(), 4);
+        assert_eq!(kinds.len(), 3);
         for (i, k) in kinds.iter().enumerate() {
             assert!(!kinds[..i].contains(k), "{k:?}");
-        }
-    }
-
-    #[test]
-    fn competitor_fires_once_at_0731_et_every_day() {
-        // The competitor job is due in [07:30, 08:00) ET; exactly one of its
-        // firings lands there each day. Includes a Saturday, a Sunday and the
-        // 2026-11-01 DST change.
-        let (start, end) = (
-            NaiveTime::from_hms_opt(7, 30, 0).unwrap(),
-            NaiveTime::from_hms_opt(8, 0, 0).unwrap(),
-        );
-        for date in [
-            "2026-10-29",
-            "2026-10-31",
-            "2026-11-01",
-            "2026-11-02",
-            "2026-11-26",
-        ] {
-            let d: NaiveDate = date.parse().unwrap();
-            let due: Vec<DateTime<Utc>> = minutes(date)
-                .into_iter()
-                .filter(|t| et(*t).date_naive() == d && fires("competitor", *t))
-                .filter(|t| (start..end).contains(&et(*t).time()))
-                .collect();
-            assert_eq!(due.len(), 1, "{date}: {due:?}");
-            assert_eq!(
-                et(due[0]).time(),
-                NaiveTime::from_hms_opt(7, 31, 0).unwrap()
-            );
-            // Minute 31: no other job fires with it.
-            assert!(!fires("premarket", due[0]) && !fires("recap", due[0]));
         }
     }
 
