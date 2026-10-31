@@ -81,7 +81,7 @@ The generator runs on the Workers Free plan for now. The limits that matter:
 
 | Limit (Free) | Value | Where it bites |
 |---|---|---|
-| Cron triggers per account | 5 | `crates/generator/wrangler.toml` uses 3 (a test in `schedule.rs` keeps it at 3). |
+| Cron triggers per account | 5 | `crates/generator/wrangler.toml` uses 2 (a test in `schedule.rs` keeps it at 2). |
 | CPU time per invocation | 10 ms | Each queue message is its own invocation (`max_batch_size = 1`). Waiting on the network is not CPU time; JSON parsing and drafting checks are. |
 | Fetch subrequests per invocation | 50 | Yahoo, Tavily, the LLM, EDGAR and the alert webhook. |
 | Subrequests to internal services | 1,000 | D1 and R2 binding calls. The [limits page](https://developers.cloudflare.com/workers/platform/limits/) counts calls to R2, KV and D1 as subrequests and gives Free a separate 1,000 row for internal services, so they are not counted in `subrequests=`. |

@@ -12,7 +12,7 @@ Auto-generated US-market briefs in English and Simplified Chinese: a premarket b
 | `crates/generator` | Cloudflare Worker (workers-rs): cron → queue → `tick`. Config in `wrangler.toml`. |
 | `apps/web` | Next.js 16 site on Cloudflare via OpenNext. Routes `/en` and `/zh`. |
 | `migrations/` | D1 schema. `db/` holds local preview data only. |
-| `docs/` | `spec.md` (design), `plan-*.md` (implementation plans), `runbook.md` (operations). |
+| `docs/` | `spec.md` (design), `plan-*.md` (implementation plans; plan 4 was a feature later removed), `runbook.md` (operations). |
 
 ## Develop
 

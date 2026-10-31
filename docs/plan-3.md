@@ -19,7 +19,7 @@ Workers Free plan (50 fetch subrequests and 10 ms CPU per invocation, 5 crons
 per account) the earnings pipeline changed from the tasks below as follows;
 where a task says otherwise, this section wins.
 
-- **Crons:** no every-minute cron. The project keeps 3 crons; the weekday cron
+- **Crons:** no every-minute cron. The project keeps 2 crons; the weekday cron
   is `"*/5 10-23 * * MON-FRI"` and, with `"*/5 0-3 * * TUE-SAT"`, covers every
   5-minute slot of the 06:00-22:00 ET window under EDT and EST. Both queue
   `earnings` (see `core::schedule`), on its own single-consumer `EARNINGS`
