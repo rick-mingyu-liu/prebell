@@ -10,11 +10,11 @@
 
 **Spec:** `docs/spec.md` (§3 goal 2, §8). Plan 1: `docs/plan-1.md`. Executors read all three.
 
-**Later plans (not this one):** Plan 3 earnings detection + health checks + calendar (in progress in parallel; touches `run.rs`/`store.rs` too) · Plan 4 competitor watch · Plan 5 Claude API.
+**Later plans (not this one):** Plan 3 earnings detection + health checks + calendar (in progress in parallel; touches `run.rs`/`store.rs` too) · Plan 5 Claude API.
 
 ## Global Constraints
 
-- Everything in Plan 1's Global Constraints still holds (languages, ET display / UTC storage, secrets, no AlphaLab content, disclaimer, provider traits).
+- Everything in Plan 1's Global Constraints still holds (languages, ET display / UTC storage, secrets, disclaimer, provider traits).
 - Recap: scheduled **4:45 PM ET** on full trading days and **1:45 PM ET** on early-close days (1:00 PM close); may publish late up to **7:00 PM ET** on both; retry every **5 minutes**; at 7:00 PM skip the day and alert. Closed days: nothing.
 - Required section: **index closes** — S&P 500 (`^GSPC`), Nasdaq 100 (`^NDX`), Dow Jones Industrial Average (`^DJI`), Russell 2000 (`^RUT`). All four must be present and for today's session. Optional: notable movers (with reasons when anchored), after-hours earnings to watch → "n/a" / "暂缺".
 - Template `recap:v1`, `content_type = "recap"`, slug `recap-YYYY-MM-DD`, run key `recap:YYYY-MM-DD`, facts at R2 `recap/YYYY-MM-DD.json`.

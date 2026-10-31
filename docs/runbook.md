@@ -14,7 +14,7 @@ Every LLM call goes through one provider: reason extraction while building facts
 - `LLM_PROVIDER`, the optional `LLM_MODEL` and `LLM_EFFORT` are plain vars in `crates/generator/wrangler.toml` under `[vars]`. If `LLM_MODEL` is unset or empty, the provider's default model is used. If `LLM_PROVIDER` is unset, it is `claude`.
 - `LLM_EFFORT` (Claude only) sets `output_config.effort` on every request: `low` (default), `medium` or `high`. `none` leaves the field out; use it for a model that does not support effort. Any other value is a config error: see the next point. DeepSeek ignores it.
 - The secrets are set only with `wrangler secret put` (production) or in `crates/generator/.dev.vars` (local, git-ignored). They are never committed.
-- An unknown `LLM_PROVIDER` or `LLM_EFFORT` is a config error. The premarket and recap jobs then never run, and each one raises one `error` alert per ET day, keyed `config:<job>:<date>`. The alert reads like `premarket: config error: parse error: unknown LLM_EFFORT: hgih (use low, medium, high or none)`. It names the variable and its value, never a key. The competitor job does not use the LLM and keeps running. Fix the var and deploy.
+- An unknown `LLM_PROVIDER` or `LLM_EFFORT` is a config error. The premarket and recap jobs then never run, and each one raises one `error` alert per ET day, keyed `config:<job>:<date>`. The alert reads like `premarket: config error: parse error: unknown LLM_EFFORT: hgih (use low, medium, high or none)`. It names the variable and its value, never a key. Fix the var and deploy.
 - The number check (`numbers::check`) and quote anchoring run the same way whichever provider is used. Switching provider does not loosen them.
 
 ## Claude (default)
@@ -81,9 +81,9 @@ The generator runs on the Workers Free plan for now. The limits that matter:
 
 | Limit (Free) | Value | Where it bites |
 |---|---|---|
-| Cron triggers per account | 5 | `crates/generator/wrangler.toml` uses 3 (a test in `schedule.rs` keeps it at 3). |
+| Cron triggers per account | 5 | `crates/generator/wrangler.toml` uses 2 (a test in `schedule.rs` keeps it at 2). |
 | CPU time per invocation | 10 ms | Each queue message is its own invocation (`max_batch_size = 1`). Waiting on the network is not CPU time; JSON parsing and drafting checks are. |
-| Fetch subrequests per invocation | 50 | Yahoo, Tavily, the LLM, EDGAR, the competitor feed and the alert webhook. |
+| Fetch subrequests per invocation | 50 | Yahoo, Tavily, the LLM, EDGAR and the alert webhook. |
 | Subrequests to internal services | 1,000 | D1 and R2 binding calls. The [limits page](https://developers.cloudflare.com/workers/platform/limits/) counts calls to R2, KV and D1 as subrequests and gives Free a separate 1,000 row for internal services, so they are not counted in `subrequests=`. |
 | Queue operations per day | 10,000 | About 650 cron messages on a weekday (premarket, recap and earnings every 5 minutes) plus earnings builds, at about 3 operations each. |
 
@@ -103,7 +103,7 @@ An invocation over 10 ms of CPU is killed. In `wrangler tail` it shows with outc
 
 ## Earnings
 
-- Before the first deploy, apply the D1 migrations: `pnpm exec wrangler d1 migrations apply prebell --remote` (in `crates/generator`). It applies `0003_earnings.sql` even though `0004_competitor.sql` is already applied: D1 tracks each migration by name.
+- Apply the D1 migrations before the first deploy: `pnpm exec wrangler d1 migrations apply prebell --remote` (in `crates/generator`).
 - Create the queue before the first deploy: `pnpm exec wrangler queues create prebell-earnings`. Earnings run only on it (one consumer, one message at a time, one retry), so EDGAR is never hit in parallel.
 - On the first deploy, check one detected filing's time: compare `earnings_filings.accepted_at` (UTC) with the "Accepted" time on its `-index.htm` page (ET). They should differ by exactly the ET offset (4 h EDT, 5 h EST). The feed's time was checked once against an index page before the merge.
 - `SEC_CONTACT` must be a real contact email: SEC blocks anonymous clients. With the placeholder, every earnings step is a config error with one `error` alert per ET day, keyed `config:earnings:<date>`.

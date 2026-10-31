@@ -5,11 +5,11 @@ Name: PreBell (盘前铃), domain prebell.ai
 
 ## 1. Intent
 
-Build our own automated investing-news site, in **English and Simplified Chinese**, that does the daily reading for people who follow US stocks but don't want to read filings and news themselves. They should come back every day. The model is AlphaLab (alphalab.site), whose machinery we reverse-engineered in `notes/findings.md`; we take its *architecture and ideas*, not its text, name, or look.
+Build an automated investing-news site, in **English and Simplified Chinese**, that does the daily reading for people who follow US stocks but don't want to read filings and news themselves. They should come back every day.
 
-What makes ours different from AlphaLab:
-- **North America first.** All schedules run on US Eastern time. AlphaLab's schedule is built around a Taiwan breakfast (market recap at 7 PM ET) and has **no premarket content at all**. Ours leads with a premarket brief at ~8:30 AM ET, which also lands at ~8:30–9:30 PM in Beijing for Chinese readers.
-- **Faster, source-backed earnings.** We detect earnings releases from SEC EDGAR filings (8-K Item 2.02) instead of waiting for a nightly batch.
+What defines it:
+- **North America first.** All schedules run on US Eastern time. It leads with a premarket brief at ~8:30 AM ET, which also lands at ~8:30–9:30 PM in Beijing for Chinese readers.
+- **Source-backed earnings.** We detect earnings releases from SEC EDGAR filings (8-K Item 2.02) as they are filed.
 - **Numbers that are checked.** Every number in every published text is checked against the stored data before publishing.
 
 ## 2. Readers and success
@@ -28,7 +28,6 @@ What makes ours different from AlphaLab:
 3. **Earnings health checks** for a watchlist of large companies: triggered when the company's 8-K Item 2.02 appears on EDGAR. Covers revenue, margins, EPS (GAAP vs non-GAAP), cash flow, guidance, with charts, citing the filing and press release.
 4. **Earnings calendar page** (upcoming dates, before open / after close / unknown), confirmed from primary sources.
 5. **English + Simplified Chinese** for every piece, at `/en/...` and `/zh/...`.
-6. **Competitor watch** (internal only): daily read of AlphaLab's public RSS feed for coverage gaps.
 
 ## 4. Non-goals (not at launch)
 
@@ -40,10 +39,10 @@ What makes ours different from AlphaLab:
 
 ## 5. Anti-goals (failure even if it "works")
 
-- Publishing a number the data doesn't support, or one where the model filled in a gap. Missing data is shown as missing, never guessed (AlphaLab's own rule, which we keep and enforce in code).
-- Any AlphaLab text reaching our content, even rewritten or translated. Competitor watch reads titles, tickers, categories and timestamps only, and never feeds generation directly.
+- Publishing a number the data doesn't support, or one where the model filled in a gap. Missing data is shown as missing, never guessed, and this is enforced in code.
 - Reading as investment advice. Every page carries a "not investment advice" disclaimer in its language.
-- Silent failure: a job that fails must not publish a half-empty post (AlphaLab shipped a ~1.3k-char crypto digest on 2026-10-20); it alerts instead.
+- Silent failure: a job that fails must not publish a half-empty post; it alerts instead.
+- Republishing third-party text. Articles are written from our own stored facts; news sources are cited and quoted only as short attributed excerpts; their text is never reproduced as our content.
 
 ## 6. Owner's decisions (as stated)
 
@@ -51,9 +50,8 @@ What makes ours different from AlphaLab:
 - **Platform:** Cloudflare.
 - **Generator / backend:** Rust.
 - **AI:** Claude API (owner, updated 2026-10-29: Anthropic API key with launch credit). Launch waits for the Claude provider (Plan 5). DeepSeek stays implemented as a fallback. The provider must be swappable by config (`LLM_PROVIDER`).
-- **Data:** start free like AlphaLab — Yahoo Finance (unofficial), SEC EDGAR, web search for news — and move to a paid market-data provider once the site proves itself. The source must be swappable.
+- **Data:** start free — Yahoo Finance (unofficial), SEC EDGAR, web search for news — and move to a paid market-data provider once the site proves itself. The source must be swappable.
 - **Audience:** North America primary; mainland China as a mix → Simplified Chinese; no China-specific delivery work.
-- **Competitor watch:** yes, AlphaLab's public feed only, metadata only.
 
 ## 7. Architecture (designer's calls unless marked owner)
 
@@ -74,7 +72,7 @@ EDGAR poller (every 2–5 min, market hours) ─┤
 ```
 
 - **Site:** Next.js App Router on Cloudflare Workers via `@opennextjs/cloudflare` (owner: Next.js + Cloudflare; adapter is designer's call). i18n with `next-intl`, routes `/en/...` and `/zh/...`, `hreflang` alternates, language switch on every page. Pages render from D1/R2 on the server and are cached; publishing triggers revalidation of the affected paths.
-- **Storage:** D1 for posts, translations, facts index, sources, runs, calendar, competitor items. R2 for facts JSON snapshots, article bodies if large, and chart SVGs.
+- **Storage:** D1 for posts, translations, facts index, sources, runs, calendar. R2 for facts JSON snapshots, article bodies if large, and chart SVGs.
 - **Generator:** Rust compiled to WebAssembly with `workers-rs` (owner: Rust). Scheduled by Cron Triggers; heavy work goes through a Queue so each job runs in its own invocation. Cron times are UTC, so the Worker is triggered at both candidate UTC times and checks the current America/New_York time in code to handle daylight saving (DST ends 2026-11-01).
   - Fallback if a needed Rust crate won't run under WebAssembly: run the same Rust code as a native binary on a schedule (e.g., GitHub Actions or a small VM) writing to D1/R2 through Cloudflare's API. Builder decides if and when.
 - **Provider interfaces (traits in Rust):**
@@ -83,8 +81,7 @@ EDGAR poller (every 2–5 min, market hours) ─┤
   - `NewsSearch`: a web search API (Brave Search or Tavily — designer's call) because our code needs the full article text to verify quotes. Kept on Tavily after the Claude switch; Claude's web-search tool returns results to the model rather than raw text to our code.
   - `Filings`: SEC EDGAR (`data.sec.gov/submissions`, full-text/filing index). Must send a descriptive User-Agent with contact email and stay under 10 requests/second.
 - **Earnings detection:** during US hours (~6 AM–9 PM ET, weekdays), poll EDGAR submissions for watchlist companies every few minutes; a new 8-K with Item 2.02 queues an earnings job using the filing and its Exhibit 99.1 press release. Foreign filers (6-K, e.g., Toyota, Barclays, Santander) have no Item 2.02: at launch they're tracked only on the calendar, not auto-written.
-- **Earnings calendar:** seed upcoming dates from an aggregator (Yahoo's earnings calendar at launch); mark each entry `confirmed` only after primary proof (company IR announcement or EDGAR); entries with conflicting dates go to a quarantine list with reason and check times (AlphaLab's `pending_dates` idea).
-- **Competitor watch:** daily cron reads `https://www.alphalab.site/feed.xml`, stores title, link, published time, category and any tickers found in the title; a report lists tickers/topics they covered that we didn't in the last 24h. Admin-only (a protected page or a log/notification). Never used as generation input.
+- **Earnings calendar:** seed upcoming dates from an aggregator (Yahoo's earnings calendar at launch); mark each entry `confirmed` only after primary proof (company IR announcement or EDGAR); entries with conflicting dates go to a quarantine list with reason and check times.
 
 ## 8. Content pipeline rules
 
@@ -100,8 +97,8 @@ EDGAR poller (every 2–5 min, market hours) ─┤
    - **Late, not thin (owner).** If required data is missing at the scheduled time, the job keeps retrying (every ~5 min). The premarket brief may publish up to **9:25 AM ET**; after that it is skipped for the day and an alert is sent. The recap may publish up to 7 PM ET under the same rule.
    - **One language can go first (owner).** If English passes the number check and Chinese still fails after its retry, English publishes on time. The Chinese page for that post shows a "translation coming / 中文版稍后推出" notice (excluded from search and from the hreflang pair until filled), and the job keeps retrying Chinese until it passes, then fills it in. The reverse case (Chinese passes, English fails) holds both and alerts, since English is primary. Posts therefore have a per-language status (`published`, `pending`, `failed`).
 5. **Cite sources.** Every news claim links its URL; every earnings post links the EDGAR filing and the press release.
-6. **Versioned templates.** Each content type has a template ID and version (e.g., `premarket:v1`) stored on the post, so changes can be traced (AlphaLab does this with an HTML comment).
-7. **Idempotent runs.** A run is keyed by (content type, ET trading date, ticker if any). Re-running replaces the post instead of creating a duplicate (AlphaLab's duplicate `-2` slugs came from this).
+6. **Versioned templates.** Each content type has a template ID and version (e.g., `premarket:v1`) stored on the post, so changes can be traced.
+7. **Idempotent runs.** A run is keyed by (content type, ET trading date, ticker if any). Re-running replaces the post instead of creating a duplicate.
 8. **Market calendar.** Premarket and recap skip NYSE holidays and handle early-close days.
 
 ## 9. Pages
@@ -131,8 +128,8 @@ EDGAR poller (every 2–5 min, market hours) ─┤
 ## 12. Open for the owner
 
 - Site name and domain: PreBell (盘前铃), prebell.ai (domain not yet bought). Use a config value for the EDGAR User-Agent contact email.
-- Whether premarket/recap pages are indexed by search engines (AlphaLab hides its digests with `noindex`). Designer's default: index them.
+- Whether premarket/recap pages are indexed by search engines. Designer's default: index them.
 
 ## 13. Build approach (owner)
 
-Implementation will be split across parallel subagents (site, generator core, data providers, earnings/calendar, competitor watch), with a separate review pass.
+Implementation will be split across parallel subagents (site, generator core, data providers, earnings/calendar), with a separate review pass.

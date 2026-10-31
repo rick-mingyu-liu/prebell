@@ -20,15 +20,6 @@ const nextConfig: NextConfig = {
         source: "/api/partners",
         headers: [{ key: "Cache-Control", value: "private, no-store" }],
       },
-      {
-        // Internal pages: the token is in the URL, so never cache, index or leak it as a referrer.
-        source: "/admin/:path*",
-        headers: [
-          { key: "Cache-Control", value: "private, no-store" },
-          { key: "X-Robots-Tag", value: "noindex, nofollow" },
-          { key: "Referrer-Policy", value: "no-referrer" },
-        ],
-      },
     ];
   },
 };

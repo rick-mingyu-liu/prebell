@@ -18,8 +18,6 @@ pub trait JobRunner {
     /// only the jobs that need it) and ticks it. `Err` is a config error
     /// whose text must already be free of secret values (see `redact`).
     async fn content(&self, job: ContentJob) -> Result<TickOutcome, String>;
-    /// The competitor watch; its outcome as a log line.
-    async fn competitor(&self) -> String;
     /// One earnings step. `Ok` is a log line; `Err` is a config error, as
     /// for `content`.
     async fn earnings(&self, step: EarningsStep) -> Result<String, String>;
@@ -36,7 +34,6 @@ pub async fn run_job(
     runner: &dyn JobRunner,
 ) -> Result<String, String> {
     match JobKind::parse(job) {
-        Some(JobKind::Competitor) => Ok(format!("job {job}: {}", runner.competitor().await)),
         Some(JobKind::Content(c)) => match runner.content(c).await {
             Ok(o) => Ok(format!("job {job}: {o:?}")),
             Err(e) => Err(config_error(now, job, &e, store).await),
@@ -95,7 +92,7 @@ pub fn redact(msg: &str, secrets: &[&str]) -> String {
 mod tests {
     use super::*;
     use crate::store::MemStore;
-    use std::cell::{Cell, RefCell};
+    use std::cell::RefCell;
 
     const KEY: &str = "sk-ant-api03-SECRETVALUE";
 
@@ -103,7 +100,6 @@ mod tests {
     struct FakeRunner {
         content_err: Option<String>,
         content_calls: RefCell<Vec<ContentJob>>,
-        competitor_calls: Cell<usize>,
         earnings_calls: RefCell<Vec<EarningsStep>>,
     }
     #[async_trait(?Send)]
@@ -114,10 +110,6 @@ mod tests {
                 Some(e) => Err(e.clone()),
                 None => Ok(TickOutcome::Nothing),
             }
-        }
-        async fn competitor(&self) -> String {
-            self.competitor_calls.set(self.competitor_calls.get() + 1);
-            "AlreadyDone".into()
         }
         async fn earnings(&self, step: EarningsStep) -> Result<String, String> {
             self.earnings_calls.borrow_mut().push(step);
@@ -136,7 +128,6 @@ mod tests {
         FakeRunner {
             content_err: Some(redact(&raw, &[KEY, ""])),
             content_calls: RefCell::new(vec![]),
-            competitor_calls: Cell::new(0),
             earnings_calls: RefCell::new(vec![]),
         }
     }
@@ -200,28 +191,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn competitor_runs_despite_a_bad_llm_config() {
-        let s = MemStore::default();
-        let r = bad_effort();
-        run_job(utc("2026-10-29T12:30:00Z"), "premarket", &s, &r)
-            .await
-            .ok();
-        let out = run_job(utc("2026-10-29T11:31:00Z"), "competitor", &s, &r).await;
-        assert_eq!(out, Ok("job competitor: AlreadyDone".to_string()));
-        assert_eq!(r.competitor_calls.get(), 1);
-        // No content build for the competitor job, and no alert for it.
-        assert_eq!(r.content_calls.borrow().len(), 1);
-        assert_eq!(s.alerts.borrow().len(), 1);
-        assert!(s.alerts.borrow()[0].0.starts_with("config:premarket:"));
-    }
-
-    #[tokio::test]
     async fn good_config_ticks_without_alerts_and_unknown_job_is_dropped() {
         let s = MemStore::default();
         let r = FakeRunner {
             content_err: None,
             content_calls: RefCell::new(vec![]),
-            competitor_calls: Cell::new(0),
             earnings_calls: RefCell::new(vec![]),
         };
         let now = utc("2026-10-29T12:30:00Z");
@@ -243,7 +217,6 @@ mod tests {
         let r = FakeRunner {
             content_err: Some("SEC_CONTACT is the placeholder".into()),
             content_calls: RefCell::new(vec![]),
-            competitor_calls: Cell::new(0),
             earnings_calls: RefCell::new(vec![]),
         };
         for (t, job) in [
@@ -277,7 +250,6 @@ mod tests {
         let r = FakeRunner {
             content_err: None,
             content_calls: RefCell::new(vec![]),
-            competitor_calls: Cell::new(0),
             earnings_calls: RefCell::new(vec![]),
         };
         let out = run_job(utc("2026-10-29T12:30:00Z"), "earnings", &s, &r).await;
@@ -328,7 +300,6 @@ mod tests {
         let r = FakeRunner {
             content_err: Some(format!("line one\nline two {}", "x".repeat(1000))),
             content_calls: RefCell::new(vec![]),
-            competitor_calls: Cell::new(0),
             earnings_calls: RefCell::new(vec![]),
         };
         run_job(utc("2026-10-29T12:30:00Z"), "premarket", &s, &r)

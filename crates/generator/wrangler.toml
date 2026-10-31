@@ -7,15 +7,14 @@ command = "worker-build --release"
 
 [triggers]
 # UTC. Each cron maps to its jobs in crates/core/src/schedule.rs (a test keeps
-# the two in sync); `clock` and `core::competitor` decide what each firing means in ET.
-# Three crons: the Free Workers plan allows 5 per account. Day names, not numbers
+# the two in sync); `clock` decides what each firing means in ET.
+# Two crons: the Free Workers plan allows 5 per account. Day names, not numbers
 # (Cloudflare numbers weekdays 1-7 starting on Sunday), and no comma lists.
 # - "*/5 10-23 * * MON-FRI": earnings polling from 06:00 ET (both offsets), premarket
 #   and recap (both windows, ZH retries)
 # - "*/5 0-3 * * TUE-SAT": the EST recap tail to 19:00 ET, recap ZH retries and
 #   earnings polling to 22:00 ET
-# - "31 11-12 * * *": competitor at 07:31 ET in either offset
-crons = ["*/5 10-23 * * MON-FRI", "*/5 0-3 * * TUE-SAT", "31 11-12 * * *"]
+crons = ["*/5 10-23 * * MON-FRI", "*/5 0-3 * * TUE-SAT"]
 
 [[d1_databases]]
 binding = "DB"
