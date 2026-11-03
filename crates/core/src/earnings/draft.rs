@@ -45,7 +45,7 @@ fn headings(lang: Lang) -> [&'static str; 4] {
 
 /// The headings these facts call for: Results always, every other section
 /// only when it has a figure or note to discuss ("What else stood out" may
-/// discuss the trend).
+/// discuss the trend, when it has any quarter).
 fn wanted(f: &EarningsFacts, lang: Lang) -> Vec<&'static str> {
     let [results, margins, guidance, other] = headings(lang);
     let notes = |n: &Field<Vec<_>>| matches!(n, Field::Value(v) if !v.is_empty());
@@ -64,7 +64,9 @@ fn wanted(f: &EarningsFacts, lang: Lang) -> Vec<&'static str> {
     if notes(&f.guidance) {
         out.push(guidance);
     }
-    if notes(&f.highlights) || matches!(f.trend, Field::Value(_)) {
+    let trend = matches!(&f.trend, Field::Value(t)
+        if !(t.revenue.is_empty() && t.eps_diluted.is_empty() && t.net_income.is_empty()));
+    if notes(&f.highlights) || trend {
         out.push(other);
     }
     out
@@ -519,6 +521,24 @@ pub(crate) mod tests {
             assert_eq!(md.matches("\n## ").count(), 2, "Results and Sources only: {md}");
             assert!(l.prompts.borrow()[0].ends_with(line), "{}", l.prompts.borrow()[0]);
         }
+    }
+
+    #[test]
+    fn an_empty_trend_is_nothing_to_discuss() {
+        let mut f = facts();
+        f.highlights = Field::Value(vec![]);
+        f.trend = Field::Value(crate::earnings::facts::Trend {
+            revenue: vec![],
+            eps_diluted: vec![],
+            net_income: vec![],
+        });
+        assert_eq!(
+            wanted(&f, Lang::En),
+            ["Results", "Margins and cash flow", "Guidance"]
+        );
+        // Any quarter in the trend is enough.
+        f.trend = facts().trend;
+        assert_eq!(wanted(&f, Lang::En).len(), 4);
     }
 
     #[tokio::test]

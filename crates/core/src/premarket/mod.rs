@@ -184,9 +184,12 @@ pub(crate) fn news_cutoff(now: DateTime<Utc>) -> DateTime<Utc> {
 }
 
 /// Search hits that never explain a move: institutional holdings filings
-/// ("Aware Super ... Trims Position"), 13F pages and the like. "shares"
-/// needs a following "in" ("buys shares in"), so "raises prices, shares
-/// jump" is kept.
+/// ("Aware Super ... Trims Position"), 13F pages and the like. The verb
+/// must sit right before the holding ("trims position", "buys 1,200 shares
+/// of"), so deal news ("takes $5 billion stake in Intel") and prose that
+/// only mentions a position or shares are kept. A bare "takes stake" is
+/// news ("Berkshire Hathaway takes stake in UnitedHealth"); "takes new
+/// stake" and "takes position" are filing language.
 pub(crate) fn is_noise(hit: &SearchHit) -> bool {
     static TITLE: OnceLock<Regex> = OnceLock::new();
     let url = hit.url.to_lowercase();
@@ -197,13 +200,18 @@ pub(crate) fn is_noise(hit: &SearchHit) -> bool {
         .map_or("", |(_, p)| p);
     let path = format!("/{path}");
     url.contains("marketbeat.com/instant-alerts/filing")
-        || ["/13f/", "/holdings/", "/institutional"]
+        || [
+            "/13f/",
+            "/holdings/",
+            "/institutional-holdings",
+            "/institutional-ownership",
+        ]
             .iter()
             .any(|p| path.contains(p))
         || TITLE
             .get_or_init(|| {
                 Regex::new(
-                    r"(?i)\b(trims|cuts|reduces|lowers|raises|increases|boosts|adds to|acquires|buys|sells|purchases|takes|has)\b.*(\b(position|stake|holdings)\b|\bshares in\b)|\b13F\b",
+                    r"(?i)\b(?:trims|cuts|reduces|lowers|raises|increases|boosts|adds to|acquires|buys|sells|purchases|has)\s+(?:new\s+)?(?:position|stake|holdings)\b|\btakes\s+(?:new\s+(?:position|stake|holdings)|position|holdings)\b|\b(?:buys|sells|purchases|acquires)\s+(?:[\d,]+\s+)?shares\s+(?:in|of)\b|\bhas\s+\$[\d.,]+\s+(?:million|thousand)\s+(?:stake|position)\b|\b13F\b",
                 )
                 .expect("valid built-in regex")
             })
@@ -211,11 +219,13 @@ pub(crate) fn is_noise(hit: &SearchHit) -> bool {
 }
 
 /// A hedged cause ("which could support the gain"): a mover reason states
-/// its cause as a fact or is not a reason.
+/// its cause as a fact or is not a reason. "may" is matched in lower case
+/// only, so the month passes; plain "would" is reported speech ("said it
+/// would cut 1,000 jobs"), so only the tacked-on "which would" counts.
 fn is_hedged(summary: &str) -> bool {
     static R: OnceLock<Regex> = OnceLock::new();
     R.get_or_init(|| {
-        Regex::new(r"(?i)\b(could|may|might|possibly|perhaps|likely|appears|seems|would|should)\b")
+        Regex::new(r"\b(?i:could|might|possibly|perhaps|likely|appears|seems)\b|\bmay\b|(?i:\bwhich\s+would\b)")
             .expect("valid built-in regex")
     })
     .is_match(summary)
@@ -893,7 +903,7 @@ mod tests {
             ),
             (
                 "https://news.test/a",
-                "Norges Bank takes stake in Dell",
+                "Norges Bank takes new stake in Dell",
                 true,
             ),
             ("https://news.test/a", "Apple 13F filing roundup", true),
@@ -917,6 +927,46 @@ mod tests {
             ),
             // "holdings" in the host, not the path.
             ("https://holdings.test/aapl", "Apple results", false),
+            (
+                "https://news.test/institutional-investors-pile-into-apple",
+                "Institutional investors pile into Apple after results",
+                false,
+            ),
+            // Deal news and prose that only mentions a position or shares.
+            ("https://news.test/a", "Nvidia takes $5 billion stake in Intel", false),
+            (
+                "https://news.test/a",
+                "Berkshire Hathaway takes stake in UnitedHealth",
+                false,
+            ),
+            (
+                "https://news.test/a",
+                "Apple raises dividend, strengthens market position",
+                false,
+            ),
+            (
+                "https://news.test/a",
+                "AMD cuts outlook as China position weakens",
+                false,
+            ),
+            (
+                "https://news.test/a",
+                "Netflix raises prices; shares in Netflix jump",
+                false,
+            ),
+            // Holdings-filing shapes the narrower pattern still drops.
+            (
+                "https://news.test/a",
+                "Geode Capital buys 12,345 shares of Apple",
+                true,
+            ),
+            (
+                "https://news.test/a",
+                "Swiss National Bank has $12.3 million stake in Dell",
+                true,
+            ),
+            ("https://news.test/a", "Fund takes new position in KLA", true),
+            ("https://news.test/a", "Vanguard Group Inc. Takes Position in KLA", true),
         ] {
             assert_eq!(is_noise(&h(url, title)), noise, "{url} {title}");
         }
@@ -939,6 +989,33 @@ mod tests {
         assert_eq!(got.len(), 1);
         assert_eq!(got[0].url, URL);
         assert_eq!((d.news_noise, d.news_stale), (1, 0));
+    }
+
+    #[test]
+    fn hedge_pattern_drops_hedges_and_keeps_facts() {
+        for (summary, hedged) in [
+            (
+                "KLA topped estimates, which could support the premarket gain.",
+                true,
+            ),
+            (
+                "Zebra's margin fell, which may explain the stock drop.",
+                true,
+            ),
+            ("The upgrade likely lifted shares.", true),
+            ("The deal appears to have lifted shares.", true),
+            ("Margins fell, which would support the gain.", true),
+            (
+                "Apple agreed to a deal that would value it at $4.9 billion.",
+                false,
+            ),
+            ("Ford said it would cut 1,000 jobs.", false),
+            ("Results for the quarter ended May 29 rose.", false),
+            ("The company said margins should improve next year.", false),
+            ("Apple rose on record iPhone sales.", false),
+        ] {
+            assert_eq!(is_hedged(summary), hedged, "{summary}");
+        }
     }
 
     #[tokio::test]
