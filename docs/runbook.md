@@ -92,10 +92,18 @@ The generator runs on the Workers Free plan for now. The limits that matter:
 After each queue message, `pnpm exec wrangler tail` in `crates/generator` shows one line like `subrequests=27 job=premarket`. Alert delivery logs its own line, `subrequests=N job=alerts`. Add the two lines to get the invocation's total. Delivery posts at most 45 minus what the job used; the other alerts stay unsent for the next invocation. Most firings show `subrequests=0`: the clock decides nothing is due, and only D1 is read.
 
 - A premarket build is about 1 Yahoo cookie, 1 crumb, 11 v7 batches and 4 futures charts, plus 1 Tavily search and 1 LLM call per mover, 1 macro search and its LLM call, and 2-4 draft calls.
-- A recap build is 4 index charts, the cookie, the crumb and 11 v7 batches, plus the same news and LLM work.
+- A recap build is 4 index charts, the cookie, the crumb and 11 v7 batches, plus the same news and LLM work. It also reads which earnings checks were published that day: 1 D1 `posts` query plus 1 R2 facts read per earnings post. Those are internal-service subrequests, so they do not show in `subrequests=`.
 - An earnings poll (`job=earnings`) is 1-3 requests for EDGAR's current 8-K feed (usually 1: it reads back only to the previous poll). A build (`job=earnings:build`) is the filing index, the exhibit, up to 5 XBRL `companyconcept` documents, the extraction and 2-4 draft calls: about 12, at most about 14 with a Chinese retry. The calendar (`job=earnings:calendar`) is the Yahoo cookie, crumb and 3 v7 batches plus up to 5 announcement searches with an LLM call each: about 15.
 - When a run retries, `runs.last_error` ends with `subrequests=N`: the count when the facts were built, before the drafts. Read it with `pnpm exec wrangler d1 execute prebell --remote --command "select run_key,last_error from runs order by updated_at desc limit 3"`.
 - Redirect hops count toward the 50 but are not visible here, so treat 45 or more as at the limit. Past 50, fetches fail with a network error, and the build shows them as `net=` or `search_err=` in its diagnostics.
+
+### Reading the diagnostics line
+
+Each build logs one `diagnostics:` line, and a retrying run stores it in `runs.last_error`. Besides the quote, mover and search counts, these show why news was dropped:
+
+- `hedged=` on the `reasons` part counts mover reasons dropped because `summary_en` hedged its cause ("which could support the gain"). In code the counter is `reasons_hedged`.
+- `news_noise=` counts search hits dropped as noise before any LLM call: MarketBeat filing alerts, 13F, holdings and institutional-ownership pages, and "trims position"-style titles.
+- `reported=N reported_err=M` (recap only, last part) counts the earnings checks published today that the recap links as already reported. `reported_err=1` means the D1 or R2 read failed; the recap still publishes, without the line.
 
 ### CPU overruns
 
