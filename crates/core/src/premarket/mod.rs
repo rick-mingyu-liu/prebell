@@ -221,11 +221,11 @@ pub(crate) fn is_noise(hit: &SearchHit) -> bool {
 /// A hedged cause ("which could support the gain"): a mover reason states
 /// its cause as a fact or is not a reason. "may" is matched in lower case
 /// only, so the month passes; plain "would" is reported speech ("said it
-/// would cut 1,000 jobs"), so only the tacked-on "which would" counts.
+/// would cut 1,000 jobs"), so only the tacked-on "which would" or "which should" counts.
 fn is_hedged(summary: &str) -> bool {
     static R: OnceLock<Regex> = OnceLock::new();
     R.get_or_init(|| {
-        Regex::new(r"\b(?i:could|might|possibly|perhaps|likely|appears|seems)\b|\bmay\b|(?i:\bwhich\s+would\b)")
+        Regex::new(r"\b(?i:could|might|possibly|perhaps|likely|appears|seems)\b|\bmay\b|(?i:\bwhich\s+(?:would|should)\b)")
             .expect("valid built-in regex")
     })
     .is_match(summary)
@@ -1005,6 +1005,8 @@ mod tests {
             ("The upgrade likely lifted shares.", true),
             ("The deal appears to have lifted shares.", true),
             ("Margins fell, which would support the gain.", true),
+            ("Margins fell, which should support the gain.", true),
+            ("Ford said it should close the deal in 2027.", false),
             (
                 "Apple agreed to a deal that would value it at $4.9 billion.",
                 false,

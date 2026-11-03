@@ -103,7 +103,7 @@ Each build logs one `diagnostics:` line, and a retrying run stores it in `runs.l
 
 - `hedged=` on the `reasons` part counts mover reasons dropped because `summary_en` hedged its cause ("which could support the gain"). In code the counter is `reasons_hedged`.
 - `news_noise=` counts search hits dropped as noise before any LLM call: MarketBeat filing alerts, 13F, holdings and institutional-ownership pages, and "trims position"-style titles.
-- `reported=N reported_err=M` (recap only, last part) counts the earnings checks published today that the recap links as already reported. `reported_err=1` means the D1 or R2 read failed; the recap still publishes, without the line.
+- `reported=N reported_err=M` (recap only, last part) counts the earnings checks published today that the recap links as already reported. `reported_err=M` above 0 means that many D1 or R2 reads failed; the recap still publishes and lists the checks it could read.
 
 ### CPU overruns
 
