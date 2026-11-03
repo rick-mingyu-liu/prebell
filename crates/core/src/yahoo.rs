@@ -1,5 +1,5 @@
 use crate::clock::{trading_day, DayKind};
-use crate::facts::Quote;
+use crate::facts::{round2, Quote};
 use crate::providers::{Http, HttpResp, MarketData, ProviderError};
 use async_trait::async_trait;
 use chrono::{DateTime, NaiveDate, NaiveTime, TimeZone, Utc};
@@ -443,12 +443,13 @@ fn v7_quote(v: V7Quote, today: NaiveDate) -> Result<Quote, ProviderError> {
     }
     Ok(Quote {
         symbol: v.symbol,
-        last,
-        prev_close,
+        last: round2(last),
+        prev_close: round2(prev_close),
         // Percent units already: 1.15 means +1.15%.
-        change_pct: v
-            .pre_market_change_percent
-            .unwrap_or((last - prev_close) / prev_close * 100.0),
+        change_pct: round2(
+            v.pre_market_change_percent
+                .unwrap_or((last - prev_close) / prev_close * 100.0),
+        ),
         volume: None,
     })
 }
@@ -483,13 +484,14 @@ fn v7_close(v: V7Quote, session: NaiveDate, d: &mut CloseDiag) -> Result<Quote, 
     d.ok += 1;
     Ok(Quote {
         symbol: v.symbol,
-        last,
-        prev_close,
+        last: round2(last),
+        prev_close: round2(prev_close),
         // Percent units already: 2.0 means +2%.
-        change_pct: v
-            .regular_market_change_percent
-            .filter(|x| x.is_finite())
-            .unwrap_or((last - prev_close) / prev_close * 100.0),
+        change_pct: round2(
+            v.regular_market_change_percent
+                .filter(|x| x.is_finite())
+                .unwrap_or((last - prev_close) / prev_close * 100.0),
+        ),
         volume: v
             .regular_market_volume
             .filter(|x| x.is_finite() && *x >= 0.0)
@@ -597,9 +599,9 @@ fn parse_close(symbol: &str, body: &str, session: NaiveDate) -> Result<Quote, Pr
     }
     Ok(Quote {
         symbol: symbol.to_string(),
-        last,
-        prev_close,
-        change_pct: (last - prev_close) / prev_close * 100.0,
+        last: round2(last),
+        prev_close: round2(prev_close),
+        change_pct: round2((last - prev_close) / prev_close * 100.0),
         volume: meta.regular_volume.map(|v| v as u64),
     })
 }
@@ -649,9 +651,9 @@ fn parse_quote(symbol: &str, body: &str) -> Result<Quote, ProviderError> {
     }
     Ok(Quote {
         symbol: symbol.to_string(),
-        last,
-        prev_close,
-        change_pct: (last - prev_close) / prev_close * 100.0,
+        last: round2(last),
+        prev_close: round2(prev_close),
+        change_pct: round2((last - prev_close) / prev_close * 100.0),
         volume,
     })
 }
@@ -900,7 +902,7 @@ mod tests {
         let q = yahoo(&[("ES=F", 200, ES)]).quote("ES=F").await.unwrap();
         assert_eq!(q.prev_close, 5890.0);
         assert_eq!(q.last, 5912.75);
-        assert!((q.change_pct - (5912.75 - 5890.0) / 5890.0 * 100.0).abs() < 1e-9);
+        assert_eq!(q.change_pct, round2((5912.75 - 5890.0) / 5890.0 * 100.0));
         assert_eq!(q.volume, Some(1200 + 800 + 500 + 600));
     }
 
@@ -1017,11 +1019,12 @@ mod tests {
         assert_eq!(aapl.symbol, "AAPL");
         assert_eq!(aapl.last, 232.15);
         assert_eq!(aapl.prev_close, 229.5);
-        assert_eq!(aapl.change_pct, 1.154684);
+        // Stored at two decimals: the fixture says 1.154684.
+        assert_eq!(aapl.change_pct, 1.15);
         assert_eq!(aapl.volume, None);
         let msft = get("MSFT").unwrap();
         assert_eq!((msft.last, msft.prev_close), (405.2, 411.3));
-        assert_eq!(msft.change_pct, -1.483102);
+        assert_eq!(msft.change_pct, -1.48);
         assert_eq!(get("BRK-B").unwrap().last, 481.0);
         // Absent from the response.
         assert_eq!(get("ZZZZ"), Err(ProviderError::Empty));
@@ -1267,7 +1270,7 @@ mod tests {
         assert_eq!(q.symbol, "^GSPC");
         assert_eq!(q.last, 5850.12);
         assert_eq!(q.prev_close, 5820.4);
-        assert!((q.change_pct - (5850.12 - 5820.4) / 5820.4 * 100.0).abs() < 1e-9);
+        assert_eq!(q.change_pct, round2((5850.12 - 5820.4) / 5820.4 * 100.0));
     }
 
     #[tokio::test]
@@ -1383,6 +1386,41 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn close_quotes_round_to_two_decimals() {
+        // The 2026-11-02 ZH recap printed Yahoo's raw Russell 2000 close.
+        let body = close_batch_for(&syms(&["^RUT"]), CLOSE_T)
+            .replace("102.0", "2805.876")
+            .replace(
+                "\"regularMarketPreviousClose\":100.0",
+                "\"regularMarketPreviousClose\":2790.1234",
+            )
+            .replace("2.0,", "0.565432,");
+        let y = yahoo_v7(move |_, _| resp(200, &body));
+        let q = y.close_quotes(&syms(&["^RUT"]), day("2026-10-29")).await[0]
+            .1
+            .clone()
+            .unwrap();
+        assert_eq!(
+            (q.last, q.prev_close, q.change_pct),
+            (2805.88, 2790.12, 0.57)
+        );
+        let pre = v7_quote(
+            V7Quote {
+                pre_market_price: Some(101.236),
+                pre_market_change: None,
+                pre_market_change_percent: None,
+                ..v7(Some(1793277000), 100.004)
+            },
+            NaiveDate::from_ymd_opt(2026, 10, 29).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            (pre.last, pre.prev_close, pre.change_pct),
+            (101.24, 100.0, 1.23)
+        );
+    }
+
+    #[tokio::test]
     async fn close_quotes_map_by_symbol_field() {
         // The fixture's regular-session fields are 2026-10-28's close.
         let y = yahoo_v7(|_, _| resp(200, BATCH));
@@ -1392,7 +1430,8 @@ mod tests {
         let msft = r[2].1.clone().unwrap();
         assert_eq!(msft.symbol, "MSFT");
         assert_eq!((msft.last, msft.prev_close), (411.3, 409.2));
-        assert_eq!(msft.change_pct, 0.513196);
+        // Stored at two decimals: the fixture says 0.513196.
+        assert_eq!(msft.change_pct, 0.51);
         assert_eq!(msft.volume, Some(18_234_511));
         assert_eq!(r[0].1.as_ref().unwrap().last, 180.0);
         assert_eq!(r[1].1, Err(ProviderError::Empty));

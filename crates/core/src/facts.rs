@@ -22,6 +22,12 @@ pub struct Quote {
     pub volume: Option<u64>,
 }
 
+/// Two decimals, as every `Quote` price and percent is stored: provider
+/// prices such as 2805.876 would otherwise reach the facts and the prose.
+pub fn round2(v: f64) -> f64 {
+    (v * 100.0).round() / 100.0
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct NewsReason {
     pub url: String,
