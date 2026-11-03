@@ -5,9 +5,11 @@ pub mod draft;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Datelike, Duration, NaiveDate, NaiveTime, Timelike, Utc};
+use regex::Regex;
 use serde::{Deserialize, Serialize};
 
-use crate::clock::{recap_window, trading_day, DayKind, Window};
+use crate::clock::{et, recap_window, trading_day, DayKind, Window};
+use crate::earnings::facts::EarningsFacts;
 use crate::facts::{quote_numbers, Field, Mover, NewsReason, Quote};
 use crate::numbers::Lang;
 use crate::premarket::draft::Draft;
@@ -50,10 +52,23 @@ pub struct RecapFacts {
     pub losers: Vec<Mover>,
     /// Companies the news says report after today's close.
     pub after_hours: Field<Vec<NewsReason>>,
+    /// Companies whose earnings check this site already published for an
+    /// after-close filing today. Absent in facts stored before it existed.
+    #[serde(default)]
+    pub reported: Vec<Reported>,
     /// Short counters from the build, for logs and `last_error`. Never sent
     /// to the LLM.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub diagnostics: Vec<String>,
+}
+
+/// A company that reported after today's close, with our earnings check.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct Reported {
+    pub ticker: String,
+    pub company: String,
+    /// The earnings check's post slug: `/{lang}/p/{slug}`.
+    pub slug: String,
 }
 
 /// Names of required sections that are unavailable. Empty means publishable.
@@ -155,11 +170,69 @@ async fn mover(
     }
 }
 
+/// Earnings checks published for filings accepted at or after today's
+/// close (1:00 PM ET on early-close days), from each post's stored facts.
+/// A post whose facts are absent or unparsable is skipped; a store error
+/// comes back as `Err` with whatever was read before it.
+async fn reported(
+    store: &dyn Store,
+    date: NaiveDate,
+    early_close: bool,
+) -> Result<Vec<Reported>, Vec<Reported>> {
+    let close = NaiveTime::from_hms_opt(if early_close { 13 } else { 16 }, 0, 0)
+        .expect("valid built-in time");
+    let day = date.format("%Y-%m-%d").to_string();
+    let posts = store
+        .posts_on(crate::earnings::draft::CONTENT_TYPE, &day)
+        .await
+        .map_err(|_| vec![])?;
+    let mut out = Vec::new();
+    for p in posts {
+        let Ok(json) = store.get_facts(&p.facts_r2_key).await else {
+            return Err(out);
+        };
+        let Some(f) = json.and_then(|j| serde_json::from_str::<EarningsFacts>(&j).ok()) else {
+            continue;
+        };
+        let at = et(f.accepted_at);
+        if at.date_naive() == date && at.time() >= close {
+            out.push(Reported {
+                ticker: f.ticker,
+                company: f.company,
+                slug: p.slug,
+            });
+        }
+    }
+    Ok(out)
+}
+
+/// Whether `text` names any of `reported`, by ticker or company, as a whole
+/// word and ignoring case.
+fn names_reported(text: &str, reported: &[Reported]) -> bool {
+    reported.iter().any(|r| {
+        [&r.ticker, &r.company].iter().any(|name| {
+            !name.is_empty()
+                && Regex::new(&format!(r"(?i)\b{}\b", regex::escape(name)))
+                    .is_ok_and(|re| re.is_match(text))
+        })
+    })
+}
+
+/// "Apple (AAPL), Intel (INTC)".
+fn reported_list(reported: &[Reported]) -> String {
+    reported
+        .iter()
+        .map(|r| format!("{} ({})", r.company, r.ticker))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 async fn after_hours(
     ns: &dyn NewsSearch,
     llm: &dyn LlmProvider,
     date: NaiveDate,
     now: DateTime<Utc>,
+    reported: &[Reported],
     d: &mut Diag,
 ) -> Field<Vec<NewsReason>> {
     let day = long_date(date);
@@ -189,7 +262,14 @@ async fn after_hours(
         ),
         AFTER_HOURS_ITEMS,
     );
-    let header = format!("Topic: companies reporting earnings after the US market close on {day}");
+    let mut header =
+        format!("Topic: companies reporting earnings after the US market close on {day}");
+    if !reported.is_empty() {
+        header.push_str(&format!(
+            "\nAlready reported today and must be skipped: {}",
+            reported_list(reported)
+        ));
+    }
     match extract(
         llm,
         &system,
@@ -201,7 +281,18 @@ async fn after_hours(
     )
     .await
     {
-        Ok(v) => Field::Value(v),
+        // The recap links reported companies itself; an item naming one
+        // would say it is still to report.
+        Ok(v) => Field::Value(
+            v.into_iter()
+                .filter(|r| {
+                    !names_reported(
+                        &format!("{}\n{}\n{}", r.quote, r.title, r.summary_en),
+                        reported,
+                    )
+                })
+                .collect(),
+        ),
         Err(e) => Field::Missing {
             reason: e.to_string(),
         },
@@ -233,6 +324,7 @@ pub async fn build_facts(
     md: &dyn MarketData,
     ns: &dyn NewsSearch,
     llm: &dyn LlmProvider,
+    store: &dyn Store,
     trading_date: NaiveDate,
     now: DateTime<Utc>,
 ) -> RecapFacts {
@@ -274,9 +366,16 @@ pub async fn build_facts(
             after_hours: Field::Missing {
                 reason: "not gathered: index closes unavailable".into(),
             },
+            reported: vec![],
             diagnostics: d.lines_as("indexes"),
         };
     }
+
+    // A store error costs only the "already reported" line.
+    let (reported, reported_err) = match reported(store, trading_date, early_close).await {
+        Ok(r) => (r, 0),
+        Err(r) => (r, 1),
+    };
 
     let quotes = liquid_closes(md, trading_date, &mut d).await;
     let mut up: Vec<Quote> = quotes
@@ -301,6 +400,12 @@ pub async fn build_facts(
         losers.push(mover(ns, llm, q, now, &mut d).await);
     }
 
+    let after_hours = after_hours(ns, llm, trading_date, now, &reported, &mut d).await;
+    let mut diagnostics = d.lines_as("indexes");
+    diagnostics.push(format!(
+        "reported={} reported_err={reported_err}",
+        reported.len()
+    ));
     RecapFacts {
         trading_date,
         as_of_utc: now,
@@ -308,8 +413,9 @@ pub async fn build_facts(
         indexes,
         gainers,
         losers,
-        after_hours: after_hours(ns, llm, trading_date, now, &mut d).await,
-        diagnostics: d.lines_as("indexes"),
+        after_hours,
+        reported,
+        diagnostics,
     }
 }
 
@@ -318,6 +424,8 @@ pub struct Recap<'a> {
     pub md: &'a dyn MarketData,
     pub ns: &'a dyn NewsSearch,
     pub llm: &'a dyn LlmProvider,
+    /// Read for the earnings checks already published today.
+    pub store: &'a dyn Store,
 }
 
 #[async_trait(?Send)]
@@ -345,7 +453,7 @@ impl Content for Recap<'_> {
         t.minute() == 0
     }
     async fn build_facts(&self, date: NaiveDate, now: DateTime<Utc>) -> RecapFacts {
-        build_facts(self.md, self.ns, self.llm, date, now).await
+        build_facts(self.md, self.ns, self.llm, self.store, date, now).await
     }
     fn missing_required(&self, f: &RecapFacts) -> Vec<&'static str> {
         missing_required(f)
@@ -414,7 +522,8 @@ pub async fn tick_with_hooks(
     llm: &dyn LlmProvider,
     hooks: &Hooks<'_>,
 ) -> TickOutcome {
-    tick_content(now, store, &Recap { md, ns, llm }, hooks).await
+    let recap = Recap { md, ns, llm, store };
+    tick_content(now, store, &recap, hooks).await
 }
 
 #[cfg(test)]
@@ -422,6 +531,7 @@ mod tests {
     use super::*;
     use crate::facts::{Field, NewsReason, Quote};
     use crate::providers::{LlmProvider, MarketData, NewsSearch, ProviderError, SearchHit};
+    use crate::store::{MemStore, PostRow};
     use async_trait::async_trait;
     use chrono::{DateTime, NaiveDate, Utc};
     use serde_json::{json, Value};
@@ -582,7 +692,15 @@ mod tests {
     #[tokio::test]
     async fn all_indexes_present_is_publishable() {
         let m = md(&[]);
-        let f = build_facts(&m, &ns(vec![]), &llm(vec![]), date(), now()).await;
+        let f = build_facts(
+            &m,
+            &ns(vec![]),
+            &llm(vec![]),
+            &MemStore::default(),
+            date(),
+            now(),
+        )
+        .await;
         assert_eq!(f.trading_date, date());
         assert_eq!(f.as_of_utc, now());
         assert!(!f.early_close);
@@ -608,7 +726,15 @@ mod tests {
     #[tokio::test]
     async fn indexes_by_close_quote_universe_in_one_batch() {
         let m = md(&[q("NVDA", 182.35, 3.08, Some(210_000_000))]);
-        build_facts(&m, &ns(vec![]), &llm(vec![]), date(), now()).await;
+        build_facts(
+            &m,
+            &ns(vec![]),
+            &llm(vec![]),
+            &MemStore::default(),
+            date(),
+            now(),
+        )
+        .await;
         // The four index closes are single requests (chart); only the
         // universe goes through the batched `close_quotes`.
         let batches = m.batches.borrow();
@@ -621,7 +747,15 @@ mod tests {
     #[tokio::test]
     async fn diagnostics_say_why_movers_collapsed() {
         let m = md(&[q("NVDA", 182.35, 3.08, Some(210_000_000))]);
-        let f = build_facts(&m, &ns(vec![]), &llm(vec![]), date(), now()).await;
+        let f = build_facts(
+            &m,
+            &ns(vec![]),
+            &llm(vec![]),
+            &MemStore::default(),
+            date(),
+            now(),
+        )
+        .await;
         let n = universe().len();
         assert_eq!(
             f.diagnostics,
@@ -635,6 +769,7 @@ mod tests {
                 "reasons proposed=0 kept=0 hedged=0".to_string(),
                 "search_err=2 llm_err=0 news_stale=0 news_noise=0".to_string(),
                 "indexes ok=4 err=0".to_string(),
+                "reported=0 reported_err=0".to_string(),
             ]
         );
     }
@@ -648,7 +783,15 @@ mod tests {
         m.reverse = true;
         m.indexes
             .insert("^RUT".into(), q("^RUT", 2230.75, 1.05, Some(1)));
-        let f = build_facts(&m, &ns(vec![]), &llm(vec![]), date(), now()).await;
+        let f = build_facts(
+            &m,
+            &ns(vec![]),
+            &llm(vec![]),
+            &MemStore::default(),
+            date(),
+            now(),
+        )
+        .await;
         assert!(
             matches!(&f.indexes[3].1, Field::Value(q) if q.symbol == "^RUT" && q.last == 2230.75)
         );
@@ -662,7 +805,7 @@ mod tests {
         let mut m = md(&[q("NVDA", 182.35, 3.08, Some(210_000_000))]);
         m.indexes.remove("^RUT");
         let l = llm(vec![]);
-        let f = build_facts(&m, &ns(vec![]), &l, date(), now()).await;
+        let f = build_facts(&m, &ns(vec![]), &l, &MemStore::default(), date(), now()).await;
         // No movers or news work while the required section is missing.
         assert!(f.gainers.is_empty() && l.prompts.borrow().is_empty());
         assert_eq!(m.sessions.borrow().len(), 4);
@@ -689,7 +832,15 @@ mod tests {
             q("AMD", 100.0, -1.0, None),           // unknown volume
             q("BRK-B", 480.0, -0.5, Some(3_000_000)),
         ]);
-        let f = build_facts(&md(&stocks), &ns(vec![]), &llm(vec![]), date(), now()).await;
+        let f = build_facts(
+            &md(&stocks),
+            &ns(vec![]),
+            &llm(vec![]),
+            &MemStore::default(),
+            date(),
+            now(),
+        )
+        .await;
         assert_eq!(syms(&f.gainers), ["TSLA", "META", "AMZN", "NVDA", "MSFT"]);
         assert_eq!(syms(&f.losers), ["GOOGL", "BRK.B"]);
         assert_eq!(f.losers[1].name, "Berkshire Hathaway");
@@ -724,7 +875,7 @@ mod tests {
                 ),
             ),
         ]);
-        let f = build_facts(&md(&stocks), &n, &l, date(), now()).await;
+        let f = build_facts(&md(&stocks), &n, &l, &MemStore::default(), date(), now()).await;
         assert_eq!(f.gainers[0].reasons.len(), 1);
         assert_eq!(f.gainers[0].reasons[0].quote, QUOTE);
         assert_eq!(f.losers[0].reasons, vec![]);
@@ -749,7 +900,7 @@ mod tests {
         };
         let n = ns(vec![(NVDA_Q, Ok(vec![stale]))]);
         let l = llm(vec![("NVDA", reasons(URL, QUOTE, "Nvidia rose."))]);
-        let f = build_facts(&md(&stocks), &n, &l, date(), now()).await;
+        let f = build_facts(&md(&stocks), &n, &l, &MemStore::default(), date(), now()).await;
         assert_eq!(f.gainers[0].reasons, vec![]);
         assert!(l.prompts.borrow().iter().all(|(_, u)| !u.contains("NVDA")));
         assert!(
@@ -761,7 +912,7 @@ mod tests {
         );
 
         let n = ns(vec![(NVDA_Q, Ok(vec![hit(URL, ARTICLE)]))]);
-        let f = build_facts(&md(&stocks), &n, &l, date(), now()).await;
+        let f = build_facts(&md(&stocks), &n, &l, &MemStore::default(), date(), now()).await;
         assert_eq!(f.gainers[0].reasons.len(), 1);
         let p = l.prompts.borrow();
         let (sys, _) = p.iter().find(|(_, u)| u.contains("NVDA")).unwrap();
@@ -779,7 +930,7 @@ mod tests {
                 {"url": "https://news.test/ah", "title": "T", "quote": "Apple will report results after the bell tonight", "summary_en": "Apple reports."}
             ]})),
         )]);
-        let f = build_facts(&md(&[]), &n, &l, date(), now()).await;
+        let f = build_facts(&md(&[]), &n, &l, &MemStore::default(), date(), now()).await;
         match &f.after_hours {
             Field::Value(v) => {
                 assert_eq!(v.len(), 1);
@@ -793,6 +944,144 @@ mod tests {
             "{sys}"
         );
         assert!(user.contains("October 29, 2026"), "{user}");
+    }
+
+    /// An earnings post for `date`, its facts accepted at `accepted` (UTC).
+    fn earnings_post(s: &MemStore, ticker: &str, company: &str, slug: &str, accepted: &str) {
+        let key = format!("earnings/{slug}.json");
+        let f = crate::earnings::facts::EarningsFacts {
+            ticker: ticker.into(),
+            company: company.into(),
+            accepted_at: accepted.parse().unwrap(),
+            ..crate::earnings::facts::tests::facts()
+        };
+        s.facts
+            .borrow_mut()
+            .insert(key.clone(), serde_json::to_string(&f).unwrap());
+        let id = s.posts.borrow().len() as i64 + 1;
+        s.posts.borrow_mut().push(PostRow {
+            id: Some(id),
+            run_key: format!("earnings:{slug}"),
+            content_type: "earnings".into(),
+            template_id: "earnings:v1".into(),
+            trading_date: "2026-10-29".into(),
+            slug: slug.into(),
+            facts_r2_key: key,
+            published_at: Some(accepted.into()),
+        });
+    }
+
+    #[tokio::test]
+    async fn published_earnings_checks_are_reported_and_skipped_after_hours() {
+        let s = MemStore::default();
+        // 16:30 ET: reported after the close.
+        earnings_post(
+            &s,
+            "AAPL",
+            "Apple",
+            "aapl-q4-fy2026-earnings",
+            "2026-10-29T20:30:41Z",
+        );
+        // 07:00 ET: reported before the open, not after the close.
+        earnings_post(
+            &s,
+            "SHW",
+            "Sherwin-Williams",
+            "shw-q3-fy2026-earnings",
+            "2026-10-29T11:00:00Z",
+        );
+        // A post whose facts never reached R2 is skipped.
+        earnings_post(
+            &s,
+            "AMZN",
+            "Amazon",
+            "amzn-q3-fy2026-earnings",
+            "2026-10-29T20:05:00Z",
+        );
+        s.facts
+            .borrow_mut()
+            .remove("earnings/amzn-q3-fy2026-earnings.json");
+        // An unpublished post is not read.
+        earnings_post(
+            &s,
+            "INTC",
+            "Intel",
+            "intc-q3-fy2026-earnings",
+            "2026-10-29T20:10:00Z",
+        );
+        s.posts.borrow_mut()[3].published_at = None;
+
+        let src = "Apple will report results after the bell tonight. Intel and Amazon are scheduled to report quarterly results after the bell on Thursday, October 29.";
+        let n = ns(vec![(AH_Q, Ok(vec![hit("https://news.test/ah", src)]))]);
+        let l = llm(vec![(
+            "after the US market close",
+            Ok(json!({"reasons": [
+                {"url": "https://news.test/ah", "title": "T", "quote": "Apple will report results after the bell tonight", "summary_en": "Apple reports after the close."},
+                {"url": "https://news.test/ah", "title": "T", "quote": "Intel and Amazon are scheduled to report quarterly results after the bell", "summary_en": "Intel and Amazon report after the close."}
+            ]})),
+        )]);
+        let f = build_facts(&md(&[]), &n, &l, &s, date(), now()).await;
+        assert_eq!(
+            f.reported,
+            vec![Reported {
+                ticker: "AAPL".into(),
+                company: "Apple".into(),
+                slug: "aapl-q4-fy2026-earnings".into(),
+            }]
+        );
+        assert_eq!(f.diagnostics.last().unwrap(), "reported=1 reported_err=0");
+        let (_, user) = l.prompts.borrow()[0].clone();
+        assert!(
+            user.contains("\nAlready reported today and must be skipped: Apple (AAPL)\n"),
+            "{user}"
+        );
+        // The model's Apple item is dropped even though it is anchored.
+        match &f.after_hours {
+            Field::Value(v) => {
+                assert_eq!(v.len(), 1, "{v:?}");
+                assert!(v[0].quote.starts_with("Intel and Amazon"));
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn reported_names_match_whole_words_only() {
+        let r = [Reported {
+            ticker: "T".into(),
+            company: "AT&T".into(),
+            slug: "t-q3-fy2026-earnings".into(),
+        }];
+        assert!(names_reported("at&t reports tonight", &r));
+        assert!(names_reported("Shares of T rose", &r));
+        assert!(!names_reported("Tesla reports tonight", &r));
+    }
+
+    #[tokio::test]
+    async fn store_error_leaves_reported_empty_and_the_recap_builds() {
+        let s = MemStore::default();
+        earnings_post(
+            &s,
+            "AAPL",
+            "Apple",
+            "aapl-q4-fy2026-earnings",
+            "2026-10-29T20:30:41Z",
+        );
+        s.fail_posts_on.set(true);
+        let f = build_facts(&md(&[]), &ns(vec![]), &llm(vec![]), &s, date(), now()).await;
+        assert!(f.reported.is_empty());
+        assert_eq!(f.diagnostics.last().unwrap(), "reported=0 reported_err=1");
+        assert!(missing_required(&f).is_empty());
+    }
+
+    #[tokio::test]
+    async fn facts_stored_before_reported_existed_still_load() {
+        let s = MemStore::default();
+        let f = build_facts(&md(&[]), &ns(vec![]), &llm(vec![]), &s, date(), now()).await;
+        let mut v = serde_json::to_value(&f).unwrap();
+        v.as_object_mut().unwrap().remove("reported");
+        let back: RecapFacts = serde_json::from_value(v).unwrap();
+        assert_eq!(back, f);
     }
 
     /// Records each `search_since` call; every search finds nothing.
@@ -816,7 +1105,15 @@ mod tests {
     #[tokio::test]
     async fn after_hours_previews_reach_back_a_week() {
         let n = SinceNs(RefCell::new(vec![]));
-        build_facts(&md(&[]), &n, &llm(vec![]), date(), now()).await;
+        build_facts(
+            &md(&[]),
+            &n,
+            &llm(vec![]),
+            &MemStore::default(),
+            date(),
+            now(),
+        )
+        .await;
         assert_eq!(
             *n.0.borrow(),
             vec![(AH_Q.to_string(), now() - chrono::Duration::days(7))]
@@ -825,7 +1122,15 @@ mod tests {
 
     #[tokio::test]
     async fn after_hours_errors_are_missing() {
-        let f = build_facts(&md(&[]), &ns(vec![]), &llm(vec![]), date(), now()).await;
+        let f = build_facts(
+            &md(&[]),
+            &ns(vec![]),
+            &llm(vec![]),
+            &MemStore::default(),
+            date(),
+            now(),
+        )
+        .await;
         assert_eq!(
             f.after_hours,
             Field::Missing {
@@ -837,7 +1142,7 @@ mod tests {
             "after the US market close",
             Err(ProviderError::Http(503)),
         )]);
-        let f = build_facts(&md(&[]), &n, &l, date(), now()).await;
+        let f = build_facts(&md(&[]), &n, &l, &MemStore::default(), date(), now()).await;
         assert_eq!(
             f.after_hours,
             Field::Missing {
@@ -851,7 +1156,15 @@ mod tests {
     #[tokio::test]
     async fn early_close_day_is_flagged() {
         let d = NaiveDate::from_ymd_opt(2026, 11, 27).unwrap();
-        let f = build_facts(&md(&[]), &ns(vec![]), &llm(vec![]), d, now()).await;
+        let f = build_facts(
+            &md(&[]),
+            &ns(vec![]),
+            &llm(vec![]),
+            &MemStore::default(),
+            d,
+            now(),
+        )
+        .await;
         assert!(f.early_close);
     }
 
@@ -870,6 +1183,7 @@ mod tests {
             &md(&[q("NVDA", 182.35, 3.08, Some(210_000_000))]),
             &ns(vec![]),
             &llm(vec![]),
+            &MemStore::default(),
             date(),
             now(),
         )
@@ -1068,6 +1382,41 @@ mod run_tests {
     }
 
     #[tokio::test]
+    async fn tick_links_earnings_checks_published_today() {
+        let s = MemStore::default();
+        let f = crate::earnings::facts::EarningsFacts {
+            accepted_at: utc("2026-10-29T20:30:41Z"),
+            ..crate::earnings::facts::tests::facts()
+        };
+        s.facts.borrow_mut().insert(
+            "earnings/aapl.json".into(),
+            serde_json::to_string(&f).unwrap(),
+        );
+        s.posts.borrow_mut().push(PostRow {
+            id: Some(1),
+            run_key: "earnings:0000320193-26-000070".into(),
+            content_type: "earnings".into(),
+            template_id: "earnings:v1".into(),
+            trading_date: "2026-10-29".into(),
+            slug: "aapl-q4-fy2026-earnings".into(),
+            facts_r2_key: "earnings/aapl.json".into(),
+            published_at: Some("2026-10-29T20:40:00Z".into()),
+        });
+        let (m, l) = (md(true), llm(true, true));
+        assert_eq!(
+            tick(utc("2026-10-29T20:45:00Z"), &s, &m, &FakeNs, &l).await,
+            TickOutcome::Published
+        );
+        let tr = s.translations.borrow();
+        assert!(tr[&(2, "en".to_string())].body_md.contains(
+            "Already reported after the close: [Apple (AAPL)](/en/p/aapl-q4-fy2026-earnings)."
+        ));
+        assert!(tr[&(2, "zh".to_string())]
+            .body_md
+            .contains("已于盘后发布财报：[Apple（AAPL）](/zh/p/aapl-q4-fy2026-earnings)。"));
+    }
+
+    #[tokio::test]
     async fn extra_diagnostics_reach_last_error() {
         let s = MemStore::default();
         let (m, l) = (md(false), llm(true, true));
@@ -1111,7 +1460,10 @@ mod run_tests {
                 ),
                 "{logs:?}"
             );
-            assert!(logs[0].ends_with("; indexes ok=4 err=0"), "{logs:?}");
+            assert!(
+                logs[0].ends_with("; indexes ok=4 err=0; reported=0 reported_err=0"),
+                "{logs:?}"
+            );
         }
         // No build, no diagnostics line.
         tick_with_log(now, &s, &m, &FakeNs, &l, &log).await;
@@ -1119,11 +1471,10 @@ mod run_tests {
         // Diagnostics are stored with the facts.
         let facts: RecapFacts =
             serde_json::from_str(&s.facts.borrow()["recap/2026-10-29.json"]).unwrap();
-        assert!(facts
-            .diagnostics
-            .last()
-            .unwrap()
-            .starts_with("indexes ok=4"));
+        assert_eq!(
+            facts.diagnostics.last().unwrap(),
+            "reported=0 reported_err=0"
+        );
     }
 
     #[tokio::test]

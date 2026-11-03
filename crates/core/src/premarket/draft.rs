@@ -354,6 +354,15 @@ fn reject_meta(what: &str, s: &str, data: bool) -> Result<(), String> {
     }
 }
 
+/// The page text with link targets removed: EDGAR URLs carry accession
+/// digits and post slugs carry fiscal years, neither of them figures.
+pub(crate) fn without_link_targets(md: &str) -> String {
+    static R: OnceLock<Regex> = OnceLock::new();
+    R.get_or_init(|| Regex::new(r"\]\([^)\s]*\)").expect("valid built-in regex"))
+        .replace_all(md, "]")
+        .into_owned()
+}
+
 /// A setext heading underline: a line of only `=` or only `-`, length >= 2.
 pub(crate) fn is_setext_underline(line: &str) -> bool {
     let l = line.trim();

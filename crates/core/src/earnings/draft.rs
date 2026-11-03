@@ -14,7 +14,9 @@ use serde_json::Value;
 use crate::earnings::facts::{numbers_in_facts, EarningsFacts, Metric, Unit};
 use crate::facts::Field;
 use crate::numbers::{check, Lang};
-use crate::premarket::draft::{fmt_num, is_setext_underline, one_line, reject_markup, Draft};
+use crate::premarket::draft::{
+    fmt_num, is_setext_underline, one_line, reject_markup, without_link_targets, Draft,
+};
 use crate::providers::{LlmProvider, ProviderError};
 
 pub const TEMPLATE_ID: &str = "earnings:v1";
@@ -189,14 +191,6 @@ pub fn render_markdown(d: &Draft, f: &EarningsFacts) -> String {
     });
     out.push('\n');
     out
-}
-
-/// The page text with link targets removed (EDGAR URLs carry accession digits).
-fn without_link_targets(md: &str) -> String {
-    static R: OnceLock<Regex> = OnceLock::new();
-    R.get_or_init(|| Regex::new(r"\]\([^)\s]*\)").expect("valid built-in regex"))
-        .replace_all(md, "]")
-        .into_owned()
 }
 
 /// The company name and ticker replaced by placeholders before the number

@@ -5,10 +5,11 @@
 use crate::facts::{Field, Mover, NewsReason};
 use crate::numbers::{check, Lang};
 use crate::premarket::draft::{
-    blank_names, cell, fmt_num, fmt_pct, na, no_news, render_sources, write_with, Draft,
+    blank_names, cell, fmt_num, fmt_pct, na, no_news, render_sources, without_link_targets,
+    write_with, Draft,
 };
 use crate::providers::LlmProvider;
-use crate::recap::{numbers_in_facts, RecapFacts};
+use crate::recap::{numbers_in_facts, RecapFacts, Reported};
 
 pub const TEMPLATE_ID: &str = "recap:v1";
 pub const DISCLAIMER_EN: &str =
@@ -18,6 +19,7 @@ pub const DISCLAIMER_ZH: &str = "本回顾根据公开数据自动生成，仅�
 const PROMPT_EN: &str = include_str!("../../prompts/recap_v1_en.md");
 const PROMPT_ZH: &str = include_str!("../../prompts/recap_v1_zh.md");
 
+/// Every section heading the recap can have, in order.
 pub fn headings(lang: Lang) -> [&'static str; 3] {
     match lang {
         Lang::En => [
@@ -27,6 +29,42 @@ pub fn headings(lang: Lang) -> [&'static str; 3] {
         ],
         Lang::Zh => ["指数收盘", "个股异动", "盘后财报关注"],
     }
+}
+
+/// The headings these facts call for: the after-hours section only when
+/// there is something to say in it.
+fn wanted(f: &RecapFacts, lang: Lang) -> Vec<&'static str> {
+    let [closes, movers, after] = headings(lang);
+    let ahead = matches!(&f.after_hours, Field::Value(v) if !v.is_empty());
+    if ahead || !f.reported.is_empty() {
+        vec![closes, movers, after]
+    } else {
+        vec![closes, movers]
+    }
+}
+
+/// The code-rendered end of the after-hours section, linking each earnings
+/// check already published: "Already reported after the close: [Apple
+/// (AAPL)](/en/p/aapl-q4-fy2026-earnings)." `None` when there is none.
+fn reported_line(reported: &[Reported], lang: Lang) -> Option<String> {
+    if reported.is_empty() {
+        return None;
+    }
+    let links: Vec<String> = reported
+        .iter()
+        .map(|r| {
+            let name = cell(&r.company).replace('[', "\\[").replace(']', "\\]");
+            let ticker = cell(&r.ticker);
+            match lang {
+                Lang::En => format!("[{name} ({ticker})](/en/p/{})", r.slug),
+                Lang::Zh => format!("[{name}（{ticker}）](/zh/p/{})", r.slug),
+            }
+        })
+        .collect();
+    Some(match lang {
+        Lang::En => format!("Already reported after the close: {}.", links.join(", ")),
+        Lang::Zh => format!("已于盘后发布财报：{}。", links.join("、")),
+    })
 }
 
 fn prompt(lang: Lang) -> &'static str {
@@ -107,8 +145,16 @@ fn render_body(d: &Draft, f: &RecapFacts) -> String {
         out.push('\n');
     }
 
+    let after = headings(lang)[2];
+    let reported = reported_line(&f.reported, lang);
     for (heading, body) in &d.sections {
-        out.push_str(&format!("## {heading}\n\n{}\n\n", body.trim()));
+        let body = body.trim();
+        let text = match &reported {
+            Some(line) if heading == after && body.is_empty() => line.clone(),
+            Some(line) if heading == after => format!("{body}\n\n{line}"),
+            _ => body.to_string(),
+        };
+        out.push_str(&format!("## {heading}\n\n{text}\n\n"));
     }
     out
 }
@@ -139,9 +185,10 @@ pub fn render_markdown(d: &Draft, f: &RecapFacts) -> String {
 
 /// Drafts one language from the facts (one retry, as for the premarket
 /// brief), then checks every number in the rendered body, tables included.
-/// Source link titles are verbatim citations and are not checked. Company
-/// names come from the universe file, so their digits ("3M", "Phillips 66")
-/// are not read as figures.
+/// Source link titles are verbatim citations and are not checked, nor are
+/// link targets (post slugs). Company names come from the universe file and
+/// the earnings checks, so their digits ("3M", "Phillips 66") are not read
+/// as figures.
 pub async fn write(
     llm: &dyn LlmProvider,
     f: &RecapFacts,
@@ -160,6 +207,7 @@ pub async fn write(
         .iter()
         .chain(&f.losers)
         .map(|m| m.name.as_str())
+        .chain(f.reported.iter().map(|r| r.company.as_str()))
         .collect();
     let (d, md) = write_with(
         llm,
@@ -167,14 +215,15 @@ pub async fn write(
         &facts_json,
         &allowed,
         &names,
-        &headings(lang),
+        &wanted(f, lang),
         &headings(lang),
         lang,
         |d| render_markdown(d, f),
     )
     .await?;
     allowed.extend(table_values(f));
-    check(&blank_names(&render_body(&d, f), &names), lang, &allowed).map_err(|bad| {
+    let body = without_link_targets(&render_body(&d, f));
+    check(&blank_names(&body, &names), lang, &allowed).map_err(|bad| {
         bad.into_iter()
             .map(|n| format!("rendered: {n}"))
             .collect::<Vec<_>>()
@@ -205,6 +254,7 @@ mod tests {
     use super::*;
     use crate::facts::{Field, Mover, NewsReason, Quote};
     use crate::providers::{LlmProvider, ProviderError};
+    use crate::recap::Reported;
     use async_trait::async_trait;
     use chrono::NaiveDate;
     use serde_json::{json, Value};
@@ -270,6 +320,7 @@ mod tests {
             after_hours: Field::Missing {
                 reason: "empty result".into(),
             },
+            reported: vec![],
             diagnostics: vec![],
         }
     }
@@ -305,13 +356,18 @@ mod tests {
     async fn clean_en_draft_renders_tables() {
         let l = llm(vec![clean(Lang::En)]);
         let (d, md) = write(&l, &facts(), Lang::En).await.unwrap();
-        assert_eq!(d.sections.len(), 3);
-        assert_eq!(d.sections[2].0, "After-hours earnings to watch");
+        // No after-hours news and nothing reported: the reply's third
+        // section is dropped unread, and no "n/a" section is printed.
+        assert_eq!(d.sections.len(), 2);
+        assert!(!md.contains("After-hours") && !md.contains("n/a"), "{md}");
         let (sys, user) = l.prompts.borrow()[0].clone();
         assert_eq!(sys, PROMPT_EN);
-        assert!(
-            user.starts_with(&serde_json::to_string_pretty(&facts()).unwrap()),
-            "{user}"
+        assert_eq!(
+            user,
+            format!(
+                "{}\n\nWrite exactly these sections, in this order: \"Index closes\", \"Notable movers\"",
+                serde_json::to_string_pretty(&facts()).unwrap()
+            )
         );
         assert!(
             md.starts_with("# Stocks close higher; Nvidia gains 3%\n\n"),
@@ -330,6 +386,105 @@ mod tests {
         assert!(md.trim_end().ends_with(DISCLAIMER_EN));
     }
 
+    fn apple() -> Reported {
+        Reported {
+            ticker: "AAPL".into(),
+            company: "Apple".into(),
+            slug: "aapl-q4-fy2026-earnings".into(),
+        }
+    }
+
+    #[tokio::test]
+    async fn reported_checks_get_the_after_hours_section_and_a_link_line() {
+        let mut f = facts();
+        f.reported = vec![apple()];
+        for (lang, line, heading) in [
+            (
+                Lang::En,
+                "The S&P 500 closed at 5,850.12, up 0.51%.\n\nAlready reported after the close: [Apple (AAPL)](/en/p/aapl-q4-fy2026-earnings).\n\n",
+                "After-hours earnings to watch",
+            ),
+            (
+                Lang::Zh,
+                "The S&P 500 closed at 5,850.12, up 0.51%.\n\n已于盘后发布财报：[Apple（AAPL）](/zh/p/aapl-q4-fy2026-earnings)。\n\n",
+                "盘后财报关注",
+            ),
+        ] {
+            let l = llm(vec![clean(lang)]);
+            let (d, md) = write(&l, &f, lang).await.unwrap();
+            assert_eq!(d.sections.len(), 3);
+            assert!(md.contains(&format!("## {heading}\n\n{line}")), "{md}");
+            let user = &l.prompts.borrow()[0].1;
+            assert!(user.ends_with(&format!("\"{heading}\"")), "{user}");
+            // The link line is code's: the LLM's draft does not carry it.
+            assert!(!d.sections[2].1.contains("/p/"));
+        }
+    }
+
+    #[tokio::test]
+    async fn several_reported_join_and_slug_digits_pass_the_check() {
+        let mut f = facts();
+        f.reported = vec![
+            apple(),
+            Reported {
+                ticker: "MMM".into(),
+                company: "3M".into(),
+                // A colliding slug carries the accession's last digits.
+                slug: "mmm-q3-fy2026-earnings-000070".into(),
+            },
+        ];
+        let (_, md) = write(&llm(vec![clean(Lang::En)]), &f, Lang::En)
+            .await
+            .unwrap();
+        assert!(
+            md.contains("Already reported after the close: [Apple (AAPL)](/en/p/aapl-q4-fy2026-earnings), [3M (MMM)](/en/p/mmm-q3-fy2026-earnings-000070)."),
+            "{md}"
+        );
+        let (_, zh) = write(&llm(vec![clean(Lang::Zh)]), &f, Lang::Zh)
+            .await
+            .unwrap();
+        assert!(
+            zh.contains("(/zh/p/aapl-q4-fy2026-earnings)、[3M（MMM）]"),
+            "{zh}"
+        );
+    }
+
+    #[test]
+    fn reported_line_stands_alone_without_llm_text() {
+        let mut f = facts();
+        f.reported = vec![apple()];
+        let d = Draft {
+            lang: Lang::En,
+            title: "T".into(),
+            summary: "S".into(),
+            sections: headings(Lang::En)
+                .iter()
+                .map(|h| (h.to_string(), String::new()))
+                .collect(),
+        };
+        let md = render_markdown(&d, &f);
+        assert!(
+            md.contains("## After-hours earnings to watch\n\nAlready reported after the close: [Apple (AAPL)]"),
+            "{md}"
+        );
+    }
+
+    #[test]
+    fn prompts_describe_reported_and_take_sections_from_the_user_message() {
+        assert!(
+            PROMPT_EN.contains("never say they are scheduled to report")
+                && PROMPT_EN.contains("listed at the end of the user message")
+                && !PROMPT_EN.contains("n/a"),
+            "{PROMPT_EN}"
+        );
+        assert!(
+            PROMPT_ZH.contains("不得说它们将要发布财报")
+                && PROMPT_ZH.contains("列在用户消息末尾")
+                && !PROMPT_ZH.contains("暂缺"),
+            "{PROMPT_ZH}"
+        );
+    }
+
     #[tokio::test]
     async fn unbacked_number_retried_then_fails() {
         let l = llm(vec![bad(Lang::En), clean(Lang::En)]);
@@ -344,8 +499,10 @@ mod tests {
 
     #[tokio::test]
     async fn zh_draft_uses_zh_headings_and_disclaimer() {
+        let mut f = facts();
+        f.after_hours = Field::Value(vec![reason("https://news.test/ah", "Intel reports")]);
         let l = llm(vec![clean(Lang::Zh)]);
-        let (_, md) = write(&l, &facts(), Lang::Zh).await.unwrap();
+        let (_, md) = write(&l, &f, Lang::Zh).await.unwrap();
         assert_eq!(l.prompts.borrow()[0].0, PROMPT_ZH);
         assert!(
             md.contains("## 指数收盘") && md.contains("## 盘后财报关注"),

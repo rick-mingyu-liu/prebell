@@ -1106,6 +1106,9 @@ mod tests {
         async fn get_post_by_run(&self, run_key: &str) -> Result<Option<PostRow>, String> {
             self.inner.get_post_by_run(run_key).await
         }
+        async fn posts_on(&self, content_type: &str, date: &str) -> Result<Vec<PostRow>, String> {
+            self.inner.posts_on(content_type, date).await
+        }
         async fn upsert_post(&self, p: &PostRow) -> Result<i64, String> {
             self.inner.upsert_post(p).await
         }
