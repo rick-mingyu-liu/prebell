@@ -94,6 +94,8 @@ pub struct MemStore {
     pub facts: RefCell<HashMap<String, String>>,
     /// Makes `posts_on` fail, as a D1 outage would.
     pub fail_posts_on: Cell<bool>,
+    /// Makes `get_facts` fail for this key, as an R2 outage would.
+    pub fail_facts_key: RefCell<Option<String>>,
 }
 
 #[async_trait(?Send)]
@@ -184,6 +186,9 @@ impl Store for MemStore {
         Ok(())
     }
     async fn get_facts(&self, key: &str) -> Result<Option<String>, String> {
+        if self.fail_facts_key.borrow().as_deref() == Some(key) {
+            return Err(format!("r2: get {key} failed"));
+        }
         Ok(self.facts.borrow().get(key).cloned())
     }
 }

@@ -27,5 +27,5 @@ Reply with JSON exactly in this shape and nothing else:
 
 - `title`: one headline line.
 - `summary`: at most 40 words.
-- `sections`: the sections to write are listed at the end of the user message. Write exactly those sections, in that order, with those exact headings, and no others. "After-hours earnings to watch" exists only when `after_hours` has items or `reported` is not empty.
+- `sections`: the sections to write are listed at the end of the user message. Write exactly those sections, in that order, with those exact headings, and no others. "After-hours earnings to watch" exists only when `after_hours` has items or `reported` is not empty. When `after_hours` has no items, leave the "After-hours earnings to watch" markdown empty (""); the page adds the reported line itself.
 - Each `markdown` is the section body in Markdown, without its heading.

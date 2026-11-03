@@ -5,7 +5,6 @@ pub mod draft;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Datelike, Duration, NaiveDate, NaiveTime, Timelike, Utc};
-use regex::Regex;
 use serde::{Deserialize, Serialize};
 
 use crate::clock::{et, recap_window, trading_day, DayKind, Window};
@@ -172,24 +171,25 @@ async fn mover(
 
 /// Earnings checks published for filings accepted at or after today's
 /// close (1:00 PM ET on early-close days), from each post's stored facts.
-/// A post whose facts are absent or unparsable is skipped; a store error
-/// comes back as `Err` with whatever was read before it.
-async fn reported(
-    store: &dyn Store,
-    date: NaiveDate,
-    early_close: bool,
-) -> Result<Vec<Reported>, Vec<Reported>> {
+/// A post whose facts are absent or unparsable is skipped. Returns the
+/// companies and the number of store errors: a failed `posts_on` reads
+/// nothing, and a failed facts read skips only that post.
+async fn reported(store: &dyn Store, date: NaiveDate, early_close: bool) -> (Vec<Reported>, usize) {
     let close = NaiveTime::from_hms_opt(if early_close { 13 } else { 16 }, 0, 0)
         .expect("valid built-in time");
     let day = date.format("%Y-%m-%d").to_string();
-    let posts = store
+    let Ok(posts) = store
         .posts_on(crate::earnings::draft::CONTENT_TYPE, &day)
         .await
-        .map_err(|_| vec![])?;
+    else {
+        return (vec![], 1);
+    };
     let mut out = Vec::new();
+    let mut errors = 0;
     for p in posts {
         let Ok(json) = store.get_facts(&p.facts_r2_key).await else {
-            return Err(out);
+            errors += 1;
+            continue;
         };
         let Some(f) = json.and_then(|j| serde_json::from_str::<EarningsFacts>(&j).ok()) else {
             continue;
@@ -203,19 +203,26 @@ async fn reported(
             });
         }
     }
-    Ok(out)
+    (out, errors)
 }
 
-/// Whether `text` names any of `reported`, by ticker or company, as a whole
-/// word and ignoring case.
-fn names_reported(text: &str, reported: &[Reported]) -> bool {
-    reported.iter().any(|r| {
-        [&r.ticker, &r.company].iter().any(|name| {
-            !name.is_empty()
-                && Regex::new(&format!(r"(?i)\b{}\b", regex::escape(name)))
-                    .is_ok_and(|re| re.is_match(text))
+/// Whether `name` occurs in `text` with no ASCII letter or digit on either
+/// side, as `mask_names` in the earnings draft reads names.
+fn has_word(text: &str, name: &str) -> bool {
+    let word = |c: Option<char>| c.is_some_and(|c| c.is_ascii_alphanumeric());
+    !name.is_empty()
+        && text.match_indices(name).any(|(i, _)| {
+            !word(text[..i].chars().next_back()) && !word(text[i + name.len()..].chars().next())
         })
-    })
+}
+
+/// Whether an after-hours `summary_en` names any of `reported`: the ticker
+/// as written (NOW is not "now"), the company in any case.
+fn names_reported(summary: &str, reported: &[Reported]) -> bool {
+    let lower = summary.to_lowercase();
+    reported
+        .iter()
+        .any(|r| has_word(summary, &r.ticker) || has_word(&lower, &r.company.to_lowercase()))
 }
 
 /// "Apple (AAPL), Intel (INTC)".
@@ -282,15 +289,11 @@ async fn after_hours(
     .await
     {
         // The recap links reported companies itself; an item naming one
-        // would say it is still to report.
+        // would say it is still to report. Only the item's own summary is
+        // read: a roundup's title and quote name every company in it.
         Ok(v) => Field::Value(
             v.into_iter()
-                .filter(|r| {
-                    !names_reported(
-                        &format!("{}\n{}\n{}", r.quote, r.title, r.summary_en),
-                        reported,
-                    )
-                })
+                .filter(|r| !names_reported(&r.summary_en, reported))
                 .collect(),
         ),
         Err(e) => Field::Missing {
@@ -372,10 +375,7 @@ pub async fn build_facts(
     }
 
     // A store error costs only the "already reported" line.
-    let (reported, reported_err) = match reported(store, trading_date, early_close).await {
-        Ok(r) => (r, 0),
-        Err(r) => (r, 1),
-    };
+    let (reported, reported_err) = reported(store, trading_date, early_close).await;
 
     let quotes = liquid_closes(md, trading_date, &mut d).await;
     let mut up: Vec<Quote> = quotes
@@ -1052,9 +1052,91 @@ mod tests {
             company: "AT&T".into(),
             slug: "t-q3-fy2026-earnings".into(),
         }];
+        // The company in any case, the ticker only as written.
         assert!(names_reported("at&t reports tonight", &r));
         assert!(names_reported("Shares of T rose", &r));
         assert!(!names_reported("Tesla reports tonight", &r));
+        assert!(!names_reported("Verizon won't report until Friday", &r));
+        assert!(!names_reported("t is not a ticker in lower case", &r));
+        let now = [Reported {
+            ticker: "NOW".into(),
+            company: "ServiceNow".into(),
+            slug: "now-q3-fy2026-earnings".into(),
+        }];
+        assert!(!names_reported("Amazon reports now after the bell", &now));
+        assert!(!names_reported("Now Amazon reports", &now));
+        assert!(names_reported("NOW reports after the bell", &now));
+        assert!(names_reported("servicenow reports after the bell", &now));
+        // Letters or digits glued on are another word.
+        assert!(!names_reported("NOWX and 3NOW report", &now));
+    }
+
+    #[tokio::test]
+    async fn roundup_drops_only_the_reported_companys_item() {
+        let s = MemStore::default();
+        earnings_post(
+            &s,
+            "AAPL",
+            "Apple",
+            "aapl-q4-fy2026-earnings",
+            "2026-10-29T20:30:41Z",
+        );
+        earnings_post(
+            &s,
+            "NOW",
+            "ServiceNow",
+            "now-q3-fy2026-earnings",
+            "2026-10-29T20:10:00Z",
+        );
+        let src = "Apple will report results after the bell tonight. Amazon is scheduled to report quarterly results after the bell on Thursday.";
+        // Both items come from one roundup, so they share its title.
+        let roundup = SearchHit {
+            title: "Apple, Amazon earnings after the bell".into(),
+            ..hit("https://news.test/ah", src)
+        };
+        let n = ns(vec![(AH_Q, Ok(vec![roundup]))]);
+        let l = llm(vec![(
+            "after the US market close",
+            Ok(json!({"reasons": [
+                {"url": "https://news.test/ah", "title": "T", "quote": "Apple will report results after the bell tonight", "summary_en": "Apple reports after the close."},
+                {"url": "https://news.test/ah", "title": "T", "quote": "Amazon is scheduled to report quarterly results after the bell", "summary_en": "Amazon reports now after the bell."}
+            ]})),
+        )]);
+        let f = build_facts(&md(&[]), &n, &l, &s, date(), now()).await;
+        assert_eq!(f.reported.len(), 2);
+        match &f.after_hours {
+            Field::Value(v) => {
+                assert_eq!(v.len(), 1, "{v:?}");
+                assert!(v[0].quote.starts_with("Amazon"));
+                assert_eq!(v[0].title, "Apple, Amazon earnings after the bell");
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn one_failed_facts_read_skips_only_that_post() {
+        let s = MemStore::default();
+        earnings_post(
+            &s,
+            "AAPL",
+            "Apple",
+            "aapl-q4-fy2026-earnings",
+            "2026-10-29T20:30:41Z",
+        );
+        earnings_post(
+            &s,
+            "INTC",
+            "Intel",
+            "intc-q3-fy2026-earnings",
+            "2026-10-29T20:10:00Z",
+        );
+        *s.fail_facts_key.borrow_mut() = Some("earnings/aapl-q4-fy2026-earnings.json".into());
+        let f = build_facts(&md(&[]), &ns(vec![]), &llm(vec![]), &s, date(), now()).await;
+        let tickers: Vec<&str> = f.reported.iter().map(|r| r.ticker.as_str()).collect();
+        assert_eq!(tickers, ["INTC"]);
+        assert_eq!(f.diagnostics.last().unwrap(), "reported=1 reported_err=1");
+        assert!(missing_required(&f).is_empty());
     }
 
     #[tokio::test]

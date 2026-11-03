@@ -449,36 +449,42 @@ mod tests {
         );
     }
 
-    #[test]
-    fn reported_line_stands_alone_without_llm_text() {
+    #[tokio::test]
+    async fn reported_line_stands_alone_without_llm_text() {
+        // No after-hours items: the prompt asks for an empty body there, so
+        // the section says "reported" once, in code's line.
         let mut f = facts();
         f.reported = vec![apple()];
-        let d = Draft {
-            lang: Lang::En,
-            title: "T".into(),
-            summary: "S".into(),
-            sections: headings(Lang::En)
-                .iter()
-                .map(|h| (h.to_string(), String::new()))
-                .collect(),
-        };
-        let md = render_markdown(&d, &f);
-        assert!(
-            md.contains("## After-hours earnings to watch\n\nAlready reported after the close: [Apple (AAPL)]"),
-            "{md}"
-        );
+        for (lang, want) in [
+            (
+                Lang::En,
+                "## After-hours earnings to watch\n\nAlready reported after the close: [Apple (AAPL)](/en/p/aapl-q4-fy2026-earnings).\n\n## Sources",
+            ),
+            (
+                Lang::Zh,
+                "## 盘后财报关注\n\n已于盘后发布财报：[Apple（AAPL）](/zh/p/aapl-q4-fy2026-earnings)。\n\n## 来源",
+            ),
+        ] {
+            let mut v = clean(lang).unwrap();
+            v["sections"][2]["markdown"] = json!("");
+            let (d, md) = write(&llm(vec![Ok(v)]), &f, lang).await.unwrap();
+            assert_eq!(d.sections[2].1, "");
+            assert!(md.contains(want), "{md}");
+        }
     }
 
     #[test]
     fn prompts_describe_reported_and_take_sections_from_the_user_message() {
         assert!(
             PROMPT_EN.contains("never say they are scheduled to report")
+                && PROMPT_EN.contains("When `after_hours` has no items, leave the \"After-hours earnings to watch\" markdown empty")
                 && PROMPT_EN.contains("listed at the end of the user message")
                 && !PROMPT_EN.contains("n/a"),
             "{PROMPT_EN}"
         );
         assert!(
             PROMPT_ZH.contains("不得说它们将要发布财报")
+                && PROMPT_ZH.contains("`after_hours` 没有条目时，“盘后财报关注”的 `markdown` 留空")
                 && PROMPT_ZH.contains("列在用户消息末尾")
                 && !PROMPT_ZH.contains("暂缺"),
             "{PROMPT_ZH}"
