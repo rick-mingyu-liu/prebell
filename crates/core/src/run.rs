@@ -816,8 +816,8 @@ mod tests {
         let want = format!(
             "futures, movers | quotes ok=0 http429={n} http_other=0 empty=0 stale=0 parse=0 net=0 \
              skipped=0; \
-             movers liquid=0 gainers=0 losers=0; reasons proposed=0 kept=0; \
-             search_err=1 llm_err=0 news_stale=0; futures ok=0 err=4"
+             movers liquid=0 gainers=0 losers=0; reasons proposed=0 kept=0 hedged=0; \
+             search_err=1 llm_err=0 news_stale=0 news_noise=0; futures ok=0 err=4"
         );
         for t in ["2026-10-29T12:30:00Z", "2026-10-29T12:35:00Z"] {
             match tick(utc(t), &s, &m, &FakeNs, &l).await {

@@ -137,6 +137,7 @@ async fn mover(
                 &articles_prompt(&header, &hits),
                 &hits,
                 MOVER_REASONS,
+                true,
                 d,
             )
             .await
@@ -195,6 +196,7 @@ async fn after_hours(
         &articles_prompt(&header, &hits),
         &hits,
         AFTER_HOURS_ITEMS,
+        false,
         d,
     )
     .await
@@ -630,8 +632,8 @@ mod tests {
                 ),
                 "closes ok=1 other_day=519".to_string(),
                 "movers liquid=1 gainers=1 losers=0".to_string(),
-                "reasons proposed=0 kept=0".to_string(),
-                "search_err=2 llm_err=0 news_stale=0".to_string(),
+                "reasons proposed=0 kept=0 hedged=0".to_string(),
+                "search_err=2 llm_err=0 news_stale=0 news_noise=0".to_string(),
                 "indexes ok=4 err=0".to_string(),
             ]
         );
@@ -751,7 +753,9 @@ mod tests {
         assert_eq!(f.gainers[0].reasons, vec![]);
         assert!(l.prompts.borrow().iter().all(|(_, u)| !u.contains("NVDA")));
         assert!(
-            f.diagnostics.iter().any(|l| l.ends_with("news_stale=1")),
+            f.diagnostics
+                .iter()
+                .any(|l| l.ends_with("news_stale=1 news_noise=0")),
             "{:?}",
             f.diagnostics
         );
@@ -1102,8 +1106,9 @@ mod run_tests {
                 "{logs:?}"
             );
             assert!(
-                logs[0]
-                    .contains("; movers liquid=1 gainers=1 losers=0; reasons proposed=1 kept=1;"),
+                logs[0].contains(
+                    "; movers liquid=1 gainers=1 losers=0; reasons proposed=1 kept=1 hedged=0;"
+                ),
                 "{logs:?}"
             );
             assert!(logs[0].ends_with("; indexes ok=4 err=0"), "{logs:?}");
@@ -1128,8 +1133,8 @@ mod run_tests {
         let s = MemStore::default();
         let (m, l) = (md(false), llm(true, true));
         let want = "indexes | quotes ok=0 http429=0 http_other=0 empty=0 stale=0 parse=0 net=0 \
-                    skipped=0; movers liquid=0 gainers=0 losers=0; reasons proposed=0 kept=0; \
-                    search_err=0 llm_err=0 news_stale=0; indexes ok=3 err=1";
+                    skipped=0; movers liquid=0 gainers=0 losers=0; reasons proposed=0 kept=0 hedged=0; \
+                    search_err=0 llm_err=0 news_stale=0 news_noise=0; indexes ok=3 err=1";
         for t in ["2026-11-06T21:45:00Z", "2026-11-06T23:55:00Z"] {
             assert_eq!(
                 tick(utc(t), &s, &m, &FakeNs, &l).await,
