@@ -353,8 +353,8 @@ async fn macro_items(
     d: &mut Diag,
 ) -> Field<Vec<NewsReason>> {
     let hits = match fresh_news(ns, MACRO_QUERY, MACRO_HITS, now, d).await {
-        // Missing, not an empty list: the brief then says "n/a" rather
-        // than narrating that no news was found.
+        // Missing, not an empty list. Either way the brief leaves out its
+        // macro section rather than narrating that no news was found.
         Ok(h) if h.is_empty() => {
             return Field::Missing {
                 reason: "no fresh news".into(),

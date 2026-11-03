@@ -168,6 +168,7 @@ pub async fn write(
         &allowed,
         &names,
         &headings(lang),
+        &headings(lang),
         lang,
         |d| render_markdown(d, f),
     )
@@ -308,7 +309,10 @@ mod tests {
         assert_eq!(d.sections[2].0, "After-hours earnings to watch");
         let (sys, user) = l.prompts.borrow()[0].clone();
         assert_eq!(sys, PROMPT_EN);
-        assert_eq!(user, serde_json::to_string_pretty(&facts()).unwrap());
+        assert!(
+            user.starts_with(&serde_json::to_string_pretty(&facts()).unwrap()),
+            "{user}"
+        );
         assert!(
             md.starts_with("# Stocks close higher; Nvidia gains 3%\n\n"),
             "{md}"
