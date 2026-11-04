@@ -18,6 +18,8 @@ const PROMPT: &str = include_str!("../../prompts/earnings_extract_v1.md");
 /// Press releases with full statements run 20-60k characters.
 const MAX_DOC_CHARS: usize = 60_000;
 const MAX_NOTES: usize = 4;
+/// Why a table amount from another period's column is rejected.
+const CURRENT_COLUMN: &str = "a table amount must be in the current period's column: the row's first number, or the column the year header above gives the latest year";
 
 /// What one press release yields.
 #[derive(Debug, Clone, PartialEq)]
@@ -153,9 +155,11 @@ fn total_revenue_row(label: &str) -> bool {
 /// with a label naming the metric (letters before the amount); the amount is
 /// a whole number in the quote, read with the unit words that follow it
 /// there; a dollar figure written as a bare table number has the scale of
-/// the table heading above it, is the row's first number and, for revenue,
-/// is the total row; per-share figures carry no size word and are not
-/// dividends; a sign has evidence next to it.
+/// the table heading above it, is the current period's column (the row's
+/// first number, unless the year header above puts the latest year in a
+/// later column) and, for revenue, is the total row; per-share figures
+/// carry no size word, are not dividends and, in a row of several periods,
+/// follow the same column rule; a sign has evidence next to it.
 pub fn verify_figure(text: &str, metric: Metric, raw: &RawFigure) -> Result<Figure, String> {
     let unit = metric.unit();
     let quote = collapse(&raw.quote);
@@ -193,20 +197,28 @@ pub fn verify_figure(text: &str, metric: Metric, raw: &RawFigure) -> Result<Figu
     let scale = match unit {
         Unit::Usd if n.multiplier == 1.0 => {
             // A bare table number: only a scale the document itself states,
-            // read from the current-period column (the row's first number).
+            // read from the current-period column.
             if scale == 1.0 {
                 return Err(format!("bare amount {amount:?} needs the table's scale"));
             }
-            if quote[..at].chars().any(|c| c.is_ascii_digit()) {
-                return Err("a bare table amount must be the row's first number".into());
+            let lines = Lines::new(text);
+            let table = Table::find(&lines, &quote);
+            let cells = row_cells(&quote);
+            let col = cell_at(&cells, at, amount.len());
+            if !col.is_some_and(|col| current_column(table.as_ref(), &quote, &cells, col)) {
+                return Err(CURRENT_COLUMN.into());
             }
-            if metric == Metric::Revenue && !total_revenue_row(label) {
+            // The row's label, without the earlier columns.
+            let row = &label[..label
+                .find(|c: char| c.is_ascii_digit())
+                .unwrap_or(label.len())];
+            if metric == Metric::Revenue && !total_revenue_row(row) {
                 return Err(format!(
                     "{:?} looks like a segment row; revenue must be the total",
-                    label.trim()
+                    row.trim()
                 ));
             }
-            match table_scale(text, &quote) {
+            match table.map(|t| t.scale) {
                 Some(stated) if stated == scale => scale,
                 Some(_) => {
                     return Err(format!("the table above the quote is not in {}", raw.scale))
@@ -227,6 +239,31 @@ pub fn verify_figure(text: &str, metric: Metric, raw: &RawFigure) -> Result<Figu
                 || lower.contains("eps"))
             {
                 return Err("per-share quote names neither $ nor per share".into());
+            }
+            // Next to another per-share figure with no words between
+            // ("Diluted EPS $7.08 $6.45 ..."), the amount is one column of a
+            // row of periods and follows the bare-amount column rule.
+            // Only per-share cells are its periods: AMD alternates net
+            // income and per share ("$3,471 $2.09 $2,760 $1.66 ...").
+            let cells: Vec<_> = row_cells(&quote)
+                .into_iter()
+                .filter(|&(s, e)| quote[s..e].contains('.'))
+                .collect();
+            let no_words = |a: usize, b: usize| !quote[a..b].chars().any(char::is_alphabetic);
+            if let Some(col) = cell_at(&cells, at, amount.len()) {
+                let in_row = match col {
+                    0 => cells
+                        .get(1)
+                        .is_some_and(|&(s, _)| no_words(at + amount.len(), s)),
+                    _ => no_words(cells[col - 1].1, at),
+                };
+                if in_row {
+                    let lines = Lines::new(text);
+                    let table = Table::find(&lines, &quote);
+                    if !current_column(table.as_ref(), &quote, &cells, col) {
+                        return Err(CURRENT_COLUMN.into());
+                    }
+                }
             }
             1.0
         }
@@ -261,24 +298,452 @@ pub fn verify_figure(text: &str, metric: Metric, raw: &RawFigure) -> Result<Figu
     })
 }
 
-/// The unit of the nearest "(In millions ...)"-style heading before the
-/// quote. Only the parenthesised lead counts: "(In millions, except shares,
-/// which are reflected in thousands)" is a millions table.
-fn table_scale(text: &str, quote: &str) -> Option<f64> {
-    static R: OnceLock<Regex> = OnceLock::new();
-    let r = R.get_or_init(|| {
+/// The nearest scale heading in `before`: where it starts and its scale.
+/// A parenthesised heading counts by its lead only: "(In millions, except
+/// shares, which are reflected in thousands)" is a millions table. So does
+/// an unparenthesised one outside parentheses: "In millions, except per
+/// share amounts", "Dollars in millions, except per share data".
+fn scale_heading(before: &str) -> Option<(usize, f64)> {
+    static PAREN: OnceLock<Regex> = OnceLock::new();
+    static BARE: OnceLock<Regex> = OnceLock::new();
+    let paren = PAREN.get_or_init(|| {
         Regex::new(r"(?i)\([^()]{0,30}?\bin\s+(thousands|millions|billions)\b")
             .expect("valid built-in regex")
     });
-    let doc = collapse(text);
-    let before = &doc[..doc.find(quote)?];
-    let unit = r
+    let bare = BARE.get_or_init(|| {
+        Regex::new(
+            r"(?i)\b(?:(?:dollars|amounts)(?:\s+and\s+shares)?\s+in\s+(thousands|millions|billions)\b|in\s+(thousands|millions|billions)\s*,?\s*except\b)",
+        )
+        .expect("valid built-in regex")
+    });
+    let inside_parens = |at: usize| before[..at].rfind('(') > before[..at].rfind(')');
+    let paren = paren
         .captures_iter(before)
-        .last()?
-        .get(1)?
-        .as_str()
-        .to_ascii_lowercase();
-    scale_of(&unit)
+        .filter_map(|c| Some((c.get(0)?.start(), c.get(1)?.as_str())));
+    let bare = bare
+        .captures_iter(before)
+        .filter_map(|c| Some((c.get(0)?.start(), c.get(1).or(c.get(2))?.as_str())))
+        .filter(|&(at, _)| !inside_parens(at));
+    let (at, unit) = paren.chain(bare).max_by_key(|&(at, _)| at)?;
+    Some((at, scale_of(unit)?))
+}
+
+/// The exhibit text as `collapse` gives it, with where each line starts.
+struct Lines {
+    doc: String,
+    starts: Vec<usize>,
+}
+
+impl Lines {
+    fn new(text: &str) -> Self {
+        let mut doc = String::new();
+        let mut starts = Vec::new();
+        for line in text.lines() {
+            let line = collapse(line);
+            if line.is_empty() {
+                continue;
+            }
+            if !doc.is_empty() {
+                doc.push(' ');
+            }
+            starts.push(doc.len());
+            doc.push_str(&line);
+        }
+        Lines { doc, starts }
+    }
+
+    fn line_of(&self, at: usize) -> usize {
+        self.starts.partition_point(|&s| s <= at).saturating_sub(1)
+    }
+
+    /// Line `i`, cut at `cut` when the cut falls inside it.
+    fn line(&self, i: usize, cut: usize) -> &str {
+        let end = self.starts.get(i + 1).map_or(self.doc.len(), |&e| e - 1);
+        self.doc[self.starts[i]..end.min(cut)].trim()
+    }
+}
+
+/// A quote's table: where the quote stands and the nearest scale heading
+/// above it.
+struct Table<'a> {
+    lines: &'a Lines,
+    quote_at: usize,
+    heading_at: usize,
+    scale: f64,
+}
+
+impl<'a> Table<'a> {
+    fn find(lines: &'a Lines, quote: &str) -> Option<Self> {
+        let quote_at = lines.doc.find(quote)?;
+        let (heading_at, scale) = scale_heading(&lines.doc[..quote_at])?;
+        Some(Table {
+            lines,
+            quote_at,
+            heading_at,
+            scale,
+        })
+    }
+
+    /// The nearest year header line between the scale heading and the
+    /// quote; a line with other words is not a header. It is `past_stop`
+    /// when a line with no digits that is not a column label ("Supplemental
+    /// table", "Revenues:") sits between it and the quote: such a header may
+    /// reject the row's first column but never accepts a later one.
+    fn header(&self) -> Option<Header> {
+        let l = self.lines;
+        let (top, bottom) = (l.line_of(self.heading_at), l.line_of(self.quote_at));
+        let mut past_stop = false;
+        for i in (top..=bottom).rev() {
+            let line = l.line(i, self.quote_at);
+            if line.is_empty() {
+                continue;
+            }
+            if let Some(tokens) = header_years(line, i == top) {
+                let (years, periods) = tokens.into_iter().unzip();
+                return Some(Header {
+                    line: i,
+                    years,
+                    periods,
+                    past_stop,
+                });
+            }
+            if !line.contains(|c: char| c.is_ascii_digit()) && !period_words_only(line) {
+                past_stop = true;
+            }
+        }
+        None
+    }
+
+    /// Whether the period labels of header line `i` (and of a label-only
+    /// line right above it) name the quarter first: "Three Months Ended
+    /// ... Nine Months Ended", "2025 Q4 2026 Q4". `None` when they name no
+    /// period length.
+    fn quarter_first(&self, i: usize) -> Option<bool> {
+        static R: OnceLock<Regex> = OnceLock::new();
+        let r = R.get_or_init(|| {
+            Regex::new(r"(?i)\b(?:(three\s+months|thirteen\s+weeks|quarters?|q[1-4])|six\s+months|nine\s+months|twelve\s+months|years?|ytd|year-to-date)\b")
+                .expect("valid built-in regex")
+        });
+        let l = self.lines;
+        let above = i
+            .checked_sub(1)
+            .map(|j| l.line(j, self.quote_at))
+            .filter(|s| period_words_only(s))
+            .unwrap_or("");
+        let labels = format!("{above} {}", l.line(i, self.quote_at));
+        r.captures(&labels).map(|c| c.get(1).is_some())
+    }
+}
+
+/// A year header line found above a quote.
+struct Header {
+    line: usize,
+    years: Vec<u32>,
+    /// The period written just before each year, if any.
+    periods: Vec<Option<Period>>,
+    past_stop: bool,
+}
+
+/// A year token's period label: "September 26, 2026" is month 9, day 26;
+/// "Q3 2026" and "Q3'26" are quarter 3.
+#[derive(Debug, Clone, Copy, PartialEq, PartialOrd)]
+enum Period {
+    Month(u32, u32),
+    Quarter(u32),
+}
+
+/// The period label that ends `before` (the text just before a year).
+fn period_before(before: &str) -> Option<Period> {
+    static MONTH: OnceLock<Regex> = OnceLock::new();
+    static QUARTER: OnceLock<Regex> = OnceLock::new();
+    let month = MONTH.get_or_init(|| {
+        Regex::new(r"(?i)\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)(?:uary|ruary|ch|il|e|y|ust|t|tember|ober|ember)?\b\.?(?:\s+(\d{1,2}))?\s*,?\s*$")
+            .expect("valid built-in regex")
+    });
+    let quarter =
+        QUARTER.get_or_init(|| Regex::new(r"(?i)\bq([1-4])\s*$").expect("valid built-in regex"));
+    if let Some(c) = quarter.captures(before) {
+        return Some(Period::Quarter(c[1].parse().ok()?));
+    }
+    let c = month.captures(before)?;
+    let m = [
+        "jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec",
+    ]
+    .iter()
+    .position(|m| c[1].eq_ignore_ascii_case(m))?;
+    let day = c.get(2).map_or(Some(0), |d| d.as_str().parse().ok())?;
+    Some(Period::Month(m as u32 + 1, day))
+}
+
+/// For an untrusted header that starts with the latest year: whether that
+/// first token is the current period. Within the first block (up to where
+/// every year has appeared; the whole header for a single year), a latest
+/// year listed once is; listed more than once, every such token needs a
+/// period of one kind, and the first must be strictly the newest ("September
+/// 26, 2026 June 27, 2026" passes; "June 30, 2026 September 30, 2026" and a
+/// tie do not). No latest-year period anywhere in the header may be newer
+/// than the first.
+fn first_is_newest(h: &Header, distinct: &[u32]) -> bool {
+    let latest = distinct[distinct.len() - 1];
+    let end = if distinct.len() == 1 {
+        h.years.len()
+    } else {
+        (1..=h.years.len())
+            .find(|&i| distinct.iter().all(|y| h.years[..i].contains(y)))
+            .unwrap_or(h.years.len())
+    };
+    let latest_periods: Vec<_> = (0..end)
+        .filter(|&i| h.years[i] == latest)
+        .map(|i| h.periods[i])
+        .collect();
+    let [first, rest @ ..] = latest_periods.as_slice() else {
+        return false;
+    };
+    // Anywhere in the header, no latest-year period of the same kind is
+    // newer than the first ("June 30, 2026 September 30, 2025 September 30,
+    // 2026"); a tie (AMD's nine-month "September 26, 2026") is fine.
+    let newer_later = first.is_some_and(|first| {
+        (0..h.years.len()).any(|i| {
+            h.years[i] == latest
+                && h.periods[i].is_some_and(|p| {
+                    std::mem::discriminant(&p) == std::mem::discriminant(&first) && p > first
+                })
+        })
+    });
+    if newer_later {
+        return false;
+    }
+    if rest.is_empty() {
+        return true;
+    }
+    let Some(first) = first else {
+        return false;
+    };
+    rest.iter().all(|p| {
+        p.is_some_and(|p| std::mem::discriminant(&p) == std::mem::discriminant(first) && p < *first)
+    })
+}
+
+/// `s` without its parenthesised parts, nested ones included.
+fn strip_parens(s: &str) -> String {
+    static R: OnceLock<Regex> = OnceLock::new();
+    let r = R.get_or_init(|| Regex::new(r"\([^()]*\)").expect("valid built-in regex"));
+    let mut s = s.to_string();
+    while r.is_match(&s) {
+        s = r.replace_all(&s, " ").into_owned();
+    }
+    s
+}
+
+/// Every word outside parentheses names a period or a column: "Three
+/// Months Ended September 30,", "GAAP Non-GAAP", "Change", "Inc/ (Dec)
+/// Excluding Currency Translation", "(Unaudited)".
+fn period_words_only(s: &str) -> bool {
+    const WORDS: &[&str] = &[
+        "jan",
+        "january",
+        "feb",
+        "february",
+        "mar",
+        "march",
+        "apr",
+        "april",
+        "may",
+        "jun",
+        "june",
+        "jul",
+        "july",
+        "aug",
+        "august",
+        "sep",
+        "sept",
+        "september",
+        "oct",
+        "october",
+        "nov",
+        "november",
+        "dec",
+        "december",
+        "three",
+        "six",
+        "nine",
+        "twelve",
+        "thirteen",
+        "months",
+        "month",
+        "weeks",
+        "ended",
+        "ending",
+        "quarter",
+        "quarters",
+        "year",
+        "years",
+        "fiscal",
+        "full",
+        "fy",
+        "q",
+        "ytd",
+        "y",
+        "change",
+        "inc",
+        "increase",
+        "decrease",
+        "excluding",
+        "constant",
+        "currency",
+        "translation",
+        "gaap",
+        "non",
+        "unaudited",
+    ];
+    static R: OnceLock<Regex> = OnceLock::new();
+    let r = R.get_or_init(|| Regex::new(r"[A-Za-z]+").expect("valid built-in regex"));
+    r.find_iter(&strip_parens(s))
+        .all(|w| WORDS.contains(&w.as_str().to_ascii_lowercase().as_str()))
+}
+
+/// The years a column header line lists ("2025 Q4 2026 Q4 Change 2025
+/// 2026", "September 26, 2026 September 27, 2025", "Q3'26 Q3'25"): at
+/// least two, no dollar amounts (a data row; a "$ Change" label is fine)
+/// and no words but period and column labels. On the scale heading's line only the part from the
+/// first year counts ("In millions, except per share amounts 2026 2025").
+fn header_years(line: &str, heading_line: bool) -> Option<Vec<(u32, Option<Period>)>> {
+    static R: OnceLock<Regex> = OnceLock::new();
+    let r =
+        R.get_or_init(|| Regex::new(r"\b(?:19|20)\d\d\b|'(\d\d)\b").expect("valid built-in regex"));
+    let dollar_amount = line.match_indices('$').any(|(i, _)| {
+        line[i + 1..]
+            .trim_start()
+            .starts_with(|c: char| c.is_ascii_digit() || c == '(')
+    });
+    if dollar_amount {
+        return None;
+    }
+    let line = strip_parens(line);
+    let found: Vec<_> = r.captures_iter(&line).collect();
+    if found.len() < 2 {
+        return None;
+    }
+    let from = if heading_line {
+        found[0].get(0)?.start()
+    } else {
+        0
+    };
+    if !period_words_only(&line[from..]) {
+        return None;
+    }
+    found
+        .iter()
+        .map(|c| {
+            let whole = c.get(0)?;
+            let year = match c.get(1) {
+                Some(yy) => 2000 + yy.as_str().parse::<u32>().ok()?,
+                None => whole.as_str().parse().ok()?,
+            };
+            Some((year, period_before(&line[..whole.start()])))
+        })
+        .collect()
+}
+
+/// The row's value cells in `quote`, as byte spans of their digits. Not
+/// cells: percentages ("10%", "(92) %"), digits glued to letters
+/// ("Orders2", "Q4") and a footnote marker after the label words (a 1-2
+/// digit integer in parentheses with no "$", not followed by another
+/// parenthesised number: "Inc. (2) $6,626", but not "Net loss (62) (37)").
+fn row_cells(quote: &str) -> Vec<(usize, usize)> {
+    static R: OnceLock<Regex> = OnceLock::new();
+    let r = R.get_or_init(|| {
+        Regex::new(r"\d{1,3}(?:,\d{3})+(?:\.\d+)?|\d+(?:\.\d+)?").expect("valid built-in regex")
+    });
+    let mut cells = Vec::new();
+    for m in r.find_iter(quote) {
+        let (before, after) = (&quote[..m.start()], &quote[m.end()..]);
+        if before.ends_with(|c: char| c.is_alphabetic())
+            || after.starts_with(|c: char| c.is_alphabetic())
+            || after.trim_start_matches(')').trim_start().starts_with('%')
+        {
+            continue;
+        }
+        let footnote = cells.is_empty()
+            && m.as_str().len() <= 2
+            && before.ends_with('(')
+            && !before.ends_with("$(")
+            && after.starts_with(')')
+            && !after[1..].trim_start().starts_with('(');
+        if !footnote {
+            cells.push((m.start(), m.end()));
+        }
+    }
+    cells
+}
+
+/// The index of the cell the amount (at byte `at`, `len` long) holds.
+fn cell_at(cells: &[(usize, usize)], at: usize, len: usize) -> Option<usize> {
+    cells.iter().position(|&(s, _)| s >= at && s < at + len)
+}
+
+/// Whether cell `col` of the row's `cells` (spans in `quote`) is the
+/// current period's column. Without a year header: the first cell. A
+/// header is trusted when it is not past a stop line, its years form blocks
+/// that each hold every year once, and there is one year per cell; then the
+/// column is the latest year's place in the first block, which must be the
+/// quarter when there are several. An untrusted header allows only the
+/// first cell, when the header starts with the latest year, names its
+/// periods if it repeats years, and lists that first period as the newest
+/// (`first_is_newest`). A header whose
+/// first period is not the quarter rejects any repeated-year row, and with
+/// more cells than years a leading "(5)" may be a footnote, not a column.
+fn current_column(
+    table: Option<&Table>,
+    quote: &str,
+    cells: &[(usize, usize)],
+    col: usize,
+) -> bool {
+    let Some((t, h)) = table.and_then(|t| Some((t, t.header()?))) else {
+        return col == 0;
+    };
+    let years = &h.years;
+    if col == 0 && cells.len() > years.len() {
+        let (s, e) = cells[0];
+        if e - s <= 2 && quote[..s].ends_with('(') && quote[e..].starts_with(')') {
+            return false;
+        }
+    }
+    let mut distinct = years.clone();
+    distinct.sort_unstable();
+    distinct.dedup();
+    let k = distinct.len();
+    let latest = distinct[k - 1];
+    let repeated = years.len() > k;
+    let quarter_first = if repeated {
+        t.quarter_first(h.line)
+    } else {
+        Some(true)
+    };
+    if quarter_first == Some(false) {
+        return false;
+    }
+    let trusted = !h.past_stop
+        && k >= 2
+        && years.len() == cells.len()
+        && years.len() % k == 0
+        && quarter_first == Some(true)
+        && years.chunks(k).all(|c| {
+            let mut c = c.to_vec();
+            c.sort_unstable();
+            c == distinct
+        });
+    if trusted {
+        years[..k].iter().position(|&y| y == latest) == Some(col)
+    } else {
+        // Repeated years with no period labels at all, neither a period
+        // length on the header or its label line ("Three Months Ended ...")
+        // nor a month or quarter on a latest-year token: order unknown.
+        let unlabelled = repeated
+            && quarter_first.is_none()
+            && (0..years.len()).all(|i| years[i] != latest || h.periods[i].is_none());
+        col == 0 && years[0] == latest && !unlabelled && first_is_newest(&h, &distinct)
+    }
 }
 
 fn quarter_words(q: u8) -> &'static [&'static str] {
@@ -888,6 +1353,329 @@ mod tests {
         assert!(
             verify_figure(&t, Metric::NetIncome, &raw("14,736", "millions", false, q)).is_err()
         );
+    }
+
+    #[test]
+    fn unparenthesised_scale_headings() {
+        // CVS: the heading line carries the column years, no parentheses.
+        let cvs = "Three Months Ended September 30, Year Ending December 31,\nIn billions, except per share amounts 2026 2025 2026 Projected\nTotal revenues $108.4 $102.9 At least $420.0\nConsolidated third quarter results\nThree Months Ended September 30, Nine Months Ended September 30,\nIn millions, except per share amounts 2026 2025 Change 2026 2025 Change\nTotal revenues $108,399 $102,871 $5,528 $314,921 $296,374 $18,547";
+        let q = "Total revenues $108,399 $102,871 $5,528 $314,921 $296,374 $18,547";
+        let f = verify_figure(cvs, Metric::Revenue, &raw("$108,399", "millions", false, q));
+        assert_eq!(f.unwrap().value, 108.399e9);
+        let q = "Total revenues $108.4 $102.9 At least $420.0";
+        let f = verify_figure(cvs, Metric::Revenue, &raw("$108.4", "billions", false, q));
+        assert_eq!(f.unwrap().value, 108.4e9);
+        let f = verify_figure(cvs, Metric::Revenue, &raw("$108.4", "millions", false, q));
+        assert!(f.unwrap_err().contains("not in millions"));
+        // MCD: "Dollars in millions", heading on its own line.
+        let mcd = "KEY FINANCIAL METRICS - CONSOLIDATED\nDollars in millions, except per share data\nQuarters Ended September 30, Nine Months Ended September 30,\n2026 2025 Inc/ (Dec) Inc/ (Dec) Excluding Currency Translation 2026 2025 Inc/ (Dec) Inc/ (Dec) Excluding Currency Translation\nRevenues $7,157 $7,078 1% 1% $20,773 $19,876 5% 2%";
+        let q = "Revenues $7,157 $7,078 1% 1% $20,773 $19,876 5% 2%";
+        let f = verify_figure(mcd, Metric::Revenue, &raw("$7,157", "millions", false, q));
+        assert_eq!(f.unwrap().value, 7.157e9);
+        let mcd2 = "Dollars and shares in millions, except per share data\nTOTAL REVENUES 7,157 7,078 79 1";
+        let f = verify_figure(
+            mcd2,
+            Metric::Revenue,
+            &raw(
+                "7,157",
+                "millions",
+                false,
+                "TOTAL REVENUES 7,157 7,078 79 1",
+            ),
+        );
+        assert_eq!(f.unwrap().value, 7.157e9);
+        // Inside a parenthesised heading only the lead counts, even when a
+        // later part reads like an unparenthesised heading.
+        let t =
+            "(In millions, shares in thousands, except per share data)\nTotal revenues $1,000 $900";
+        let q = "Total revenues $1,000 $900";
+        assert!(verify_figure(t, Metric::Revenue, &raw("1,000", "millions", false, q)).is_ok());
+        assert!(verify_figure(t, Metric::Revenue, &raw("1,000", "thousands", false, q)).is_err());
+    }
+
+    #[test]
+    fn prior_year_first_tables_read_the_latest_column() {
+        // EMR: "2025 Q4 2026 Q4", prior year first, on the heading line.
+        let emr = "(dollars in millions, except per share) 2025 Q4 2026 Q4 Change 2025 2026 Change\nUnderlying Orders2 14% 9%\nNet Sales $4,855 $5,201 7% $18,016 $18,982 5%";
+        let q = "Net Sales $4,855 $5,201 7% $18,016 $18,982 5%";
+        let f = verify_figure(emr, Metric::Revenue, &raw("$5,201", "millions", false, q));
+        assert_eq!(f.unwrap().value, 5.201e9);
+        // The row's first number is the prior year; the full-year column
+        // is a 2026 column too, but not the first.
+        for amount in ["$4,855", "$18,016", "$18,982"] {
+            let r = verify_figure(emr, Metric::Revenue, &raw(amount, "millions", false, q));
+            assert!(r.unwrap_err().contains("current period"), "{amount}");
+        }
+        // UBER: "2025 2026% Change" on the heading line, and a statement
+        // whose years sit on their own line under the heading.
+        let uber = "(In millions, except percentages and per share amounts) 2025 2026% Change % Change (Constant Currency (1))\nTrips 3,512 4,061 16%\nGross Bookings $49,740 $59,819 20% 20%\nRevenue $13,467 $14,766 10% 10%\n(In millions, except share amounts which are reflected in thousands, and per share amounts)\n(Unaudited)\nThree Months Ended September 30, Nine Months Ended September 30,\n2025 2026 2025 2026\nRevenue $13,467 $14,766 $37,651 $42,160";
+        let q = "Revenue $13,467 $14,766 10% 10%";
+        let f = verify_figure(uber, Metric::Revenue, &raw("$14,766", "millions", false, q));
+        assert_eq!(f.unwrap().value, 14.766e9);
+        assert!(
+            verify_figure(uber, Metric::Revenue, &raw("$13,467", "millions", false, q)).is_err()
+        );
+        let q = "Revenue $13,467 $14,766 $37,651 $42,160";
+        let f = verify_figure(uber, Metric::Revenue, &raw("$14,766", "millions", false, q));
+        assert_eq!(f.unwrap().value, 14.766e9);
+        for amount in ["$13,467", "$37,651", "$42,160"] {
+            let r = verify_figure(uber, Metric::Revenue, &raw(amount, "millions", false, q));
+            assert!(r.is_err(), "{amount}: {r:?}");
+        }
+        // Current-year-first header: the second column stays rejected.
+        let t = "(In millions)\nThree Months Ended\nSeptember 26, 2026 September 27, 2025\nTotal net sales $102,466 $94,930";
+        let q = "Total net sales $102,466 $94,930";
+        assert!(verify_figure(t, Metric::Revenue, &raw("94,930", "millions", false, q)).is_err());
+        assert!(verify_figure(t, Metric::Revenue, &raw("102,466", "millions", false, q)).is_ok());
+        // No year header between the scale heading and the row.
+        let t = "(In millions)\nTotal net sales $102,466 $94,930";
+        assert!(verify_figure(t, Metric::Revenue, &raw("94,930", "millions", false, q)).is_err());
+    }
+
+    #[test]
+    fn footnote_markers_are_not_columns() {
+        // UBER's highlights table, as html_to_text renders it.
+        let uber = "Three Months Ended September 30,\n(In millions, except percentages and per share amounts) 2025 2026% Change % Change (Constant Currency (1))\nRevenue $13,467 $14,766 10% 10%\nGAAP Income from operations $1,113 $1,447 30%\nGAAP Net income attributable to Uber Technologies, Inc. (2) $6,626 $512 (92) %\nGAAP Diluted EPS $3.11 $0.25 (92) %\nNon-GAAP EPS (1) $0.65 $0.88 35%";
+        let q = "GAAP Net income attributable to Uber Technologies, Inc. (2) $6,626 $512 (92) %";
+        let f = verify_figure(uber, Metric::NetIncome, &raw("$512", "millions", false, q));
+        assert_eq!(f.unwrap().value, 512e6);
+        let r = verify_figure(
+            uber,
+            Metric::NetIncome,
+            &raw("$6,626", "millions", false, q),
+        );
+        assert!(r.unwrap_err().contains("current period"));
+        let q = "Non-GAAP EPS (1) $0.65 $0.88 35%";
+        let f = verify_figure(uber, Metric::EpsNonGaap, &raw("$0.88", "units", false, q));
+        assert_eq!(f.unwrap().value, 0.88);
+        assert!(verify_figure(uber, Metric::EpsNonGaap, &raw("$0.65", "units", false, q)).is_err());
+        // Without a header, a footnoted row's first number is its first column.
+        let t = "(In millions)\nNet income (1) $900 $800";
+        let q = "Net income (1) $900 $800";
+        assert!(verify_figure(t, Metric::NetIncome, &raw("$900", "millions", false, q)).is_ok());
+        assert!(verify_figure(t, Metric::NetIncome, &raw("$800", "millions", false, q)).is_err());
+        // Small negative values in parentheses are columns, not footnotes.
+        let t = "(In millions)\n2026 2025\nNet loss for the period (62) (37)";
+        let q = "Net loss for the period (62) (37)";
+        assert!(verify_figure(t, Metric::NetIncome, &raw("(37)", "millions", true, q)).is_err());
+        let f = verify_figure(t, Metric::NetIncome, &raw("(62)", "millions", true, q));
+        assert_eq!(f.unwrap().value, -62e6);
+        // More cells than header years: a leading "(5)" may be a footnote,
+        // so it is not read as the current column.
+        let t = "(In millions)\n2026 2025\nNet loss for the period (5) (62) (37)";
+        let q = "Net loss for the period (5) (62) (37)";
+        for a in ["(5)", "(62)", "(37)"] {
+            let r = verify_figure(t, Metric::NetIncome, &raw(a, "millions", true, q));
+            assert!(r.is_err(), "{a}: {r:?}");
+        }
+    }
+
+    #[test]
+    fn untrusted_headers_fail_closed() {
+        let reject = |t: &str, m: Metric, amount: &str, scale: &str, q: &str| {
+            let r = verify_figure(t, m, &raw(amount, scale, false, q));
+            assert!(r.is_err(), "{amount} in {q:?}: {r:?}");
+        };
+        // Five trailing quarters, oldest first: no year-per-block shape.
+        let t = "(In millions)\nSep 30, 2025 Dec 31, 2025 Mar 31, 2026 Jun 30, 2026 Sep 30, 2026\nTotal revenues $100 $105 $110 $115 $120";
+        let q = "Total revenues $100 $105 $110 $115 $120";
+        for a in ["$100", "$110", "$120"] {
+            reject(t, Metric::Revenue, a, "millions", q);
+        }
+        // Sequential quarter labels, oldest first.
+        let t = "(In millions)\nQ3 2025 Q2 2026 Q3 2026\nTotal revenues $100 $115 $120";
+        let q = "Total revenues $100 $115 $120";
+        for a in ["$100", "$115", "$120"] {
+            reject(t, Metric::Revenue, a, "millions", q);
+        }
+        // The same, newest first: the first column is the current quarter.
+        let t = "(In millions)\nQ3 2026 Q2 2026 Q3 2025\nTotal revenues $120 $115 $100";
+        let q = "Total revenues $120 $115 $100";
+        assert!(verify_figure(t, Metric::Revenue, &raw("$120", "millions", false, q)).is_ok());
+        reject(t, Metric::Revenue, "$115", "millions", q);
+        // GAAP and non-GAAP columns under each year, prior year first.
+        let t = "(In millions, except per share)\n2025 2026\nGAAP Non-GAAP GAAP Non-GAAP\nDiluted EPS $5.93 $5.64 $7.08 $6.45";
+        let q = "Diluted EPS $5.93 $5.64 $7.08 $6.45";
+        for a in ["$5.93", "$5.64", "$7.08", "$6.45"] {
+            reject(t, Metric::EpsGaap, a, "units", q);
+            reject(t, Metric::EpsNonGaap, a, "units", q);
+        }
+        // Nine months before three months, either year order.
+        let t = "(In millions)\nNine Months Ended September 30, Three Months Ended September 30,\n2025 2026 2025 2026\nTotal revenues $300 $360 $100 $120";
+        let q = "Total revenues $300 $360 $100 $120";
+        for a in ["$300", "$360", "$100", "$120"] {
+            reject(t, Metric::Revenue, a, "millions", q);
+        }
+        let t = "(In millions)\nNine Months Ended September 30, Three Months Ended September 30,\n2026 2025 2026 2025\nTotal revenues $360 $300 $120 $100";
+        let q = "Total revenues $360 $300 $120 $100";
+        for a in ["$360", "$120"] {
+            reject(t, Metric::Revenue, a, "millions", q);
+        }
+        // Three months first, prior year first, all on the heading line.
+        let t = "(In millions) Three Months Ended 2025 2026 Nine Months Ended 2025 2026\nTotal revenues $100 $120 $300 $360";
+        let q = "Total revenues $100 $120 $300 $360";
+        let f = verify_figure(t, Metric::Revenue, &raw("$120", "millions", false, q));
+        assert_eq!(f.unwrap().value, 120e6);
+        for a in ["$100", "$300", "$360"] {
+            reject(t, Metric::Revenue, a, "millions", q);
+        }
+    }
+
+    #[test]
+    fn a_repeated_latest_year_needs_its_periods_newest_first() {
+        // AMD's statement: two 2026 quarters, newest first, then 2025.
+        let t = "(In millions, except per share amounts)\nThree Months Ended Nine Months Ended\nSeptember 26, 2026 June 27, 2026 September 27, 2025 September 26, 2026 September 27, 2025\nNet revenue $13,377 $11,536 $9,246 $35,166 $24,369";
+        let q = "Net revenue $13,377 $11,536 $9,246 $35,166 $24,369";
+        let f = verify_figure(t, Metric::Revenue, &raw("$13,377", "millions", false, q));
+        assert_eq!(f.unwrap().value, 13.377e9);
+        assert!(verify_figure(t, Metric::Revenue, &raw("$11,536", "millions", false, q)).is_err());
+        // A newer latest-year period later in the header, past the first
+        // block: rejected.
+        for header in [
+            "June 30, 2026 September 30, 2025 September 30, 2026",
+            "Q2 2026 Q3 2025 Q3 2026",
+        ] {
+            let t = format!("(In millions)\n{header}\nTotal revenues $115 $100 $120");
+            let q = "Total revenues $115 $100 $120";
+            let r = verify_figure(&t, Metric::Revenue, &raw("$115", "millions", false, q));
+            assert!(r.is_err(), "{header}: {r:?}");
+        }
+        // Oldest first, a tie, or a latest year with no period: rejected;
+        // "Decrease" is not December.
+        assert_eq!(period_before("Increase Decrease "), None);
+        assert_eq!(period_before("Sept. 30, "), Some(Period::Month(9, 30)));
+        assert_eq!(period_before("Q3"), Some(Period::Quarter(3)));
+        for header in [
+            "June 30, 2026 September 30, 2026",
+            "Q2 2026 Q3 2026 Q2 2025 Q3 2025",
+            "Q3 2026 Q3 2026",
+            "2026 September 30, 2026 2025",
+        ] {
+            let t = format!("(In millions)\n{header}\nTotal revenues $120 $100 $90 $95");
+            let q = "Total revenues $120 $100 $90 $95";
+            let r = verify_figure(&t, Metric::Revenue, &raw("$120", "millions", false, q));
+            assert!(r.is_err(), "{header}: {r:?}");
+        }
+        // CVS repeats 2026 across blocks with no month or quarter on its
+        // year tokens; the label line above names the periods (three months
+        // first), so the first column stands.
+        let t = "Three Months Ended September 30, Nine Months Ended September 30,\nIn millions, except per share amounts 2026 2025 Change 2026 2025 Change\nTotal revenues $108,399 $102,871 $5,528 $314,921 $296,374 $18,547";
+        let q = "Total revenues $108,399 $102,871 $5,528 $314,921 $296,374 $18,547";
+        assert!(verify_figure(t, Metric::Revenue, &raw("$108,399", "millions", false, q)).is_ok());
+        // With no period labels at all, the order is unknown.
+        let t = "In millions, except per share amounts 2026 2025 Change 2026 2025 Change\nTotal revenues $108,399 $102,871 $5,528 $314,921 $296,374 $18,547";
+        assert!(verify_figure(t, Metric::Revenue, &raw("$108,399", "millions", false, q)).is_err());
+        let t = "(In millions)\n2026 2025 2026 2025\nTotal revenues $360 $300 $120 $100";
+        let q = "Total revenues $360 $300 $120 $100";
+        assert!(verify_figure(t, Metric::Revenue, &raw("$360", "millions", false, q)).is_err());
+    }
+
+    #[test]
+    fn headers_stay_within_their_table() {
+        let ok = |t: &str, amount: &str, q: &str| {
+            let r = verify_figure(t, Metric::Revenue, &raw(amount, "millions", false, q));
+            assert!(r.is_ok(), "{amount} in {q:?}: {r:?}");
+        };
+        let bad = |t: &str, amount: &str, q: &str| {
+            let r = verify_figure(t, Metric::Revenue, &raw(amount, "millions", false, q));
+            assert!(r.is_err(), "{amount} in {q:?}: {r:?}");
+        };
+        let q = "Total revenues $14,766 $13,467";
+        // A previous table's prior-year-first header does not reach past a
+        // title line, nor past the next table's own "Q3'26 Q3'25" header.
+        let t = "(In millions) 2025 2026\nGross Bookings $49,740 $59,819\nSupplemental table\nQ3'26 Q3'25\nTotal revenues $14,766 $13,467";
+        ok(t, "$14,766", q);
+        bad(t, "$13,467", q);
+        let t = "(In millions) 2025 2026\nGross Bookings $49,740 $59,819\nQ3'26 Q3'25\nTotal revenues $14,766 $13,467";
+        ok(t, "$14,766", q);
+        bad(t, "$13,467", q);
+        // Past the title line the earlier header can still reject the first
+        // column (its first year is not the latest), and never accepts.
+        let t = "(In millions) 2025 2026\nGross Bookings $49,740 $59,819\nSupplemental table\nTotal revenues $14,766 $13,467";
+        bad(t, "$14,766", q);
+        bad(t, "$13,467", q);
+        // A row-group label between header and row: the header can only
+        // reject.
+        let t = "(In millions)\n2025 2026\nRevenues:\nTotal revenues $100 $120";
+        let q2 = "Total revenues $100 $120";
+        bad(t, "$100", q2);
+        bad(t, "$120", q2);
+        let t = "(In millions)\n2026 2025\nRevenues:\nTotal revenues $120 $100";
+        let q2 = "Total revenues $120 $100";
+        ok(t, "$120", q2);
+        bad(t, "$100", q2);
+        // A "$ Change" column label does not make the header a data row.
+        let t = "(In millions)\n2025 2026 $ Change\nTotal revenues $100 $120 $20";
+        let q = "Total revenues $100 $120 $20";
+        bad(t, "$100", q);
+        // A prose line with years is not a header.
+        let t = "(In millions)\n2026 2025\nRevenue by region for 2025 and 2026 restated\nTotal revenues $120 $100";
+        let q = "Total revenues $120 $100";
+        ok(t, "$120", q);
+        bad(t, "$100", q);
+    }
+
+    #[test]
+    fn per_share_rows_read_the_latest_column() {
+        // Without a header, a row of periods is read from its first column.
+        let t = "Diluted EPS $1.33 $1.08";
+        assert!(verify_figure(t, Metric::EpsGaap, &raw("$1.08", "units", false, t)).is_err());
+        assert!(verify_figure(t, Metric::EpsGaap, &raw("$1.33", "units", false, t)).is_ok());
+        // AMGN: years group GAAP and non-GAAP columns, so only the row's
+        // first number maps to a year column with certainty.
+        let amgn = "(In millions, except per-share data)\n(Unaudited)\nThe following table presents the computations for GAAP and non-GAAP diluted earnings per share:\nThree months ended September 30, 2026 Three months ended September 30, 2025\nGAAP Non-GAAP GAAP Non-GAAP\nNet income $3,864 $3,520 $3,216 $3,055\nShares (Denominator):\nWeighted-average shares for diluted EPS 546 546 542 542\nDiluted EPS $7.08 $6.45 $5.93 $5.64";
+        let q = "Diluted EPS $7.08 $6.45 $5.93 $5.64";
+        let f = verify_figure(amgn, Metric::EpsGaap, &raw("$7.08", "units", false, q));
+        assert_eq!(f.unwrap().value, 7.08);
+        for amount in ["$6.45", "$5.93", "$5.64"] {
+            for m in [Metric::EpsGaap, Metric::EpsNonGaap] {
+                let r = verify_figure(amgn, m, &raw(amount, "units", false, q));
+                assert!(r.is_err(), "{amount} {m:?}: {r:?}");
+            }
+        }
+        // EMR: prior year first.
+        let emr = "(AMOUNTS IN MILLIONS EXCEPT PER SHARE, UNAUDITED)\nQuarter Ended September 30, Year Ended September 30,\n2025 2026 2025 2026\nNet sales $4,855 $5,201 $18,016 $18,982\nDiluted earnings per common share $1.08 $1.33 $4.00 $4.79";
+        let q = "Diluted earnings per common share $1.08 $1.33 $4.00 $4.79";
+        let f = verify_figure(emr, Metric::EpsGaap, &raw("$1.33", "units", false, q));
+        assert_eq!(f.unwrap().value, 1.33);
+        for amount in ["$1.08", "$4.00", "$4.79"] {
+            let r = verify_figure(emr, Metric::EpsGaap, &raw(amount, "units", false, q));
+            assert!(r.unwrap_err().contains("current period"), "{amount}");
+        }
+        // UBER: a footnote marker in the label is not a column.
+        let uber = "(In millions, except percentages and per share amounts) 2025 2026% Change % Change (Constant Currency (1))\nGAAP Diluted EPS $3.11 $0.25 (92) %\nNon-GAAP EPS (1) $0.65 $0.88 35%";
+        let q = "GAAP Diluted EPS $3.11 $0.25 (92) %";
+        let f = verify_figure(uber, Metric::EpsGaap, &raw("$0.25", "units", false, q));
+        assert_eq!(f.unwrap().value, 0.25);
+        assert!(verify_figure(uber, Metric::EpsGaap, &raw("$3.11", "units", false, q)).is_err());
+        let q = "Non-GAAP EPS (1) $0.65 $0.88 35%";
+        let f = verify_figure(uber, Metric::EpsNonGaap, &raw("$0.88", "units", false, q));
+        assert_eq!(f.unwrap().value, 0.88);
+        // EMR's statement: "Costs and expenses:" and a group label sit
+        // between the "2025 2026 2025 2026" header and the EPS row.
+        let emr = "(AMOUNTS IN MILLIONS EXCEPT PER SHARE, UNAUDITED)\nQuarter Ended September 30, Year Ended September 30,\n2025 2026 2025 2026\nNet sales $4,855 $5,201 $18,016 $18,982\nCosts and expenses:\nCost of sales 2,335 2,461 8,497 8,854\nNet earnings common stockholders $609 $744 $2,270 $2,691\nDiluted earnings per share common stockholders\nEarnings from continuing operations $1.07 $1.33 $3.99 $4.79\nDiscontinued operations 0.01 — 0.01 —\nDiluted earnings per common share $1.08 $1.33 $4.00 $4.79";
+        let q = "Diluted earnings per common share $1.08 $1.33 $4.00 $4.79";
+        for a in ["$1.08", "$1.33", "$4.79"] {
+            let r = verify_figure(emr, Metric::EpsGaap, &raw(a, "units", false, q));
+            assert!(r.unwrap_err().contains("current period"), "{a}");
+        }
+        // AMD: net income and per-share columns alternate; the per-share
+        // cells are the row's periods.
+        let amd = "(In millions, except per share amounts)\nThree Months Ended\nSeptember 26, 2026 June 27, 2026 September 27, 2025\nNon-GAAP net income / earnings per share $3,471 $2.09 $2,760 $1.66 $1,965 $1.20";
+        let q = "Non-GAAP net income / earnings per share $3,471 $2.09 $2,760 $1.66 $1,965 $1.20";
+        let f = verify_figure(amd, Metric::EpsNonGaap, &raw("$2.09", "units", false, q));
+        assert_eq!(f.unwrap().value, 2.09);
+        for a in ["$1.66", "$1.20"] {
+            assert!(verify_figure(amd, Metric::EpsNonGaap, &raw(a, "units", false, q)).is_err());
+        }
+        // Prose that cites another per-share figure first is not a table row.
+        let t = "Excluding the current year charges described above of $0.06 per share, diluted earnings per share was $3.57, an increase of 11%.";
+        assert!(verify_figure(t, Metric::EpsNonGaap, &raw("$3.57", "units", false, t)).is_ok());
+        // Prose under a prior-year-first header, comparing two periods, is
+        // not a row of columns either.
+        let t = format!("{emr}\nDiluted EPS was $1.33, compared with $1.08 a year ago.");
+        let q = "Diluted EPS was $1.33, compared with $1.08 a year ago.";
+        assert!(verify_figure(&t, Metric::EpsGaap, &raw("$1.33", "units", false, q)).is_ok());
     }
 
     #[test]
