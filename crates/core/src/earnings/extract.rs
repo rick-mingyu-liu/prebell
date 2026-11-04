@@ -481,7 +481,8 @@ fn period_before(before: &str) -> Option<Period> {
 /// year listed once is; listed more than once, every such token needs a
 /// period of one kind, and the first must be strictly the newest ("September
 /// 26, 2026 June 27, 2026" passes; "June 30, 2026 September 30, 2026" and a
-/// tie do not).
+/// tie do not). No latest-year period anywhere in the header may be newer
+/// than the first.
 fn first_is_newest(h: &Header, distinct: &[u32]) -> bool {
     let latest = distinct[distinct.len() - 1];
     let end = if distinct.len() == 1 {
@@ -498,6 +499,20 @@ fn first_is_newest(h: &Header, distinct: &[u32]) -> bool {
     let [first, rest @ ..] = latest_periods.as_slice() else {
         return false;
     };
+    // Anywhere in the header, no latest-year period of the same kind is
+    // newer than the first ("June 30, 2026 September 30, 2025 September 30,
+    // 2026"); a tie (AMD's nine-month "September 26, 2026") is fine.
+    let newer_later = first.is_some_and(|first| {
+        (0..h.years.len()).any(|i| {
+            h.years[i] == latest
+                && h.periods[i].is_some_and(|p| {
+                    std::mem::discriminant(&p) == std::mem::discriminant(&first) && p > first
+                })
+        })
+    });
+    if newer_later {
+        return false;
+    }
     if rest.is_empty() {
         return true;
     }
@@ -1514,6 +1529,17 @@ mod tests {
         let f = verify_figure(t, Metric::Revenue, &raw("$13,377", "millions", false, q));
         assert_eq!(f.unwrap().value, 13.377e9);
         assert!(verify_figure(t, Metric::Revenue, &raw("$11,536", "millions", false, q)).is_err());
+        // A newer latest-year period later in the header, past the first
+        // block: rejected.
+        for header in [
+            "June 30, 2026 September 30, 2025 September 30, 2026",
+            "Q2 2026 Q3 2025 Q3 2026",
+        ] {
+            let t = format!("(In millions)\n{header}\nTotal revenues $115 $100 $120");
+            let q = "Total revenues $115 $100 $120";
+            let r = verify_figure(&t, Metric::Revenue, &raw("$115", "millions", false, q));
+            assert!(r.is_err(), "{header}: {r:?}");
+        }
         // Oldest first, a tie, or a latest year with no period: rejected;
         // "Decrease" is not December.
         assert_eq!(period_before("Increase Decrease "), None);
