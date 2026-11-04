@@ -673,7 +673,9 @@ fn cell_at(cells: &[(usize, usize)], at: usize, len: usize) -> Option<usize> {
 /// that each hold every year once, and there is one year per cell; then the
 /// column is the latest year's place in the first block, which must be the
 /// quarter when there are several. An untrusted header allows only the
-/// first cell, when the header starts with the latest year. A header whose
+/// first cell, when the header starts with the latest year, names its
+/// periods if it repeats years, and lists that first period as the newest
+/// (`first_is_newest`). A header whose
 /// first period is not the quarter rejects any repeated-year row, and with
 /// more cells than years a leading "(5)" may be a footnote, not a column.
 fn current_column(
@@ -719,7 +721,13 @@ fn current_column(
     if trusted {
         years[..k].iter().position(|&y| y == latest) == Some(col)
     } else {
-        col == 0 && years[0] == latest && first_is_newest(&h, &distinct)
+        // Repeated years with no period labels at all, neither a period
+        // length on the header or its label line ("Three Months Ended ...")
+        // nor a month or quarter on a latest-year token: order unknown.
+        let unlabelled = repeated
+            && quarter_first.is_none()
+            && (0..years.len()).all(|i| years[i] != latest || h.periods[i].is_none());
+        col == 0 && years[0] == latest && !unlabelled && first_is_newest(&h, &distinct)
     }
 }
 
@@ -1335,7 +1343,7 @@ mod tests {
     #[test]
     fn unparenthesised_scale_headings() {
         // CVS: the heading line carries the column years, no parentheses.
-        let cvs = "In billions, except per share amounts 2026 2025 2026 Projected\nTotal revenues $108.4 $102.9 At least $420.0\nIn millions, except per share amounts 2026 2025 Change 2026 2025 Change\nTotal revenues $108,399 $102,871 $5,528 $314,921 $296,374 $18,547";
+        let cvs = "Three Months Ended September 30, Year Ending December 31,\nIn billions, except per share amounts 2026 2025 2026 Projected\nTotal revenues $108.4 $102.9 At least $420.0\nConsolidated third quarter results\nThree Months Ended September 30, Nine Months Ended September 30,\nIn millions, except per share amounts 2026 2025 Change 2026 2025 Change\nTotal revenues $108,399 $102,871 $5,528 $314,921 $296,374 $18,547";
         let q = "Total revenues $108,399 $102,871 $5,528 $314,921 $296,374 $18,547";
         let f = verify_figure(cvs, Metric::Revenue, &raw("$108,399", "millions", false, q));
         assert_eq!(f.unwrap().value, 108.399e9);
@@ -1522,11 +1530,18 @@ mod tests {
             let r = verify_figure(&t, Metric::Revenue, &raw("$120", "millions", false, q));
             assert!(r.is_err(), "{header}: {r:?}");
         }
-        // Repeats across blocks only (CVS "2026 2025 Change 2026 2025 Change"
-        // with extra cells) keep the first column.
-        let t = "In millions, except per share amounts 2026 2025 Change 2026 2025 Change\nTotal revenues $108,399 $102,871 $5,528 $314,921 $296,374 $18,547";
+        // CVS repeats 2026 across blocks with no month or quarter on its
+        // year tokens; the label line above names the periods (three months
+        // first), so the first column stands.
+        let t = "Three Months Ended September 30, Nine Months Ended September 30,\nIn millions, except per share amounts 2026 2025 Change 2026 2025 Change\nTotal revenues $108,399 $102,871 $5,528 $314,921 $296,374 $18,547";
         let q = "Total revenues $108,399 $102,871 $5,528 $314,921 $296,374 $18,547";
         assert!(verify_figure(t, Metric::Revenue, &raw("$108,399", "millions", false, q)).is_ok());
+        // With no period labels at all, the order is unknown.
+        let t = "In millions, except per share amounts 2026 2025 Change 2026 2025 Change\nTotal revenues $108,399 $102,871 $5,528 $314,921 $296,374 $18,547";
+        assert!(verify_figure(t, Metric::Revenue, &raw("$108,399", "millions", false, q)).is_err());
+        let t = "(In millions)\n2026 2025 2026 2025\nTotal revenues $360 $300 $120 $100";
+        let q = "Total revenues $360 $300 $120 $100";
+        assert!(verify_figure(t, Metric::Revenue, &raw("$360", "millions", false, q)).is_err());
     }
 
     #[test]
