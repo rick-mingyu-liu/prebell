@@ -14,7 +14,7 @@ use crate::earnings::charts::{charts, r2_key};
 use crate::earnings::detect::{domestic_by_cik, earnings_entries, name_mismatches};
 use crate::earnings::draft::{slug, write, CONTENT_TYPE, TEMPLATE_ID};
 use crate::earnings::extract::{extract, Extracted};
-use crate::earnings::facts::{missing_required, EarningsFacts, Metrics};
+use crate::earnings::facts::{missing_required, EarningsFacts, Metric, Metrics};
 use crate::earnings::store::{ChartRow, EarningsStore, FilingRow};
 use crate::earnings::xbrl::fetch_trend;
 use crate::earnings::{find, in_window, WatchEntry};
@@ -544,6 +544,21 @@ fn sources(f: &EarningsFacts) -> Vec<NewsReason> {
     out
 }
 
+/// Why a field `missing_required` names is missing: the extraction, EDGAR
+/// or verifier reason (GAAP EPS's for "eps"), so the run error says which
+/// step failed.
+fn missing_reason<'a>(f: &'a EarningsFacts, field: &str) -> Option<&'a str> {
+    let metric = match field {
+        "revenue" => Metric::Revenue,
+        "eps" => Metric::EpsGaap,
+        _ => return None,
+    };
+    match f.metrics.get(metric) {
+        Field::Missing { reason } => Some(reason),
+        Field::Value(_) => None,
+    }
+}
+
 async fn build(
     now: DateTime<Utc>,
     es: &dyn EarningsStore,
@@ -562,15 +577,11 @@ async fn build(
     let facts = gather(filings, llm, f).await?;
     let missing = missing_required(&facts);
     if !missing.is_empty() {
-        return not_ready(
-            now,
-            es,
-            store,
-            f,
-            row,
-            format!("missing {}", missing.join(", ")),
-        )
-        .await;
+        let mut err = format!("missing {}", missing.join(", "));
+        if let Some(reason) = missing_reason(&facts, missing[0]) {
+            err.push_str(&format!(" ({}: {reason})", missing[0]));
+        }
+        return not_ready(now, es, store, f, row, err).await;
     }
     let (en, en_md) = match write(llm, &facts, Lang::En).await {
         Ok(x) => x,
@@ -1328,8 +1339,10 @@ mod tests {
         let o = build_tick(utc("2026-10-31T01:30:00Z"), &es, base.as_ref(), &fl, &l)
             .await
             .unwrap();
-        assert!(matches!(&o[0].1, TickOutcome::Retrying(e) if e.contains("revenue")));
+        let err = "missing revenue, eps (revenue: no EX-99 exhibit in the filing)";
+        assert_eq!(o[0].1, TickOutcome::Retrying(err.into()));
         assert_eq!(base.runs.borrow()[KEY].status, "pending");
+        assert_eq!(base.runs.borrow()[KEY].last_error.as_deref(), Some(err));
         // Retried no sooner than 5 minutes later.
         let o = build_tick(utc("2026-10-31T01:33:00Z"), &es, base.as_ref(), &fl, &l)
             .await
@@ -1342,8 +1355,38 @@ mod tests {
         assert_eq!(base.runs.borrow()[KEY].status, "failed");
         assert_eq!(base.alerts.borrow().len(), 1);
         assert_eq!(base.alerts.borrow()[0].1, "error");
+        assert!(
+            base.alerts.borrow()[0].2.ends_with(err),
+            "{:?}",
+            base.alerts.borrow()[0]
+        );
         assert!(base.posts.borrow().is_empty());
         assert_eq!(es.filings.borrow()[ACC].state, "done");
+    }
+
+    struct DeniedLlm;
+    #[async_trait(?Send)]
+    impl LlmProvider for DeniedLlm {
+        async fn complete_json(&self, _: &str, _: &str) -> Result<Value, ProviderError> {
+            Err(ProviderError::Http(401))
+        }
+    }
+
+    #[tokio::test]
+    async fn a_failed_extraction_names_its_reason() {
+        let (base, es, fl) = detected().await;
+        let o = build_tick(
+            poll_time() + Duration::minutes(1),
+            &es,
+            base.as_ref(),
+            &fl,
+            &DeniedLlm,
+        )
+        .await
+        .unwrap();
+        let err = "missing revenue, eps (revenue: extraction failed: http status 401)";
+        assert_eq!(o[0].1, TickOutcome::Retrying(err.into()));
+        assert_eq!(base.runs.borrow()[KEY].last_error.as_deref(), Some(err));
     }
 
     #[tokio::test]
