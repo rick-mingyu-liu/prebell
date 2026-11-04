@@ -205,7 +205,7 @@ pub fn verify_figure(text: &str, metric: Metric, raw: &RawFigure) -> Result<Figu
             let table = Table::find(&lines, &quote);
             let cells = row_cells(&quote);
             let col = cell_at(&cells, at, amount.len());
-            if !col.is_some_and(|col| current_column(table.as_ref(), col, cells.len())) {
+            if !col.is_some_and(|col| current_column(table.as_ref(), &quote, &cells, col)) {
                 return Err(CURRENT_COLUMN.into());
             }
             // The row's label, without the earlier columns.
@@ -260,7 +260,7 @@ pub fn verify_figure(text: &str, metric: Metric, raw: &RawFigure) -> Result<Figu
                 if in_row {
                     let lines = Lines::new(text);
                     let table = Table::find(&lines, &quote);
-                    if !current_column(table.as_ref(), col, cells.len()) {
+                    if !current_column(table.as_ref(), &quote, &cells, col) {
                         return Err(CURRENT_COLUMN.into());
                     }
                 }
@@ -384,23 +384,29 @@ impl<'a> Table<'a> {
         })
     }
 
-    /// The nearest year header line above the quote, within its table: the
-    /// line index and its years. The search stops at the scale heading and
-    /// at a line with no digits that is not a column label ("Supplemental
-    /// table", "Revenues:"), and a line with other words is not a header.
-    fn header(&self) -> Option<(usize, Vec<u32>)> {
+    /// The nearest year header line between the scale heading and the
+    /// quote; a line with other words is not a header. It is `past_stop`
+    /// when a line with no digits that is not a column label ("Supplemental
+    /// table", "Revenues:") sits between it and the quote: such a header may
+    /// reject the row's first column but never accepts a later one.
+    fn header(&self) -> Option<Header> {
         let l = self.lines;
         let (top, bottom) = (l.line_of(self.heading_at), l.line_of(self.quote_at));
+        let mut past_stop = false;
         for i in (top..=bottom).rev() {
             let line = l.line(i, self.quote_at);
             if line.is_empty() {
                 continue;
             }
             if let Some(years) = header_years(line, i == top) {
-                return Some((i, years));
+                return Some(Header {
+                    line: i,
+                    years,
+                    past_stop,
+                });
             }
             if !line.contains(|c: char| c.is_ascii_digit()) && !period_words_only(line) {
-                return None;
+                past_stop = true;
             }
         }
         None
@@ -425,6 +431,13 @@ impl<'a> Table<'a> {
         let labels = format!("{above} {}", l.line(i, self.quote_at));
         r.captures(&labels).map(|c| c.get(1).is_some())
     }
+}
+
+/// A year header line found above a quote.
+struct Header {
+    line: usize,
+    years: Vec<u32>,
+    past_stop: bool,
 }
 
 /// `s` without its parenthesised parts, nested ones included.
@@ -581,18 +594,31 @@ fn cell_at(cells: &[(usize, usize)], at: usize, len: usize) -> Option<usize> {
     cells.iter().position(|&(s, _)| s >= at && s < at + len)
 }
 
-/// Whether cell `col` of a row of `cells` cells is the current period's
-/// column. Without a year header: the first cell. A header is trusted when
-/// its years form blocks that each hold every year once and there is one
-/// year per cell; then the column is the latest year's place in the first
-/// block, which must be the quarter when there are several. An untrusted
-/// header allows only the first cell, when the header starts with the
-/// latest year. A header whose first period is not the quarter rejects any
-/// repeated-year row.
-fn current_column(table: Option<&Table>, col: usize, cells: usize) -> bool {
-    let Some((t, (i, years))) = table.and_then(|t| Some((t, t.header()?))) else {
+/// Whether cell `col` of the row's `cells` (spans in `quote`) is the
+/// current period's column. Without a year header: the first cell. A
+/// header is trusted when it is not past a stop line, its years form blocks
+/// that each hold every year once, and there is one year per cell; then the
+/// column is the latest year's place in the first block, which must be the
+/// quarter when there are several. An untrusted header allows only the
+/// first cell, when the header starts with the latest year. A header whose
+/// first period is not the quarter rejects any repeated-year row, and with
+/// more cells than years a leading "(5)" may be a footnote, not a column.
+fn current_column(
+    table: Option<&Table>,
+    quote: &str,
+    cells: &[(usize, usize)],
+    col: usize,
+) -> bool {
+    let Some((t, h)) = table.and_then(|t| Some((t, t.header()?))) else {
         return col == 0;
     };
+    let years = &h.years;
+    if col == 0 && cells.len() > years.len() {
+        let (s, e) = cells[0];
+        if e - s <= 2 && quote[..s].ends_with('(') && quote[e..].starts_with(')') {
+            return false;
+        }
+    }
     let mut distinct = years.clone();
     distinct.sort_unstable();
     distinct.dedup();
@@ -600,15 +626,16 @@ fn current_column(table: Option<&Table>, col: usize, cells: usize) -> bool {
     let latest = distinct[k - 1];
     let repeated = years.len() > k;
     let quarter_first = if repeated {
-        t.quarter_first(i)
+        t.quarter_first(h.line)
     } else {
         Some(true)
     };
     if quarter_first == Some(false) {
         return false;
     }
-    let trusted = k >= 2
-        && years.len() == cells
+    let trusted = !h.past_stop
+        && k >= 2
+        && years.len() == cells.len()
         && years.len() % k == 0
         && quarter_first == Some(true)
         && years.chunks(k).all(|c| {
@@ -1337,6 +1364,14 @@ mod tests {
         assert!(verify_figure(t, Metric::NetIncome, &raw("(37)", "millions", true, q)).is_err());
         let f = verify_figure(t, Metric::NetIncome, &raw("(62)", "millions", true, q));
         assert_eq!(f.unwrap().value, -62e6);
+        // More cells than header years: a leading "(5)" may be a footnote,
+        // so it is not read as the current column.
+        let t = "(In millions)\n2026 2025\nNet loss for the period (5) (62) (37)";
+        let q = "Net loss for the period (5) (62) (37)";
+        for a in ["(5)", "(62)", "(37)"] {
+            let r = verify_figure(t, Metric::NetIncome, &raw(a, "millions", true, q));
+            assert!(r.is_err(), "{a}: {r:?}");
+        }
     }
 
     #[test]
@@ -1409,9 +1444,21 @@ mod tests {
         let t = "(In millions) 2025 2026\nGross Bookings $49,740 $59,819\nQ3'26 Q3'25\nTotal revenues $14,766 $13,467";
         ok(t, "$14,766", q);
         bad(t, "$13,467", q);
+        // Past the title line the earlier header can still reject the first
+        // column (its first year is not the latest), and never accepts.
         let t = "(In millions) 2025 2026\nGross Bookings $49,740 $59,819\nSupplemental table\nTotal revenues $14,766 $13,467";
-        ok(t, "$14,766", q);
+        bad(t, "$14,766", q);
         bad(t, "$13,467", q);
+        // A row-group label between header and row: the header can only
+        // reject.
+        let t = "(In millions)\n2025 2026\nRevenues:\nTotal revenues $100 $120";
+        let q2 = "Total revenues $100 $120";
+        bad(t, "$100", q2);
+        bad(t, "$120", q2);
+        let t = "(In millions)\n2026 2025\nRevenues:\nTotal revenues $120 $100";
+        let q2 = "Total revenues $120 $100";
+        ok(t, "$120", q2);
+        bad(t, "$100", q2);
         // A "$ Change" column label does not make the header a data row.
         let t = "(In millions)\n2025 2026 $ Change\nTotal revenues $100 $120 $20";
         let q = "Total revenues $100 $120 $20";
@@ -1459,6 +1506,14 @@ mod tests {
         let q = "Non-GAAP EPS (1) $0.65 $0.88 35%";
         let f = verify_figure(uber, Metric::EpsNonGaap, &raw("$0.88", "units", false, q));
         assert_eq!(f.unwrap().value, 0.88);
+        // EMR's statement: "Costs and expenses:" and a group label sit
+        // between the "2025 2026 2025 2026" header and the EPS row.
+        let emr = "(AMOUNTS IN MILLIONS EXCEPT PER SHARE, UNAUDITED)\nQuarter Ended September 30, Year Ended September 30,\n2025 2026 2025 2026\nNet sales $4,855 $5,201 $18,016 $18,982\nCosts and expenses:\nCost of sales 2,335 2,461 8,497 8,854\nNet earnings common stockholders $609 $744 $2,270 $2,691\nDiluted earnings per share common stockholders\nEarnings from continuing operations $1.07 $1.33 $3.99 $4.79\nDiscontinued operations 0.01 — 0.01 —\nDiluted earnings per common share $1.08 $1.33 $4.00 $4.79";
+        let q = "Diluted earnings per common share $1.08 $1.33 $4.00 $4.79";
+        for a in ["$1.08", "$1.33", "$4.79"] {
+            let r = verify_figure(emr, Metric::EpsGaap, &raw(a, "units", false, q));
+            assert!(r.unwrap_err().contains("current period"), "{a}");
+        }
         // AMD: net income and per-share columns alternate; the per-share
         // cells are the row's periods.
         let amd = "(In millions, except per share amounts)\nThree Months Ended\nSeptember 26, 2026 June 27, 2026 September 27, 2025\nNon-GAAP net income / earnings per share $3,471 $2.09 $2,760 $1.66 $1,965 $1.20";
