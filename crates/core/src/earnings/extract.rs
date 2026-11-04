@@ -398,10 +398,12 @@ impl<'a> Table<'a> {
             if line.is_empty() {
                 continue;
             }
-            if let Some(years) = header_years(line, i == top) {
+            if let Some(tokens) = header_years(line, i == top) {
+                let (years, periods) = tokens.into_iter().unzip();
                 return Some(Header {
                     line: i,
                     years,
+                    periods,
                     past_stop,
                 });
             }
@@ -437,7 +439,74 @@ impl<'a> Table<'a> {
 struct Header {
     line: usize,
     years: Vec<u32>,
+    /// The period written just before each year, if any.
+    periods: Vec<Option<Period>>,
     past_stop: bool,
+}
+
+/// A year token's period label: "September 26, 2026" is month 9, day 26;
+/// "Q3 2026" and "Q3'26" are quarter 3.
+#[derive(Debug, Clone, Copy, PartialEq, PartialOrd)]
+enum Period {
+    Month(u32, u32),
+    Quarter(u32),
+}
+
+/// The period label that ends `before` (the text just before a year).
+fn period_before(before: &str) -> Option<Period> {
+    static MONTH: OnceLock<Regex> = OnceLock::new();
+    static QUARTER: OnceLock<Regex> = OnceLock::new();
+    let month = MONTH.get_or_init(|| {
+        Regex::new(r"(?i)\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)(?:uary|ruary|ch|il|e|y|ust|t|tember|ober|ember)?\b\.?(?:\s+(\d{1,2}))?\s*,?\s*$")
+            .expect("valid built-in regex")
+    });
+    let quarter =
+        QUARTER.get_or_init(|| Regex::new(r"(?i)\bq([1-4])\s*$").expect("valid built-in regex"));
+    if let Some(c) = quarter.captures(before) {
+        return Some(Period::Quarter(c[1].parse().ok()?));
+    }
+    let c = month.captures(before)?;
+    let m = [
+        "jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec",
+    ]
+    .iter()
+    .position(|m| c[1].eq_ignore_ascii_case(m))?;
+    let day = c.get(2).map_or(Some(0), |d| d.as_str().parse().ok())?;
+    Some(Period::Month(m as u32 + 1, day))
+}
+
+/// For an untrusted header that starts with the latest year: whether that
+/// first token is the current period. Within the first block (up to where
+/// every year has appeared; the whole header for a single year), a latest
+/// year listed once is; listed more than once, every such token needs a
+/// period of one kind, and the first must be strictly the newest ("September
+/// 26, 2026 June 27, 2026" passes; "June 30, 2026 September 30, 2026" and a
+/// tie do not).
+fn first_is_newest(h: &Header, distinct: &[u32]) -> bool {
+    let latest = distinct[distinct.len() - 1];
+    let end = if distinct.len() == 1 {
+        h.years.len()
+    } else {
+        (1..=h.years.len())
+            .find(|&i| distinct.iter().all(|y| h.years[..i].contains(y)))
+            .unwrap_or(h.years.len())
+    };
+    let latest_periods: Vec<_> = (0..end)
+        .filter(|&i| h.years[i] == latest)
+        .map(|i| h.periods[i])
+        .collect();
+    let [first, rest @ ..] = latest_periods.as_slice() else {
+        return false;
+    };
+    if rest.is_empty() {
+        return true;
+    }
+    let Some(first) = first else {
+        return false;
+    };
+    rest.iter().all(|p| {
+        p.is_some_and(|p| std::mem::discriminant(&p) == std::mem::discriminant(first) && p < *first)
+    })
 }
 
 /// `s` without its parenthesised parts, nested ones included.
@@ -523,7 +592,7 @@ fn period_words_only(s: &str) -> bool {
 /// least two, no dollar amounts (a data row; a "$ Change" label is fine)
 /// and no words but period and column labels. On the scale heading's line only the part from the
 /// first year counts ("In millions, except per share amounts 2026 2025").
-fn header_years(line: &str, heading_line: bool) -> Option<Vec<u32>> {
+fn header_years(line: &str, heading_line: bool) -> Option<Vec<(u32, Option<Period>)>> {
     static R: OnceLock<Regex> = OnceLock::new();
     let r =
         R.get_or_init(|| Regex::new(r"\b(?:19|20)\d\d\b|'(\d\d)\b").expect("valid built-in regex"));
@@ -550,9 +619,13 @@ fn header_years(line: &str, heading_line: bool) -> Option<Vec<u32>> {
     }
     found
         .iter()
-        .map(|c| match c.get(1) {
-            Some(yy) => yy.as_str().parse::<u32>().ok().map(|y| 2000 + y),
-            None => c.get(0)?.as_str().parse().ok(),
+        .map(|c| {
+            let whole = c.get(0)?;
+            let year = match c.get(1) {
+                Some(yy) => 2000 + yy.as_str().parse::<u32>().ok()?,
+                None => whole.as_str().parse().ok()?,
+            };
+            Some((year, period_before(&line[..whole.start()])))
         })
         .collect()
 }
@@ -646,7 +719,7 @@ fn current_column(
     if trusted {
         years[..k].iter().position(|&y| y == latest) == Some(col)
     } else {
-        col == 0 && years[0] == latest
+        col == 0 && years[0] == latest && first_is_newest(&h, &distinct)
     }
 }
 
@@ -1423,6 +1496,37 @@ mod tests {
         for a in ["$100", "$300", "$360"] {
             reject(t, Metric::Revenue, a, "millions", q);
         }
+    }
+
+    #[test]
+    fn a_repeated_latest_year_needs_its_periods_newest_first() {
+        // AMD's statement: two 2026 quarters, newest first, then 2025.
+        let t = "(In millions, except per share amounts)\nThree Months Ended Nine Months Ended\nSeptember 26, 2026 June 27, 2026 September 27, 2025 September 26, 2026 September 27, 2025\nNet revenue $13,377 $11,536 $9,246 $35,166 $24,369";
+        let q = "Net revenue $13,377 $11,536 $9,246 $35,166 $24,369";
+        let f = verify_figure(t, Metric::Revenue, &raw("$13,377", "millions", false, q));
+        assert_eq!(f.unwrap().value, 13.377e9);
+        assert!(verify_figure(t, Metric::Revenue, &raw("$11,536", "millions", false, q)).is_err());
+        // Oldest first, a tie, or a latest year with no period: rejected;
+        // "Decrease" is not December.
+        assert_eq!(period_before("Increase Decrease "), None);
+        assert_eq!(period_before("Sept. 30, "), Some(Period::Month(9, 30)));
+        assert_eq!(period_before("Q3"), Some(Period::Quarter(3)));
+        for header in [
+            "June 30, 2026 September 30, 2026",
+            "Q2 2026 Q3 2026 Q2 2025 Q3 2025",
+            "Q3 2026 Q3 2026",
+            "2026 September 30, 2026 2025",
+        ] {
+            let t = format!("(In millions)\n{header}\nTotal revenues $120 $100 $90 $95");
+            let q = "Total revenues $120 $100 $90 $95";
+            let r = verify_figure(&t, Metric::Revenue, &raw("$120", "millions", false, q));
+            assert!(r.is_err(), "{header}: {r:?}");
+        }
+        // Repeats across blocks only (CVS "2026 2025 Change 2026 2025 Change"
+        // with extra cells) keep the first column.
+        let t = "In millions, except per share amounts 2026 2025 Change 2026 2025 Change\nTotal revenues $108,399 $102,871 $5,528 $314,921 $296,374 $18,547";
+        let q = "Total revenues $108,399 $102,871 $5,528 $314,921 $296,374 $18,547";
+        assert!(verify_figure(t, Metric::Revenue, &raw("$108,399", "millions", false, q)).is_ok());
     }
 
     #[test]
