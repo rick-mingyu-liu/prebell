@@ -816,8 +816,8 @@ mod tests {
         let want = format!(
             "futures, movers | quotes ok=0 http429={n} http_other=0 empty=0 stale=0 parse=0 net=0 \
              skipped=0; \
-             movers liquid=0 gainers=0 losers=0; reasons proposed=0 kept=0; \
-             search_err=1 llm_err=0 news_stale=0; futures ok=0 err=4"
+             movers liquid=0 gainers=0 losers=0; reasons proposed=0 kept=0 hedged=0; \
+             search_err=1 llm_err=0 news_stale=0 news_noise=0; futures ok=0 err=4"
         );
         for t in ["2026-10-29T12:30:00Z", "2026-10-29T12:35:00Z"] {
             match tick(utc(t), &s, &m, &FakeNs, &l).await {
@@ -1105,6 +1105,9 @@ mod tests {
         }
         async fn get_post_by_run(&self, run_key: &str) -> Result<Option<PostRow>, String> {
             self.inner.get_post_by_run(run_key).await
+        }
+        async fn posts_on(&self, content_type: &str, date: &str) -> Result<Vec<PostRow>, String> {
+            self.inner.posts_on(content_type, date).await
         }
         async fn upsert_post(&self, p: &PostRow) -> Result<i64, String> {
             self.inner.upsert_post(p).await

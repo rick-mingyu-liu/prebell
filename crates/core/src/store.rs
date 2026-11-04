@@ -2,7 +2,7 @@
 //! `migrations/0001_init.sql` column for column; status strings use the
 //! schema's allowed values. Task 11 implements `Store` on D1/R2.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 
 use async_trait::async_trait;
@@ -56,6 +56,12 @@ pub trait Store {
     /// Insert or replace by `run_key`.
     async fn upsert_run(&self, r: &RunRow) -> Result<(), String>;
     async fn get_post_by_run(&self, run_key: &str) -> Result<Option<PostRow>, String>;
+    /// Published posts of `content_type` for the ET `trading_date`, by id.
+    async fn posts_on(
+        &self,
+        content_type: &str,
+        trading_date: &str,
+    ) -> Result<Vec<PostRow>, String>;
     /// Insert or update by `run_key`; returns the existing id when the run
     /// already has a post, so re-runs never create a second post.
     async fn upsert_post(&self, p: &PostRow) -> Result<i64, String>;
@@ -86,6 +92,10 @@ pub struct MemStore {
     /// `(run_key, level, message)` in insertion order.
     pub alerts: RefCell<Vec<(String, String, String)>>,
     pub facts: RefCell<HashMap<String, String>>,
+    /// Makes `posts_on` fail, as a D1 outage would.
+    pub fail_posts_on: Cell<bool>,
+    /// Makes `get_facts` fail for this key, as an R2 outage would.
+    pub fail_facts_key: RefCell<Option<String>>,
 }
 
 #[async_trait(?Send)]
@@ -104,6 +114,28 @@ impl Store for MemStore {
             .iter()
             .find(|p| p.run_key == run_key)
             .cloned())
+    }
+    async fn posts_on(
+        &self,
+        content_type: &str,
+        trading_date: &str,
+    ) -> Result<Vec<PostRow>, String> {
+        if self.fail_posts_on.get() {
+            return Err("d1: posts_on failed".into());
+        }
+        let mut out: Vec<PostRow> = self
+            .posts
+            .borrow()
+            .iter()
+            .filter(|p| {
+                p.content_type == content_type
+                    && p.trading_date == trading_date
+                    && p.published_at.is_some()
+            })
+            .cloned()
+            .collect();
+        out.sort_by_key(|p| p.id);
+        Ok(out)
     }
     async fn upsert_post(&self, p: &PostRow) -> Result<i64, String> {
         let mut posts = self.posts.borrow_mut();
@@ -154,6 +186,9 @@ impl Store for MemStore {
         Ok(())
     }
     async fn get_facts(&self, key: &str) -> Result<Option<String>, String> {
+        if self.fail_facts_key.borrow().as_deref() == Some(key) {
+            return Err(format!("r2: get {key} failed"));
+        }
         Ok(self.facts.borrow().get(key).cloned())
     }
 }

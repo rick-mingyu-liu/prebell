@@ -43,7 +43,12 @@ pub(crate) const PREV_CLOSE_BUFFER_HOURS: i64 = 2;
 pub(crate) const EVENT_RULE: &str = "A reason must be a specific event that explains this session's move: \
      earnings, guidance, a deal, an analyst upgrade or downgrade, a filing, or macro news tied to this company. \
      Trailing performance (\"down over the past month\"), momentum, technical levels and valuation commentary \
-     are not reasons. If that is all the articles offer, return {\"reasons\":[]}.";
+     are not reasons. If that is all the articles offer, return {\"reasons\":[]}. \
+     The event must be big enough to plausibly move the stock by the stated percentage: sponsorships, \
+     minor product or marketing news, routine appointments and institutional holdings changes are not reasons. \
+     `summary_en` states the cause as a fact in one clause, never hedged: no \"could\", \"may\", \"might\", \
+     \"possibly\", \"likely\", \"appears\" or \"seems\", and no trailing clause such as \
+     \"which could support the gain\" or \"which may explain the drop\".";
 
 /// Counters behind `PremarketFacts::diagnostics` (and the recap's, which
 /// counts index closes in `futures_*`).
@@ -68,6 +73,10 @@ pub(crate) struct Diag {
     pub(crate) llm_err: usize,
     /// Search hits dropped as older than `news_cutoff`.
     pub(crate) news_stale: usize,
+    /// Search hits dropped by `is_noise` (holdings filings and the like).
+    pub(crate) news_noise: usize,
+    /// Mover reasons dropped for a hedged `summary_en` ("could", "may").
+    pub(crate) reasons_hedged: usize,
     pub(crate) futures_ok: usize,
     pub(crate) futures_err: usize,
 }
@@ -110,10 +119,13 @@ impl Diag {
                 "movers liquid={} gainers={} losers={}",
                 self.liquid, self.gainers, self.losers
             ),
-            format!("reasons proposed={} kept={}", self.proposed, self.kept),
             format!(
-                "search_err={} llm_err={} news_stale={}",
-                self.search_err, self.llm_err, self.news_stale
+                "reasons proposed={} kept={} hedged={}",
+                self.proposed, self.kept, self.reasons_hedged
+            ),
+            format!(
+                "search_err={} llm_err={} news_stale={} news_noise={}",
+                self.search_err, self.llm_err, self.news_stale, self.news_noise
             ),
             format!("{head} ok={} err={}", self.futures_ok, self.futures_err),
         ]);
@@ -171,8 +183,56 @@ pub(crate) fn news_cutoff(now: DateTime<Utc>) -> DateTime<Utc> {
     by_age.min(previous_close(now) - Duration::hours(PREV_CLOSE_BUFFER_HOURS))
 }
 
-/// Hits for `query` published at or after `news_cutoff(now)`. Hits with no
-/// known date are kept, after the dated ones.
+/// Search hits that never explain a move: institutional holdings filings
+/// ("Aware Super ... Trims Position"), 13F pages and the like. The verb
+/// must sit right before the holding ("trims position", "buys 1,200 shares
+/// of"), so deal news ("takes $5 billion stake in Intel") and prose that
+/// only mentions a position or shares are kept. A bare "takes stake" is
+/// news ("Berkshire Hathaway takes stake in UnitedHealth"); "takes new
+/// stake" and "takes position" are filing language.
+pub(crate) fn is_noise(hit: &SearchHit) -> bool {
+    static TITLE: OnceLock<Regex> = OnceLock::new();
+    let url = hit.url.to_lowercase();
+    let path = url
+        .split_once("://")
+        .map_or(url.as_str(), |(_, rest)| rest)
+        .split_once('/')
+        .map_or("", |(_, p)| p);
+    let path = format!("/{path}");
+    url.contains("marketbeat.com/instant-alerts/filing")
+        || [
+            "/13f/",
+            "/holdings/",
+            "/institutional-holdings",
+            "/institutional-ownership",
+        ]
+            .iter()
+            .any(|p| path.contains(p))
+        || TITLE
+            .get_or_init(|| {
+                Regex::new(
+                    r"(?i)\b(?:trims|cuts|reduces|lowers|raises|increases|boosts|adds to|acquires|buys|sells|purchases|has)\s+(?:new\s+)?(?:position|stake|holdings)\b|\btakes\s+(?:new\s+(?:position|stake|holdings)|position|holdings)\b|\b(?:buys|sells|purchases|acquires)\s+(?:[\d,]+\s+)?shares\s+(?:in|of)\b|\bhas\s+\$[\d.,]+\s+(?:million|thousand)\s+(?:stake|position)\b|\b13F\b",
+                )
+                .expect("valid built-in regex")
+            })
+            .is_match(&hit.title)
+}
+
+/// A hedged cause ("which could support the gain"): a mover reason states
+/// its cause as a fact or is not a reason. "may" is matched in lower case
+/// only, so the month passes; plain "would" is reported speech ("said it
+/// would cut 1,000 jobs"), so only the tacked-on "which would" or "which should" counts.
+fn is_hedged(summary: &str) -> bool {
+    static R: OnceLock<Regex> = OnceLock::new();
+    R.get_or_init(|| {
+        Regex::new(r"\b(?i:could|might|possibly|perhaps|likely|appears|seems)\b|\bmay\b|(?i:\bwhich\s+(?:would|should)\b)")
+            .expect("valid built-in regex")
+    })
+    .is_match(summary)
+}
+
+/// Hits for `query` published at or after `news_cutoff(now)`, without
+/// `is_noise` hits. Hits with no known date are kept, after the dated ones.
 pub(crate) async fn fresh_news(
     ns: &dyn NewsSearch,
     query: &str,
@@ -185,6 +245,9 @@ pub(crate) async fn fresh_news(
     let found = hits.len();
     hits.retain(|h| h.published.is_none_or(|p| p >= since));
     d.news_stale += found - hits.len();
+    let fresh = hits.len();
+    hits.retain(|h| !is_noise(h));
+    d.news_noise += fresh - hits.len();
     hits.sort_by_key(|h| h.published.is_none());
     Ok(hits)
 }
@@ -196,13 +259,16 @@ pub(crate) fn as_of(now: DateTime<Utc>) -> String {
 }
 
 /// Ask the LLM for reasons and keep only those anchored in a fetched hit.
-/// No hits means no reasons, without an LLM call.
+/// No hits means no reasons, without an LLM call. `movers` also drops
+/// reasons whose `summary_en` hedges its cause (`Diag::reasons_hedged`);
+/// macro and after-hours items are not held to that.
 pub(crate) async fn extract(
     llm: &dyn LlmProvider,
     system: &str,
     user: &str,
     hits: &[SearchHit],
     max: usize,
+    movers: bool,
     d: &mut Diag,
 ) -> Result<Vec<NewsReason>, ProviderError> {
     if hits.is_empty() {
@@ -223,6 +289,11 @@ pub(crate) async fn extract(
         .filter_map(|it| serde_json::from_value::<NewsReason>(it).ok())
         // `summary_en` is rendered into the EN movers table.
         .filter(|r| reject_markup("summary_en", &r.summary_en).is_ok())
+        .filter(|r| {
+            let hedged = movers && is_hedged(&r.summary_en);
+            d.reasons_hedged += usize::from(hedged);
+            !hedged
+        })
         .filter_map(|r| {
             let h = hits
                 .iter()
@@ -278,6 +349,7 @@ async fn mover_reasons(
         &articles_prompt(&header, &hits),
         &hits,
         MOVER_REASONS,
+        true,
         d,
     )
     .await
@@ -291,8 +363,8 @@ async fn macro_items(
     d: &mut Diag,
 ) -> Field<Vec<NewsReason>> {
     let hits = match fresh_news(ns, MACRO_QUERY, MACRO_HITS, now, d).await {
-        // Missing, not an empty list: the brief then says "n/a" rather
-        // than narrating that no news was found.
+        // Missing, not an empty list. Either way the brief leaves out its
+        // macro section rather than narrating that no news was found.
         Ok(h) if h.is_empty() => {
             return Field::Missing {
                 reason: "no fresh news".into(),
@@ -320,6 +392,7 @@ async fn macro_items(
         &articles_prompt(&header, &hits),
         &hits,
         MACRO_ITEMS,
+        false,
         d,
     )
     .await
@@ -622,7 +695,10 @@ mod tests {
         assert_eq!(f.gainers[0].reasons, vec![]);
         // Nothing fresh to read, so the mover costs no LLM call.
         assert!(l.prompts.borrow().iter().all(|(_, u)| !u.contains("AAPL")));
-        assert_eq!(f.diagnostics[3], "search_err=1 llm_err=0 news_stale=1");
+        assert_eq!(
+            f.diagnostics[3],
+            "search_err=1 llm_err=0 news_stale=1 news_noise=0"
+        );
     }
 
     #[tokio::test]
@@ -805,6 +881,207 @@ mod tests {
             "{macro_user}"
         );
         assert!(!macro_sys.contains("Trailing performance"), "{macro_sys}");
+    }
+
+    #[test]
+    fn holdings_filings_are_noise_and_news_is_not() {
+        let kla_url = "https://www.marketbeat.com/instant-alerts/filing-kla-corporation-klac-stock-aware-super-pty-ltd-as-trustee-of-aware-super-trims-position-2026-11-03";
+        let kla_title =
+            "KLA Corporation $KLAC Stock: Aware Super Pty Ltd as trustee of Aware Super Trims Position";
+        let h = |url: &str, title: &str| SearchHit {
+            title: title.into(),
+            ..hit(url, "x")
+        };
+        for (url, title, noise) in [
+            (kla_url, kla_title, true),
+            (kla_url, "KLA reports results", true),
+            ("https://news.test/kla", kla_title, true),
+            (
+                "https://news.test/a",
+                "Vanguard Group Inc. Buys Shares in Apple",
+                true,
+            ),
+            (
+                "https://news.test/a",
+                "Norges Bank takes new stake in Dell",
+                true,
+            ),
+            ("https://news.test/a", "Apple 13F filing roundup", true),
+            ("https://fintel.io/13f/aapl", "Apple owners", true),
+            ("https://news.test/holdings/aapl", "Apple owners", true),
+            ("https://news.test/institutional-ownership/aapl", "Apple", true),
+            (
+                "https://stockstory.org/us/stocks/nasdaq/zbra/news/earnings/zebra-nasdaqzbra-surprises-with-q3-2026-sales-but-stock-drops",
+                "Zebra (NASDAQ:ZBRA) surprises with Q3 2026 sales but stock drops - StockStory",
+                false,
+            ),
+            (
+                "https://www.reuters.com/business/intel-forecasts-fourth-quarter-revenue-below-estimates-2026-10-29/",
+                "Intel forecasts fourth-quarter revenue below estimates, shares fall",
+                false,
+            ),
+            (
+                "https://news.test/nflx",
+                "Netflix raises prices again; shares jump",
+                false,
+            ),
+            // "holdings" in the host, not the path.
+            ("https://holdings.test/aapl", "Apple results", false),
+            (
+                "https://news.test/institutional-investors-pile-into-apple",
+                "Institutional investors pile into Apple after results",
+                false,
+            ),
+            // Deal news and prose that only mentions a position or shares.
+            ("https://news.test/a", "Nvidia takes $5 billion stake in Intel", false),
+            (
+                "https://news.test/a",
+                "Berkshire Hathaway takes stake in UnitedHealth",
+                false,
+            ),
+            (
+                "https://news.test/a",
+                "Apple raises dividend, strengthens market position",
+                false,
+            ),
+            (
+                "https://news.test/a",
+                "AMD cuts outlook as China position weakens",
+                false,
+            ),
+            (
+                "https://news.test/a",
+                "Netflix raises prices; shares in Netflix jump",
+                false,
+            ),
+            // Holdings-filing shapes the narrower pattern still drops.
+            (
+                "https://news.test/a",
+                "Geode Capital buys 12,345 shares of Apple",
+                true,
+            ),
+            (
+                "https://news.test/a",
+                "Swiss National Bank has $12.3 million stake in Dell",
+                true,
+            ),
+            ("https://news.test/a", "Fund takes new position in KLA", true),
+            ("https://news.test/a", "Vanguard Group Inc. Takes Position in KLA", true),
+        ] {
+            assert_eq!(is_noise(&h(url, title)), noise, "{url} {title}");
+        }
+    }
+
+    #[tokio::test]
+    async fn fresh_news_drops_noise_and_counts_it() {
+        let n = SinceNs(
+            RefCell::new(vec![]),
+            vec![
+                hit(
+                    "https://www.marketbeat.com/instant-alerts/filing-kla-x",
+                    "x",
+                ),
+                hit(URL, ARTICLE),
+            ],
+        );
+        let mut d = Diag::default();
+        let got = fresh_news(&n, "q", 3, now(), &mut d).await.unwrap();
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].url, URL);
+        assert_eq!((d.news_noise, d.news_stale), (1, 0));
+    }
+
+    #[test]
+    fn hedge_pattern_drops_hedges_and_keeps_facts() {
+        for (summary, hedged) in [
+            (
+                "KLA topped estimates, which could support the premarket gain.",
+                true,
+            ),
+            (
+                "Zebra's margin fell, which may explain the stock drop.",
+                true,
+            ),
+            ("The upgrade likely lifted shares.", true),
+            ("The deal appears to have lifted shares.", true),
+            ("Margins fell, which would support the gain.", true),
+            ("Margins fell, which should support the gain.", true),
+            ("Ford said it should close the deal in 2027.", false),
+            (
+                "Apple agreed to a deal that would value it at $4.9 billion.",
+                false,
+            ),
+            ("Ford said it would cut 1,000 jobs.", false),
+            ("Results for the quarter ended May 29 rose.", false),
+            ("The company said margins should improve next year.", false),
+            ("Apple rose on record iPhone sales.", false),
+        ] {
+            assert_eq!(is_hedged(summary), hedged, "{summary}");
+        }
+    }
+
+    #[tokio::test]
+    async fn hedged_mover_reasons_are_dropped_and_counted() {
+        for (summary, kept) in [
+            (
+                "KLA reported quarterly EPS that topped estimates, which could support the premarket gain.",
+                false,
+            ),
+            ("Zebra's gross margin declined, which may explain the stock drop.", false),
+            ("The upgrade likely lifted shares.", false),
+            ("Apple rose on record iPhone sales.", true),
+            ("Apple Maybe sold more phones.", true),
+        ] {
+            let m = md(&[q("AAPL", 230.0, 8.0, Some(2_000_000))]);
+            let n = ns(vec![(AAPL_Q, Ok(vec![hit(URL, ARTICLE)]))]);
+            let l = llm(vec![("AAPL", reasons(URL, QUOTE, summary))]);
+            let f = build_facts(&m, &n, &l, date(), now()).await;
+            assert_eq!(f.gainers[0].reasons.len(), usize::from(kept), "{summary}");
+            let hedged = if kept { 0 } else { 1 };
+            assert_eq!(
+                f.diagnostics[2],
+                format!("reasons proposed=1 kept={} hedged={hedged}", usize::from(kept)),
+                "{summary}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn macro_items_are_not_held_to_the_hedge_rule() {
+        let src =
+            "Stock futures rose overnight as Treasury yields fell after the Fed signaled patience.";
+        let n = ns(vec![(
+            MACRO_QUERY,
+            Ok(vec![hit("https://news.test/macro", src)]),
+        )]);
+        let l = llm(vec![(
+            "overnight",
+            reasons(
+                "https://news.test/macro",
+                "Stock futures rose overnight as Treasury yields fell",
+                "Futures rose as yields fell, which may help stocks at the open.",
+            ),
+        )]);
+        let f = build_facts(&md(&[]), &n, &l, date(), now()).await;
+        assert!(
+            matches!(&f.macro_items, Field::Value(v) if v.len() == 1),
+            "{:?}",
+            f.macro_items
+        );
+    }
+
+    #[test]
+    fn event_rule_forbids_hedging_and_immaterial_events() {
+        for needle in [
+            "big enough to plausibly move the stock",
+            "sponsorships",
+            "institutional holdings changes are not reasons",
+            "never hedged",
+            "\"could\"",
+            "which may explain the drop",
+        ] {
+            assert!(EVENT_RULE.contains(needle), "{needle}: {EVENT_RULE}");
+        }
     }
 
     #[tokio::test]
@@ -1092,8 +1369,8 @@ mod tests {
                     "quotes ok=0 http429={n} http_other=0 empty=0 stale=0 parse=0 net=0 skipped=0"
                 ),
                 "movers liquid=0 gainers=0 losers=0".to_string(),
-                "reasons proposed=0 kept=0".to_string(),
-                "search_err=1 llm_err=0 news_stale=0".to_string(),
+                "reasons proposed=0 kept=0 hedged=0".to_string(),
+                "search_err=1 llm_err=0 news_stale=0 news_noise=0".to_string(),
                 "futures ok=4 err=0".to_string(),
             ]
         );
@@ -1130,7 +1407,10 @@ mod tests {
         );
         assert_eq!(f.diagnostics[1], "movers liquid=2 gainers=1 losers=1");
         // Two mover searches and the macro search all fail.
-        assert_eq!(f.diagnostics[3], "search_err=3 llm_err=0 news_stale=0");
+        assert_eq!(
+            f.diagnostics[3],
+            "search_err=3 llm_err=0 news_stale=0 news_noise=0"
+        );
         assert_eq!(f.diagnostics[4], "futures ok=0 err=4");
     }
 
@@ -1156,8 +1436,11 @@ mod tests {
             ("MSFT", Err(ProviderError::Http(500))),
         ]);
         let f = build_facts(&m, &n, &l, date(), now()).await;
-        assert_eq!(f.diagnostics[2], "reasons proposed=2 kept=1");
-        assert_eq!(f.diagnostics[3], "search_err=1 llm_err=1 news_stale=0");
+        assert_eq!(f.diagnostics[2], "reasons proposed=2 kept=1 hedged=0");
+        assert_eq!(
+            f.diagnostics[3],
+            "search_err=1 llm_err=1 news_stale=0 news_noise=0"
+        );
     }
 
     #[tokio::test]

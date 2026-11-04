@@ -31,10 +31,9 @@ pub struct Draft {
     pub sections: Vec<(String, String)>,
 }
 
-/// The section headings in order. "What to watch" is last and only there
-/// when the facts have a watch list.
-fn headings(lang: Lang, watch: bool) -> Vec<&'static str> {
-    let all = match lang {
+/// Every section heading the brief can have, in order.
+fn all_headings(lang: Lang) -> [&'static str; 4] {
+    match lang {
         Lang::En => [
             "Futures",
             "Biggest premarket movers",
@@ -42,8 +41,57 @@ fn headings(lang: Lang, watch: bool) -> Vec<&'static str> {
             "What to watch",
         ],
         Lang::Zh => ["期货", "盘前异动", "宏观与隔夜", "今日关注"],
-    };
-    all[..if watch { 4 } else { 3 }].to_vec()
+    }
+}
+
+/// The section headings in order: futures and movers always, then "Macro &
+/// overnight" and "What to watch" only when the facts have items for them.
+fn headings(lang: Lang, macro_news: bool, watch: bool) -> Vec<&'static str> {
+    let [futures, movers, macro_heading, watch_heading] = all_headings(lang);
+    let mut out = vec![futures, movers];
+    if macro_news {
+        out.push(macro_heading);
+    }
+    if watch {
+        out.push(watch_heading);
+    }
+    out
+}
+
+/// Whether an optional list has anything to write about.
+fn has_items<T>(f: &Field<Vec<T>>) -> bool {
+    matches!(f, Field::Value(v) if !v.is_empty())
+}
+
+/// The line appended to the user message naming the sections to write, so
+/// the LLM never decides which optional sections exist.
+pub(crate) fn sections_line(lang: Lang, want: &[&str]) -> String {
+    let quoted: Vec<String> = want.iter().map(|h| format!("\"{h}\"")).collect();
+    match lang {
+        Lang::En => format!(
+            "Write exactly these sections, in this order: {}",
+            quoted.join(", ")
+        ),
+        Lang::Zh => format!("只写以下部分，按此顺序：{}", quoted.join("、")),
+    }
+}
+
+/// `got` without the sections the facts do not call for: a heading in
+/// `known` but not in `want` is dropped (never rendered, so never checked),
+/// and the rest must then be exactly `want` in order.
+pub(crate) fn match_sections(
+    mut got: Vec<(String, String)>,
+    want: &[&str],
+    known: &[&str],
+) -> Result<Vec<(String, String)>, String> {
+    let seen: Vec<String> = got.iter().map(|(h, _)| h.clone()).collect();
+    got.retain(|(h, _)| want.contains(&h.as_str()) || !known.contains(&h.as_str()));
+    if got.len() != want.len() || got.iter().zip(want).any(|((h, _), w)| h != w) {
+        return Err(format!(
+            "sections must be exactly {want:?} in order, got {seen:?}"
+        ));
+    }
+    Ok(got)
 }
 
 fn prompt(lang: Lang) -> &'static str {
@@ -290,7 +338,7 @@ const META_DATA: [&str; 4] = [
 fn is_movers(heading: &str) -> bool {
     [Lang::En, Lang::Zh]
         .into_iter()
-        .any(|l| headings(l, false)[1] == heading || crate::recap::draft::headings(l)[1] == heading)
+        .any(|l| all_headings(l)[1] == heading || crate::recap::draft::headings(l)[1] == heading)
 }
 
 /// Rejects prose that comments on missing facts or data; `data` adds the
@@ -304,6 +352,15 @@ fn reject_meta(what: &str, s: &str, data: bool) -> Result<(), String> {
         )),
         None => Ok(()),
     }
+}
+
+/// The page text with link targets removed: EDGAR URLs carry accession
+/// digits and post slugs carry fiscal years, neither of them figures.
+pub(crate) fn without_link_targets(md: &str) -> String {
+    static R: OnceLock<Regex> = OnceLock::new();
+    R.get_or_init(|| Regex::new(r"\]\([^)\s]*\)").expect("valid built-in regex"))
+        .replace_all(md, "]")
+        .into_owned()
 }
 
 /// A setext heading underline: a line of only `=` or only `-`, length >= 2.
@@ -326,7 +383,7 @@ pub(crate) fn one_line(v: &Value, key: &str) -> Result<String, String> {
     Ok(s)
 }
 
-fn parse(v: &Value, lang: Lang, want: &[&str]) -> Result<Draft, String> {
+fn parse(v: &Value, lang: Lang, want: &[&str], known: &[&str]) -> Result<Draft, String> {
     let title = one_line(v, "title")?;
     let summary = one_line(v, "summary")?;
     reject_meta("title", &title, true)?;
@@ -338,7 +395,7 @@ fn parse(v: &Value, lang: Lang, want: &[&str]) -> Result<Draft, String> {
         .get("sections")
         .and_then(Value::as_array)
         .ok_or("missing \"sections\" array")?;
-    let mut got: Vec<(String, String)> = items
+    let got: Vec<(String, String)> = items
         .iter()
         .map(|s| {
             let h = s
@@ -355,17 +412,9 @@ fn parse(v: &Value, lang: Lang, want: &[&str]) -> Result<Draft, String> {
             (h, m)
         })
         .collect();
-    // A stray watch section after the three wanted ones is never rendered,
-    // so it is dropped rather than retried.
-    if want == headings(lang, false) && got.len() == 4 && got[3].0 == headings(lang, true)[3] {
-        got.pop();
-    }
-    if got.len() != want.len() || got.iter().zip(want).any(|((h, _), w)| h != w) {
-        let seen: Vec<&str> = got.iter().map(|(h, _)| h.as_str()).collect();
-        return Err(format!(
-            "sections must be exactly {want:?} in order, got {seen:?}"
-        ));
-    }
+    // A known section the facts do not call for is never rendered, so it is
+    // dropped rather than retried.
+    let got = match_sections(got, want, known)?;
     for (h, m) in &got {
         reject_markup(&format!("section {h:?}"), m)?;
         reject_meta(&format!("section {h:?}"), m, is_movers(h))?;
@@ -403,11 +452,12 @@ fn attempt(
     v: Result<Value, ProviderError>,
     lang: Lang,
     want: &[&str],
+    known: &[&str],
     allowed: &[f64],
     names: &[&str],
 ) -> Result<Draft, Problem> {
     let v = v.map_err(Problem::Llm)?;
-    let d = parse(&v, lang, want).map_err(Problem::Malformed)?;
+    let d = parse(&v, lang, want, known).map_err(Problem::Malformed)?;
     let mut text = format!("{}\n{}", d.title, d.summary);
     for (h, m) in &d.sections {
         text.push_str(&format!("\n{h}\n{m}"));
@@ -457,7 +507,8 @@ pub async fn write(
         &facts_json,
         &numbers_in_facts(f),
         &[],
-        &headings(lang, matches!(f.watch_list, Field::Value(_))),
+        &headings(lang, has_items(&f.macro_items), has_items(&f.watch_list)),
+        &all_headings(lang),
         lang,
         |d| render_markdown(d, f),
     )
@@ -465,7 +516,8 @@ pub async fn write(
 }
 
 /// The drafting loop shared by every content type: ask `llm` with `system`
-/// and the facts JSON, require exactly `headings`, reject markup, check every
+/// and the facts JSON plus the `sections_line`, require exactly `headings`
+/// (dropping any other section of `known`), reject markup, check every
 /// number against `allowed` (ignoring the digits of known `names`), and
 /// retry once with the problems appended. On success returns the draft and
 /// `render(draft)`.
@@ -477,16 +529,19 @@ pub(crate) async fn write_with(
     allowed: &[f64],
     names: &[&str],
     headings: &[&str],
+    known: &[&str],
     lang: Lang,
     render: impl Fn(&Draft) -> String,
 ) -> Result<(Draft, String), Vec<String>> {
-    let mut user = facts_json.to_string();
+    let base = format!("{facts_json}\n\n{}", sections_line(lang, headings));
+    let mut user = base.clone();
     let mut last = None;
     for _ in 0..ATTEMPTS {
         match attempt(
             llm.complete_json(system, &user).await,
             lang,
             headings,
+            known,
             allowed,
             names,
         ) {
@@ -495,7 +550,7 @@ pub(crate) async fn write_with(
                 return Ok((d, md));
             }
             Err(p) => {
-                user = format!("{facts_json}{}", retry_note(&p));
+                user = format!("{base}{}", retry_note(&p));
                 last = Some(p);
             }
         }
@@ -583,7 +638,7 @@ mod tests {
     }
 
     fn reply(lang: Lang, body: &str) -> Result<Value, ProviderError> {
-        reply_with(&headings(lang, false), body)
+        reply_with(&headings(lang, true, false), body)
     }
     fn reply_with(heads: &[&str], body: &str) -> Result<Value, ProviderError> {
         Ok(json!({
@@ -605,7 +660,8 @@ mod tests {
         let (d, md) = write(&l, &facts(), Lang::En).await.unwrap();
         assert_eq!(d.lang, Lang::En);
         assert_eq!(d.title, "Futures edge up; Apple jumps 8%");
-        assert_eq!(d.sections.len(), 3);
+        // The facts have no macro news, so its section is dropped unread.
+        assert_eq!(d.sections.len(), 2);
         assert_eq!(d.sections[0].0, "Futures");
         assert!(
             !md.contains("What to watch") && !md.contains("\nn/a\n"),
@@ -614,7 +670,13 @@ mod tests {
         assert_eq!(l.prompts.borrow().len(), 1);
         let (sys, user) = &l.prompts.borrow()[0];
         assert_eq!(sys, PROMPT_EN);
-        assert_eq!(user, &serde_json::to_string_pretty(&facts()).unwrap());
+        assert_eq!(
+            user,
+            &format!(
+                "{}\n\nWrite exactly these sections, in this order: \"Futures\", \"Biggest premarket movers\"",
+                serde_json::to_string_pretty(&facts()).unwrap()
+            )
+        );
         assert!(md.starts_with("# Futures edge up; Apple jumps 8%"));
         assert!(md.contains(DISCLAIMER_EN));
     }
@@ -622,9 +684,9 @@ mod tests {
     #[tokio::test]
     async fn missing_watch_list_drops_its_section_in_both_languages() {
         for (lang, gone) in [(Lang::En, "What to watch"), (Lang::Zh, "今日关注")] {
-            // A stray trailing watch section is dropped, not retried, and
-            // its body (an unbacked number here) is never checked.
-            let four = reply_with(&headings(lang, true), "Up 7.5%.");
+            // Stray macro and watch sections are dropped, not retried, and
+            // their bodies (an unbacked number here) are never checked.
+            let four = reply_with(&all_headings(lang), "Up 7.5%.");
             let mut v = four.unwrap();
             for s in v["sections"].as_array_mut().unwrap().iter_mut().take(3) {
                 s["markdown"] = json!("Quiet.");
@@ -632,7 +694,7 @@ mod tests {
             let l = llm(vec![Ok(v)]);
             let (d, md) = write(&l, &facts(), lang).await.unwrap();
             assert_eq!(l.prompts.borrow().len(), 1);
-            assert_eq!(d.sections.len(), 3);
+            assert_eq!(d.sections.len(), 2);
             // No heading and no "n/a" body: missing futures stay as table cells.
             let na_body = format!("\n{}\n", na(lang));
             assert!(!md.contains(gone) && !md.contains(&na_body), "{md}");
@@ -640,19 +702,30 @@ mod tests {
     }
 
     #[test]
-    fn only_a_trailing_watch_section_is_dropped() {
-        let want = headings(Lang::En, false);
+    fn only_known_unwanted_sections_are_dropped() {
+        let want = headings(Lang::En, true, false);
         let swapped = [
             "Futures",
             "Macro & overnight",
             "Biggest premarket movers",
             "What to watch",
         ];
-        let five = [&headings(Lang::En, true)[..], &["What to watch"]].concat();
-        for heads in [&swapped[..], &five[..]] {
+        let twice = [&want[..], &["Macro & overnight"]].concat();
+        let unknown = [&want[..], &["Earnings"]].concat();
+        for heads in [&swapped[..], &twice[..], &unknown[..]] {
             let v = reply_with(heads, "Quiet.").unwrap();
-            assert!(parse(&v, Lang::En, &want).is_err(), "{heads:?}");
+            let err = parse(&v, Lang::En, &want, &all_headings(Lang::En)).unwrap_err();
+            assert!(
+                err.starts_with("sections must be exactly"),
+                "{heads:?}: {err}"
+            );
         }
+        // Every unwanted known section goes, wherever it sits.
+        let want = headings(Lang::En, false, false);
+        let five = [&all_headings(Lang::En)[..], &["What to watch"]].concat();
+        let v = reply_with(&five, "Quiet.").unwrap();
+        let d = parse(&v, Lang::En, &want, &all_headings(Lang::En)).unwrap();
+        assert_eq!(d.sections.len(), 2);
         // Recap headings never drop anything.
         let recap = [
             "Index closes",
@@ -660,7 +733,7 @@ mod tests {
             "After-hours earnings to watch",
         ];
         let v = reply_with(&[&recap[..], &["What to watch"]].concat(), "Quiet.").unwrap();
-        assert!(parse(&v, Lang::En, &recap).is_err());
+        assert!(parse(&v, Lang::En, &recap, &recap).is_err());
     }
 
     #[test]
@@ -681,14 +754,21 @@ mod tests {
             (Lang::Zh, "暂无数据。"),
         ] {
             let v = reply(lang, body).unwrap();
-            let err = parse(&v, lang, &headings(lang, false)).unwrap_err();
+            let err =
+                parse(&v, lang, &headings(lang, true, false), &all_headings(lang)).unwrap_err();
             assert!(err.contains("missing facts or data"), "{body:?}: {err}");
             // The note does not steer the model toward any one section.
             assert!(!err.contains("mover"), "{err}");
         }
         let mut v = clean(Lang::En).unwrap();
         v["summary"] = json!("Futures fell; no reason was given for Dell.");
-        assert!(parse(&v, Lang::En, &headings(Lang::En, false)).is_err());
+        assert!(parse(
+            &v,
+            Lang::En,
+            &headings(Lang::En, true, false),
+            &all_headings(Lang::En)
+        )
+        .is_err());
     }
 
     #[test]
@@ -705,7 +785,10 @@ mod tests {
             ),
         ] {
             let v = reply(lang, body).unwrap();
-            assert!(parse(&v, lang, &headings(lang, false)).is_ok(), "{body:?}");
+            assert!(
+                parse(&v, lang, &headings(lang, true, false), &all_headings(lang)).is_ok(),
+                "{body:?}"
+            );
         }
     }
 
@@ -722,7 +805,7 @@ mod tests {
 
     /// A reply with `macro_body` in the macro section and "Quiet." elsewhere.
     fn macro_reply(lang: Lang, macro_body: &str) -> Value {
-        let heads = headings(lang, false);
+        let heads = headings(lang, true, false);
         let mut v = reply_with(&heads, "Quiet.").unwrap();
         v["sections"][2]["markdown"] = json!(macro_body);
         v
@@ -745,7 +828,13 @@ mod tests {
             ),
         ] {
             assert!(
-                parse(&macro_reply(lang, body), lang, &headings(lang, false)).is_ok(),
+                parse(
+                    &macro_reply(lang, body),
+                    lang,
+                    &headings(lang, true, false),
+                    &all_headings(lang)
+                )
+                .is_ok(),
                 "{body:?}"
             );
         }
@@ -764,17 +853,20 @@ mod tests {
             let mut title = macro_reply(lang, "Quiet.");
             title["title"] = json!(phrase);
             for v in [movers, summary, title] {
-                assert!(parse(&v, lang, &headings(lang, false)).is_err(), "{v}");
+                assert!(
+                    parse(&v, lang, &headings(lang, true, false), &all_headings(lang)).is_err(),
+                    "{v}"
+                );
             }
         }
         // The recap's movers section is covered too.
         let recap = crate::recap::draft::headings(Lang::En);
         let mut v = reply_with(&recap, "Quiet.").unwrap();
         v["sections"][1]["markdown"] = json!("Data was unavailable for Dell.");
-        assert!(parse(&v, Lang::En, &recap).is_err());
+        assert!(parse(&v, Lang::En, &recap, &recap).is_err());
         v["sections"][1]["markdown"] = json!("Quiet.");
         v["sections"][2]["markdown"] = json!("Data was unavailable for Dell.");
-        assert!(parse(&v, Lang::En, &recap).is_ok());
+        assert!(parse(&v, Lang::En, &recap, &recap).is_ok());
     }
 
     #[tokio::test]
@@ -783,12 +875,70 @@ mod tests {
         f.watch_list = Field::Value(vec!["Fed minutes at 2 PM ET".into()]);
         for (lang, heading) in [(Lang::En, "What to watch"), (Lang::Zh, "今日关注")] {
             let l = llm(vec![
-                reply_with(&headings(lang, false), "Quiet."),
-                reply_with(&headings(lang, true), "Quiet."),
+                reply_with(&headings(lang, true, false), "Quiet."),
+                reply_with(&all_headings(lang), "Quiet."),
             ]);
             let (d, md) = write(&l, &f, lang).await.unwrap();
             assert_eq!(l.prompts.borrow().len(), 2);
-            assert_eq!(d.sections.len(), 4);
+            // Futures, movers and watch: the facts have no macro news.
+            assert_eq!(d.sections.len(), 3);
+            assert!(md.contains(&format!("## {heading}\n\nQuiet.")), "{md}");
+        }
+    }
+
+    #[tokio::test]
+    async fn missing_macro_news_renders_no_macro_section() {
+        for (lang, heading) in [(Lang::En, "Macro & overnight"), (Lang::Zh, "宏观与隔夜")] {
+            for macro_items in [
+                Field::Missing {
+                    reason: "none".into(),
+                },
+                Field::Value(vec![]),
+            ] {
+                let f = PremarketFacts {
+                    macro_items,
+                    ..facts()
+                };
+                // The model still writes the section, as "n/a": dropped unread.
+                let mut v = reply_with(&headings(lang, true, false), "Quiet.").unwrap();
+                v["sections"][2]["markdown"] = json!(na(lang));
+                let l = llm(vec![Ok(v)]);
+                let (d, md) = write(&l, &f, lang).await.unwrap();
+                assert_eq!(l.prompts.borrow().len(), 1);
+                assert_eq!(d.sections.len(), 2);
+                let na_body = format!("\n{}\n", na(lang));
+                assert!(
+                    !md.contains(&format!("## {heading}")) && !md.contains(&na_body),
+                    "{md}"
+                );
+                let user = &l.prompts.borrow()[0].1;
+                assert!(!user.ends_with(&format!("\"{heading}\"")), "{user}");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn macro_news_requires_and_renders_its_section() {
+        let mut f = facts();
+        f.macro_items = Field::Value(vec![reason("https://news.test/m", "Futures slip")]);
+        for (lang, line) in [
+            (
+                Lang::En,
+                "Write exactly these sections, in this order: \"Futures\", \"Biggest premarket movers\", \"Macro & overnight\"",
+            ),
+            (Lang::Zh, "只写以下部分，按此顺序：\"期货\"、\"盘前异动\"、\"宏观与隔夜\""),
+        ] {
+            let l = llm(vec![
+                reply_with(&headings(lang, false, false), "Quiet."),
+                reply_with(&headings(lang, true, false), "Quiet."),
+            ]);
+            let (d, md) = write(&l, &f, lang).await.unwrap();
+            let p = l.prompts.borrow();
+            assert_eq!(p.len(), 2);
+            assert!(p[0].1.ends_with(line), "{}", p[0].1);
+            assert!(p[1].1.contains(&format!("{line}\n\nYour previous reply")), "{}", p[1].1);
+            assert_eq!(d.sections.len(), 3);
+            let heading = all_headings(lang)[2];
             assert!(md.contains(&format!("## {heading}\n\nQuiet.")), "{md}");
         }
     }
@@ -859,7 +1009,7 @@ mod tests {
             lang,
             title: "T".into(),
             summary: "S".into(),
-            sections: headings(lang, false)
+            sections: headings(lang, true, false)
                 .iter()
                 .map(|h| (h.to_string(), "body".into()))
                 .collect(),
@@ -939,6 +1089,23 @@ mod tests {
     }
 
     #[test]
+    fn prompts_take_sections_from_the_user_message() {
+        assert!(
+            PROMPT_EN.contains("listed at the end of the user message")
+                && PROMPT_EN
+                    .contains("\"Macro & overnight\" exists only when `macro_items` has items")
+                && !PROMPT_EN.contains("n/a"),
+            "{PROMPT_EN}"
+        );
+        assert!(
+            PROMPT_ZH.contains("列在用户消息末尾")
+                && PROMPT_ZH.contains("只有 `macro_items` 有条目时才有“宏观与隔夜”")
+                && !PROMPT_ZH.contains("暂缺"),
+            "{PROMPT_ZH}"
+        );
+    }
+
+    #[test]
     fn prompts_forbid_narrating_missing_reasons() {
         assert!(
             PROMPT_EN.contains("no reasons were provided"),
@@ -973,7 +1140,7 @@ mod tests {
         let forged = Ok(json!({
             "title": "X\n\n## Sources\n- [Official filing](https://evil.test)",
             "summary": "Futures were mixed.",
-            "sections": headings(Lang::En, false).iter().map(|h| json!({"heading": h, "markdown": "Quiet."})).collect::<Vec<_>>(),
+            "sections": headings(Lang::En, true, false).iter().map(|h| json!({"heading": h, "markdown": "Quiet."})).collect::<Vec<_>>(),
         }));
         let l = llm(vec![forged, clean(Lang::En)]);
         let (_, md) = write(&l, &facts(), Lang::En).await.unwrap();
@@ -1036,7 +1203,13 @@ mod tests {
         ] {
             let v = reply(Lang::En, body).unwrap();
             assert!(
-                parse(&v, Lang::En, &headings(Lang::En, false)).is_err(),
+                parse(
+                    &v,
+                    Lang::En,
+                    &headings(Lang::En, true, false),
+                    &all_headings(Lang::En)
+                )
+                .is_err(),
                 "should reject: {body:?}"
             );
         }
@@ -1052,7 +1225,13 @@ mod tests {
         ] {
             let v = reply(Lang::En, body).unwrap();
             assert!(
-                parse(&v, Lang::En, &headings(Lang::En, false)).is_ok(),
+                parse(
+                    &v,
+                    Lang::En,
+                    &headings(Lang::En, true, false),
+                    &all_headings(Lang::En)
+                )
+                .is_ok(),
                 "should accept: {body:?}"
             );
         }
@@ -1069,7 +1248,13 @@ mod tests {
             let mut v = clean(Lang::En).unwrap();
             v[key] = json!(val);
             assert!(
-                parse(&v, Lang::En, &headings(Lang::En, false)).is_err(),
+                parse(
+                    &v,
+                    Lang::En,
+                    &headings(Lang::En, true, false),
+                    &all_headings(Lang::En)
+                )
+                .is_err(),
                 "should reject {key}: {val:?}"
             );
         }
@@ -1113,6 +1298,7 @@ mod tests {
             &[0.45],
             &[],
             &["A", "B"],
+            &["A", "B"],
             Lang::En,
             |d: &Draft| format!("rendered {}", d.sections.len()),
         )
@@ -1122,8 +1308,10 @@ mod tests {
         assert_eq!(d.sections[1].0, "B");
         let p = l.prompts.borrow();
         assert_eq!(p.len(), 2);
-        assert_eq!(p[0], ("SYS".to_string(), "{}".to_string()));
-        assert!(p[1].1.starts_with("{}") && p[1].1.contains("Your reply was invalid"));
+        let user = "{}\n\nWrite exactly these sections, in this order: \"A\", \"B\"";
+        assert_eq!(p[0], ("SYS".to_string(), user.to_string()));
+        // The retry note follows the section list.
+        assert!(p[1].1.starts_with(user) && p[1].1.contains("Your reply was invalid"));
     }
 
     #[test]

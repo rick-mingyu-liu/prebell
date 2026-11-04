@@ -53,6 +53,21 @@ struct PostRec {
     published_at: Option<String>,
 }
 
+impl From<PostRec> for PostRow {
+    fn from(p: PostRec) -> Self {
+        PostRow {
+            id: Some(p.id),
+            run_key: p.run_key,
+            content_type: p.content_type,
+            template_id: p.template_id,
+            trading_date: p.trading_date,
+            slug: p.slug,
+            facts_r2_key: p.facts_r2_key.unwrap_or_default(),
+            published_at: p.published_at,
+        }
+    }
+}
+
 #[derive(Deserialize)]
 struct TrRec {
     post_id: i64,
@@ -176,16 +191,26 @@ impl Store for D1Store {
             &[s(run_key)],
         )
         .await?;
-        Ok(r.map(|p| PostRow {
-            id: Some(p.id),
-            run_key: p.run_key,
-            content_type: p.content_type,
-            template_id: p.template_id,
-            trading_date: p.trading_date,
-            slug: p.slug,
-            facts_r2_key: p.facts_r2_key.unwrap_or_default(),
-            published_at: p.published_at,
-        }))
+        Ok(r.map(PostRow::from))
+    }
+
+    async fn posts_on(
+        &self,
+        content_type: &str,
+        trading_date: &str,
+    ) -> Result<Vec<PostRow>, String> {
+        let sql = "SELECT id, run_key, content_type, template_id, trading_date, slug, facts_r2_key, published_at \
+                   FROM posts WHERE content_type = ?1 AND trading_date = ?2 AND published_at IS NOT NULL ORDER BY id";
+        let r = self
+            .db
+            .prepare(sql)
+            .bind(&[s(content_type), s(trading_date)])
+            .map_err(|e| err(sql, e))?
+            .all()
+            .await
+            .map_err(|e| err(sql, e))?;
+        let rows = r.results::<PostRec>().map_err(|e| err(sql, e))?;
+        Ok(rows.into_iter().map(PostRow::from).collect())
     }
 
     async fn upsert_post(&self, p: &PostRow) -> Result<i64, String> {

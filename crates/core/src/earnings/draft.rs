@@ -14,7 +14,10 @@ use serde_json::Value;
 use crate::earnings::facts::{numbers_in_facts, EarningsFacts, Metric, Unit};
 use crate::facts::Field;
 use crate::numbers::{check, Lang};
-use crate::premarket::draft::{fmt_num, is_setext_underline, one_line, reject_markup, Draft};
+use crate::premarket::draft::{
+    fmt_num, is_setext_underline, match_sections, one_line, reject_markup, sections_line,
+    without_link_targets, Draft,
+};
 use crate::providers::{LlmProvider, ProviderError};
 
 pub const TEMPLATE_ID: &str = "earnings:v1";
@@ -27,6 +30,7 @@ const PROMPT_EN: &str = include_str!("../../prompts/earnings_v1_en.md");
 const PROMPT_ZH: &str = include_str!("../../prompts/earnings_v1_zh.md");
 const ATTEMPTS: usize = 2;
 
+/// Every section heading the check can have, in order.
 fn headings(lang: Lang) -> [&'static str; 4] {
     match lang {
         Lang::En => [
@@ -39,12 +43,46 @@ fn headings(lang: Lang) -> [&'static str; 4] {
     }
 }
 
-fn na(lang: Lang) -> &'static str {
-    match lang {
-        Lang::En => "n/a",
-        Lang::Zh => "暂缺",
+/// The headings these facts call for: Results always, every other section
+/// only when it has a figure or note to discuss ("What else stood out" may
+/// discuss the trend, when it has any quarter).
+fn wanted(f: &EarningsFacts, lang: Lang) -> Vec<&'static str> {
+    let [results, margins, guidance, other] = headings(lang);
+    let notes = |n: &Field<Vec<_>>| matches!(n, Field::Value(v) if !v.is_empty());
+    let mut out = vec![results];
+    if [
+        Metric::GrossMargin,
+        Metric::OperatingMargin,
+        Metric::OperatingCashFlow,
+        Metric::FreeCashFlow,
+    ]
+    .into_iter()
+    .any(|m| f.metrics.value(m).is_some())
+    {
+        out.push(margins);
     }
+    if notes(&f.guidance) {
+        out.push(guidance);
+    }
+    let trend = matches!(&f.trend, Field::Value(t)
+        if !(t.revenue.is_empty() && t.eps_diluted.is_empty() && t.net_income.is_empty()));
+    if notes(&f.highlights) || trend {
+        out.push(other);
+    }
+    out
 }
+
+/// Phrases that narrate a missing figure, which the page simply leaves out
+/// (the Apple fiscal Q4 2026 rehearsal said "Operating cash flow: n/a", then cited
+/// $28 billion of it). Matched case-insensitively.
+const MISSING: [&str; 6] = [
+    "n/a",
+    "暂缺",
+    "not disclosed",
+    "not provided",
+    "未披露",
+    "未提供",
+];
 
 /// Words that would judge results against estimates (spec §8: no consensus,
 /// no beat/miss).
@@ -152,15 +190,16 @@ pub fn render_markdown(d: &Draft, f: &EarningsFacts) -> String {
         Lang::En => "| Key figure | This quarter |\n|---|---:|\n",
         Lang::Zh => "| 关键数据 | 本季度 |\n|---|---:|\n",
     });
+    // Only the figures the release gave; revenue and an EPS are required.
     for m in Metric::ALL {
+        let Some(fig) = f.metrics.value(m) else {
+            continue;
+        };
         let label = match lang {
             Lang::En => m.label_en(),
             Lang::Zh => m.label_zh(),
         };
-        let v = f.metrics.value(m).map_or_else(
-            || na(lang).to_string(),
-            |fig| fmt_value(fig.value, fig.unit, lang),
-        );
+        let v = fmt_value(fig.value, fig.unit, lang);
         out.push_str(&format!("| {label} | {v} |\n"));
     }
     out.push('\n');
@@ -189,14 +228,6 @@ pub fn render_markdown(d: &Draft, f: &EarningsFacts) -> String {
     });
     out.push('\n');
     out
-}
-
-/// The page text with link targets removed (EDGAR URLs carry accession digits).
-fn without_link_targets(md: &str) -> String {
-    static R: OnceLock<Regex> = OnceLock::new();
-    R.get_or_init(|| Regex::new(r"\]\([^)\s]*\)").expect("valid built-in regex"))
-        .replace_all(md, "]")
-        .into_owned()
 }
 
 /// The company name and ticker replaced by placeholders before the number
@@ -235,13 +266,12 @@ enum Problem {
     Numbers(Vec<String>),
 }
 
-fn parse(v: &Value, lang: Lang) -> Result<Draft, String> {
+fn parse(v: &Value, lang: Lang, want: &[&str]) -> Result<Draft, String> {
     let title = one_line(v, "title")?;
     let summary = one_line(v, "summary")?;
     if summary.starts_with('#') {
         return Err("summary starts with a heading marker".into());
     }
-    let want = headings(lang);
     let items = v
         .get("sections")
         .and_then(Value::as_array)
@@ -253,12 +283,8 @@ fn parse(v: &Value, lang: Lang) -> Result<Draft, String> {
             (text("heading").trim().to_string(), text("markdown"))
         })
         .collect();
-    if got.len() != want.len() || got.iter().zip(want).any(|((h, _), w)| h != w) {
-        let seen: Vec<&str> = got.iter().map(|(h, _)| h.as_str()).collect();
-        return Err(format!(
-            "sections must be exactly {want:?} in order, got {seen:?}"
-        ));
-    }
+    // A known section the facts do not call for is dropped unread.
+    let got = match_sections(got, want, &headings(lang))?;
     for (h, m) in &got {
         reject_markup(&format!("section {h:?}"), m)?;
         if m.lines()
@@ -277,6 +303,12 @@ fn parse(v: &Value, lang: Lang) -> Result<Draft, String> {
                 w.as_str()
             ));
         }
+        let lower = text.to_lowercase();
+        if let Some(p) = MISSING.iter().find(|p| lower.contains(*p)) {
+            return Err(format!(
+                "do not mention missing figures ({p:?}): leave them out entirely"
+            ));
+        }
     }
     Ok(Draft {
         lang,
@@ -290,10 +322,11 @@ fn attempt(
     v: Result<Value, ProviderError>,
     f: &EarningsFacts,
     lang: Lang,
+    want: &[&str],
     allowed: &[f64],
 ) -> Result<(Draft, String), Problem> {
     let v = v.map_err(Problem::Llm)?;
-    let d = parse(&v, lang).map_err(Problem::Malformed)?;
+    let d = parse(&v, lang, want).map_err(Problem::Malformed)?;
     let md = render_markdown(&d, f);
     // The whole page, code-rendered parts included, is checked. Names are
     // not figures: "3M" must not read as three million.
@@ -338,18 +371,21 @@ pub async fn write(
     let facts_json =
         serde_json::to_string_pretty(f).map_err(|e| vec![format!("draft: facts json: {e}")])?;
     let allowed = numbers_in_facts(f);
-    let mut user = facts_json.clone();
+    let want = wanted(f, lang);
+    let base = format!("{facts_json}\n\n{}", sections_line(lang, &want));
+    let mut user = base.clone();
     let mut last = None;
     for _ in 0..ATTEMPTS {
         match attempt(
             llm.complete_json(prompt(lang), &user).await,
             f,
             lang,
+            &want,
             &allowed,
         ) {
             Ok(x) => return Ok(x),
             Err(p) => {
-                user = format!("{facts_json}{}", retry_note(&p));
+                user = format!("{base}{}", retry_note(&p));
                 last = Some(p);
             }
         }
@@ -412,7 +448,11 @@ pub(crate) mod tests {
         assert!(md.contains("| Revenue | $102.5 billion |"), "{md}");
         assert!(md.contains("| Diluted EPS (GAAP) | $1.85 |"));
         assert!(md.contains("| Gross margin | 47.2% |"));
-        assert!(md.contains("| Free cash flow (non-GAAP) | n/a |"));
+        // Missing figures get no row at all.
+        assert!(
+            !md.contains("Free cash flow") && !md.contains("n/a"),
+            "{md}"
+        );
         assert!(md.contains("Fiscal Q4 2026 · Form 8-K filed Oct 30, 2026"));
         assert!(md.contains("(https://www.sec.gov/Archives/edgar/data/320193/000032019326000070/0000320193-26-000070-index.htm)"));
         assert!(md.contains("a8-kex991q4202609262026.htm)"));
@@ -426,7 +466,119 @@ pub(crate) mod tests {
         assert!(md.contains("| 营收 | 1025亿美元 |"), "{md}");
         assert!(md.contains("| 摊薄每股收益（GAAP） | 1.85美元 |"));
         assert!(md.contains("2026财年第四季度 · 8-K 提交于2026年10月30日"));
-        assert!(md.contains("| 经营现金流 | 暂缺 |"));
+        assert!(!md.contains("经营现金流") && !md.contains("暂缺"), "{md}");
+    }
+
+    #[tokio::test]
+    async fn full_facts_keep_all_four_sections() {
+        for lang in [Lang::En, Lang::Zh] {
+            let l = llm(vec![reply(lang, "Quiet.")]);
+            let (d, md) = write(&l, &facts(), lang).await.unwrap();
+            let got: Vec<&str> = d.sections.iter().map(|(h, _)| h.as_str()).collect();
+            assert_eq!(got, headings(lang));
+            for h in headings(lang) {
+                assert!(md.contains(&format!("## {h}\n\nQuiet.")), "{md}");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn thin_release_prints_only_given_figures_and_results() {
+        let mut f = facts();
+        f.metrics.gross_margin = Field::Missing { reason: "x".into() };
+        f.metrics.net_income = Field::Value(crate::earnings::facts::Figure {
+            value: 27.5e9,
+            unit: Unit::Usd,
+            amount: "$27.5 billion".into(),
+            scale: 1.0,
+            quote: "Net income was $27.5 billion for the quarter.".into(),
+        });
+        f.guidance = Field::Value(vec![]);
+        f.highlights = Field::Missing {
+            reason: "none".into(),
+        };
+        f.trend = Field::Missing {
+            reason: "no XBRL".into(),
+        };
+        for (lang, rows, line) in [
+            (
+                Lang::En,
+                "| Key figure | This quarter |\n|---|---:|\n| Revenue | $102.5 billion |\n| Net income (GAAP) | $27.5 billion |\n| Diluted EPS (GAAP) | $1.85 |\n\n",
+                "Write exactly these sections, in this order: \"Results\"",
+            ),
+            (
+                Lang::Zh,
+                "| 关键数据 | 本季度 |\n|---|---:|\n| 营收 | 1025亿美元 |\n| 净利润（GAAP） | 275亿美元 |\n| 摊薄每股收益（GAAP） | 1.85美元 |\n\n",
+                "只写以下部分，按此顺序：\"业绩概览\"",
+            ),
+        ] {
+            // The model writes all four; the three without facts are dropped.
+            let l = llm(vec![reply(lang, "Quiet.")]);
+            let (d, md) = write(&l, &f, lang).await.unwrap();
+            assert!(md.contains(rows), "{md}");
+            assert_eq!(d.sections.len(), 1);
+            assert_eq!(d.sections[0].0, headings(lang)[0]);
+            assert_eq!(md.matches("\n## ").count(), 2, "Results and Sources only: {md}");
+            assert!(l.prompts.borrow()[0].ends_with(line), "{}", l.prompts.borrow()[0]);
+        }
+    }
+
+    #[test]
+    fn an_empty_trend_is_nothing_to_discuss() {
+        let mut f = facts();
+        f.highlights = Field::Value(vec![]);
+        f.trend = Field::Value(crate::earnings::facts::Trend {
+            revenue: vec![],
+            eps_diluted: vec![],
+            net_income: vec![],
+        });
+        assert_eq!(
+            wanted(&f, Lang::En),
+            ["Results", "Margins and cash flow", "Guidance"]
+        );
+        // Any quarter in the trend is enough.
+        f.trend = facts().trend;
+        assert_eq!(wanted(&f, Lang::En).len(), 4);
+    }
+
+    #[tokio::test]
+    async fn narrating_a_missing_figure_is_retried() {
+        for (lang, body) in [
+            (Lang::En, "Operating cash flow: n/a."),
+            (Lang::En, "Free cash flow was not disclosed."),
+            (Lang::En, "Guidance was Not Provided."),
+            (Lang::Zh, "经营现金流暂缺。"),
+            (Lang::Zh, "公司未披露自由现金流。"),
+            (Lang::Zh, "公司未提供指引。"),
+        ] {
+            let l = llm(vec![reply(lang, body), reply(lang, "Quiet.")]);
+            assert!(write(&l, &facts(), lang).await.is_ok(), "{body}");
+            let p = l.prompts.borrow();
+            assert_eq!(p.len(), 2);
+            assert!(p[1].contains("do not mention missing figures"), "{}", p[1]);
+        }
+        let mut r = reply(Lang::En, "Quiet.");
+        r["summary"] = "Revenue was $102.5 billion; cash flow n/a.".into();
+        let l = llm(vec![r.clone(), r]);
+        let e = write(&l, &facts(), Lang::En).await.unwrap_err();
+        assert!(e[0].contains("missing figures"), "{e:?}");
+    }
+
+    #[test]
+    fn prompts_leave_missing_figures_out() {
+        assert!(
+            PROMPT_EN.contains("do not mention it at all")
+                && PROMPT_EN.contains("listed at the end of the user message")
+                && !PROMPT_EN.contains("write \"n/a\" for it")
+                && !PROMPT_EN.contains("says \"n/a\""),
+            "{PROMPT_EN}"
+        );
+        assert!(
+            PROMPT_ZH.contains("完全不要提及")
+                && PROMPT_ZH.contains("列在用户消息末尾")
+                && !PROMPT_ZH.contains("时写\"暂缺\""),
+            "{PROMPT_ZH}"
+        );
     }
 
     #[tokio::test]
@@ -565,7 +717,7 @@ pub(crate) mod tests {
         let f = facts();
         let allowed = numbers_in_facts(&f);
         for lang in [Lang::En, Lang::Zh] {
-            let d = parse(&reply(lang, "n/a"), lang).unwrap();
+            let d = parse(&reply(lang, "Quiet."), lang, &wanted(&f, lang)).unwrap();
             let md = render_markdown(&d, &f);
             assert_eq!(
                 check(&without_link_targets(&md), lang, &allowed),
