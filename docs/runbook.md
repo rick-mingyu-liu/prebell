@@ -102,7 +102,7 @@ After each queue message, `pnpm exec wrangler tail` in `crates/generator` shows 
 Each build logs one `diagnostics:` line, and a retrying run stores it in `runs.last_error`. Besides the quote, mover and search counts, these show why news was dropped:
 
 - `hedged=` on the `reasons` part counts mover reasons dropped because `summary_en` hedged its cause ("which could support the gain"). In code the counter is `reasons_hedged`.
-- `news_noise=` counts search hits dropped as noise before any LLM call: MarketBeat filing alerts, 13F, holdings and institutional-ownership pages, and "trims position"-style titles.
+- `news_noise=` counts search hits dropped as noise before any LLM call: MarketBeat filing alerts, 13F, holdings and institutional-ownership pages, "trims position"-style titles, analyst consensus-rating alerts ("Has Consensus Price Target of", "Average Rating of"), and Tavily's own company-profile pages (`tavily.com/knowledge/`). Each mover and macro news query asks Tavily for `NEWS_EXTRA_HITS` (2) more hits than it keeps, so stale and noise hits do not use up a mover's slots; after filtering, the prompt still gets at most the usual number of articles. `news_stale=` and `news_noise=` count every dropped hit, including the extra ones.
 - `reported=N reported_err=M` (recap only, last part) counts the earnings checks published today that the recap links as already reported. `reported_err=M` above 0 means that many D1 or R2 reads failed; the recap still publishes and lists the checks it could read.
 
 ### CPU overruns
