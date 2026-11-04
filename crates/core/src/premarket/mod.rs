@@ -39,6 +39,10 @@ const MAX_CONTENT_CHARS: usize = 6_000;
 pub(crate) const NEWS_MAX_AGE_HOURS: i64 = 36;
 /// How long before the previous session's close news still counts.
 pub(crate) const PREV_CLOSE_BUFFER_HOURS: i64 = 2;
+/// Extra hits requested per query so that stale and noise hits do not
+/// use up the caller's slots. Filtering happens before the prompt, so
+/// the LLM still sees at most `max` articles and the cost is unchanged.
+pub(crate) const NEWS_EXTRA_HITS: usize = 2;
 /// Added to the mover prompts: what counts as a reason for a move.
 pub(crate) const EVENT_RULE: &str = "A reason must be a specific event that explains this session's move: \
      earnings, guidance, a deal, an analyst upgrade or downgrade, a filing, or macro news tied to this company. \
@@ -189,17 +193,21 @@ pub(crate) fn news_cutoff(now: DateTime<Utc>) -> DateTime<Utc> {
 /// of"), so deal news ("takes $5 billion stake in Intel") and prose that
 /// only mentions a position or shares are kept. A bare "takes stake" is
 /// news ("Berkshire Hathaway takes stake in UnitedHealth"); "takes new
-/// stake" and "takes position" are filing language.
+/// stake" and "takes position" are filing language. Analyst consensus
+/// roundups ("Has Consensus Price Target of $95.61", "Receives Average
+/// Rating of") and Tavily's own company-profile pages (`tavily.com/knowledge/`)
+/// are noise too; MarketBeat price alerts ("shares gap up on earnings beat")
+/// are kept.
 pub(crate) fn is_noise(hit: &SearchHit) -> bool {
     static TITLE: OnceLock<Regex> = OnceLock::new();
     let url = hit.url.to_lowercase();
-    let path = url
-        .split_once("://")
-        .map_or(url.as_str(), |(_, rest)| rest)
-        .split_once('/')
-        .map_or("", |(_, p)| p);
+    let rest = url.split_once("://").map_or(url.as_str(), |(_, rest)| rest);
+    let (host, path) = rest.split_once('/').unwrap_or((rest, ""));
     let path = format!("/{path}");
+    let tavily = host == "tavily.com" || host.ends_with(".tavily.com");
     url.contains("marketbeat.com/instant-alerts/filing")
+        || url.contains("marketbeat.com/instant-alerts/consensus")
+        || (tavily && path.starts_with("/knowledge/"))
         || [
             "/13f/",
             "/holdings/",
@@ -211,7 +219,7 @@ pub(crate) fn is_noise(hit: &SearchHit) -> bool {
         || TITLE
             .get_or_init(|| {
                 Regex::new(
-                    r"(?i)\b(?:trims|cuts|reduces|lowers|raises|increases|boosts|adds to|acquires|buys|sells|purchases|has)\s+(?:new\s+)?(?:position|stake|holdings)\b|\btakes\s+(?:new\s+(?:position|stake|holdings)|position|holdings)\b|\b(?:buys|sells|purchases|acquires)\s+(?:[\d,]+\s+)?shares\s+(?:in|of)\b|\bhas\s+\$[\d.,]+\s+(?:million|thousand)\s+(?:stake|position)\b|\b13F\b",
+                    r"(?i)\b(?:trims|cuts|reduces|lowers|raises|increases|boosts|adds to|acquires|buys|sells|purchases|has)\s+(?:new\s+)?(?:position|stake|holdings)\b|\btakes\s+(?:new\s+(?:position|stake|holdings)|position|holdings)\b|\b(?:buys|sells|purchases|acquires)\s+(?:[\d,]+\s+)?shares\s+(?:in|of)\b|\bhas\s+\$[\d.,]+\s+(?:million|thousand)\s+(?:stake|position)\b|\b13F\b|\b(?:consensus\s+price\s+target|average\s+rating\s+of|average\s+recommendation\s+of|consensus\s+recommendation\s+of)\b",
                 )
                 .expect("valid built-in regex")
             })
@@ -233,6 +241,7 @@ fn is_hedged(summary: &str) -> bool {
 
 /// Hits for `query` published at or after `news_cutoff(now)`, without
 /// `is_noise` hits. Hits with no known date are kept, after the dated ones.
+/// Asks for `NEWS_EXTRA_HITS` more than `max` and returns at most `max`.
 pub(crate) async fn fresh_news(
     ns: &dyn NewsSearch,
     query: &str,
@@ -241,7 +250,7 @@ pub(crate) async fn fresh_news(
     d: &mut Diag,
 ) -> Result<Vec<SearchHit>, ProviderError> {
     let since = news_cutoff(now);
-    let mut hits = ns.search_since(query, max, since).await?;
+    let mut hits = ns.search_since(query, max + NEWS_EXTRA_HITS, since).await?;
     let found = hits.len();
     hits.retain(|h| h.published.is_none_or(|p| p >= since));
     d.news_stale += found - hits.len();
@@ -249,6 +258,7 @@ pub(crate) async fn fresh_news(
     hits.retain(|h| !is_noise(h));
     d.news_noise += fresh - hits.len();
     hits.sort_by_key(|h| h.published.is_none());
+    hits.truncate(max);
     Ok(hits)
 }
 
@@ -967,6 +977,42 @@ mod tests {
             ),
             ("https://news.test/a", "Fund takes new position in KLA", true),
             ("https://news.test/a", "Vanguard Group Inc. Takes Position in KLA", true),
+            // Consensus-rating alerts and Tavily company pages say nothing
+            // about the session; MarketBeat price alerts can be real news.
+            (
+                "https://www.marketbeat.com/instant-alerts/consensus-block-inc-nyse-xyz-stock-has-consensus-price-target-of-9561-2026-11-04",
+                "Block stock",
+                true,
+            ),
+            ("https://tavily.com/knowledge/company/uOeIBIg88F1B", "CDW", true),
+            (
+                "https://www.marketbeat.com/instant-alerts/price-dupont-de-nemours-nyse-dd-shares-gap-up-on-earnings-beat-2026-11-03",
+                "DuPont de Nemours (NYSE:DD) Shares Gap Up on Earnings Beat",
+                false,
+            ),
+            (
+                "https://news.test/a",
+                "Block, Inc. (NYSE:XYZ) Stock Has Consensus Price Target of $95.61",
+                true,
+            ),
+            (
+                "https://news.test/a",
+                "Trimble Inc. (NASDAQ:TRMB) Receives Average Rating of \"Buy\" from Analysts",
+                true,
+            ),
+            (
+                "https://news.test/a",
+                "CDW Corporation Given Average Recommendation of \"Moderate Buy\"",
+                true,
+            ),
+            (
+                "https://news.test/a",
+                "Vistra Corp. Receives consensus recommendation of \"Buy\"",
+                true,
+            ),
+            // "tavily.com" outside the host, and other Tavily paths.
+            ("https://news.test/tavily.com/knowledge/x", "Apple results", false),
+            ("https://tavily.com/blog/launch", "Tavily launch", false),
         ] {
             assert_eq!(is_noise(&h(url, title)), noise, "{url} {title}");
         }
@@ -989,6 +1035,65 @@ mod tests {
         assert_eq!(got.len(), 1);
         assert_eq!(got[0].url, URL);
         assert_eq!((d.news_noise, d.news_stale), (1, 0));
+    }
+
+    /// Records the `max` each search is asked for.
+    struct MaxNs(RefCell<Vec<usize>>, Vec<SearchHit>);
+    #[async_trait(?Send)]
+    impl NewsSearch for MaxNs {
+        async fn search(&self, _: &str, _: usize) -> Result<Vec<SearchHit>, ProviderError> {
+            unreachable!("fresh news asks for a start time")
+        }
+        async fn search_since(
+            &self,
+            _: &str,
+            max: usize,
+            _: DateTime<Utc>,
+        ) -> Result<Vec<SearchHit>, ProviderError> {
+            self.0.borrow_mut().push(max);
+            Ok(self.1.clone())
+        }
+    }
+
+    #[tokio::test]
+    async fn fresh_news_asks_for_extra_hits_and_returns_at_most_max() {
+        let n = MaxNs(
+            RefCell::new(vec![]),
+            vec![
+                dated("https://n.test/stale", "old", 48),
+                hit("https://tavily.com/knowledge/company/x", "profile"),
+                dated("https://n.test/1", "a", 1),
+                dated("https://n.test/2", "b", 2),
+                dated("https://n.test/3", "c", 3),
+            ],
+        );
+        let mut d = Diag::default();
+        let got = fresh_news(&n, "q", 3, now(), &mut d).await.unwrap();
+        assert_eq!(*n.0.borrow(), vec![3 + NEWS_EXTRA_HITS]);
+        assert_eq!(got.len(), 3);
+        assert_eq!((d.news_stale, d.news_noise), (1, 1));
+    }
+
+    #[tokio::test]
+    async fn fresh_news_keeps_dated_hits_before_undated_when_truncating() {
+        let n = MaxNs(
+            RefCell::new(vec![]),
+            vec![
+                hit("https://n.test/u1", "u1"),
+                dated("https://n.test/1", "a", 1),
+                hit("https://n.test/u2", "u2"),
+                dated("https://n.test/2", "b", 2),
+                dated("https://n.test/3", "c", 3),
+            ],
+        );
+        let got = fresh_news(&n, "q", 3, now(), &mut Diag::default())
+            .await
+            .unwrap();
+        let urls: Vec<&str> = got.iter().map(|h| h.url.as_str()).collect();
+        assert_eq!(
+            urls,
+            ["https://n.test/1", "https://n.test/2", "https://n.test/3"]
+        );
     }
 
     #[test]
