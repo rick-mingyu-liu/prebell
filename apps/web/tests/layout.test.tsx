@@ -94,6 +94,8 @@ describe("globals.css", () => {
   it("lets the index line scroll in place at every width and never clips its left end", () => {
     const base = css.match(/^\.index-line \{[^}]*\}/m)?.[0] ?? "";
     expect(base).toContain("overflow-x: auto");
+    // Its sr-only labels are absolutely positioned: without this they escape the scroller and widen the page.
+    expect(base).toContain("position: relative");
     expect(base).not.toContain("justify-content");
     expect(css).toMatch(/\.ix:first-child \{ margin-left: auto; \}/);
   });

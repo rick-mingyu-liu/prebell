@@ -1,7 +1,7 @@
 import { statSync } from "node:fs";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import AuthorBlock from "../src/components/AuthorBlock";
 import { hasAuthorPhoto } from "../src/lib/author";
 
@@ -32,6 +32,21 @@ describe("AuthorBlock", () => {
     const out = renderToStaticMarkup(createElement(AuthorBlock, { locale: "en" }));
     expect(hasAuthorPhoto).toBe(true);
     expect(out).toContain('<img class="author-photo" src="/author.jpg"');
+  });
+
+  it("renders no image when the photo was not shipped", async () => {
+    vi.resetModules();
+    vi.doMock("../src/lib/author", () => ({ hasAuthorPhoto: false }));
+    try {
+      const { default: NoPhoto } = await import("../src/components/AuthorBlock");
+      const out = renderToStaticMarkup(createElement(NoPhoto, { locale: "en" }));
+      expect(out).not.toContain("<img");
+      expect(out).toContain("Rick Liu");
+      expect(out).toContain('href="/en/archive"');
+    } finally {
+      vi.doUnmock("../src/lib/author");
+      vi.resetModules();
+    }
   });
 
   it("public/author.jpg exists and is under 60 KB", () => {

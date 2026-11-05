@@ -5,8 +5,6 @@ import type { PartnerGroup, PartnersResponse } from "../lib/partners";
 
 const GROUPS: PartnerGroup[] = ["brokers", "crypto"];
 
-export type PartnerLabels = Record<PartnerGroup | "disclosure", string>;
-
 const isResponse = (v: unknown): v is PartnersResponse =>
   typeof v === "object" && v !== null && GROUPS.every((g) => Array.isArray((v as Record<string, unknown>)[g]));
 
@@ -28,58 +26,20 @@ export function loadPartners(fetchImpl: (url: string) => Promise<Response> = fet
   return pending;
 }
 
-/** One box per group that has links, then the disclosure; nothing at all when there are no links. */
-export function PartnerBoxes({
-  data,
-  labels,
-  variant = "boxes",
-}: {
-  data: PartnersResponse | null;
-  labels: PartnerLabels;
-  variant?: "boxes" | "strip";
-}) {
+/** The partner names as plain sponsored links; nothing at all when there are no links. */
+export function PartnerNames({ data }: { data: PartnersResponse | null }) {
   const groups = data ? GROUPS.filter((g) => data[g].length > 0) : [];
   if (!data || groups.length === 0) return null;
-  // The strip: just the names as plain sponsored links; its parent supplies the label and disclosure.
-  if (variant === "strip")
-    return (
-      <>
-        {groups.flatMap((g) =>
-          data[g].map((p) => (
-            <a key={p.id} href={p.url} target="_blank" rel="sponsored noopener noreferrer">
-              {p.name}
-            </a>
-          )),
-        )}
-      </>
-    );
+  // Its parent (the partner strip) supplies the label and the disclosure.
   return (
     <>
-      {groups.map((g) => (
-        <section key={g} className="side-box">
-          <h2>{labels[g]}</h2>
-          <ul>
-            {data[g].map((p) => (
-              <li key={p.id}>
-                <a href={p.url} target="_blank" rel="sponsored noopener noreferrer">
-                  <span className="side-name">
-                    {p.logo && (
-                      <picture className="side-logo">
-                        {p.logoDark && <source srcSet={p.logoDark} media="(prefers-color-scheme: dark)" />}
-                        {/* Decorative: the name beside it is the link text. */}
-                        <img src={p.logo} alt="" width={18} height={18} />
-                      </picture>
-                    )}
-                    {p.name}
-                  </span>
-                  <span aria-hidden="true">↗</span>
-                </a>
-              </li>
-            ))}
-          </ul>
-        </section>
-      ))}
-      <p className="side-disc">{labels.disclosure}</p>
+      {groups.flatMap((g) =>
+        data[g].map((p) => (
+          <a key={p.id} href={p.url} target="_blank" rel="sponsored noopener noreferrer">
+            {p.name}
+          </a>
+        )),
+      )}
     </>
   );
 }
@@ -88,13 +48,7 @@ export function PartnerBoxes({
  * Country-gated invite links. Pages are edge-cached and country-neutral, so the links are fetched
  * per visitor after load. Nothing renders on the server, while loading or on error (fails closed).
  */
-export default function PartnerLinks({
-  labels,
-  variant = "boxes",
-}: {
-  labels: PartnerLabels;
-  variant?: "boxes" | "strip";
-}) {
+export default function PartnerLinks() {
   const [data, setData] = useState<PartnersResponse | null>(null);
 
   useEffect(() => {
@@ -107,5 +61,5 @@ export default function PartnerLinks({
     };
   }, []);
 
-  return <PartnerBoxes data={data} labels={labels} variant={variant} />;
+  return <PartnerNames data={data} />;
 }

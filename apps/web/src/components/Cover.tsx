@@ -15,9 +15,19 @@ export interface CoverProps {
 export default function Cover({ coverKey, lines, tag, size, alt }: CoverProps) {
   const logo = tag.kind === "logo" ? companyLogo(tag.ticker) : null;
   const stat = lines && lines[0] !== "" ? lines : null;
+  // The lead and article covers sit above the fold, so their scene loads at once; list covers wait.
+  const eager = size !== "small";
   return (
     <figure className={`cover cover-${size}`} aria-label={alt || undefined}>
-      {coverKey && <img className="cover-bg" src={`/${coverKey}`} alt="" loading="lazy" />}
+      {coverKey && (
+        <img
+          className="cover-bg"
+          src={`/${coverKey}`}
+          alt=""
+          loading={eager ? "eager" : "lazy"}
+          fetchPriority={eager ? "high" : undefined}
+        />
+      )}
       <div className="cover-shade"></div>
       <div className="cover-in">
         <span className="cover-tag">

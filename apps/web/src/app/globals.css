@@ -60,8 +60,9 @@ html:lang(zh-Hans) .site-nav { font-variant-caps: normal; }
 .site-nav a, .lang-switch { text-decoration: none; }
 .site-nav a:hover, .site-nav a:focus-visible, .lang-switch:hover, .lang-switch:focus-visible { text-decoration: underline; }
 
-/* Index line: one muted line of levels and moves; on a phone it scrolls sideways inside itself. */
-.index-line { display: flex; margin: 0.6rem 0 0; max-width: none; overflow-x: auto; scrollbar-width: none; font-size: 12.5px; color: var(--muted); white-space: nowrap; }
+/* Index line: one muted line of levels and moves; on a phone it scrolls sideways inside itself.
+   Positioned so its absolutely placed screen-reader labels are clipped by it instead of widening the page. */
+.index-line { position: relative; display: flex; margin: 0.6rem 0 0; max-width: none; overflow-x: auto; scrollbar-width: none; font-size: 12.5px; color: var(--muted); white-space: nowrap; }
 .index-line::-webkit-scrollbar { display: none; }
 /* Auto margins centre the line when it fits and never clip its left end when it does not. */
 .ix:first-child { margin-left: auto; }
@@ -238,8 +239,7 @@ html:lang(zh-Hans) .partners-strip .partners-label { font-variant-caps: normal; 
 .footer-links { display: flex; gap: 1rem; font-size: 13px; }
 .footer-links a { color: var(--muted); }
 
-/* Shared bits: the quiet "more" link, the About column, the pending-translation notice, the logo tile. */
-.tlogo { width: 18px; height: 18px; flex: none; }
+/* Shared bits: the quiet "more" link, the About column, the pending-translation notice. */
 .more { font-weight: 600; font-size: 14px; text-decoration: none; }
 .more:hover, .more:focus-visible { text-decoration: underline; }
 .prose { max-width: 680px; }
@@ -248,7 +248,7 @@ html:lang(zh-Hans) .partners-strip .partners-label { font-variant-caps: normal; 
 .prose > h2 { font-size: 22px; margin: 0 0 0.25rem; }
 .prose .disclaimer { margin-top: 1.5rem; font-size: 13px; }
 .prose > h2 + .author { margin-top: 0.5rem; border-top: 0; padding-top: 0.5rem; }
-.about-tp { margin: 0.5rem 0 1.5rem; color: var(--muted); font-size: 15px; }
+.prose > .about-tp { margin: 0.5rem 0 1.5rem; color: var(--muted); font-size: 15px; }
 .prose .signup { margin-top: 1.5rem; }
 .notice { max-width: 680px; padding: 0.75rem 1rem; border: 1px solid var(--rule); border-left: 3px solid var(--rule-strong); }
 .notice p { margin: 0.25rem 0; }

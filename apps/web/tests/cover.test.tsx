@@ -22,12 +22,10 @@ describe("Cover", () => {
     expect(logo).not.toBeNull();
     const out = render();
     expect(out).toContain('<figure class="cover cover-lead" aria-label="Apple earnings">');
-    expect(out).toContain('<img class="cover-bg" src="/covers/aapl-q4.png" alt="" loading="lazy"/>');
+    expect(out).toContain('<img class="cover-bg" src="/covers/aapl-q4.png" alt="" loading="eager" fetchPriority="high"/>');
     expect(out).toContain('<div class="cover-shade"></div>');
     expect(out).toContain('<div class="cover-in">');
     expect(out).toContain(`<span class="cover-tag"><img src="${logo}" alt="AAPL" loading="lazy"/></span>`);
-    // A lazy image is not hoisted into a preload link.
-    expect(out).not.toContain("<link");
     expect(out).toContain('<p class="cover-stat">Revenue $94.9B<br/>Beat by 2.1%</p>');
     expect(out).toContain('<span class="cover-bar"></span>');
   });
@@ -63,6 +61,18 @@ describe("Cover", () => {
     const none = render({ lines: ["", "ignored"] });
     expect(none).not.toContain("cover-stat");
     expect(none).not.toContain("cover-bar");
+  });
+
+  it("loads the lead and article scenes at once and preloads them; list covers stay lazy", () => {
+    for (const size of ["lead", "article"] as const) {
+      const out = render({ size });
+      expect(out).toContain('<img class="cover-bg" src="/covers/aapl-q4.png" alt="" loading="eager" fetchPriority="high"/>');
+      expect(out).toContain('<link rel="preload" as="image" href="/covers/aapl-q4.png" fetchPriority="high"/>');
+    }
+    const small = render({ size: "small" });
+    expect(small).toContain('<img class="cover-bg" src="/covers/aapl-q4.png" alt="" loading="lazy"/>');
+    // A lazy image is not hoisted into a preload link.
+    expect(small).not.toContain("<link");
   });
 
   it("supports the three sizes", () => {

@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from "vitest";
 import { POST } from "../src/app/api/subscribe/route";
 import { subscribe, validEmail } from "../src/lib/subscribe";
 
@@ -16,6 +16,16 @@ vi.mock("@opennextjs/cloudflare", () => ({
 
 const reply = (status: number, body: unknown = {}) =>
   Promise.resolve(new Response(typeof body === "string" ? body : JSON.stringify(body), { status }));
+
+// The error paths log one line each; capture it so the run stays quiet and the content is checked.
+let errors: MockInstance<typeof console.error>;
+beforeEach(() => {
+  errors = vi.spyOn(console, "error").mockImplementation(() => {});
+});
+afterEach(() => {
+  errors.mockRestore();
+});
+const logged = () => errors.mock.calls.map((args) => args.join(" "));
 
 describe("validEmail", () => {
   it("accepts ordinary addresses and rejects malformed ones", () => {
@@ -37,6 +47,12 @@ describe("subscribe", () => {
     expect(await subscribe("KEY", "a@b.co", tags, other400)).toBe("error");
     expect(await subscribe("KEY", "a@b.co", tags, vi.fn(() => reply(500, "boom")))).toBe("error");
     expect(await subscribe("KEY", "a@b.co", tags, vi.fn(() => Promise.reject(new Error("offline"))))).toBe("error");
+    // Only the status (or "network error") is logged: never the upstream body, the error or the key.
+    expect(logged()).toEqual([
+      "buttondown subscribe failed, status 400",
+      "buttondown subscribe failed, status 500",
+      "buttondown subscribe failed, network error",
+    ]);
   });
 
   it("posts the subscriber to Buttondown with the token and tags", async () => {
@@ -98,6 +114,7 @@ describe("POST /api/subscribe", () => {
     expect(JSON.parse(f.mock.calls[0][1]?.body as string).tags).toEqual(["prebell", "lang:zh", "source:post"]);
     vi.stubGlobal("fetch", vi.fn(() => reply(400, { detail: "already subscribed" })));
     expect(await (await post(good)).json()).toEqual({ ok: true });
+    expect(errors).not.toHaveBeenCalled();
   });
 
   it("never echoes upstream error text or the key", async () => {
@@ -109,5 +126,6 @@ describe("POST /api/subscribe", () => {
     expect(JSON.parse(text)).toEqual({ ok: false });
     expect(text).not.toContain("UPSTREAM-LEAK");
     expect(text).not.toContain("SECRETKEY");
+    expect(logged()).toEqual(["buttondown subscribe failed, status 500"]);
   });
 });

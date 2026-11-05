@@ -18,11 +18,7 @@
     "empty": "Nothing has been published yet.",
     "allBriefs": "All posts",
     "noEarnings": "No earnings checks yet.",
-    "briefTabs": "Daily brief",
     "readFull": "Read the full brief →",
-    "tabMovers": "Top movers",
-    "tabEarnings": "Earnings checks",
-    "panelTabs": "Movers and earnings checks",
     "noMovers": "No movers for this brief.",
     "allEarnings": "All earnings checks →",
     "moversInBrief": "Movers are in the full brief →",
@@ -81,9 +77,6 @@
     "confirmed": "Confirmed",
     "reported": "Reported",
     "none": "No reports.",
-    "stripLabel": "Earnings · {date}",
-    "stripToday": "Earnings today",
-    "stripUnknown": "Time TBD",
     "stripAll": "Full calendar →",
     "stripMore": "+{count} more",
     "prevWeek": "Previous week",
@@ -117,21 +110,14 @@
     "close": "Close"
   },
   "partners": {
-    "brokers": "Brokers",
-    "crypto": "Crypto exchanges",
-    "disclosure": "Affiliate links: PreBell may earn a reward if you sign up. Not investment advice.",
     "from": "From our partners",
     "affiliateNote": "Affiliate links · not investment advice"
   },
   "termpocket": {
-    "name": "TermPocket",
     "copy": "From the PreBell team. Plan your goals and habits with Pocky, your AI assistant.",
     "cta": "Try TermPocket →"
   },
   "brief": {
-    "crumbLabel": "Breadcrumb",
-    "premarket": "Premarket",
-    "recap": "Recap",
     "checked": "✓ Numbers checked against source data",
     "movers": "Top movers",
     "adjacent": "More briefs",
