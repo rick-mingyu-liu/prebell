@@ -37,6 +37,48 @@ pub struct NewsReason {
     pub summary_en: String,
 }
 
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "PascalCase")]
+pub enum Direction {
+    Up,
+    Down,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct ThemeMember {
+    pub ticker: String,
+    pub name: String,
+    /// Percent units, signed.
+    pub change_pct: f64,
+}
+
+/// An industry group moving together: several members beyond the rule's
+/// threshold in one direction.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct Theme {
+    pub group: String,
+    pub group_zh: String,
+    pub direction: Direction,
+    /// Qualifying members by |move| descending; at most the listed few.
+    pub members: Vec<ThemeMember>,
+    /// Qualifying members not listed in `members`.
+    pub more: usize,
+    /// Signed median move of the qualifying members, two decimals.
+    pub median_pct: f64,
+    pub reasons: Vec<NewsReason>,
+}
+
+/// Breadth of one group's strong movers, even when no theme formed.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct ThemeStat {
+    pub group: String,
+    pub present: usize,
+    pub up: usize,
+    pub down: usize,
+    pub median_up: Option<f64>,
+    pub median_down: Option<f64>,
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct Mover {
     pub quote: Quote,
