@@ -252,6 +252,11 @@ When there are no themes the block is absent.
 - Approved by Rick on 2026-11-05 ("can we merge it in and edit today's
   article"); today's article cannot be regenerated because premarket quotes
   are live-only.
+- 2026-11-05: the fallback above was taken. The 150-symbol live check could
+  not run from this network, so `QUOTE_BATCH` stays 50 (11 v7 batches) and
+  `MOVERS_PER_SIDE` goes from 5 to 4; the theme search stays budget-guarded
+  in both briefs (it fits at the nominal premarket usage and is skipped at
+  the nominal recap usage).
 
 ## Open for Rick
 

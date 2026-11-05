@@ -19,12 +19,13 @@ What defines it:
 
 ## 3. Goals
 
-1. **Premarket brief** (the headline product), weekdays ~8:30 AM ET:
-   - index futures (ES, NQ, YM, RTY) and their changes;
-   - top premarket gainers and losers among liquid US stocks, each with the news behind the move;
-   - overnight earnings and macro news;
-   - a short "what to watch today" list (scheduled data releases, earnings before the open).
-2. **After-close recap**, weekdays ~4:45 PM ET: index closes, notable movers with reasons, after-hours earnings to watch. Shorter than the premarket brief. (Kept by default; owner hasn't objected.)
+1. **Premarket brief** (the headline product), weekdays ~8:30 AM ET. Sections in this order, macro first because the order follows the story:
+   - "Futures" / "期货": index futures (ES, NQ, YM, RTY) and their changes;
+   - "Macro & overnight" / "宏观与隔夜": up to five overnight macro and market news items;
+   - "Themes" / "板块动向": industry groups whose members moved together, each as a code-rendered list line ("**Memory & storage** ▼ median −4.10%: MU −4.12%, WDC −3.90%, and 2 more") and a short paragraph;
+   - "Biggest premarket movers" / "盘前异动": top premarket gainers and losers among liquid US stocks, each with the news behind the move;
+   - "What to watch" / "今日关注": a short list (scheduled data releases, earnings before the open).
+2. **After-close recap**, weekdays ~4:45 PM ET: "Index closes" / "指数收盘", "Macro & after the close" / "宏观与盘后", "Themes" / "板块动向" (same list line and paragraphs), "Notable movers" / "个股异动" with reasons, "After-hours earnings to watch" / "盘后财报关注". Shorter than the premarket brief. (Kept by default; owner hasn't objected.)
 3. **Earnings health checks** for a watchlist of large companies: triggered when the company's 8-K Item 2.02 appears on EDGAR. Covers revenue, margins, EPS (GAAP vs non-GAAP), cash flow, guidance, with charts, citing the filing and press release.
 4. **Earnings calendar page** (upcoming dates, before open / after close / unknown), confirmed from primary sources.
 5. **English + Simplified Chinese** for every piece, at `/en/...` and `/zh/...`.
@@ -93,7 +94,7 @@ EDGAR poller (every 2–5 min, market hours) ─┤
 2. **Write each language separately** from the facts, using per-template prompts in each language. Not translate-after.
 3. **Number check in code.** Extract every number from each draft, match it to a facts value (allowing defined rounding and unit conversions such as "92.28 billion" ↔ "922.8 億"), and fail the draft if any number has no match. On failure: retry once with the error list; if it still fails, don't publish that language and alert.
 4. **Missing data stays missing.** If a source returns nothing for a field, the facts JSON marks it missing; the prompt forbids filling it. A missing required field keeps the post from publishing. A missing optional field or section is **omitted** from the page, never shown as "n/a" / "暂缺", and the prose does not mention it. Code, not the LLM, decides which sections exist and lists them at the end of the drafting prompt. The futures and index tables have fixed rows, so a missing contract or index keeps its "n/a" / "暂缺" cell.
-   - **Required sections (designer's call).** A post only publishes if its required sections have data; optional sections are left out when empty. Premarket brief: required = movers (with at least one news reason) and futures; optional = macro, watch list. Recap: required = index closes; optional = movers, after-hours. Earnings check: required = revenue, EPS, a link to the filing; optional = segments, cash flow, guidance. The earnings key-figures table lists only the figures the release gave.
+   - **Required sections (designer's call).** A post only publishes if its required sections have data; optional sections are left out when empty. Premarket brief: required = movers (with at least one news reason) and futures; optional = macro, themes, watch list. Recap: required = index closes; optional = macro, themes, movers, after-hours. Earnings check: required = revenue, EPS, a link to the filing; optional = segments, cash flow, guidance. The earnings key-figures table lists only the figures the release gave.
    - **Already reported (recap).** When our earnings check for a filing accepted after today's close is already published, the recap's after-hours section ends with a code-rendered line, "Already reported after the close: [Apple (AAPL)](/en/p/aapl-q4-fy2026-earnings)." (ZH "已于盘后发布财报：…"), and the after-hours news extraction skips that company, so the recap never says it is still to report.
    - **Late, not thin (owner).** If required data is missing at the scheduled time, the job keeps retrying (every ~5 min). The premarket brief may publish up to **9:25 AM ET**; after that it is skipped for the day and an alert is sent. The recap may publish up to 7 PM ET under the same rule.
    - **One language can go first (owner).** If English passes the number check and Chinese still fails after its retry, English publishes on time. The Chinese page for that post shows a "translation coming / 中文版稍后推出" notice (excluded from search and from the hreflang pair until filled), and the job keeps retrying Chinese until it passes, then fills it in. The reverse case (Chinese passes, English fails) holds both and alerts, since English is primary. Posts therefore have a per-language status (`published`, `pending`, `failed`).

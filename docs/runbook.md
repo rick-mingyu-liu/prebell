@@ -104,7 +104,34 @@ Each build logs one `diagnostics:` line as soon as its facts are built, before t
 - `hedged=` on the `reasons` part counts mover reasons dropped because `summary_en` hedged its cause ("which could support the gain"). In code the counter is `reasons_hedged`.
 - `news_noise=` counts search hits dropped as noise before any LLM call: MarketBeat filing alerts, 13F, holdings and institutional-ownership pages, "trims position"-style titles, analyst consensus-rating alerts ("Has Consensus Price Target of", "Average Rating of"), and Tavily's own company-profile pages (`tavily.com/knowledge/`). Each mover and macro news query asks Tavily for `NEWS_EXTRA_HITS` (2) more hits than it keeps, so stale and noise hits do not use up a mover's slots; after filtering, the prompt still gets at most the usual number of articles. `news_stale=` and `news_noise=` count every dropped hit, including the extra ones.
 - `reported=N reported_err=M` (recap only, last part) counts the earnings checks published today that the recap links as already reported. `reported_err=M` above 0 means that many D1 or R2 reads failed; the recap still publishes and lists the checks it could read.
+- `macro queries=Q hits=H items=I` (premarket and recap) covers the macro section. `queries=` is how many of the three macro searches ran: 3 normally, fewer when the budget guard dropped the later ones (see "Budget guard" below). `hits=` is the hits left after merging the searches, dropping duplicates, stale and noise hits, and capping at 8. `items=` is the macro items that passed the quote check and are in the facts, at most 5. `items=0` means the brief has no macro section; with `hits=0` there was nothing fresh to read, with `hits=` above 0 the extraction kept nothing.
+- `themes found=N kept=K searched=0|1` (premarket and recap) covers the themes section. `found=` counts the industry groups that qualified as a theme, `kept=` the ones shown after the cap of 3. `searched=1` means the top theme had no reason from its movers' news and its own search ran; `searched=0` means no theme formed, the top theme already had a reason, or the budget guard skipped the search. `found=0` means the brief has no themes section and the front page shows no themes block.
 - `cover=ok|skip|err` (premarket and recap only, its own line after the scene step; never in `runs.last_error` or the stored facts) says what happened to the post's cover scene. `ok`: the Workers AI image was stored in R2 under `covers/<slug>.<ext>`. `skip`: no scene maker is configured (`CF_AI_TOKEN` or `CF_ACCOUNT_ID` is missing), so the post has the plain cover. `err`: the scene call failed, the image was neither PNG nor JPEG, or the R2 write failed; the post still publishes with the plain cover. When the scene call itself failed, `wrangler tail` also shows `cover: <message>`, for example the API's quota or auth error. Earnings posts get covers the same way but log no `cover=` line. Scene prompts never name the company: an earnings scene is one of eight generic, people-free and text-free settings picked by a stable hash of the ticker, and a brief scene rotates by weekday through five such settings.
+
+### Tuning themes
+
+A theme is an industry group from `crates/core/data/universe.txt` whose members move together. The rules are constants in `crates/core/src/themes.rs`:
+
+| Constant | Premarket | Recap |
+|---|---|---|
+| `min_move`: a member counts at this move or more | 2.0% | 3.0% |
+| `min_median`: the counting members' median move | 2.5% | 3.5% |
+| `THEME_MIN_MEMBERS`: counting members on one side | 3 | 3 |
+
+A group also needs the counting members to be at least half of its members that moved more than 0.5%, and a group with 3 or more counting members on both sides is no theme. Dual share classes count once. Themes rank by median times members; `THEME_MAX` keeps 3, and each theme lists up to 6 members (`THEME_LIST_MEMBERS`) and "and N more".
+
+To see what nearly qualified, read the stored facts. Each brief's facts object is in the `prebell-facts` R2 bucket at `premarket/YYYY-MM-DD.json` or `recap/YYYY-MM-DD.json`, and its `theme_candidates` array has one entry for every group with at least two members beyond ±1.5% (`THEME_STAT_MOVE`), up to 15:
+
+```
+cd crates/generator
+pnpm exec wrangler r2 object get prebell-facts/recap/2026-11-05.json --remote --pipe | jq '.theme_candidates, [.themes[] | {group, median_pct, more}]'
+```
+
+Each entry has `group`, `present` (members with a quote), `up` and `down` (members at or beyond +1.5% and −1.5%), and `median_up` / `median_down` (the median move on each side). A group with `down: 2` and `median_down: -4.0` moved hard but missed on member count; a group with `down: 4` and `median_down: -2.2` had the breadth but most likely missed on the median (the theme rules count members at 2.0% or 3.0%, not 1.5%, so the stats are a wider net). After a week of briefs, change the constants if the same near misses keep showing on days the market plainly had that story; the tests in `themes.rs` pin the values, so update them in the same commit.
+
+### Budget guard
+
+The facts stage keeps optional work under `BUDGET_SOFT` (40 fetch subrequests, `crates/core/src/budget.rs`), which leaves room for the drafts, the cover scene and the Yahoo 401-refresh path. Before each optional step the build checks that what it has used plus the step's cost is 40 or less. What goes first, in order: the top theme's search, then the third macro query, then the second. The first macro query, the quotes, the mover searches and the drafts always run; the recap also keeps room for its after-hours search. In the diagnostics the guard shows as `searched=0` with `found=` above 0 and as `macro queries=` below 3. At the nominal premarket usage the theme search fits; at the nominal recap usage it is skipped and all three macro queries run.
 
 ### CPU overruns
 
