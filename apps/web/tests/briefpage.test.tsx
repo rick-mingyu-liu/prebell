@@ -125,18 +125,25 @@ describe("BriefView", () => {
     const tag = at(out, '<span class="cover-tag">Oct 30 · Premarket</span>');
     const body = at(out, '<div class="story-body">');
     const lede = at(out, '<p class="story-lede">US futures fell for a second day as weak tech earnings');
-    const movers = at(out, '<table class="table movers-table">');
     const futures = at(out, "<h2>Futures</h2>");
+    const heading = at(out, '<section class="story-movers" aria-labelledby="movers"><h2 id="movers">Biggest premarket movers</h2>');
+    const movers = at(out, '<table class="table movers-table">');
+    const prose = at(out, "Intel (INTC) plunged 26.0%");
+    const macro = at(out, "<h2>Macro &amp; overnight</h2>");
     const sources = at(out, '<section class="sources"');
     const disclaimer = at(out, "It is not investment advice.");
     const author = at(out, '<section class="author">');
     const signup = at(out, '<section class="signup">');
     const prev = at(out, 'rel="prev"');
     const partners = at(out, '<aside class="partners-strip"');
-    expect(inOrder([kicker, title, meta, time, checked, cover, tag, body, lede, movers, futures, sources, disclaimer, author, signup, prev, partners])).toBe(true);
+    expect(
+      inOrder([kicker, title, meta, time, checked, cover, tag, body, lede, futures, heading, movers, prose, macro, sources, disclaimer, author, signup, prev, partners]),
+    ).toBe(true);
 
-    // Title, summary, sources heading and disclaimer once each; the body's tables give way to the movers table.
+    // Title, summary, movers heading, sources heading and disclaimer once each; the body's tables give way to the movers table.
     expect(out.match(/<h1/g)).toHaveLength(1);
+    expect(out.match(/Biggest premarket movers/g)).toHaveLength(1);
+    expect(out).not.toContain("Top movers");
     expect(out.match(/US futures fell for a second day as weak tech earnings/g)).toHaveLength(1);
     expect(out.match(/<table/g)).toHaveLength(1);
     expect(out.match(/>Sources</g)).toHaveLength(1);
@@ -155,6 +162,38 @@ describe("BriefView", () => {
     // No grid, sidebar, strip, breadcrumb, numbers block, pills or old movers list.
     for (const gone of ["grid-article", "sidebar", "estrip", "crumb", "numbers", 'class="movers"', "pill", "lang-pill", "brief-"])
       expect(out, gone).not.toContain(gone);
+  });
+
+  it("follows the section order: macro, themes, then the movers table under its heading, right before its prose", () => {
+    const md = fixtureText("premarket-2026-11-05.en.md");
+    const out = render({
+      post: post({
+        slug: "premarket-2026-11-05",
+        tradingDate: "2026-11-05",
+        title: "Chip stocks slide as yields climb; Intel plunges premarket",
+        summary: md.split("\n\n")[1],
+        bodyMd: md,
+        sources: [...md.matchAll(/\]\((https:\/\/[^)]+)\)/g)].map((m) => ({ url: m[1], title: m[1] })),
+      }),
+    });
+    const lede = at(out, '<p class="story-lede">US futures fell as Treasury yields rose');
+    const futures = at(out, "<h2>Futures</h2>");
+    const futuresProse = at(out, "S&amp;P 500 futures were down 1.14%");
+    const macro = at(out, "<h2>Macro &amp; overnight</h2>");
+    const themes = at(out, "<h2>Themes</h2>");
+    const themeLine = at(out, "<strong>Semiconductors</strong>");
+    const heading = at(out, '<section class="story-movers" aria-labelledby="movers"><h2 id="movers">Biggest premarket movers</h2>');
+    const table = at(out, '<table class="table movers-table">');
+    const prose = at(out, "Intel (INTC) plunged 26.0%");
+    const watch = at(out, "<h2>What to watch</h2>");
+    const sources = at(out, '<section class="sources"');
+    expect(inOrder([lede, futures, futuresProse, macro, themes, themeLine, heading, table, prose, watch, sources])).toBe(true);
+
+    // The body's own tables give way to the movers table; the heading shows once, as the markdown wrote it.
+    expect(out.match(/<table/g)).toHaveLength(1);
+    expect(out.match(/Biggest premarket movers/g)).toHaveLength(1);
+    expect(out).not.toContain("Top movers");
+    expect(out).not.toContain("Shares surged in premarket trading after the global snacks manufacturer reported results. |");
   });
 
   it("labels a recap's kicker, cover and price column for the close", () => {
@@ -249,6 +288,7 @@ describe("BriefView", () => {
     expect(out).not.toContain("发布于");
     expect(out).toContain('role="status"');
     expect(out).toContain('href="/en/p/premarket-2026-10-30"');
+    expect(at(out, '<section class="story-movers" aria-labelledby="movers"><h2 id="movers">涨跌榜</h2>')).toBeLessThan(at(out, "movers-table"));
     expect(at(out, "movers-table")).toBeLessThan(at(out, 'role="status"'));
     expect(out).not.toContain("post-body");
     expect(out).not.toContain('class="sources"');

@@ -1,524 +1,520 @@
-# S&P 500 ∪ Nasdaq-100 as of 2026-06 (model knowledge date); refresh periodically.
-# Format: TICKER<TAB>Company Name. Lines starting with # are comments.
-A	Agilent Technologies
-AAPL	Apple
-ABBV	AbbVie
-ABNB	Airbnb
-ABT	Abbott Laboratories
-ACGL	Arch Capital Group
-ACN	Accenture
-ADBE	Adobe
-ADI	Analog Devices
-ADM	Archer-Daniels-Midland
-ADP	Automatic Data Processing
-ADSK	Autodesk
-AEE	Ameren
-AEP	American Electric Power
-AES	AES Corporation
-AFL	Aflac
-AIG	American International Group
-AIZ	Assurant
-AJG	Arthur J. Gallagher
-AKAM	Akamai Technologies
-ALB	Albemarle
-ALGN	Align Technology
-ALL	Allstate
-ALLE	Allegion
-AMAT	Applied Materials
-AMCR	Amcor
-AMD	Advanced Micro Devices
-AME	Ametek
-AMGN	Amgen
-AMP	Ameriprise Financial
-AMT	American Tower
-AMZN	Amazon
-ANET	Arista Networks
-AON	Aon
-AOS	A. O. Smith
-APA	APA Corporation
-APD	Air Products and Chemicals
-APH	Amphenol
-APO	Apollo Global Management
-APP	AppLovin
-APTV	Aptiv
-ARE	Alexandria Real Estate Equities
-ATO	Atmos Energy
-AVB	AvalonBay Communities
-AVGO	Broadcom
-AVY	Avery Dennison
-AWK	American Water Works
-AXON	Axon Enterprise
-AXP	American Express
-AZO	AutoZone
-BA	Boeing
-BAC	Bank of America
-BALL	Ball Corporation
-BAX	Baxter International
-BBY	Best Buy
-BDX	Becton Dickinson
-BEN	Franklin Resources
-BF.B	Brown-Forman
-BG	Bunge Global
-BIIB	Biogen
-BK	BNY Mellon
-BKNG	Booking Holdings
-BKR	Baker Hughes
-BLDR	Builders FirstSource
-BLK	BlackRock
-BMY	Bristol-Myers Squibb
-BR	Broadridge Financial Solutions
-BRK.B	Berkshire Hathaway
-BRO	Brown & Brown
-BSX	Boston Scientific
-BX	Blackstone
-BXP	BXP
-C	Citigroup
-CAG	Conagra Brands
-CAH	Cardinal Health
-CARR	Carrier Global
-CAT	Caterpillar
-CB	Chubb
-CBOE	Cboe Global Markets
-CBRE	CBRE Group
-CCI	Crown Castle
-CCL	Carnival
-CDNS	Cadence Design Systems
-CDW	CDW
-CEG	Constellation Energy
-CF	CF Industries
-CFG	Citizens Financial Group
-CHD	Church & Dwight
-CHRW	C.H. Robinson
-CHTR	Charter Communications
-CI	Cigna Group
-CINF	Cincinnati Financial
-CL	Colgate-Palmolive
-CLX	Clorox
-CMCSA	Comcast
-CME	CME Group
-CMG	Chipotle Mexican Grill
-CMI	Cummins
-CMS	CMS Energy
-CNC	Centene
-CNP	CenterPoint Energy
-COF	Capital One
-COIN	Coinbase
-COO	Cooper Companies
-COP	ConocoPhillips
-COR	Cencora
-COST	Costco
-CPAY	Corpay
-CPB	Campbell's Company
-CPRT	Copart
-CPT	Camden Property Trust
-CRL	Charles River Laboratories
-CRM	Salesforce
-CRWD	CrowdStrike
-CSCO	Cisco
-CSGP	CoStar Group
-CSX	CSX
-CTAS	Cintas
-CTRA	Coterra Energy
-CTSH	Cognizant
-CTVA	Corteva
-CVNA	Carvana
-CVS	CVS Health
-CVX	Chevron
-CZR	Caesars Entertainment
-D	Dominion Energy
-DAL	Delta Air Lines
-DASH	DoorDash
-DAY	Dayforce
-DD	DuPont
-DDOG	Datadog
-DE	Deere & Company
-DECK	Deckers Brands
-DELL	Dell Technologies
-DG	Dollar General
-DGX	Quest Diagnostics
-DHI	D.R. Horton
-DHR	Danaher
-DIS	Walt Disney
-DLR	Digital Realty
-DLTR	Dollar Tree
-DOC	Healthpeak Properties
-DOV	Dover
-DOW	Dow
-DPZ	Domino's Pizza
-DRI	Darden Restaurants
-DTE	DTE Energy
-DUK	Duke Energy
-DVA	DaVita
-DVN	Devon Energy
-DXCM	Dexcom
-EA	Electronic Arts
-EBAY	eBay
-ECL	Ecolab
-ED	Consolidated Edison
-EFX	Equifax
-EG	Everest Group
-EIX	Edison International
-EL	Estee Lauder
-ELV	Elevance Health
-EME	EMCOR Group
-EMN	Eastman Chemical
-EMR	Emerson Electric
-ENPH	Enphase Energy
-EOG	EOG Resources
-EPAM	EPAM Systems
-EQIX	Equinix
-EQR	Equity Residential
-EQT	EQT Corporation
-ERIE	Erie Indemnity
-ES	Eversource Energy
-ESS	Essex Property Trust
-ETN	Eaton
-ETR	Entergy
-EVRG	Evergy
-EW	Edwards Lifesciences
-EXC	Exelon
-EXE	Expand Energy
-EXPD	Expeditors International
-EXPE	Expedia Group
-EXR	Extra Space Storage
-F	Ford Motor
-FANG	Diamondback Energy
-FAST	Fastenal
-FCX	Freeport-McMoRan
-FDS	FactSet
-FDX	FedEx
-FE	FirstEnergy
-FFIV	F5
-FI	Fiserv
-FICO	Fair Isaac
-FIS	Fidelity National Information Services
-FITB	Fifth Third Bancorp
-FOX	Fox Corporation (Class B)
-FOXA	Fox Corporation (Class A)
-FRT	Federal Realty Investment Trust
-FSLR	First Solar
-FTNT	Fortinet
-FTV	Fortive
-GD	General Dynamics
-GDDY	GoDaddy
-GE	GE Aerospace
-GEHC	GE HealthCare
-GEN	Gen Digital
-GEV	GE Vernova
-GILD	Gilead Sciences
-GIS	General Mills
-GL	Globe Life
-GLW	Corning
-GM	General Motors
-GNRC	Generac
-GOOG	Alphabet (Class C)
-GOOGL	Alphabet (Class A)
-GPC	Genuine Parts
-GPN	Global Payments
-GRMN	Garmin
-GS	Goldman Sachs
-GWW	W. W. Grainger
-HAL	Halliburton
-HAS	Hasbro
-HBAN	Huntington Bancshares
-HCA	HCA Healthcare
-HD	Home Depot
-HIG	Hartford
-HII	Huntington Ingalls Industries
-HLT	Hilton Worldwide
-HOLX	Hologic
-HON	Honeywell
-HOOD	Robinhood Markets
-HPE	Hewlett Packard Enterprise
-HPQ	HP Inc.
-HRL	Hormel Foods
-HSIC	Henry Schein
-HST	Host Hotels & Resorts
-HSY	Hershey
-HUBB	Hubbell
-HUM	Humana
-HWM	Howmet Aerospace
-IBKR	Interactive Brokers
-IBM	IBM
-ICE	Intercontinental Exchange
-IDXX	Idexx Laboratories
-IEX	IDEX Corporation
-IFF	International Flavors & Fragrances
-INCY	Incyte
-INTC	Intel
-INTU	Intuit
-INVH	Invitation Homes
-IP	International Paper
-IQV	IQVIA
-IR	Ingersoll Rand
-IRM	Iron Mountain
-ISRG	Intuitive Surgical
-IT	Gartner
-ITW	Illinois Tool Works
-IVZ	Invesco
-J	Jacobs Solutions
-JBHT	J.B. Hunt
-JBL	Jabil
-JCI	Johnson Controls
-JKHY	Jack Henry & Associates
-JNJ	Johnson & Johnson
-JPM	JPMorgan Chase
-KDP	Keurig Dr Pepper
-KEY	KeyCorp
-KEYS	Keysight Technologies
-KHC	Kraft Heinz
-KIM	Kimco Realty
-KKR	KKR
-KLAC	KLA
-KMB	Kimberly-Clark
-KMI	Kinder Morgan
-KMX	CarMax
-KO	Coca-Cola
-KR	Kroger
-KVUE	Kenvue
-L	Loews
-LDOS	Leidos
-LEN	Lennar
-LH	Labcorp
-LHX	L3Harris
-LII	Lennox International
-LIN	Linde
-LKQ	LKQ Corporation
-LLY	Eli Lilly
-LMT	Lockheed Martin
-LNT	Alliant Energy
-LOW	Lowe's
-LRCX	Lam Research
-LULU	Lululemon Athletica
-LUV	Southwest Airlines
-LVS	Las Vegas Sands
-LW	Lamb Weston
-LYB	LyondellBasell
-LYV	Live Nation Entertainment
-MA	Mastercard
-MAA	Mid-America Apartment Communities
-MAR	Marriott International
-MAS	Masco
-MCD	McDonald's
-MCHP	Microchip Technology
-MCK	McKesson
-MCO	Moody's
-MDLZ	Mondelez International
-MDT	Medtronic
-MET	MetLife
-META	Meta Platforms
-MGM	MGM Resorts
-MHK	Mohawk Industries
-MKC	McCormick
-MKTX	MarketAxess
-MLM	Martin Marietta Materials
-MMC	Marsh McLennan
-MMM	3M
-MNST	Monster Beverage
-MO	Altria
-MOH	Molina Healthcare
-MOS	Mosaic
-MPC	Marathon Petroleum
-MPWR	Monolithic Power Systems
-MRK	Merck
-MRNA	Moderna
-MS	Morgan Stanley
-MSCI	MSCI
-MSFT	Microsoft
-MSI	Motorola Solutions
-MTB	M&T Bank
-MTCH	Match Group
-MTD	Mettler-Toledo
-MU	Micron Technology
-NCLH	Norwegian Cruise Line Holdings
-NDAQ	Nasdaq Inc.
-NDSN	Nordson
-NEE	NextEra Energy
-NEM	Newmont
-NFLX	Netflix
-NI	NiSource
-NKE	Nike
-NOC	Northrop Grumman
-NOW	ServiceNow
-NRG	NRG Energy
-NSC	Norfolk Southern
-NTAP	NetApp
-NTRS	Northern Trust
-NUE	Nucor
-NVDA	Nvidia
-NVR	NVR
-NWS	News Corp (Class B)
-NWSA	News Corp (Class A)
-NXPI	NXP Semiconductors
-O	Realty Income
-ODFL	Old Dominion Freight Line
-OKE	Oneok
-OMC	Omnicom Group
-ON	ON Semiconductor
-ORCL	Oracle
-ORLY	O'Reilly Automotive
-OTIS	Otis Worldwide
-OXY	Occidental Petroleum
-PANW	Palo Alto Networks
-PAYC	Paycom
-PAYX	Paychex
-PCAR	Paccar
-PCG	PG&E
-PEG	Public Service Enterprise Group
-PEP	PepsiCo
-PFE	Pfizer
-PFG	Principal Financial Group
-PG	Procter & Gamble
-PGR	Progressive
-PH	Parker Hannifin
-PHM	PulteGroup
-PKG	Packaging Corporation of America
-PLD	Prologis
-PLTR	Palantir Technologies
-PM	Philip Morris International
-PNC	PNC Financial Services
-PNR	Pentair
-PNW	Pinnacle West Capital
-PODD	Insulet
-POOL	Pool Corporation
-PPG	PPG Industries
-PPL	PPL Corporation
-PRU	Prudential Financial
-PSA	Public Storage
-PSKY	Paramount Skydance
-PSX	Phillips 66
-PTC	PTC
-PWR	Quanta Services
-PYPL	PayPal
-QCOM	Qualcomm
-RCL	Royal Caribbean Group
-REG	Regency Centers
-REGN	Regeneron Pharmaceuticals
-RF	Regions Financial
-RJF	Raymond James Financial
-RL	Ralph Lauren
-RMD	ResMed
-ROK	Rockwell Automation
-ROL	Rollins
-ROP	Roper Technologies
-ROST	Ross Stores
-RSG	Republic Services
-RTX	RTX Corporation
-RVTY	Revvity
-SBAC	SBA Communications
-SBUX	Starbucks
-SCHW	Charles Schwab
-SHW	Sherwin-Williams
-SJM	J.M. Smucker
-SLB	SLB
-SMCI	Super Micro Computer
-SNA	Snap-on
-SNPS	Synopsys
-SO	Southern Company
-SOLV	Solventum
-SPG	Simon Property Group
-SPGI	S&P Global
-SRE	Sempra
-STE	Steris
-STLD	Steel Dynamics
-STT	State Street
-STX	Seagate Technology
-STZ	Constellation Brands
-SW	Smurfit Westrock
-SWK	Stanley Black & Decker
-SWKS	Skyworks Solutions
-SYF	Synchrony Financial
-SYK	Stryker
-SYY	Sysco
-T	AT&T
-TAP	Molson Coors
-TDG	TransDigm Group
-TDY	Teledyne Technologies
-TECH	Bio-Techne
-TEL	TE Connectivity
-TER	Teradyne
-TFC	Truist Financial
-TGT	Target
-TJX	TJX Companies
-TKO	TKO Group Holdings
-TMO	Thermo Fisher Scientific
-TMUS	T-Mobile US
-TPL	Texas Pacific Land
-TPR	Tapestry
-TRGP	Targa Resources
-TRMB	Trimble
-TROW	T. Rowe Price
-TRV	Travelers Companies
-TSCO	Tractor Supply
-TSLA	Tesla
-TSN	Tyson Foods
-TT	Trane Technologies
-TTD	The Trade Desk
-TTWO	Take-Two Interactive
-TXN	Texas Instruments
-TXT	Textron
-TYL	Tyler Technologies
-UAL	United Airlines Holdings
-UBER	Uber Technologies
-UDR	UDR
-UHS	Universal Health Services
-ULTA	Ulta Beauty
-UNH	UnitedHealth Group
-UNP	Union Pacific
-UPS	United Parcel Service
-URI	United Rentals
-USB	U.S. Bancorp
-V	Visa
-VICI	Vici Properties
-VLO	Valero Energy
-VLTO	Veralto
-VMC	Vulcan Materials
-VRSK	Verisk Analytics
-VRSN	Verisign
-VRTX	Vertex Pharmaceuticals
-VST	Vistra
-VTR	Ventas
-VTRS	Viatris
-VZ	Verizon
-WAB	Wabtec
-WAT	Waters Corporation
-WBD	Warner Bros. Discovery
-WDAY	Workday
-WDC	Western Digital
-WEC	WEC Energy Group
-WELL	Welltower
-WFC	Wells Fargo
-WM	Waste Management
-WMB	Williams Companies
-WMT	Walmart
-WRB	W. R. Berkley
-WSM	Williams-Sonoma
-WST	West Pharmaceutical Services
-WTW	Willis Towers Watson
-WY	Weyerhaeuser
-WYNN	Wynn Resorts
-XEL	Xcel Energy
-XOM	ExxonMobil
-XYL	Xylem
-XYZ	Block
-YUM	Yum! Brands
-ZBH	Zimmer Biomet
-ZBRA	Zebra Technologies
-ZTS	Zoetis
-ALNY	Alnylam Pharmaceuticals
-ARM	Arm Holdings
-ASML	ASML Holding
-AZN	AstraZeneca
-CCEP	Coca-Cola Europacific Partners
-FER	Ferrovial
-GFS	GlobalFoundries
-INSM	Insmed
-MDB	MongoDB
-MELI	MercadoLibre
-MRVL	Marvell Technology
-MSTR	Strategy
-PDD	PDD Holdings
-SHOP	Shopify
-TEAM	Atlassian
-TRI	Thomson Reuters
-ZS	Zscaler
+# S&P 500 ∪ Nasdaq-100 as of 2026-11 (Wikipedia index-change tables citing S&P DJI and Nasdaq releases, through 2026-11-04); refresh periodically.
+# Format: TICKER<TAB>Company Name<TAB>GICS Sector<TAB>Group. Lines starting with # are comments.
+A	Agilent Technologies	Health Care	Life science tools & diagnostics
+AAPL	Apple	Information Technology	Mega-cap tech platforms
+ABBV	AbbVie	Health Care	Pharma
+ABNB	Airbnb	Consumer Discretionary	Cruise & travel
+ABT	Abbott Laboratories	Health Care	Medical devices
+ACGL	Arch Capital Group	Financials	Insurers
+ACN	Accenture	Information Technology	IT services & hardware
+ADBE	Adobe	Information Technology	Cloud & enterprise software
+ADI	Analog Devices	Information Technology	Semiconductors
+ADM	Archer-Daniels-Midland	Consumer Staples	Food producers & distributors
+ADP	Automatic Data Processing	Industrials	Business services
+ADSK	Autodesk	Information Technology	Cloud & enterprise software
+AEE	Ameren	Utilities	Utilities
+AEP	American Electric Power	Utilities	Utilities
+AES	AES Corporation	Utilities	Utilities
+AFL	Aflac	Financials	Insurers
+AIG	American International Group	Financials	Insurers
+AIZ	Assurant	Financials	Insurers
+AJG	Arthur J. Gallagher	Financials	Insurance brokers
+AKAM	Akamai Technologies	Information Technology	Cybersecurity
+ALB	Albemarle	Materials	Chemicals
+ALGN	Align Technology	Health Care	Medical devices
+ALL	Allstate	Financials	Insurers
+ALLE	Allegion	Industrials	Building products & materials
+AMAT	Applied Materials	Information Technology	Semiconductor equipment
+AMCR	Amcor	Materials	Packaging & paper
+AMD	Advanced Micro Devices	Information Technology	Semiconductors
+AME	Ametek	Industrials	Industrial conglomerates & automation
+AMGN	Amgen	Health Care	Biotech
+AMP	Ameriprise Financial	Financials	Asset managers & brokers
+AMT	American Tower	Real Estate	Tower & data center REITs
+AMZN	Amazon	Consumer Discretionary	Mega-cap tech platforms
+ANET	Arista Networks	Information Technology	Networking & optical
+AON	Aon	Financials	Insurance brokers
+AOS	A. O. Smith	Industrials	Building products & materials
+APA	APA Corporation	Energy	Oil & gas producers
+APD	Air Products and Chemicals	Materials	Chemicals
+APH	Amphenol	Information Technology	Electronics & components
+APO	Apollo Global Management	Financials	Private equity & credit
+APP	AppLovin	Information Technology	Cloud & enterprise software
+APTV	Aptiv	Consumer Discretionary	Autos & EV
+ARE	Alexandria Real Estate Equities	Real Estate	REITs & real estate
+ARES	Ares Management	Financials	Private equity & credit
+ATO	Atmos Energy	Utilities	Utilities
+AVGO	Broadcom	Information Technology	Semiconductors
+AVY	Avery Dennison	Materials	Packaging & paper
+AWK	American Water Works	Utilities	Utilities
+AXON	Axon Enterprise	Industrials	Aerospace & defense
+AXP	American Express	Financials	Card issuers & consumer finance
+AZO	AutoZone	Consumer Discretionary	Home improvement & specialty retail
+BA	Boeing	Industrials	Aerospace & defense
+BAC	Bank of America	Financials	Large banks
+BALL	Ball Corporation	Materials	Packaging & paper
+BAX	Baxter International	Health Care	Medical devices
+BBY	Best Buy	Consumer Discretionary	Home improvement & specialty retail
+BDX	Becton Dickinson	Health Care	Medical devices
+BE	Bloom Energy	Industrials	Electrical & grid infrastructure
+BEN	Franklin Resources	Financials	Asset managers & brokers
+BF.B	Brown-Forman	Consumer Staples	Beverages & tobacco
+BG	Bunge Global	Consumer Staples	Food producers & distributors
+BIIB	Biogen	Health Care	Biotech
+BKNG	Booking Holdings	Consumer Discretionary	Cruise & travel
+BKR	Baker Hughes	Energy	Oilfield services
+BLK	BlackRock	Financials	Asset managers & brokers
+BMY	Bristol-Myers Squibb	Health Care	Pharma
+BNY	BNY Mellon	Financials	Asset managers & brokers
+BR	Broadridge Financial Solutions	Industrials	Business services
+BRK.B	Berkshire Hathaway	Financials	Insurers
+BRO	Brown & Brown	Financials	Insurance brokers
+BSX	Boston Scientific	Health Care	Medical devices
+BX	Blackstone	Financials	Private equity & credit
+BXP	BXP	Real Estate	REITs & real estate
+C	Citigroup	Financials	Large banks
+CAH	Cardinal Health	Health Care	Health services & distributors
+CARR	Carrier Global	Industrials	Building products & materials
+CASY	Casey's	Consumer Staples	Discount & big-box retail
+CAT	Caterpillar	Industrials	Machinery
+CB	Chubb	Financials	Insurers
+CBOE	Cboe Global Markets	Financials	Exchanges & data
+CBRE	CBRE Group	Real Estate	REITs & real estate
+CCI	Crown Castle	Real Estate	Tower & data center REITs
+CCL	Carnival	Consumer Discretionary	Cruise & travel
+CDNS	Cadence Design Systems	Information Technology	Cloud & enterprise software
+CDW	CDW	Information Technology	IT services & hardware
+CEG	Constellation Energy	Utilities	Independent power & nuclear
+CF	CF Industries	Materials	Chemicals
+CFG	Citizens Financial Group	Financials	Regional banks
+CHD	Church & Dwight	Consumer Staples	Household & personal care
+CHRW	C.H. Robinson	Industrials	Freight & logistics
+CHTR	Charter Communications	Communication Services	Telecom & cable
+CI	Cigna Group	Health Care	Managed care
+CIEN	Ciena	Information Technology	Networking & optical
+CINF	Cincinnati Financial	Financials	Insurers
+CL	Colgate-Palmolive	Consumer Staples	Household & personal care
+CLX	Clorox	Consumer Staples	Household & personal care
+CMCSA	Comcast	Communication Services	Telecom & cable
+CME	CME Group	Financials	Exchanges & data
+CMG	Chipotle Mexican Grill	Consumer Discretionary	Restaurants
+CMI	Cummins	Industrials	Machinery
+CMS	CMS Energy	Utilities	Utilities
+CNC	Centene	Health Care	Managed care
+CNP	CenterPoint Energy	Utilities	Utilities
+COF	Capital One	Financials	Card issuers & consumer finance
+COHR	Coherent	Information Technology	Networking & optical
+COIN	Coinbase	Financials	Crypto & retail trading
+COO	Cooper Companies	Health Care	Medical devices
+COP	ConocoPhillips	Energy	Oil & gas producers
+COR	Cencora	Health Care	Health services & distributors
+COST	Costco	Consumer Staples	Discount & big-box retail
+CPAY	Corpay	Financials	Payments
+CPRT	Copart	Industrials	Business services
+CPT	Camden Property Trust	Real Estate	REITs & real estate
+CRH	CRH	Materials	Building products & materials
+CRL	Charles River Laboratories	Health Care	Life science tools & diagnostics
+CRM	Salesforce	Information Technology	Cloud & enterprise software
+CRWD	CrowdStrike	Information Technology	Cybersecurity
+CSCO	Cisco	Information Technology	Networking & optical
+CSGP	CoStar Group	Real Estate	REITs & real estate
+CSX	CSX	Industrials	Freight & logistics
+CTAS	Cintas	Industrials	Business services
+CTSH	Cognizant	Information Technology	IT services & hardware
+CVNA	Carvana	Consumer Discretionary	Autos & EV
+CVS	CVS Health	Health Care	Managed care
+CVX	Chevron	Energy	Oil & gas producers
+D	Dominion Energy	Utilities	Utilities
+DAL	Delta Air Lines	Industrials	Airlines
+DASH	DoorDash	Consumer Discretionary	Internet & e-commerce
+DD	DuPont	Materials	Chemicals
+DDOG	Datadog	Information Technology	Cloud & enterprise software
+DE	Deere & Company	Industrials	Machinery
+DECK	Deckers Brands	Consumer Discretionary	Apparel & luxury
+DELL	Dell Technologies	Information Technology	AI infrastructure & data centers
+DG	Dollar General	Consumer Staples	Discount & big-box retail
+DGX	Quest Diagnostics	Health Care	Life science tools & diagnostics
+DHI	D.R. Horton	Consumer Discretionary	Homebuilders
+DHR	Danaher	Health Care	Life science tools & diagnostics
+DIS	Walt Disney	Communication Services	Media & entertainment
+DLR	Digital Realty	Real Estate	Tower & data center REITs
+DLTR	Dollar Tree	Consumer Staples	Discount & big-box retail
+DOC	Healthpeak Properties	Real Estate	REITs & real estate
+DOV	Dover	Industrials	Machinery
+DOW	Dow	Materials	Chemicals
+DPZ	Domino's Pizza	Consumer Discretionary	Restaurants
+DRI	Darden Restaurants	Consumer Discretionary	Restaurants
+DTE	DTE Energy	Utilities	Utilities
+DUK	Duke Energy	Utilities	Utilities
+DVA	DaVita	Health Care	Health services & distributors
+DVN	Devon Energy	Energy	Oil & gas producers
+DXCM	Dexcom	Health Care	Medical devices
+EBAY	eBay	Consumer Discretionary	Internet & e-commerce
+ECHO	EchoStar	Communication Services	Telecom & cable
+ECL	Ecolab	Materials	Chemicals
+ED	Consolidated Edison	Utilities	Utilities
+EFX	Equifax	Industrials	Exchanges & data
+EG	Everest Group	Financials	Insurers
+EIX	Edison International	Utilities	Utilities
+EL	Estee Lauder	Consumer Staples	Household & personal care
+ELV	Elevance Health	Health Care	Managed care
+EME	EMCOR Group	Industrials	Electrical & grid infrastructure
+EMR	Emerson Electric	Industrials	Industrial conglomerates & automation
+EOG	EOG Resources	Energy	Oil & gas producers
+EQIX	Equinix	Real Estate	Tower & data center REITs
+EQT	EQT Corporation	Energy	Oil & gas producers
+ERIE	Erie Indemnity	Financials	Insurance brokers
+ES	Eversource Energy	Utilities	Utilities
+ESS	Essex Property Trust	Real Estate	REITs & real estate
+ETN	Eaton	Industrials	Electrical & grid infrastructure
+ETR	Entergy	Utilities	Utilities
+EVRG	Evergy	Utilities	Utilities
+EW	Edwards Lifesciences	Health Care	Medical devices
+EXC	Exelon	Utilities	Utilities
+EXE	Expand Energy	Energy	Oil & gas producers
+EXPD	Expeditors International	Industrials	Freight & logistics
+EXPE	Expedia Group	Consumer Discretionary	Cruise & travel
+EXR	Extra Space Storage	Real Estate	REITs & real estate
+F	Ford Motor	Consumer Discretionary	Autos & EV
+FANG	Diamondback Energy	Energy	Oil & gas producers
+FAST	Fastenal	Industrials	Industrial distributors & rental
+FCX	Freeport-McMoRan	Materials	Metals & mining
+FDS	FactSet	Financials	Exchanges & data
+FDX	FedEx	Industrials	Freight & logistics
+FDXF	FedEx Freight	Industrials	Freight & logistics
+FE	FirstEnergy	Utilities	Utilities
+FERG	Ferguson	Industrials	Industrial distributors & rental
+FFIV	F5	Information Technology	Networking & optical
+FICO	Fair Isaac	Information Technology	Exchanges & data
+FIS	Fidelity National Information Services	Financials	Payments
+FISV	Fiserv	Financials	Payments
+FITB	Fifth Third Bancorp	Financials	Regional banks
+FIX	Comfort Systems USA	Industrials	Electrical & grid infrastructure
+FLEX	Flex	Information Technology	Electronics & components
+FOX	Fox Corporation (Class B)	Communication Services	Media & entertainment
+FOXA	Fox Corporation (Class A)	Communication Services	Media & entertainment
+FRT	Federal Realty Investment Trust	Real Estate	REITs & real estate
+FSLR	First Solar	Information Technology	Electrical & grid infrastructure
+FTNT	Fortinet	Information Technology	Cybersecurity
+FTV	Fortive	Industrials	Industrial conglomerates & automation
+GD	General Dynamics	Industrials	Aerospace & defense
+GDDY	GoDaddy	Information Technology	Cloud & enterprise software
+GE	GE Aerospace	Industrials	Aerospace & defense
+GEHC	GE HealthCare	Health Care	Medical devices
+GEN	Gen Digital	Information Technology	Cybersecurity
+GEV	GE Vernova	Industrials	Electrical & grid infrastructure
+GILD	Gilead Sciences	Health Care	Biotech
+GIS	General Mills	Consumer Staples	Food producers & distributors
+GL	Globe Life	Financials	Insurers
+GLW	Corning	Information Technology	Networking & optical
+GM	General Motors	Consumer Discretionary	Autos & EV
+GNRC	Generac	Industrials	Electrical & grid infrastructure
+GOOG	Alphabet (Class C)	Communication Services	Mega-cap tech platforms
+GOOGL	Alphabet (Class A)	Communication Services	Mega-cap tech platforms
+GPC	Genuine Parts	Consumer Discretionary	Home improvement & specialty retail
+GPN	Global Payments	Financials	Payments
+GRMN	Garmin	Consumer Discretionary	Electronics & components
+GS	Goldman Sachs	Financials	Large banks
+GWW	W. W. Grainger	Industrials	Industrial distributors & rental
+HAL	Halliburton	Energy	Oilfield services
+HAS	Hasbro	Consumer Discretionary	Media & entertainment
+HBAN	Huntington Bancshares	Financials	Regional banks
+HCA	HCA Healthcare	Health Care	Health services & distributors
+HD	Home Depot	Consumer Discretionary	Home improvement & specialty retail
+HIG	Hartford	Financials	Insurers
+HII	Huntington Ingalls Industries	Industrials	Aerospace & defense
+HLT	Hilton Worldwide	Consumer Discretionary	Hotels & casinos
+HON	Honeywell Technologies	Industrials	Industrial conglomerates & automation
+HONA	Honeywell Aerospace	Industrials	Aerospace & defense
+HOOD	Robinhood Markets	Financials	Crypto & retail trading
+HPE	Hewlett Packard Enterprise	Information Technology	AI infrastructure & data centers
+HPQ	HP Inc.	Information Technology	IT services & hardware
+HRL	Hormel Foods	Consumer Staples	Food producers & distributors
+HSIC	Henry Schein	Health Care	Health services & distributors
+HST	Host Hotels & Resorts	Real Estate	REITs & real estate
+HSY	Hershey	Consumer Staples	Food producers & distributors
+HUBB	Hubbell	Industrials	Electrical & grid infrastructure
+HUM	Humana	Health Care	Managed care
+HWM	Howmet Aerospace	Industrials	Aerospace & defense
+IBKR	Interactive Brokers	Financials	Asset managers & brokers
+IBM	IBM	Information Technology	IT services & hardware
+ICE	Intercontinental Exchange	Financials	Exchanges & data
+IDXX	Idexx Laboratories	Health Care	Life science tools & diagnostics
+IEX	IDEX Corporation	Industrials	Machinery
+IFF	International Flavors & Fragrances	Materials	Chemicals
+ILMN	Illumina	Health Care	Life science tools & diagnostics
+INCY	Incyte	Health Care	Biotech
+INTC	Intel	Information Technology	Semiconductors
+INTU	Intuit	Information Technology	Cloud & enterprise software
+INVH	Invitation Homes	Real Estate	REITs & real estate
+IP	International Paper	Materials	Packaging & paper
+IQV	IQVIA	Health Care	Life science tools & diagnostics
+IR	Ingersoll Rand	Industrials	Machinery
+IRM	Iron Mountain	Real Estate	Tower & data center REITs
+ISRG	Intuitive Surgical	Health Care	Medical devices
+IT	Gartner	Information Technology	IT services & hardware
+ITW	Illinois Tool Works	Industrials	Machinery
+IVZ	Invesco	Financials	Asset managers & brokers
+J	Jacobs Solutions	Industrials	Business services
+JBHT	J.B. Hunt	Industrials	Freight & logistics
+JBL	Jabil	Information Technology	Electronics & components
+JCI	Johnson Controls	Industrials	Building products & materials
+JKHY	Jack Henry & Associates	Financials	Payments
+JNJ	Johnson & Johnson	Health Care	Pharma
+JPM	JPMorgan Chase	Financials	Large banks
+KDP	Keurig Dr Pepper	Consumer Staples	Beverages & tobacco
+KEY	KeyCorp	Financials	Regional banks
+KEYS	Keysight Technologies	Information Technology	Electronics & components
+KHC	Kraft Heinz	Consumer Staples	Food producers & distributors
+KIM	Kimco Realty	Real Estate	REITs & real estate
+KKR	KKR	Financials	Private equity & credit
+KLAC	KLA	Information Technology	Semiconductor equipment
+KMB	Kimberly-Clark	Consumer Staples	Household & personal care
+KMI	Kinder Morgan	Energy	Refiners & midstream
+KO	Coca-Cola	Consumer Staples	Beverages & tobacco
+KR	Kroger	Consumer Staples	Discount & big-box retail
+L	Loews	Financials	Insurers
+LDOS	Leidos	Industrials	Aerospace & defense
+LEN	Lennar	Consumer Discretionary	Homebuilders
+LH	Labcorp	Health Care	Life science tools & diagnostics
+LHX	L3Harris	Industrials	Aerospace & defense
+LII	Lennox International	Industrials	Building products & materials
+LIN	Linde	Materials	Chemicals
+LITE	Lumentum	Information Technology	Networking & optical
+LLY	Eli Lilly	Health Care	Pharma
+LMT	Lockheed Martin	Industrials	Aerospace & defense
+LNT	Alliant Energy	Utilities	Utilities
+LOW	Lowe's	Consumer Discretionary	Home improvement & specialty retail
+LRCX	Lam Research	Information Technology	Semiconductor equipment
+LULU	Lululemon Athletica	Consumer Discretionary	Apparel & luxury
+LUV	Southwest Airlines	Industrials	Airlines
+LVS	Las Vegas Sands	Consumer Discretionary	Hotels & casinos
+LYB	LyondellBasell	Materials	Chemicals
+LYV	Live Nation Entertainment	Communication Services	Media & entertainment
+MA	Mastercard	Financials	Payments
+MAA	Mid-America Apartment Communities	Real Estate	REITs & real estate
+MAR	Marriott International	Consumer Discretionary	Hotels & casinos
+MAS	Masco	Industrials	Building products & materials
+MCD	McDonald's	Consumer Discretionary	Restaurants
+MCHP	Microchip Technology	Information Technology	Semiconductors
+MCK	McKesson	Health Care	Health services & distributors
+MCO	Moody's	Financials	Exchanges & data
+MDLZ	Mondelez International	Consumer Staples	Food producers & distributors
+MDT	Medtronic	Health Care	Medical devices
+MET	MetLife	Financials	Insurers
+META	Meta Platforms	Communication Services	Mega-cap tech platforms
+MGM	MGM Resorts	Consumer Discretionary	Hotels & casinos
+MKC	McCormick	Consumer Staples	Food producers & distributors
+MLM	Martin Marietta Materials	Materials	Building products & materials
+MMM	3M	Industrials	Industrial conglomerates & automation
+MNST	Monster Beverage	Consumer Staples	Beverages & tobacco
+MO	Altria	Consumer Staples	Beverages & tobacco
+MOS	Mosaic	Materials	Chemicals
+MPC	Marathon Petroleum	Energy	Refiners & midstream
+MPWR	Monolithic Power Systems	Information Technology	Semiconductors
+MRK	Merck	Health Care	Pharma
+MRNA	Moderna	Health Care	Biotech
+MRSH	Marsh McLennan	Financials	Insurance brokers
+MRVL	Marvell Technology	Information Technology	Semiconductors
+MS	Morgan Stanley	Financials	Large banks
+MSCI	MSCI	Financials	Exchanges & data
+MSFT	Microsoft	Information Technology	Mega-cap tech platforms
+MSI	Motorola Solutions	Information Technology	IT services & hardware
+MTB	M&T Bank	Financials	Regional banks
+MTD	Mettler-Toledo	Health Care	Life science tools & diagnostics
+MU	Micron Technology	Information Technology	Memory & storage
+NCLH	Norwegian Cruise Line Holdings	Consumer Discretionary	Cruise & travel
+NDAQ	Nasdaq Inc.	Financials	Exchanges & data
+NDSN	Nordson	Industrials	Machinery
+NEE	NextEra Energy	Utilities	Utilities
+NEM	Newmont	Materials	Metals & mining
+NFLX	Netflix	Communication Services	Media & entertainment
+NI	NiSource	Utilities	Utilities
+NKE	Nike	Consumer Discretionary	Apparel & luxury
+NOC	Northrop Grumman	Industrials	Aerospace & defense
+NOW	ServiceNow	Information Technology	Cloud & enterprise software
+NRG	NRG Energy	Utilities	Independent power & nuclear
+NSC	Norfolk Southern	Industrials	Freight & logistics
+NTAP	NetApp	Information Technology	Memory & storage
+NTRS	Northern Trust	Financials	Asset managers & brokers
+NUE	Nucor	Materials	Metals & mining
+NVDA	Nvidia	Information Technology	Semiconductors
+NVR	NVR	Consumer Discretionary	Homebuilders
+NWS	News Corp (Class B)	Communication Services	Media & entertainment
+NWSA	News Corp (Class A)	Communication Services	Media & entertainment
+NXPI	NXP Semiconductors	Information Technology	Semiconductors
+O	Realty Income	Real Estate	REITs & real estate
+ODFL	Old Dominion Freight Line	Industrials	Freight & logistics
+OKE	Oneok	Energy	Refiners & midstream
+OKTA	Okta	Information Technology	Cybersecurity
+OMC	Omnicom Group	Communication Services	Media & entertainment
+ON	ON Semiconductor	Information Technology	Semiconductors
+ORCL	Oracle	Information Technology	Cloud & enterprise software
+ORLY	O'Reilly Automotive	Consumer Discretionary	Home improvement & specialty retail
+OTIS	Otis Worldwide	Industrials	Machinery
+OXY	Occidental Petroleum	Energy	Oil & gas producers
+P	Everpure	Information Technology	Memory & storage
+PANW	Palo Alto Networks	Information Technology	Cybersecurity
+PAYX	Paychex	Industrials	Business services
+PCAR	Paccar	Industrials	Machinery
+PCG	PG&E	Utilities	Utilities
+PEG	Public Service Enterprise Group	Utilities	Utilities
+PEP	PepsiCo	Consumer Staples	Beverages & tobacco
+PFE	Pfizer	Health Care	Pharma
+PFG	Principal Financial Group	Financials	Insurers
+PG	Procter & Gamble	Consumer Staples	Household & personal care
+PGR	Progressive	Financials	Insurers
+PH	Parker Hannifin	Industrials	Machinery
+PHM	PulteGroup	Consumer Discretionary	Homebuilders
+PKG	Packaging Corporation of America	Materials	Packaging & paper
+PLD	Prologis	Real Estate	REITs & real estate
+PLTR	Palantir Technologies	Information Technology	Cloud & enterprise software
+PM	Philip Morris International	Consumer Staples	Beverages & tobacco
+PNC	PNC Financial Services	Financials	Regional banks
+PNR	Pentair	Industrials	Machinery
+PNW	Pinnacle West Capital	Utilities	Utilities
+PODD	Insulet	Health Care	Medical devices
+PPG	PPG Industries	Materials	Chemicals
+PPL	PPL Corporation	Utilities	Utilities
+PRU	Prudential Financial	Financials	Insurers
+PSA	Public Storage	Real Estate	REITs & real estate
+PSX	Phillips 66	Energy	Refiners & midstream
+PTC	PTC	Information Technology	Cloud & enterprise software
+PWR	Quanta Services	Industrials	Electrical & grid infrastructure
+PYPL	PayPal	Financials	Payments
+Q	Qnity Electronics	Information Technology	Semiconductor equipment
+QCOM	Qualcomm	Information Technology	Semiconductors
+RCL	Royal Caribbean Group	Consumer Discretionary	Cruise & travel
+RDDT	Reddit	Communication Services	Internet & e-commerce
+REG	Regency Centers	Real Estate	REITs & real estate
+REGN	Regeneron Pharmaceuticals	Health Care	Biotech
+RF	Regions Financial	Financials	Regional banks
+RJF	Raymond James Financial	Financials	Asset managers & brokers
+RL	Ralph Lauren	Consumer Discretionary	Apparel & luxury
+RMD	ResMed	Health Care	Medical devices
+ROK	Rockwell Automation	Industrials	Industrial conglomerates & automation
+ROL	Rollins	Industrials	Business services
+ROP	Roper Technologies	Information Technology	Cloud & enterprise software
+ROST	Ross Stores	Consumer Discretionary	Discount & big-box retail
+RSG	Republic Services	Industrials	Business services
+RTX	RTX Corporation	Industrials	Aerospace & defense
+RVTY	Revvity	Health Care	Life science tools & diagnostics
+SBAC	SBA Communications	Real Estate	Tower & data center REITs
+SBUX	Starbucks	Consumer Discretionary	Restaurants
+SCHW	Charles Schwab	Financials	Asset managers & brokers
+SHW	Sherwin-Williams	Materials	Chemicals
+SJM	J.M. Smucker	Consumer Staples	Food producers & distributors
+SKYD	Skydance	Communication Services	Media & entertainment
+SLB	SLB	Energy	Oilfield services
+SMCI	Super Micro Computer	Information Technology	AI infrastructure & data centers
+SNA	Snap-on	Industrials	Machinery
+SNDK	Sandisk	Information Technology	Memory & storage
+SNPS	Synopsys	Information Technology	Cloud & enterprise software
+SO	Southern Company	Utilities	Utilities
+SOLV	Solventum	Health Care	Medical devices
+SPG	Simon Property Group	Real Estate	REITs & real estate
+SPGI	S&P Global	Financials	Exchanges & data
+SRE	Sempra	Utilities	Utilities
+STE	Steris	Health Care	Medical devices
+STLD	Steel Dynamics	Materials	Metals & mining
+STT	State Street	Financials	Asset managers & brokers
+STX	Seagate Technology	Information Technology	Memory & storage
+STZ	Constellation Brands	Consumer Staples	Beverages & tobacco
+SW	Smurfit Westrock	Materials	Packaging & paper
+SWK	Stanley Black & Decker	Industrials	Machinery
+SWKS	Skyworks Solutions	Information Technology	Semiconductors
+SYF	Synchrony Financial	Financials	Card issuers & consumer finance
+SYK	Stryker	Health Care	Medical devices
+SYY	Sysco	Consumer Staples	Food producers & distributors
+T	AT&T	Communication Services	Telecom & cable
+TDG	TransDigm Group	Industrials	Aerospace & defense
+TDY	Teledyne Technologies	Information Technology	Electronics & components
+TECH	Bio-Techne	Health Care	Life science tools & diagnostics
+TEL	TE Connectivity	Information Technology	Electronics & components
+TER	Teradyne	Information Technology	Semiconductor equipment
+TFC	Truist Financial	Financials	Regional banks
+TGT	Target	Consumer Staples	Discount & big-box retail
+TJX	TJX Companies	Consumer Discretionary	Discount & big-box retail
+TKO	TKO Group Holdings	Communication Services	Media & entertainment
+TMO	Thermo Fisher Scientific	Health Care	Life science tools & diagnostics
+TMUS	T-Mobile US	Communication Services	Telecom & cable
+TPL	Texas Pacific Land	Energy	Oil & gas producers
+TPR	Tapestry	Consumer Discretionary	Apparel & luxury
+TRGP	Targa Resources	Energy	Refiners & midstream
+TRMB	Trimble	Information Technology	Electronics & components
+TROW	T. Rowe Price	Financials	Asset managers & brokers
+TRV	Travelers Companies	Financials	Insurers
+TSCO	Tractor Supply	Consumer Discretionary	Home improvement & specialty retail
+TSLA	Tesla	Consumer Discretionary	Autos & EV
+TSN	Tyson Foods	Consumer Staples	Food producers & distributors
+TT	Trane Technologies	Industrials	Building products & materials
+TTWO	Take-Two Interactive	Communication Services	Media & entertainment
+TWLO	Twilio	Information Technology	Cloud & enterprise software
+TXN	Texas Instruments	Information Technology	Semiconductors
+TXT	Textron	Industrials	Aerospace & defense
+TYL	Tyler Technologies	Information Technology	Cloud & enterprise software
+UAL	United Airlines Holdings	Industrials	Airlines
+UBER	Uber Technologies	Industrials	Internet & e-commerce
+UDR	UDR	Real Estate	REITs & real estate
+UHS	Universal Health Services	Health Care	Health services & distributors
+ULTA	Ulta Beauty	Consumer Discretionary	Home improvement & specialty retail
+UNH	UnitedHealth Group	Health Care	Managed care
+UNP	Union Pacific	Industrials	Freight & logistics
+UPS	United Parcel Service	Industrials	Freight & logistics
+URI	United Rentals	Industrials	Industrial distributors & rental
+USB	U.S. Bancorp	Financials	Regional banks
+V	Visa	Financials	Payments
+VEEV	Veeva Systems	Health Care	Cloud & enterprise software
+VICI	Vici Properties	Real Estate	REITs & real estate
+VLO	Valero Energy	Energy	Refiners & midstream
+VLTO	Veralto	Industrials	Industrial conglomerates & automation
+VMC	Vulcan Materials	Materials	Building products & materials
+VMRK	Vivmark Residential	Real Estate	REITs & real estate
+VRSK	Verisk Analytics	Industrials	Exchanges & data
+VRSN	Verisign	Information Technology	Cloud & enterprise software
+VRT	Vertiv	Industrials	AI infrastructure & data centers
+VRTX	Vertex Pharmaceuticals	Health Care	Biotech
+VST	Vistra	Utilities	Independent power & nuclear
+VTR	Ventas	Real Estate	REITs & real estate
+VTRS	Viatris	Health Care	Pharma
+VYLR	Vylor	Materials	Chemicals
+VZ	Verizon	Communication Services	Telecom & cable
+WAB	Wabtec	Industrials	Machinery
+WAT	Waters Corporation	Health Care	Life science tools & diagnostics
+WDAY	Workday	Information Technology	Cloud & enterprise software
+WDC	Western Digital	Information Technology	Memory & storage
+WEC	WEC Energy Group	Utilities	Utilities
+WELL	Welltower	Real Estate	REITs & real estate
+WFC	Wells Fargo	Financials	Large banks
+WM	Waste Management	Industrials	Business services
+WMB	Williams Companies	Energy	Refiners & midstream
+WMT	Walmart	Consumer Staples	Discount & big-box retail
+WRB	W. R. Berkley	Financials	Insurers
+WSM	Williams-Sonoma	Consumer Discretionary	Home improvement & specialty retail
+WST	West Pharmaceutical Services	Health Care	Life science tools & diagnostics
+WTW	Willis Towers Watson	Financials	Insurance brokers
+WY	Weyerhaeuser	Real Estate	REITs & real estate
+WYNN	Wynn Resorts	Consumer Discretionary	Hotels & casinos
+XEL	Xcel Energy	Utilities	Utilities
+XOM	ExxonMobil	Energy	Oil & gas producers
+XYL	Xylem	Industrials	Machinery
+XYZ	Block	Financials	Payments
+YUM	Yum! Brands	Consumer Discretionary	Restaurants
+ZBH	Zimmer Biomet	Health Care	Medical devices
+ZBRA	Zebra Technologies	Information Technology	Electronics & components
+ZTS	Zoetis	Health Care	Pharma
+ALAB	Astera Labs	Information Technology	Semiconductors
+ALNY	Alnylam Pharmaceuticals	Health Care	Biotech
+ARM	Arm Holdings	Information Technology	Semiconductors
+ASML	ASML Holding	Information Technology	Semiconductor equipment
+CCEP	Coca-Cola Europacific Partners	Consumer Staples	Beverages & tobacco
+CRWV	CoreWeave	Information Technology	AI infrastructure & data centers
+FER	Ferrovial	Industrials	Electrical & grid infrastructure
+MELI	MercadoLibre	Consumer Discretionary	Internet & e-commerce
+MSTR	Strategy	Information Technology	Crypto & retail trading
+NBIS	Nebius	Information Technology	AI infrastructure & data centers
+PDD	PDD Holdings	Consumer Discretionary	Internet & e-commerce
+RKLB	Rocket Lab	Industrials	Aerospace & defense
+SHOP	Shopify	Information Technology	Internet & e-commerce
+SPCX	SpaceX	Industrials	Aerospace & defense
+TRI	Thomson Reuters	Industrials	Exchanges & data

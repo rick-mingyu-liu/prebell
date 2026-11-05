@@ -27,3 +27,13 @@ they are never asked twice. Things decided *not* to do go in `declined.md`.
   removed.** (Rick, via the builder-check question.)
 - **Generator LLM stays DeepSeek** (`--var LLM_PROVIDER:deepseek` on deploy)
   until the Max-plan API credit is claimed, then switch to Claude.
+
+## 2026-11-05
+
+- **Section order follows the story: macro → themes → movers (AlphaLab's
+  digest order); approved by Rick 2026-11-05 when he approved the
+  themes-and-macro design.**
+- **Free-plan budget: 4 movers per side instead of 150-symbol Yahoo
+  batches** (controller's call after the 150-symbol live check could not
+  run; reversible in one constant once a live check from another network
+  passes).

@@ -74,6 +74,18 @@ export function trimStory(md: string, summary?: string): string {
   return joined(out);
 }
 
+/** Fence state per line, so headings and paragraphs inside code never count. */
+function fencedLines(lines: string[]): boolean[] {
+  const fenced: boolean[] = [];
+  let inFence = false;
+  for (const line of lines) {
+    const opens = FENCE.test(line);
+    fenced.push(inFence || opens);
+    if (opens) inFence = !inFence;
+  }
+  return fenced;
+}
+
 /** The generators' sources heading, EN or ZH. */
 const SOURCES = /^ {0,3}##\s+(Sources|来源)\s*#*\s*$/;
 const SECTION = /^ {0,3}##\s/;
@@ -96,14 +108,7 @@ export interface StoryTail {
  */
 export function splitTail(md: string): StoryTail {
   const lines = linesOf(md);
-  // Fence state per line, so headings and paragraphs inside code never count.
-  const fenced: boolean[] = [];
-  let inFence = false;
-  for (const line of lines) {
-    const opens = FENCE.test(line);
-    fenced.push(inFence || opens);
-    if (opens) inFence = !inFence;
-  }
+  const fenced = fencedLines(lines);
 
   let firstSection = -1;
   let sourcesAt = -1;
@@ -135,4 +140,31 @@ export function splitTail(md: string): StoryTail {
     sources: hasSources ? joined(lines.slice(sourcesAt + 1, tailAt)) : "",
     disclaimer: isDisclaimer ? block.map((l) => l.trim()).join(" ") : "",
   };
+}
+
+/** The generators' movers headings: premarket and recap, EN and ZH. */
+const MOVERS = /^ {0,3}##\s+(Biggest premarket movers|Notable movers|盘前异动|个股异动)\s*#*\s*$/;
+
+export interface MoversSplit {
+  /** The markdown above the movers heading; the whole input when there is none. */
+  before: string;
+  /** The movers heading's text, as written; null when there is none. */
+  heading: string | null;
+  /** The markdown after the movers heading line (its prose and any later sections); "" when there is none. */
+  after: string;
+}
+
+/**
+ * A story body split at its movers section's `## ` heading (EN or ZH, premarket or recap), so the page
+ * can put the movers table under that heading, right before its prose. Headings inside code fences
+ * never count; without a movers heading everything is `before`.
+ */
+export function splitAtMovers(md: string): MoversSplit {
+  const lines = linesOf(md);
+  const fenced = fencedLines(lines);
+  for (let i = 0; i < lines.length; i++) {
+    const m = fenced[i] ? null : MOVERS.exec(lines[i]);
+    if (m) return { before: joined(lines.slice(0, i)), heading: m[1], after: joined(lines.slice(i + 1)) };
+  }
+  return { before: md, heading: null, after: "" };
 }
