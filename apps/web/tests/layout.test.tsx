@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { IndexLineView } from "../src/lib/indexline";
@@ -146,8 +146,8 @@ describe("globals.css", () => {
 
 describe("site icon", () => {
   it("ships an SVG favicon and an Apple touch icon beside the app root", () => {
-    expect(fs.existsSync("src/app/icon.svg")).toBe(true);
-    expect(fs.readFileSync("src/app/icon.svg", "utf8")).toContain("#e8a317");
-    expect(fs.statSync("src/app/apple-icon.png").size).toBeGreaterThan(500);
+    expect(existsSync("src/app/icon.svg")).toBe(true);
+    expect(readFileSync("src/app/icon.svg", "utf8")).toContain("#e8a317");
+    expect(statSync("src/app/apple-icon.png").size).toBeGreaterThan(500);
   });
 });
