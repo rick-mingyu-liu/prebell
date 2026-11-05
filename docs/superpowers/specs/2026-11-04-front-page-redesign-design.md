@@ -342,6 +342,45 @@ the site has no feed yet; a feed is a separate follow-up.
 - Author photo is the GitHub avatar; links are site, GitHub and LinkedIn.
   (Rick.)
 
+## Amendments after the code inventory (2026-11-04, my calls)
+
+- **Index line data.** Premarket facts hold futures, recap facts hold index
+  closes. The `kv` snapshot (`index_line`) is written by whichever brief
+  publishes last and carries `kind` (`premarket` | `recap`), `as_of_utc`
+  and four entries `{symbol, last, change_pct}`. The web labels by symbol
+  with the existing `index.*` messages (so a premarket morning shows
+  "S&P 500 futures" with the futures move) and prints the as-of time.
+  `kv_set` is added to the `Store` trait; the D1 store already has the
+  implementation under `EarningsStore`.
+- **Cover lines for a premarket brief** use the biggest futures move
+  ("S&P futures −1.14%") and the top gainer and loser, same shape as recap.
+- **Scene image size.** Flux Schnell on Workers AI takes `prompt` and
+  `steps` only; the image is whatever size the model returns (square). The
+  cover crops it with `object-fit: cover`. The stored key keeps the real
+  format: `covers/<slug>.png` or `.jpg` by magic bytes; `posts.cover_key`
+  records it, and the covers route derives the content type from the
+  extension.
+- **Earnings kicker.** The web does not load earnings facts. The kicker is
+  "Earnings check · <TICKER>" with the ticker from the `earnings_filings`
+  join (list queries gain a `ticker` field, null for briefs); the company,
+  fiscal period and filing line stay in the body's existing meta line.
+- **Chinese mover reasons** do not exist in the facts (reasons are English
+  summaries). The ZH movers table omits the reason column, as the ZH page
+  does today. Not a regression; a ZH reason line is a separate follow-up.
+- **"Reporting" block** uses the existing `stripDay` from the next trading
+  day after the lead brief's date (from today when the lead is a
+  premarket), non-exact, and shows the date it found in its heading.
+- **Newsreader is self-hosted** via `@fontsource-variable/newsreader` and
+  `next/font/local`, matching how Inter is loaded; no Google Fonts request.
+- **`cover=` diagnostics** are appended to the logged line for briefs only
+  (not stored in facts); earnings has no diagnostics line, so the Worker's
+  cover client logs its own warn on failure.
+- **Migration 0006** adds the three nullable columns; web test seeds that
+  insert into `post_translations` positionally are converted to column
+  lists in the same task.
+- **Revenue is always present** on a published earnings post (the generator
+  requires it), so the fiscal-period fallback applies to the EPS line only.
+
 ## Open for Rick
 
 - Buttondown account and its API key, set on `prebell-web` as
