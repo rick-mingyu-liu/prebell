@@ -10,7 +10,6 @@
     "earnings": "财报",
     "briefs": "简报",
     "calendar": "日历",
-    "wordmark": "Pre<b>Bell</b>",
     "wordmarkSub": "盘前铃",
     "navLabel": "主导航"
   },
@@ -26,7 +25,12 @@
     "panelTabs": "涨跌榜与财报速评",
     "noMovers": "本期暂无涨跌榜。",
     "allEarnings": "全部财报速评 →",
-    "moversInBrief": "涨跌榜见完整简报 →"
+    "moversInBrief": "涨跌榜见完整简报 →",
+    "leadRead": "阅读完整回顾 →",
+    "earningsChecks": "财报速评",
+    "topMovers": "涨跌榜",
+    "reporting": "{date}财报",
+    "recentSection": "近期"
   },
   "post": {
     "permalink": "本文链接",
@@ -104,7 +108,9 @@
   "partners": {
     "brokers": "券商",
     "crypto": "加密交易所",
-    "disclosure": "推广链接：通过链接注册，PreBell 可能获得奖励。不构成投资建议。"
+    "disclosure": "推广链接：通过链接注册，PreBell 可能获得奖励。不构成投资建议。",
+    "from": "合作伙伴",
+    "affiliateNote": "推广链接 · 不构成投资建议"
   },
   "termpocket": {
     "name": "TermPocket",
@@ -120,5 +126,40 @@
     "adjacent": "更多简报",
     "prev": "上一篇",
     "next": "下一篇"
+  },
+  "paper": {
+    "masthead": {
+      "main": "盘前铃",
+      "sub": "PreBell"
+    },
+    "dateline": {
+      "premarket": "盘前",
+      "recap": "收盘后",
+      "earnings": "财报速评"
+    },
+    "index": {
+      "asOf": "截至 {time}"
+    }
+  },
+  "author": {
+    "name": "Rick Liu",
+    "bio": "AI 与软件工程师，毕业于滑铁卢大学。打造盘前铃，是想让财报像分析师那样被读懂，却不需要分析师。",
+    "website": "rickmingyuliu.com",
+    "github": "GitHub",
+    "linkedin": "LinkedIn",
+    "allBriefs": "全部简报 →",
+    "heading": "幕后的人"
+  },
+  "signup": {
+    "heading": "订阅每周精选",
+    "copy": "每周一封邮件：本周的简报与财报速评。不发垃圾邮件，随时可退订。",
+    "emailLabel": "邮箱地址",
+    "placeholder": "you@example.com",
+    "submit": "订阅",
+    "sending": "正在订阅…",
+    "success": "请查收邮件并确认订阅。",
+    "error": "出了点问题，请稍后再试。",
+    "invalid": "请输入有效的邮箱地址。",
+    "manage": "已经订阅？管理订阅偏好"
   }
 }

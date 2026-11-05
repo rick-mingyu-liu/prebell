@@ -23,14 +23,21 @@ export function formatEt(iso: string | null | undefined, lang: Lang): string {
   return `${zh.format(d).replace(/[  ]/g, " ")}（美东）`;
 }
 
-/** A trading date (YYYY-MM-DD) as a calendar date, independent of time zone. */
-export function formatDate(date: string, lang: Lang): string {
+/** A trading date (YYYY-MM-DD) as a calendar date, independent of time zone; "full" adds the weekday and long month. */
+export function formatDate(date: string, lang: Lang, style: "medium" | "full" = "medium"): string {
   const d = new Date(`${date}T12:00:00Z`);
   if (Number.isNaN(d.getTime())) return date;
   return new Intl.DateTimeFormat(lang === "en" ? "en-US" : "zh-CN", {
     timeZone: "UTC",
-    dateStyle: lang === "en" ? "medium" : "long",
+    dateStyle: style === "full" ? "full" : lang === "en" ? "medium" : "long",
   }).format(d);
+}
+
+const etHour = new Intl.DateTimeFormat("en-US", { timeZone: TZ, hour: "numeric", hourCycle: "h23" });
+
+/** The edition the front page is in at `now`: the premarket brief until 4:00 PM US Eastern, the recap after. */
+export function editionAt(now: Date = new Date()): "premarket" | "recap" {
+  return Number(etHour.format(now)) < 16 ? "premarket" : "recap";
 }
 
 const enTime = new Intl.DateTimeFormat("en-US", { timeZone: TZ, timeStyle: "short" });

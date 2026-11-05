@@ -1,29 +1,9 @@
 import type { Locale } from "../i18n/routing";
 import type { FactsView, IndexView } from "../lib/facts";
 import { fmtPct, fmtPoint, fmtPrice } from "../lib/format";
+import { indexName } from "../lib/indexnames";
 import { formatEtTime } from "../lib/time";
 import { translator } from "../lib/translator";
-
-/** `=` and `^` are awkward in message keys, so symbols map to `index.*` keys here. */
-const NAME_KEY = {
-  "ES=F": "index.es",
-  "NQ=F": "index.nq",
-  "YM=F": "index.ym",
-  "RTY=F": "index.rty",
-  "^GSPC": "index.gspc",
-  "^NDX": "index.ndx",
-  "^IXIC": "index.ixic",
-  "^DJI": "index.dji",
-  "^RUT": "index.rut",
-} as const;
-type NameKey = (typeof NAME_KEY)[keyof typeof NAME_KEY];
-
-type Translate = ReturnType<typeof translator>;
-
-function indexName(t: Translate, symbol: string): string {
-  const key = (NAME_KEY as Record<string, NameKey | undefined>)[symbol];
-  return key ? t(key) : symbol;
-}
 
 /** The lead index as a big number with its point change and percent; a Missing value is a grey dash. */
 function Lead({ index, name, time, asOf }: { index: IndexView; name: string; time: string; asOf: string }) {

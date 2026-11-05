@@ -10,7 +10,6 @@
     "earnings": "Earnings",
     "briefs": "Briefs",
     "calendar": "Calendar",
-    "wordmark": "Pre<b>Bell</b>",
     "wordmarkSub": "盘前铃",
     "navLabel": "Main"
   },
@@ -26,7 +25,12 @@
     "panelTabs": "Movers and earnings checks",
     "noMovers": "No movers for this brief.",
     "allEarnings": "All earnings checks →",
-    "moversInBrief": "Movers are in the full brief →"
+    "moversInBrief": "Movers are in the full brief →",
+    "leadRead": "Read the full recap →",
+    "earningsChecks": "Earnings checks",
+    "topMovers": "Top movers",
+    "reporting": "Reporting {date}",
+    "recentSection": "Recent"
   },
   "post": {
     "permalink": "Permalink",
@@ -104,7 +108,9 @@
   "partners": {
     "brokers": "Brokers",
     "crypto": "Crypto exchanges",
-    "disclosure": "Affiliate links: PreBell may earn a reward if you sign up. Not investment advice."
+    "disclosure": "Affiliate links: PreBell may earn a reward if you sign up. Not investment advice.",
+    "from": "From our partners",
+    "affiliateNote": "Affiliate links · not investment advice"
   },
   "termpocket": {
     "name": "TermPocket",
@@ -120,5 +126,40 @@
     "adjacent": "More briefs",
     "prev": "Previous",
     "next": "Next"
+  },
+  "paper": {
+    "masthead": {
+      "main": "PreBell",
+      "sub": "盘前铃"
+    },
+    "dateline": {
+      "premarket": "Before the bell",
+      "recap": "After the close",
+      "earnings": "Earnings check"
+    },
+    "index": {
+      "asOf": "as of {time}"
+    }
+  },
+  "author": {
+    "name": "Rick Liu",
+    "bio": "AI & software engineer, University of Waterloo. Built PreBell to read earnings the way an analyst would, without the analyst.",
+    "website": "rickmingyuliu.com",
+    "github": "GitHub",
+    "linkedin": "LinkedIn",
+    "allBriefs": "All briefs →",
+    "heading": "Who is behind it"
+  },
+  "signup": {
+    "heading": "Get the weekly digest",
+    "copy": "One email a week: the week's briefs and earnings checks. No spam, unsubscribe anytime.",
+    "emailLabel": "Email address",
+    "placeholder": "you@example.com",
+    "submit": "Subscribe",
+    "sending": "Subscribing…",
+    "success": "Check your inbox to confirm.",
+    "error": "Something went wrong. Please try again.",
+    "invalid": "Enter a valid email address.",
+    "manage": "Already subscribed? Manage preferences"
   }
 }
