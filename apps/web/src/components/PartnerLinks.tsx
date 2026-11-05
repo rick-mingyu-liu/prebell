@@ -29,9 +29,30 @@ export function loadPartners(fetchImpl: (url: string) => Promise<Response> = fet
 }
 
 /** One box per group that has links, then the disclosure; nothing at all when there are no links. */
-export function PartnerBoxes({ data, labels }: { data: PartnersResponse | null; labels: PartnerLabels }) {
+export function PartnerBoxes({
+  data,
+  labels,
+  variant = "boxes",
+}: {
+  data: PartnersResponse | null;
+  labels: PartnerLabels;
+  variant?: "boxes" | "strip";
+}) {
   const groups = data ? GROUPS.filter((g) => data[g].length > 0) : [];
   if (!data || groups.length === 0) return null;
+  // The strip: just the names as plain sponsored links; its parent supplies the label and disclosure.
+  if (variant === "strip")
+    return (
+      <>
+        {groups.flatMap((g) =>
+          data[g].map((p) => (
+            <a key={p.id} href={p.url} target="_blank" rel="sponsored noopener noreferrer">
+              {p.name}
+            </a>
+          )),
+        )}
+      </>
+    );
   return (
     <>
       {groups.map((g) => (
@@ -67,7 +88,13 @@ export function PartnerBoxes({ data, labels }: { data: PartnersResponse | null; 
  * Country-gated invite links. Pages are edge-cached and country-neutral, so the links are fetched
  * per visitor after load. Nothing renders on the server, while loading or on error (fails closed).
  */
-export default function PartnerLinks({ labels }: { labels: PartnerLabels }) {
+export default function PartnerLinks({
+  labels,
+  variant = "boxes",
+}: {
+  labels: PartnerLabels;
+  variant?: "boxes" | "strip";
+}) {
   const [data, setData] = useState<PartnersResponse | null>(null);
 
   useEffect(() => {
@@ -80,5 +107,5 @@ export default function PartnerLinks({ labels }: { labels: PartnerLabels }) {
     };
   }, []);
 
-  return <PartnerBoxes data={data} labels={labels} />;
+  return <PartnerBoxes data={data} labels={labels} variant={variant} />;
 }
