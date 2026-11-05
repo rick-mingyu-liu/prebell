@@ -149,9 +149,9 @@ describe a market-wide story, the first sentence of the summary names it."
 
 `build_facts` receives a `Budget` (a closure returning the subrequests used
 so far, from the Worker's `CountingHttp`, the same source as the
-`subrequests=` line). Optional work runs only while `used < BUDGET_SOFT` =
-42: the third macro query, then the theme search, in that order of
-sacrifice (the theme search is the first dropped). The diagnostics gain
+`subrequests=` line). Optional work runs only while `used + cost <=
+BUDGET_SOFT` = 40 (see Amendments): the theme search is dropped first, then
+the third macro query, then the second. The diagnostics gain
 `themes found=N kept=K searched=0|1` and `macro queries=3 hits=H items=I`.
 Drafts still need 2 to 4 calls, so the ceiling stays under 48 on the
 normal path and the 401-refresh path (+3) still fits.
