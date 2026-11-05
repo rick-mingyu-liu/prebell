@@ -110,9 +110,18 @@ describe("globals.css", () => {
   });
 
   it("defines the paper palette tokens", () => {
-    for (const hex of ["#faf8f3", "#1a1a1a", "#666", "#d9d5cc", "#222", "#15803d", "#b91c1c", "#8a1c1c", "#e8a317"]) {
+    for (const hex of ["#faf8f3", "#1a1a1a", "#666", "#d9d5cc", "#222", "#15803d", "#b91c1c", "#8a1c1c", "#e8a317", "#e6e1d6"]) {
       expect(css.toLowerCase()).toContain(hex);
     }
+  });
+
+  it("keeps the flat cover colour as a token and styles the flat cover with it", () => {
+    expect(css).toMatch(/:root \{[^}]*--cover-flat: #e6e1d6;/);
+    expect(css.toLowerCase().split("#e6e1d6")).toHaveLength(2);
+    expect(css).toMatch(/\.cover-flat \{[^}]*background: var\(--cover-flat\);[^}]*color: var\(--ink\);/);
+    expect(css).toMatch(/\.cover-flat \.cover-shade \{ display: none; \}/);
+    expect(css).toMatch(/\.cover-flat \.cover-stat \{[^}]*color: var\(--ink\);/);
+    expect(css).toMatch(/\.cover-flat \.cover-bar \{[^}]*var\(--cover-bar\)/);
   });
 
   it("lets the index line scroll in place at every width and never clips its left end", () => {
@@ -125,7 +134,7 @@ describe("globals.css", () => {
   });
 
   it("uses no colour outside the palette, no shadows, and one mobile breakpoint at 720px", () => {
-    const allowed = new Set(["#faf8f3", "#1a1a1a", "#666", "#d9d5cc", "#222", "#15803d", "#b91c1c", "#8a1c1c", "#e8a317", "#fff", "#000"]);
+    const allowed = new Set(["#faf8f3", "#1a1a1a", "#666", "#d9d5cc", "#222", "#15803d", "#b91c1c", "#8a1c1c", "#e8a317", "#e6e1d6", "#fff", "#000"]);
     const hexes = (css.toLowerCase().match(/#[0-9a-f]{3,8}\b/g) ?? []).filter((h) => !allowed.has(h));
     expect(hexes).toEqual([]);
     expect(css).not.toMatch(/box-shadow|text-shadow/);

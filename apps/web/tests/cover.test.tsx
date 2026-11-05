@@ -32,11 +32,17 @@ describe("Cover", () => {
 
   it("renders a flat tag-only cover without key or lines", () => {
     const out = render({ coverKey: null, lines: null, tag: { kind: "label", text: "Nov 4 · Recap" }, size: "small" });
-    expect(out).toContain('class="cover cover-small"');
+    expect(out).toContain('class="cover cover-small cover-flat"');
     expect(out).not.toContain("<img");
     expect(out).not.toContain("cover-stat");
     expect(out).not.toContain("cover-bar");
     expect(out).toContain('<span class="cover-tag">Nov 4 · Recap</span>');
+  });
+
+  it("marks only the scene-less cover as flat", () => {
+    expect(render({ coverKey: null })).toContain('<figure class="cover cover-lead cover-flat"');
+    expect(render({ coverKey: null, lines: null, size: "small" })).toContain('class="cover cover-small cover-flat"');
+    expect(render()).not.toContain("cover-flat");
   });
 
   it("renders every key/lines combination", () => {

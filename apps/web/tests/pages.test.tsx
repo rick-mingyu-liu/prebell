@@ -61,7 +61,7 @@ describe("list pages are one paper column", () => {
   it("the archive shows its rows with a cover, filters and pager as plain links", async () => {
     const out = renderToStaticMarkup(await pages[0][1]());
     expect(out).toContain('class="post-row"');
-    expect(out).toContain('class="cover cover-small"');
+    expect(out).toContain('class="cover cover-small cover-flat"');
     expect(out).toContain('<nav class="filters"');
     // The outline is h1 then h2 row titles, with no skipped level.
     expect(out).toContain('<h2 class="story-title">');
