@@ -267,14 +267,17 @@ pub fn scene_prompt(subject: &str) -> String {
     )
 }
 
-/// Brief scenes: places with no people and nothing to read, so the model
-/// has no reason to draw crowds or garbled lettering.
+/// Brief scenes, indexed by weekday (Monday first). Subjects must have no
+/// surface that normally carries lettering (walls, shelves, hulls, cranes,
+/// signs, placards): the model draws fake text on those regardless of the
+/// prompt's "no text" cue (Workers AI cover test, 2026-11-05). Skylines,
+/// bridges, glass facades, aerial roads and landscapes come out clean.
 const BRIEF_SCENES: [&str; 5] = [
-    "an empty stock exchange hall at dawn",
-    "a stock exchange building exterior at dawn",
-    "a financial district skyline at dusk",
+    "a financial district skyline at dusk from across the river",
     "a suspension bridge over a calm river at first light",
-    "a harbour of container ships",
+    "a glass office facade reflecting clouds, close-up",
+    "a highway interchange at night seen from above",
+    "a coastline with sea fog at dawn",
 ];
 
 /// The premarket and recap scene, rotated by weekday so consecutive days
@@ -283,18 +286,21 @@ pub fn brief_scene_subject(date: NaiveDate) -> String {
     BRIEF_SCENES[date.weekday().num_days_from_monday() as usize % BRIEF_SCENES.len()].to_string()
 }
 
-/// Earnings scenes: generic, text-free and people-free settings. The company
-/// name is never sent to the model, because it would paint the name (or a
-/// look-alike logo) into the picture.
+/// Earnings scenes: generic, people-free settings. The company name is never
+/// sent to the model, because it would paint the name (or a look-alike logo)
+/// into the picture. As for `BRIEF_SCENES`, subjects must have no surface
+/// that normally carries lettering (walls, shelves, hulls, cranes, signs,
+/// placards): the model draws fake text on those regardless of the prompt's
+/// "no text" cue (Workers AI cover test, 2026-11-05).
 const EARNINGS_SCENES: [&str; 8] = [
-    "a modern office tower facade at dawn",
-    "a quiet laboratory bench with glassware",
-    "an automated factory floor with no workers",
-    "a container port seen from above",
-    "a data center corridor",
+    "a glass office facade reflecting clouds, close-up",
+    "rolling farmland under morning mist",
     "a wind farm on rolling hills",
-    "a pharmacy shelf of unlabeled bottles",
-    "a highway interchange at night",
+    "a mountain lake at first light",
+    "a highway interchange at night seen from above",
+    "a financial district skyline at dusk from across the river",
+    "a coastline with sea fog at dawn",
+    "a river valley in fog seen from a hilltop",
 ];
 
 /// 64-bit FNV-1a: a fixed, dependency-free hash, so a ticker keeps its scene
@@ -679,20 +685,33 @@ pub(crate) mod tests {
         let next_mon: NaiveDate = "2026-11-09".parse().unwrap();
         assert_eq!(
             brief_scene_subject(mon),
-            "an empty stock exchange hall at dawn"
+            "a financial district skyline at dusk from across the river"
         );
         assert_ne!(brief_scene_subject(mon), brief_scene_subject(tue));
         assert_eq!(brief_scene_subject(mon), brief_scene_subject(next_mon));
     }
 
     #[test]
-    fn brief_scenes_avoid_people_and_text_prone_subjects() {
-        for scene in BRIEF_SCENES {
+    fn scenes_avoid_people_and_text_prone_subjects() {
+        for scene in BRIEF_SCENES.iter().chain(EARNINGS_SCENES.iter()) {
             for prone in [
+                "hall",
+                "shelf",
+                "shelves",
+                "container",
+                "ship",
+                "harbour",
+                "harbor",
+                "tower",
+                "corridor",
+                "atrium",
+                "office tower",
+                "sign",
+                "desk",
+                "floor",
                 "trading floor",
                 "newsroom",
                 "printed",
-                "desk",
                 "crowd",
                 "screen",
             ] {
