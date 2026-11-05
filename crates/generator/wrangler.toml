@@ -59,7 +59,7 @@ max_retries = 1
 LLM_PROVIDER = "claude"
 LLM_EFFORT = "low"
 SEC_CONTACT = "rickmyliu@gmail.com"
-# Cloudflare account for Workers AI cover scenes (not a secret). Needs the secret CF_AI_TOKEN; see docs/runbook.md.
+# Unused since covers became data graphics (2026-11-05); kept until the owner removes it.
 CF_ACCOUNT_ID = "ed6569531d89c3e00705807340c7b75f"
 # Earnings calendar seeding: "yahoo" (Yahoo v7 quote earnings dates, the default)
 # or "off" (only company announcements and EDGAR filings).

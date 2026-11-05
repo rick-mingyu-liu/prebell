@@ -7,7 +7,5 @@ crates/generator/build/
 .env
 .worktrees/
 backfill-covers.sql
-backfill-scenes/
-backfill-scenes.sql
 backfill-graphics/
 backfill-graphics.sql

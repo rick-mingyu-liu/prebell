@@ -10,7 +10,7 @@
 use chrono::{DateTime, Duration, SecondsFormat, Utc};
 
 use crate::clock::et;
-use crate::cover::{earnings_lines, earnings_scene_subject, make_scene, CoverMaker};
+use crate::cover::{earnings_graphic, earnings_lines, store_graphic};
 use crate::earnings::charts::{charts, r2_key};
 use crate::earnings::detect::{domestic_by_cik, earnings_entries, name_mismatches};
 use crate::earnings::draft::{slug, write, CONTENT_TYPE, TEMPLATE_ID};
@@ -258,14 +258,15 @@ fn since_update(r: &RunRow, now: DateTime<Utc>) -> Duration {
 
 /// Works through the open filings, oldest first: closes finished ones,
 /// skips in-flight or recently retried ones, and does at most one piece of
-/// LLM work (a build or a Chinese retry) per tick.
+/// LLM work (a build or a Chinese retry) per tick. `log` receives the
+/// cover outcome, `cover=ok|err|none`, once per build that publishes.
 pub async fn build_tick(
     now: DateTime<Utc>,
     es: &dyn EarningsStore,
     store: &dyn Store,
     filings: &dyn Filings,
     llm: &dyn LlmProvider,
-    cover: &dyn CoverMaker,
+    log: &dyn Fn(&str),
 ) -> Result<Vec<(String, TickOutcome)>, String> {
     let mut out = Vec::new();
     // One build and one Chinese retry per tick, budgeted separately so a
@@ -313,7 +314,7 @@ pub async fn build_tick(
                 if let Some(o) = reconcile(now, es, store, &f, &run).await? {
                     o
                 } else {
-                    build(now, es, store, filings, llm, cover, &f, run).await?
+                    build(now, es, store, filings, llm, log, &f, run).await?
                 }
             }
         };
@@ -586,7 +587,7 @@ async fn build(
     store: &dyn Store,
     filings: &dyn Filings,
     llm: &dyn LlmProvider,
-    cover: &dyn CoverMaker,
+    log: &dyn Fn(&str),
     f: &FilingRow,
     mut row: RunRow,
 ) -> Result<TickOutcome, String> {
@@ -632,9 +633,10 @@ async fn build(
         let acc = &facts.accession;
         post_slug = format!("{post_slug}-{}", &acc[acc.len().saturating_sub(6)..]);
     }
-    // A failed scene leaves the post without one; it never blocks publishing.
-    let (cover_key, _) =
-        make_scene(store, cover, &post_slug, &earnings_scene_subject(&facts)).await;
+    // A failed cover write leaves the post on the flat tile; it never blocks
+    // publishing.
+    let (cover_key, outcome) = store_graphic(store, &post_slug, earnings_graphic(&facts)).await;
+    log(&format!("cover={outcome}"));
     let post_id = store
         .upsert_post(&PostRow {
             id: None,
@@ -844,8 +846,7 @@ async fn zh_failed(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cover::tests::{FakeCover, PNG};
-    use crate::cover::{earnings_lines, earnings_scene_subject, scene_prompt, NoCover};
+    use crate::cover::{earnings_graphic, earnings_lines};
     use crate::earnings::draft::tests::reply;
     use crate::earnings::store::MemEarningsStore;
     use crate::earnings::xbrl::tests::aapl_concept;
@@ -1183,7 +1184,7 @@ mod tests {
             base.as_ref(),
             &fl,
             &l,
-            &NoCover,
+            &|_| {},
         )
         .await
         .unwrap();
@@ -1194,7 +1195,7 @@ mod tests {
             base.as_ref(),
             &fl,
             &l,
-            &NoCover,
+            &|_| {},
         )
         .await
         .unwrap();
@@ -1300,7 +1301,7 @@ mod tests {
         .unwrap();
         let inner = llm(true, false);
         let l = CountingLlm(&inner, Cell::new(0));
-        let o = build_tick(poll_time(), &es, base.as_ref(), &edgar, &l, &NoCover)
+        let o = build_tick(poll_time(), &es, base.as_ref(), &edgar, &l, &|_| {})
             .await
             .unwrap();
         assert_eq!(o[0].1, TickOutcome::PublishedEnOnly, "{o:?}");
@@ -1338,7 +1339,7 @@ mod tests {
         let (base, es, fl) = detected().await;
         let l = llm(true, true);
         let t = poll_time() + Duration::minutes(1);
-        let o = build_tick(t, &es, base.as_ref(), &fl, &l, &NoCover)
+        let o = build_tick(t, &es, base.as_ref(), &fl, &l, &|_| {})
             .await
             .unwrap();
         assert_eq!(o, vec![(KEY.to_string(), TickOutcome::Published)]);
@@ -1384,7 +1385,7 @@ mod tests {
             base.as_ref(),
             &fl,
             &l,
-            &NoCover,
+            &|_| {},
         )
         .await
         .unwrap();
@@ -1396,7 +1397,7 @@ mod tests {
         let (base, es, fl) = detected().await;
         let l = llm(true, true);
         let t = poll_time() + Duration::minutes(1);
-        build_tick(t, &es, base.as_ref(), &fl, &l, &NoCover)
+        build_tick(t, &es, base.as_ref(), &fl, &l, &|_| {})
             .await
             .unwrap();
         // An operator re-runs the filing.
@@ -1411,7 +1412,7 @@ mod tests {
             base.as_ref(),
             &fl,
             &l,
-            &NoCover,
+            &|_| {},
         )
         .await
         .unwrap();
@@ -1431,7 +1432,7 @@ mod tests {
             base.as_ref(),
             &fl,
             &l,
-            &NoCover,
+            &|_| {},
         )
         .await
         .unwrap();
@@ -1446,7 +1447,7 @@ mod tests {
             base.as_ref(),
             &fl,
             &l,
-            &NoCover,
+            &|_| {},
         )
         .await
         .unwrap();
@@ -1457,7 +1458,7 @@ mod tests {
             base.as_ref(),
             &fl,
             &l,
-            &NoCover,
+            &|_| {},
         )
         .await
         .unwrap();
@@ -1491,7 +1492,7 @@ mod tests {
             base.as_ref(),
             &fl,
             &DeniedLlm,
-            &NoCover,
+            &|_| {},
         )
         .await
         .unwrap();
@@ -1505,7 +1506,7 @@ mod tests {
         let (base, es, fl) = detected().await;
         let l = llm(true, false);
         let t = poll_time() + Duration::minutes(1);
-        let o = build_tick(t, &es, base.as_ref(), &fl, &l, &NoCover)
+        let o = build_tick(t, &es, base.as_ref(), &fl, &l, &|_| {})
             .await
             .unwrap();
         assert_eq!(o[0].1, TickOutcome::PublishedEnOnly);
@@ -1521,7 +1522,7 @@ mod tests {
             base.as_ref(),
             &fl,
             &l,
-            &NoCover,
+            &|_| {},
         )
         .await
         .unwrap();
@@ -1537,7 +1538,7 @@ mod tests {
     async fn zh_gives_up_after_a_day() {
         let (base, es, fl) = detected().await;
         let l = llm(true, false);
-        build_tick(poll_time(), &es, base.as_ref(), &fl, &l, &NoCover)
+        build_tick(poll_time(), &es, base.as_ref(), &fl, &l, &|_| {})
             .await
             .unwrap();
         let o = build_tick(
@@ -1546,7 +1547,7 @@ mod tests {
             base.as_ref(),
             &fl,
             &l,
-            &NoCover,
+            &|_| {},
         )
         .await
         .unwrap();
@@ -1564,7 +1565,7 @@ mod tests {
     async fn en_failure_publishes_nothing() {
         let (base, es, fl) = detected().await;
         let l = llm(false, true);
-        let o = build_tick(poll_time(), &es, base.as_ref(), &fl, &l, &NoCover)
+        let o = build_tick(poll_time(), &es, base.as_ref(), &fl, &l, &|_| {})
             .await
             .unwrap();
         assert!(matches!(&o[0].1, TickOutcome::Retrying(e) if e.starts_with("en:")));
@@ -1591,7 +1592,7 @@ mod tests {
             base.as_ref(),
             &fl,
             &llm(true, true),
-            &NoCover,
+            &|_| {},
         )
         .await
         .unwrap();
@@ -1608,7 +1609,7 @@ mod tests {
         second.accepted_at = "2026-10-30T20:40:00Z".into();
         es.insert_filing(&second).await.unwrap();
         let l = llm(true, true);
-        let o = build_tick(poll_time(), &es, base.as_ref(), &fl, &l, &NoCover)
+        let o = build_tick(poll_time(), &es, base.as_ref(), &fl, &l, &|_| {})
             .await
             .unwrap();
         assert_eq!(o.len(), 1);
@@ -1624,7 +1625,7 @@ mod tests {
             base.as_ref(),
             &fl,
             &l,
-            &NoCover,
+            &|_| {},
         )
         .await
         .unwrap();
@@ -1635,7 +1636,7 @@ mod tests {
             base.as_ref(),
             &fl,
             &l,
-            &NoCover,
+            &|_| {},
         )
         .await
         .unwrap();
@@ -1646,7 +1647,7 @@ mod tests {
     async fn pending_zh_does_not_hold_up_new_builds() {
         let (base, es, fl) = detected().await;
         let l = llm(true, false);
-        build_tick(poll_time(), &es, base.as_ref(), &fl, &l, &NoCover)
+        build_tick(poll_time(), &es, base.as_ref(), &fl, &l, &|_| {})
             .await
             .unwrap();
         let mut second = es.filings.borrow()[ACC].clone();
@@ -1656,7 +1657,7 @@ mod tests {
         second.accepted_at = "2026-10-30T20:40:00Z".into();
         es.insert_filing(&second).await.unwrap();
         let t = poll_time() + Duration::minutes(6);
-        let o = build_tick(t, &es, base.as_ref(), &fl, &l, &NoCover)
+        let o = build_tick(t, &es, base.as_ref(), &fl, &l, &|_| {})
             .await
             .unwrap();
         let keys: Vec<_> = o.iter().map(|(k, _)| k.as_str()).collect();
@@ -1669,7 +1670,7 @@ mod tests {
         let (base, es, fl) = detected().await;
         let l = llm(true, false);
         let t = poll_time();
-        build_tick(t, &es, base.as_ref(), &fl, &l, &NoCover)
+        build_tick(t, &es, base.as_ref(), &fl, &l, &|_| {})
             .await
             .unwrap();
         let drafts = l.drafts.get();
@@ -1679,7 +1680,7 @@ mod tests {
             base.as_ref(),
             &fl,
             &l,
-            &NoCover,
+            &|_| {},
         )
         .await
         .unwrap();
@@ -1691,7 +1692,7 @@ mod tests {
             base.as_ref(),
             &fl,
             &l,
-            &NoCover,
+            &|_| {},
         )
         .await
         .unwrap();
@@ -1714,7 +1715,7 @@ mod tests {
             base.as_ref(),
             &fl,
             &l,
-            &NoCover,
+            &|_| {},
         )
         .await
         .unwrap();
@@ -1728,7 +1729,7 @@ mod tests {
             base.as_ref(),
             &fl,
             &l,
-            &NoCover,
+            &|_| {},
         )
         .await
         .unwrap();
@@ -1741,7 +1742,7 @@ mod tests {
         let (base, es, fl) = detected().await;
         let l = llm(true, true);
         let t = poll_time();
-        build_tick(t, &es, base.as_ref(), &fl, &l, &NoCover)
+        build_tick(t, &es, base.as_ref(), &fl, &l, &|_| {})
             .await
             .unwrap();
         // Simulate a crash after EN was written: no sources, no charts, run not published.
@@ -1762,7 +1763,7 @@ mod tests {
             base.as_ref(),
             &fl,
             &l,
-            &NoCover,
+            &|_| {},
         )
         .await
         .unwrap();
@@ -1781,7 +1782,7 @@ mod tests {
     async fn unreadable_facts_end_zh_without_blocking() {
         let (base, es, fl) = detected().await;
         let l = llm(true, false);
-        build_tick(poll_time(), &es, base.as_ref(), &fl, &l, &NoCover)
+        build_tick(poll_time(), &es, base.as_ref(), &fl, &l, &|_| {})
             .await
             .unwrap();
         let want = stored_lines(&base).zh.map(Some);
@@ -1794,7 +1795,7 @@ mod tests {
             base.as_ref(),
             &fl,
             &l,
-            &NoCover,
+            &|_| {},
         )
         .await
         .unwrap();
@@ -1823,7 +1824,7 @@ mod tests {
             base.as_ref(),
             &fl,
             &llm(true, true),
-            &NoCover,
+            &|_| {},
         )
         .await
         .unwrap();
@@ -1850,23 +1851,24 @@ mod tests {
     async fn earnings_build_writes_cover_key_and_lines() {
         let (base, es, fl) = detected().await;
         let l = llm(true, true);
-        let cover = FakeCover::new(Ok(PNG.to_vec()));
+        let logs = RefCell::new(Vec::<String>::new());
+        let log = |m: &str| logs.borrow_mut().push(m.to_string());
         let t = poll_time() + Duration::minutes(1);
-        let o = build_tick(t, &es, base.as_ref(), &fl, &l, &cover)
+        let o = build_tick(t, &es, base.as_ref(), &fl, &l, &log)
             .await
             .unwrap();
         assert_eq!(o, vec![(KEY.to_string(), TickOutcome::Published)]);
-        let key = "covers/aapl-q4-fy2026-earnings.png";
+        let key = "covers/aapl-q4-fy2026-earnings.svg";
         assert_eq!(base.posts.borrow()[0].cover_key.as_deref(), Some(key));
-        assert_eq!(
-            base.bytes.borrow()[key],
-            (PNG.to_vec(), "image/png".to_string())
-        );
         let facts = stored_facts(&base);
         assert_eq!(
-            *cover.prompts.borrow(),
-            [scene_prompt(&earnings_scene_subject(&facts))]
+            base.bytes.borrow()[key],
+            (
+                earnings_graphic(&facts).unwrap().into_bytes(),
+                "image/svg+xml".to_string()
+            )
         );
+        assert_eq!(*logs.borrow(), ["cover=ok"]);
         let lines = earnings_lines(&facts);
         assert!(lines.en[0].starts_with("Revenue $"), "{lines:?}");
         assert_eq!(lines_of(&base, "en"), lines.en.map(Some));
@@ -1880,7 +1882,7 @@ mod tests {
         let (base, es, fl) = detected().await;
         let l = llm(true, false);
         let t = poll_time() + Duration::minutes(1);
-        build_tick(t, &es, base.as_ref(), &fl, &l, &NoCover)
+        build_tick(t, &es, base.as_ref(), &fl, &l, &|_| {})
             .await
             .unwrap();
         let want = stored_lines(&base).zh.map(Some);
@@ -1892,7 +1894,7 @@ mod tests {
             base.as_ref(),
             &fl,
             &l,
-            &NoCover,
+            &|_| {},
         )
         .await
         .unwrap();
@@ -1905,7 +1907,7 @@ mod tests {
             base.as_ref(),
             &fl,
             &l,
-            &NoCover,
+            &|_| {},
         )
         .await
         .unwrap();
@@ -1914,19 +1916,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn earnings_build_publishes_when_scene_fails() {
-        for reply in [Err("boom".to_string()), Ok(b"GIF89a".to_vec())] {
-            let (base, es, fl) = detected().await;
-            let l = llm(true, true);
-            let cover = FakeCover::new(reply);
-            let t = poll_time() + Duration::minutes(1);
-            let o = build_tick(t, &es, base.as_ref(), &fl, &l, &cover)
-                .await
-                .unwrap();
-            assert_eq!(o[0].1, TickOutcome::Published);
-            assert_eq!(base.posts.borrow()[0].cover_key, None);
-            assert!(base.bytes.borrow().is_empty());
-            assert_eq!(lines_of(&base, "en"), stored_lines(&base).en.map(Some));
-        }
+    async fn earnings_build_publishes_when_the_cover_write_fails() {
+        let (base, es, fl) = detected().await;
+        base.fail_put_bytes.set(true);
+        let l = llm(true, true);
+        let logs = RefCell::new(Vec::<String>::new());
+        let log = |m: &str| logs.borrow_mut().push(m.to_string());
+        let t = poll_time() + Duration::minutes(1);
+        let o = build_tick(t, &es, base.as_ref(), &fl, &l, &log)
+            .await
+            .unwrap();
+        assert_eq!(o[0].1, TickOutcome::Published);
+        assert_eq!(base.posts.borrow()[0].cover_key, None);
+        assert!(base.bytes.borrow().is_empty());
+        assert_eq!(lines_of(&base, "en"), stored_lines(&base).en.map(Some));
+        assert_eq!(*logs.borrow(), ["cover=err"]);
     }
 }

@@ -10,8 +10,8 @@ use serde::Serialize;
 
 use crate::clock::{decide, et, premarket_window, trading_day, DayKind, SlotDecision, Window};
 use crate::cover::{
-    brief_lines, brief_scene_subject, index_snapshot, make_scene, CoverLines, CoverMaker,
-    IndexSnapshot, INDEX_LINE_KEY,
+    brief_graphic, brief_lines, cover_movers, index_snapshot, store_graphic, CoverLines,
+    IndexSnapshot, Session, INDEX_LINE_KEY,
 };
 use crate::facts::{missing_required, NewsReason, PremarketFacts};
 use crate::numbers::Lang;
@@ -59,8 +59,9 @@ pub trait Content {
     fn cover_lines(&self, f: &Self::Facts) -> CoverLines;
     /// The market snapshot the front page's index line is built from.
     fn index_snapshot(&self, f: &Self::Facts) -> IndexSnapshot;
-    /// What the cover's generated background shows.
-    fn scene_subject(&self, f: &Self::Facts) -> String;
+    /// The cover's data graphic (an SVG), or `None` when the facts give no
+    /// graphic and the post keeps the flat tile.
+    fn cover_graphic(&self, f: &Self::Facts) -> Option<String>;
 
     fn run_key(&self, date: NaiveDate) -> String {
         format!("{}:{}", self.content_type(), date.format("%Y-%m-%d"))
@@ -130,8 +131,8 @@ impl Content for Premarket<'_> {
     fn index_snapshot(&self, f: &PremarketFacts) -> IndexSnapshot {
         index_snapshot("premarket", f.as_of_utc, &f.futures)
     }
-    fn scene_subject(&self, f: &PremarketFacts) -> String {
-        brief_scene_subject(f.trading_date)
+    fn cover_graphic(&self, f: &PremarketFacts) -> Option<String> {
+        brief_graphic(&cover_movers(&f.gainers, &f.losers), Session::Premarket)
     }
 }
 /// A `building` run younger than this is assumed to be in flight. A build
@@ -169,7 +170,7 @@ pub async fn tick(
 }
 
 /// `tick`, passing the build's diagnostics line to `log` once when it builds
-/// (and the scene outcome, `cover=ok|skip|err`, when it gets that far).
+/// (and the cover outcome, `cover=ok|err|none`, when it gets that far).
 pub async fn tick_with_log(
     now: DateTime<Utc>,
     store: &dyn Store,
@@ -182,7 +183,6 @@ pub async fn tick_with_log(
         log,
         extra: &Vec::new,
         budget: &|| 0,
-        cover: &crate::cover::NoCover,
     };
     tick_with_hooks(now, store, md, ns, llm, &hooks).await
 }
@@ -202,7 +202,7 @@ pub async fn tick_with_hooks(
 /// What the caller adds to a tick.
 pub struct Hooks<'a> {
     /// Receives the build's diagnostics line, once when the facts are built
-    /// (before the drafts), then `cover=ok|skip|err` after the scene step,
+    /// (before the drafts), then `cover=ok|err|none` after the cover write,
     /// and a failed index-line write.
     pub log: &'a dyn Fn(&str),
     /// Lines appended to the build's diagnostics (log and `last_error`, not
@@ -212,8 +212,6 @@ pub struct Hooks<'a> {
     /// Subrequests used so far (the Worker's fetch count); read by
     /// `build_facts` to skip optional work near the Free plan's limit.
     pub budget: &'a dyn Fn() -> usize,
-    /// Makes the cover's background scene; `NoCover` when none is configured.
-    pub cover: &'a dyn CoverMaker,
 }
 
 /// One cron firing for content type `c`. A store error is reported as `Retrying`.
@@ -397,9 +395,9 @@ async fn build<C: Content>(
     publish(now, store, c, hooks, date, row, &facts, &lines).await
 }
 
-/// The rest of `build` once the facts are in: gate, drafts, scene, rows.
+/// The rest of `build` once the facts are in: gate, drafts, cover, rows.
 /// `lines` (the diagnostics) go into `last_error` when the gate fails; the
-/// scene outcome is logged on its own line.
+/// cover outcome is logged on its own line.
 #[allow(clippy::too_many_arguments)]
 async fn publish<C: Content>(
     now: DateTime<Utc>,
@@ -434,7 +432,7 @@ async fn publish<C: Content>(
         return Ok(TickOutcome::Nothing);
     }
     let slug = c.slug(date);
-    let (cover_key, outcome) = make_scene(store, hooks.cover, &slug, &c.scene_subject(facts)).await;
+    let (cover_key, outcome) = store_graphic(store, &slug, c.cover_graphic(facts)).await;
     (hooks.log)(&format!("cover={outcome}"));
     let facts_key = c.facts_key(date);
     let json = serde_json::to_string(facts).map_err(|e| format!("facts json: {e}"))?;
@@ -654,8 +652,6 @@ async fn retry_zh<C: Content>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cover::tests::{FakeCover, PNG};
-    use crate::cover::NoCover;
     use crate::facts::Quote;
     use crate::facts::{Field, NewsReason};
     use crate::providers::{ProviderError, SearchHit};
@@ -847,10 +843,7 @@ mod tests {
         assert_eq!(snap.kind, "premarket");
         assert_eq!(snap.as_of_utc, "2026-10-29T12:30:09Z");
         assert_eq!(snap.entries.len(), 1);
-        assert_eq!(
-            c.scene_subject(&f),
-            "a highway interchange at night seen from above"
-        );
+        assert!(c.cover_graphic(&f).unwrap().contains(">AAPL<"));
     }
 
     #[test]
@@ -1051,8 +1044,8 @@ mod tests {
                 entries: Vec::new(),
             }
         }
-        fn scene_subject(&self, _f: &u32) -> String {
-            String::new()
+        fn cover_graphic(&self, _f: &u32) -> Option<String> {
+            None
         }
     }
 
@@ -1068,7 +1061,6 @@ mod tests {
             log: &|_| {},
             extra: &Vec::new,
             budget: &budget,
-            cover: &NoCover,
         };
         tick_content(utc("2026-10-29T12:30:00Z"), &s, &probe, &hooks).await;
         assert_eq!(probe.seen.get(), Some(37));
@@ -1085,7 +1077,6 @@ mod tests {
             log: &log,
             extra: &extra,
             budget: &|| 0,
-            cover: &NoCover,
         };
         let out = tick_with_hooks(utc("2026-10-29T12:30:00Z"), &s, &m, &FakeNs, &l, &hooks).await;
         match out {
@@ -1120,7 +1111,7 @@ mod tests {
             TickOutcome::Published
         );
         {
-            // The facts line, then the scene outcome on its own line.
+            // The facts line, then the cover outcome on its own line.
             let logs = logs.borrow();
             assert_eq!(logs.len(), 2, "{logs:?}");
             assert!(logs[0].starts_with("diagnostics: quotes ok=1 "), "{logs:?}");
@@ -1129,12 +1120,12 @@ mod tests {
                 "{logs:?}"
             );
             assert!(!logs[0].contains("cover="), "{logs:?}");
-            assert_eq!(logs[1], "cover=skip");
+            assert_eq!(logs[1], "cover=ok");
         }
         // No build, no diagnostics line.
         tick_with_log(now, &s, &m, &FakeNs, &l, &log).await;
         assert_eq!(logs.borrow().len(), 2);
-        // The scene outcome is not part of the stored facts.
+        // The cover outcome is not part of the stored facts.
         assert!(!s.facts.borrow()["premarket/2026-10-29.json"].contains("cover="));
     }
 
@@ -1156,7 +1147,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn diagnostics_are_logged_before_the_drafts_and_cover_after_the_scene() {
+    async fn diagnostics_are_logged_before_the_drafts_and_cover_after_the_write() {
         let s = MemStore::default();
         let m = md(true);
         let logs = std::cell::RefCell::new(Vec::<String>::new());
@@ -1171,7 +1162,6 @@ mod tests {
             log: &log,
             extra: &extra,
             budget: &|| 0,
-            cover: &NoCover,
         };
         let out = tick_with_hooks(utc("2026-10-29T12:30:00Z"), &s, &m, &FakeNs, &spy, &hooks).await;
         assert_eq!(out, TickOutcome::Published);
@@ -1181,7 +1171,7 @@ mod tests {
         assert!(at_draft[0].ends_with("; subrequests=7"), "{at_draft:?}");
         assert_eq!(
             *logs.borrow(),
-            [at_draft[0].clone(), "cover=skip".to_string()]
+            [at_draft[0].clone(), "cover=ok".to_string()]
         );
     }
 
@@ -1638,32 +1628,22 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn build_stores_cover_lines_scene_and_index_snapshot() {
+    async fn build_stores_cover_lines_graphic_and_index_snapshot() {
         let s = MemStore::default();
         let (m, l) = (md(true), llm(true, true));
-        let cover = FakeCover::new(Ok(PNG.to_vec()));
         let logs = std::cell::RefCell::new(Vec::<String>::new());
         let log = |m: &str| logs.borrow_mut().push(m.to_string());
-        let hooks = Hooks {
-            log: &log,
-            extra: &Vec::new,
-            budget: &|| 0,
-            cover: &cover,
-        };
-        let out = tick_with_hooks(utc(NOV4), &s, &m, &FakeNs, &l, &hooks).await;
+        let out = tick_with_log(utc(NOV4), &s, &m, &FakeNs, &l, &log).await;
         assert_eq!(out, TickOutcome::Published);
 
-        let key = "covers/premarket-2026-11-04.png";
+        let key = "covers/premarket-2026-11-04.svg";
         assert_eq!(s.posts.borrow()[0].cover_key.as_deref(), Some(key));
-        assert_eq!(
-            s.bytes.borrow()[key],
-            (PNG.to_vec(), "image/png".to_string())
-        );
-        let date: NaiveDate = "2026-11-04".parse().unwrap();
-        assert_eq!(
-            *cover.prompts.borrow(),
-            [crate::cover::scene_prompt(&brief_scene_subject(date))]
-        );
+        let (bytes, mime) = s.bytes.borrow()[key].clone();
+        assert_eq!(mime, "image/svg+xml");
+        let svg = String::from_utf8(bytes).unwrap();
+        assert!(svg.starts_with("<svg"), "{svg}");
+        assert!(svg.contains(">AAPL<"), "{svg}");
+        assert!(svg.contains(">+8.00%<"), "{svg}");
 
         let lines = stored_lines(&s, NOV4_FACTS);
         assert_eq!(lines.en[1], "AAPL +8.00%");
@@ -1683,38 +1663,22 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn build_publishes_without_scene_when_maker_fails() {
-        // A maker error, an unconfigured maker, a failed image write.
-        for (maker, fail_put, want) in [
-            (Some(FakeCover::new(Err("boom".into()))), false, "cover=err"),
-            (None, false, "cover=skip"),
-            (Some(FakeCover::new(Ok(PNG.to_vec()))), true, "cover=err"),
-        ] {
-            let s = FailStore::default();
-            s.fail_put_bytes.set(fail_put);
-            let (m, l) = (md(true), llm(true, true));
-            let logs = std::cell::RefCell::new(Vec::<String>::new());
-            let log = |m: &str| logs.borrow_mut().push(m.to_string());
-            let hooks = Hooks {
-                log: &log,
-                extra: &Vec::new,
-                budget: &|| 0,
-                cover: match &maker {
-                    Some(f) => f,
-                    None => &NoCover,
-                },
-            };
-            let out = tick_with_hooks(utc(NOV4), &s, &m, &FakeNs, &l, &hooks).await;
-            assert_eq!(out, TickOutcome::Published, "{want}");
-            assert_eq!(s.inner.runs.borrow()[NOV4_KEY].status, "published");
-            assert_eq!(s.inner.posts.borrow()[0].cover_key, None, "{want}");
-            assert!(s.inner.bytes.borrow().is_empty());
-            // The lines and the snapshot do not depend on the scene.
-            assert!(lines_of(&s.inner, "en")[1].is_some());
-            assert!(s.inner.kv.borrow().contains_key("index_line"));
-            assert_eq!(logs.borrow().len(), 2, "{:?}", logs.borrow());
-            assert_eq!(logs.borrow()[1], want, "{:?}", logs.borrow());
-        }
+    async fn build_publishes_without_cover_when_the_write_fails() {
+        let s = FailStore::default();
+        s.fail_put_bytes.set(true);
+        let (m, l) = (md(true), llm(true, true));
+        let logs = std::cell::RefCell::new(Vec::<String>::new());
+        let log = |m: &str| logs.borrow_mut().push(m.to_string());
+        let out = tick_with_log(utc(NOV4), &s, &m, &FakeNs, &l, &log).await;
+        assert_eq!(out, TickOutcome::Published);
+        assert_eq!(s.inner.runs.borrow()[NOV4_KEY].status, "published");
+        assert_eq!(s.inner.posts.borrow()[0].cover_key, None);
+        assert!(s.inner.bytes.borrow().is_empty());
+        // The lines and the snapshot do not depend on the cover graphic.
+        assert!(lines_of(&s.inner, "en")[1].is_some());
+        assert!(s.inner.kv.borrow().contains_key("index_line"));
+        assert_eq!(logs.borrow().len(), 2, "{:?}", logs.borrow());
+        assert_eq!(logs.borrow()[1], "cover=err", "{:?}", logs.borrow());
     }
 
     #[tokio::test]
