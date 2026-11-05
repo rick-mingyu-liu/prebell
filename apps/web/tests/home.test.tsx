@@ -84,7 +84,7 @@ const at = (out: string, cls: string) => {
 describe("HomeView front page", () => {
   it("renders lead, earnings row, recent list, movers column and reporting block in order", () => {
     const out = render();
-    // The lead scene's preload link comes first in a fragment; in a full document React moves it to <head>.
+    // The lead graphic's preload link comes first in a fragment; in a full document React moves it to <head>.
     expect(out).toMatch(/^(<link rel="preload" as="image" [^>]*\/>)?<div class="front">/);
     const order = ["front-lead", "front-earnings", "front-recent", "front-side", "front-movers", "front-reporting"];
     const offsets = order.map((c) => at(out, c));

@@ -24,6 +24,8 @@ describe("covers", () => {
     expect(await png.text()).toBe("PNG");
     const jpg = await coverResponse(bucket, ["covers", "brief-1.jpg"]);
     expect(jpg.headers.get("content-type")).toBe("image/jpeg");
+    expect(jpg.headers.get("x-content-type-options")).toBe("nosniff");
+    expect(jpg.headers.get("content-security-policy")).toBe("sandbox");
     expect(bucket.seen).toEqual(["covers/amgn-q3.png", "covers/brief-1.jpg"]);
   });
 

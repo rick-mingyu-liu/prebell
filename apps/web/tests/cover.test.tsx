@@ -30,7 +30,7 @@ describe("Cover", () => {
     expect(out).toContain('<span class="cover-bar"></span>');
   });
 
-  it("renders an old scene key with the same paper styling", () => {
+  it("renders an old png image key with the same paper styling", () => {
     const out = render({ coverKey: "covers/aapl-q4.png" });
     expect(out).toContain('<img class="cover-bg" src="/covers/aapl-q4.png"');
     expect(out).not.toContain("cover-shade");
@@ -46,7 +46,7 @@ describe("Cover", () => {
     expect(out).toContain('<span class="cover-tag">Nov 4 · Recap</span>');
   });
 
-  it("marks only the scene-less cover as flat", () => {
+  it("marks only the cover without an image as flat", () => {
     expect(render({ coverKey: null })).toContain('<figure class="cover cover-lead cover-flat"');
     expect(render({ coverKey: null, lines: null, size: "small" })).toContain('class="cover cover-small cover-flat"');
     expect(render()).not.toContain("cover-flat");
@@ -76,7 +76,7 @@ describe("Cover", () => {
     expect(none).not.toContain("cover-bar");
   });
 
-  it("loads the lead and article scenes at once and preloads them; list covers stay lazy", () => {
+  it("loads the lead and article graphics at once and preloads them; list covers stay lazy", () => {
     for (const size of ["lead", "article"] as const) {
       const out = render({ size });
       expect(out).toContain('<img class="cover-bg" src="/covers/aapl-q4.svg" alt="" loading="eager" fetchPriority="high"/>');

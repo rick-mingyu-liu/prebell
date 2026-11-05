@@ -54,7 +54,7 @@ The cover becomes a small, true picture of the day: the biggest moves for a brie
 - Free plan only; no new bindings, no new secrets.
 - Every number in the SVG goes through `fmt_signed_pct`, `fmt_short_usd` or `fmt_eps`; the same values appear in the article.
 - Tests: core (`cargo test -p prebell-core --locked`), wasm check, clippy `-D warnings`, fmt; web `pnpm test`, `pnpm typecheck`, `pnpm lint`, `pnpm cf:build`. SVG tests assert structure (counts of `<rect>`, colours per direction, U+2212 in labels, escaping of `&`/`<`, the viewBox) and the `None` cases.
-- Deploy: generator then web; no migration. Backfill SQL applied by the owner.
+- Deploy: web first, then the generator (this change only: the web must accept `.svg` keys before the generator writes them); no migration. Backfill SQL applied by the owner.
 
 ## Left to the builder
 
