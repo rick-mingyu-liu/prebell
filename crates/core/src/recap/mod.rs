@@ -519,6 +519,7 @@ pub async fn tick_with_log(
     let hooks = Hooks {
         log,
         extra: &Vec::new,
+        cover: &crate::cover::NoCover,
     };
     tick_with_hooks(now, store, md, ns, llm, &hooks).await
 }
@@ -1518,6 +1519,7 @@ mod run_tests {
         let hooks = crate::run::Hooks {
             log: &|_| {},
             extra: &extra,
+            cover: &crate::cover::NoCover,
         };
         let out = tick_with_hooks(utc("2026-10-29T20:45:00Z"), &s, &m, &FakeNs, &l, &hooks).await;
         assert!(
@@ -1555,7 +1557,7 @@ mod run_tests {
                 "{logs:?}"
             );
             assert!(
-                logs[0].ends_with("; indexes ok=4 err=0; reported=0 reported_err=0"),
+                logs[0].ends_with("; indexes ok=4 err=0; reported=0 reported_err=0; cover=skip"),
                 "{logs:?}"
             );
         }
@@ -1568,6 +1570,27 @@ mod run_tests {
         assert_eq!(
             facts.diagnostics.last().unwrap(),
             "reported=0 reported_err=0"
+        );
+    }
+
+    #[tokio::test]
+    async fn recap_build_writes_index_snapshot_with_closes() {
+        let s = MemStore::default();
+        let (m, l) = (md(true), llm(true, true));
+        let now = utc("2026-10-29T20:45:00Z");
+        assert_eq!(tick(now, &s, &m, &FakeNs, &l).await, TickOutcome::Published);
+        let snap: crate::cover::IndexSnapshot =
+            serde_json::from_str(&s.kv.borrow()[crate::cover::INDEX_LINE_KEY]).unwrap();
+        assert_eq!(snap.kind, "recap");
+        assert_eq!(snap.entries.len(), 4);
+        assert!(snap.entries.iter().all(|e| e.last == 5850.12));
+        let tr = s.translations.borrow();
+        let en = &tr[&(1, "en".to_string())];
+        assert_eq!(en.cover_line1.as_deref(), Some("S&P 500 +0.51%"));
+        assert_eq!(en.cover_line2.as_deref(), Some("NVDA +3.08%"));
+        assert_eq!(
+            tr[&(1, "zh".to_string())].cover_line1.as_deref(),
+            Some("标普500 +0.51%")
         );
     }
 

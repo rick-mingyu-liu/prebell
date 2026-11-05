@@ -7,6 +7,7 @@ mod store;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
+use prebell_core::cover::NoCover;
 use prebell_core::earnings::calendar::{refresh_tick, yahoo_seeding, CalendarSource};
 use prebell_core::earnings::run::{build_tick, poll_job};
 use prebell_core::edgar::Edgar;
@@ -181,6 +182,7 @@ impl JobRunner for Runner<'_> {
         let hooks = Hooks {
             log: &log,
             extra: &extra,
+            cover: &NoCover,
         };
         let at = now(env);
         let store = self.store;
@@ -236,7 +238,7 @@ impl JobRunner for Runner<'_> {
             }
             EarningsStep::Build => {
                 let llm = self.llm(&[])?;
-                let o = build_tick(t, store, store, &edgar, llm.as_ref()).await?;
+                let o = build_tick(t, store, store, &edgar, llm.as_ref(), &NoCover).await?;
                 Ok(format!("{o:?}"))
             }
             EarningsStep::Calendar => {

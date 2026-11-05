@@ -1,7 +1,8 @@
 //! The cover figure of a published post: two short text lines composed from
 //! the facts, the scene prompt for the generated background, and the index
-//! snapshot the front page reads. Pure; the image model sits behind
-//! `CoverMaker` and is implemented by the generator.
+//! snapshot the front page reads. Pure apart from `make_scene`, which stores
+//! the scene; the image model sits behind `CoverMaker` and is implemented by
+//! the generator.
 
 use async_trait::async_trait;
 use chrono::{DateTime, Datelike, NaiveDate, SecondsFormat, Utc};
@@ -11,6 +12,7 @@ use crate::earnings::draft::{fmt_value, period_label};
 use crate::earnings::facts::{EarningsFacts, Metric, Unit};
 use crate::facts::{Field, Mover, Quote};
 use crate::numbers::Lang;
+use crate::store::Store;
 
 /// The `kv` key the front page reads the latest index snapshot from.
 pub const INDEX_LINE_KEY: &str = "index_line";
@@ -265,6 +267,34 @@ pub fn earnings_scene_subject(f: &EarningsFacts) -> String {
     format!("a wide establishing view of the industry of {company}: its typical facilities, products and equipment")
 }
 
+/// The scene step of a build: one `maker` attempt for `subject`, stored as
+/// `covers/{slug}.{png|jpg}`. Returns the stored key, or `None`, and the
+/// outcome for the diagnostics line: `ok`, `skip` (no maker configured) or
+/// `err` (the maker failed, the bytes are not PNG/JPEG, or the write failed).
+/// Never fails the build.
+pub async fn make_scene(
+    store: &dyn Store,
+    maker: &dyn CoverMaker,
+    slug: &str,
+    subject: &str,
+) -> (Option<String>, &'static str) {
+    let bytes = match maker.scene(&scene_prompt(subject)).await {
+        Ok(b) => b,
+        Err(e) if e.contains("not configured") => return (None, "skip"),
+        Err(_) => return (None, "err"),
+    };
+    let (ext, mime) = match image_ext(&bytes) {
+        Some("png") => ("png", "image/png"),
+        Some("jpg") => ("jpg", "image/jpeg"),
+        _ => return (None, "err"),
+    };
+    let key = format!("covers/{slug}.{ext}");
+    match store.put_bytes(&key, &bytes, mime).await {
+        Ok(()) => (Some(key), "ok"),
+        Err(_) => (None, "err"),
+    }
+}
+
 /// The latest market snapshot behind the front page's index line.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct IndexSnapshot {
@@ -306,10 +336,71 @@ pub fn index_snapshot(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::earnings::facts::tests::{facts, fig};
     use crate::earnings::facts::FiscalPeriod;
+    use crate::store::MemStore;
+    use std::cell::RefCell;
+
+    /// The PNG signature: enough for `image_ext`.
+    pub(crate) const PNG: &[u8] = &[0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
+
+    /// Answers every call with `reply` and records each prompt.
+    pub(crate) struct FakeCover {
+        pub reply: Result<Vec<u8>, String>,
+        pub prompts: RefCell<Vec<String>>,
+    }
+    impl FakeCover {
+        pub(crate) fn new(reply: Result<Vec<u8>, String>) -> Self {
+            FakeCover {
+                reply,
+                prompts: RefCell::new(Vec::new()),
+            }
+        }
+    }
+    #[async_trait(?Send)]
+    impl CoverMaker for FakeCover {
+        async fn scene(&self, prompt: &str) -> Result<Vec<u8>, String> {
+            self.prompts.borrow_mut().push(prompt.to_string());
+            self.reply.clone()
+        }
+    }
+
+    #[tokio::test]
+    async fn make_scene_stores_png_and_jpg_under_the_slug() {
+        let s = MemStore::default();
+        let png = FakeCover::new(Ok(PNG.to_vec()));
+        assert_eq!(
+            make_scene(&s, &png, "recap-2026-11-04", "a harbour").await,
+            (Some("covers/recap-2026-11-04.png".to_string()), "ok")
+        );
+        assert_eq!(*png.prompts.borrow(), [scene_prompt("a harbour")]);
+        assert_eq!(
+            s.bytes.borrow()["covers/recap-2026-11-04.png"],
+            (PNG.to_vec(), "image/png".to_string())
+        );
+        let jpg = FakeCover::new(Ok(vec![0xFF, 0xD8, 0xFF, 0xE0]));
+        assert_eq!(
+            make_scene(&s, &jpg, "aapl-q4-fy2026-earnings", "x").await,
+            (Some("covers/aapl-q4-fy2026-earnings.jpg".to_string()), "ok")
+        );
+        assert_eq!(
+            s.bytes.borrow()["covers/aapl-q4-fy2026-earnings.jpg"].1,
+            "image/jpeg"
+        );
+    }
+
+    #[tokio::test]
+    async fn make_scene_skips_without_a_maker_and_errs_on_bad_replies() {
+        let s = MemStore::default();
+        assert_eq!(make_scene(&s, &NoCover, "p", "x").await, (None, "skip"));
+        let boom = FakeCover::new(Err("boom".into()));
+        assert_eq!(make_scene(&s, &boom, "p", "x").await, (None, "err"));
+        let gif = FakeCover::new(Ok(b"GIF89a".to_vec()));
+        assert_eq!(make_scene(&s, &gif, "p", "x").await, (None, "err"));
+        assert!(s.bytes.borrow().is_empty());
+    }
 
     fn quote(sym: &str, last: f64, pct: f64) -> Quote {
         Quote {
