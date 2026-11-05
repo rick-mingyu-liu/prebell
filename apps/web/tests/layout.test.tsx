@@ -143,3 +143,11 @@ describe("globals.css", () => {
     expect(new Set(widths)).toEqual(new Set(["720px"]));
   });
 });
+
+describe("site icon", () => {
+  it("ships an SVG favicon and an Apple touch icon beside the app root", () => {
+    expect(fs.existsSync("src/app/icon.svg")).toBe(true);
+    expect(fs.readFileSync("src/app/icon.svg", "utf8")).toContain("#e8a317");
+    expect(fs.statSync("src/app/apple-icon.png").size).toBeGreaterThan(500);
+  });
+});
