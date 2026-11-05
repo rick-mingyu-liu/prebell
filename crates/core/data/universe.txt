@@ -177,13 +177,13 @@ EXPE	Expedia Group	Consumer Discretionary	Cruise & travel
 EXR	Extra Space Storage	Real Estate	REITs & real estate
 F	Ford Motor	Consumer Discretionary	Autos & EV
 FANG	Diamondback Energy	Energy	Oil & gas producers
-FAST	Fastenal	Industrials	Machinery
+FAST	Fastenal	Industrials	Industrial distributors & rental
 FCX	Freeport-McMoRan	Materials	Metals & mining
 FDS	FactSet	Financials	Exchanges & data
 FDX	FedEx	Industrials	Freight & logistics
 FDXF	FedEx Freight	Industrials	Freight & logistics
 FE	FirstEnergy	Utilities	Utilities
-FERG	Ferguson	Industrials	Machinery
+FERG	Ferguson	Industrials	Industrial distributors & rental
 FFIV	F5	Information Technology	Networking & optical
 FICO	Fair Isaac	Information Technology	Exchanges & data
 FIS	Fidelity National Information Services	Financials	Payments
@@ -215,7 +215,7 @@ GPC	Genuine Parts	Consumer Discretionary	Home improvement & specialty retail
 GPN	Global Payments	Financials	Payments
 GRMN	Garmin	Consumer Discretionary	Electronics & components
 GS	Goldman Sachs	Financials	Large banks
-GWW	W. W. Grainger	Industrials	Machinery
+GWW	W. W. Grainger	Industrials	Industrial distributors & rental
 HAL	Halliburton	Energy	Oilfield services
 HAS	Hasbro	Consumer Discretionary	Media & entertainment
 HBAN	Huntington Bancshares	Financials	Regional banks
@@ -461,7 +461,7 @@ ULTA	Ulta Beauty	Consumer Discretionary	Home improvement & specialty retail
 UNH	UnitedHealth Group	Health Care	Managed care
 UNP	Union Pacific	Industrials	Freight & logistics
 UPS	United Parcel Service	Industrials	Freight & logistics
-URI	United Rentals	Industrials	Machinery
+URI	United Rentals	Industrials	Industrial distributors & rental
 USB	U.S. Bancorp	Financials	Regional banks
 V	Visa	Financials	Payments
 VEEV	Veeva Systems	Health Care	Cloud & enterprise software
@@ -509,12 +509,12 @@ ARM	Arm Holdings	Information Technology	Semiconductors
 ASML	ASML Holding	Information Technology	Semiconductor equipment
 CCEP	Coca-Cola Europacific Partners	Consumer Staples	Beverages & tobacco
 CRWV	CoreWeave	Information Technology	AI infrastructure & data centers
-FER	Ferrovial	Industrials	Business services
+FER	Ferrovial	Industrials	Electrical & grid infrastructure
 MELI	MercadoLibre	Consumer Discretionary	Internet & e-commerce
 MSTR	Strategy	Information Technology	Crypto & retail trading
 NBIS	Nebius	Information Technology	AI infrastructure & data centers
 PDD	PDD Holdings	Consumer Discretionary	Internet & e-commerce
-RKLB	Rocket Lab	Industrials	Space & launch
+RKLB	Rocket Lab	Industrials	Aerospace & defense
 SHOP	Shopify	Information Technology	Internet & e-commerce
-SPCX	SpaceX	Industrials	Space & launch
+SPCX	SpaceX	Industrials	Aerospace & defense
 TRI	Thomson Reuters	Industrials	Exchanges & data

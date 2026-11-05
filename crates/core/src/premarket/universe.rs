@@ -223,6 +223,11 @@ mod tests {
         assert_eq!(group("MU"), Some("Memory & storage"));
         assert_eq!(group("NVDA"), Some("Semiconductors"));
         assert_eq!(group("ZION"), None);
+        assert_eq!(group("RKLB"), Some("Aerospace & defense"));
+        assert_eq!(group("SPCX"), Some("Aerospace & defense"));
+        assert_eq!(group("URI"), Some("Industrial distributors & rental"));
+        assert_eq!(group("FER"), Some("Electrical & grid infrastructure"));
+        assert!(groups().all(|g| g != "Space & launch"));
         assert_eq!(sector("GOOGL"), Some("Communication Services"));
         assert_eq!(sector("V"), Some("Financials"));
         assert_eq!(company_name("HON"), Some("Honeywell Technologies"));
