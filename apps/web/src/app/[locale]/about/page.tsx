@@ -1,7 +1,6 @@
 import type { Metadata } from "next";
 import { getTranslations, setRequestLocale } from "next-intl/server";
 import AuthorBlock from "@/components/AuthorBlock";
-import Disclaimer from "@/components/Disclaimer";
 import SignupForm from "@/components/SignupForm";
 import type { Locale } from "@/i18n/routing";
 import { TERMPOCKET_URL } from "@/lib/partners";
@@ -34,7 +33,6 @@ export default async function About({ params }: PageProps<"/[locale]/about">) {
         </a>
       </p>
       {signupEnabled() && <SignupForm source="about" locale={locale} />}
-      <Disclaimer />
     </article>
   );
 }

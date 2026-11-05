@@ -131,30 +131,30 @@ describe("BriefView", () => {
     const prose = at(out, "Intel (INTC) plunged 26.0%");
     const macro = at(out, "<h2>Macro &amp; overnight</h2>");
     const sources = at(out, '<section class="sources"');
-    const disclaimer = at(out, "It is not investment advice.");
     const author = at(out, '<section class="author">');
     const signup = at(out, '<section class="signup">');
     const prev = at(out, 'rel="prev"');
     const partners = at(out, '<aside class="partners-strip"');
     expect(
-      inOrder([kicker, title, meta, time, checked, cover, tag, body, lede, futures, heading, movers, prose, macro, sources, disclaimer, author, signup, prev, partners]),
+      inOrder([kicker, title, meta, time, checked, cover, tag, body, lede, futures, heading, movers, prose, macro, sources, author, signup, prev, partners]),
     ).toBe(true);
 
-    // Title, summary, movers heading, sources heading and disclaimer once each; the body's tables give way to the movers table.
+    // Title, summary, movers heading and sources heading once each; the body's tables give way to the movers table.
     expect(out.match(/<h1/g)).toHaveLength(1);
     expect(out.match(/Biggest premarket movers/g)).toHaveLength(1);
     expect(out).not.toContain("Top movers");
     expect(out.match(/US futures fell for a second day as weak tech earnings/g)).toHaveLength(1);
     expect(out.match(/<table/g)).toHaveLength(1);
     expect(out.match(/>Sources</g)).toHaveLength(1);
-    expect(out.match(/It is not investment advice\./g)).toHaveLength(1);
+    expect(out).not.toContain("It is not investment advice.");
     expect(out).toMatch(/<th[^>]*>Company<\/th><th[^>]*>Reason<\/th><th[^>]*>Last<\/th><th[^>]*>Change<\/th>/);
     for (const s of ["MDLZ", "REGN", "CL", "AZN", "EFX", "INTC", "HPQ", "DELL", "SYK", "ARM"]) expect(out).toContain(`>${s}</span>`);
     expect(out).toContain("$68.13");
     expect(out).toContain("S&amp;P 500 futures were down 1.14%");
     expect(out).toContain('<a href="https://www.wsj.com/business/earnings/intel-shares-tumble-on-lower-profit-weak-guidance-a2bdcdd8"');
     expect(at(out, "intel-shares-tumble")).toBeGreaterThan(sources);
-    expect(out).toContain('<p class="story-disclaimer">This brief is generated automatically from public data for information only. It is not investment advice.</p>');
+    expect(out).not.toContain("story-disclaimer");
+    expect(out).not.toContain("generated automatically from public data");
     expect(out).toMatch(/<a rel="prev" href="\/en\/p\/recap-2026-10-29"/);
     expect(out).toMatch(/<a class="next" rel="next" href="\/en\/p\/recap-2026-10-30"/);
     expect(out).toContain('id="signup-email-post"');
@@ -220,12 +220,14 @@ describe("BriefView", () => {
     const results = at(out, "<h2>Results</h2>");
     const charts = at(out, '<section class="charts"');
     const sources = at(out, '<section class="sources"');
-    const disclaimer = at(out, '<p class="story-disclaimer">This earnings summary is generated automatically');
     const author = at(out, '<section class="author">');
     const signup = at(out, '<section class="signup">');
     const partners = at(out, '<aside class="partners-strip"');
-    expect(inOrder([kicker, title, checked, cover, lede, line, table, results, charts, sources, disclaimer, author, signup, partners])).toBe(true);
+    expect(inOrder([kicker, title, checked, cover, lede, line, table, results, charts, sources, author, signup, partners])).toBe(true);
 
+    // The generator's closing line stays in the markdown; the page does not show it.
+    expect(out).not.toContain("story-disclaimer");
+    expect(out).not.toContain("it is not investment advice");
     // The key-figure table exactly as written: this quarter only, no derived columns.
     expect(out).toContain('<td>Revenue</td><td style="text-align:right">$10.4 billion</td>');
     expect(out).toContain('<td>Diluted EPS (GAAP)</td><td style="text-align:right">$7.08</td>');
@@ -268,7 +270,8 @@ describe("BriefView", () => {
     expect(out).toContain("✓ 数字已与源数据核对");
     expect(out.match(/<table/g)).toHaveLength(1);
     expect(out).toContain('<section class="sources" aria-labelledby="sources"><h2 id="sources">来源</h2>');
-    expect(out).toContain('<p class="story-disclaimer">本简报根据公开数据自动生成，仅供参考，不构成投资建议。</p>');
+    expect(out).not.toContain("story-disclaimer");
+    expect(out).not.toContain("不构成投资建议");
   });
 
   it("renders the full body with its tables when the facts are missing, title and summary once", () => {

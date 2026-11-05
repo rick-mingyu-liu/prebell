@@ -29,7 +29,7 @@ export interface BriefViewProps {
  * a body without that heading (an older post) and a pending page show the table first under a generic
  * heading. Without facts, and for an earnings check, the body keeps its tables
  * (the key-figure table exactly as written) and an earnings check adds its charts. Then the sources,
- * the post's own disclaimer, the author, the signup (when enabled), a brief's neighbours and the partner strip.
+ * the author, the signup (when enabled), a brief's neighbours and the partner strip.
  */
 export default function BriefView({ data, locale, signup }: BriefViewProps) {
   const { post, facts, adjacent, charts } = data;
@@ -108,7 +108,6 @@ export default function BriefView({ data, locale, signup }: BriefViewProps) {
           <PostBody markdown={story.sources} sources={sources} />
         </section>
       )}
-      {story?.disclaimer && <p className="story-disclaimer">{story.disclaimer}</p>}
 
       <AuthorBlock locale={locale} />
       {signup && <SignupForm source="post" locale={locale} />}

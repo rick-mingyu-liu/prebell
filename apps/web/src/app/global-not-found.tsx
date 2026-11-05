@@ -42,14 +42,6 @@ export default function GlobalNotFound() {
             </div>
           </section>
         </main>
-        <footer className="site-footer">
-          <div className="wrap">
-            <p className="disclaimer">{en.disclaimer}</p>
-            <p className="disclaimer" lang="zh-Hans">
-              {zh.disclaimer}
-            </p>
-          </div>
-        </footer>
       </body>
     </html>
   );

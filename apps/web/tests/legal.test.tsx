@@ -38,6 +38,19 @@ describe("Privacy & Terms page", () => {
     }
   });
 
+  it("carries the nature-of-content statement as the first terms section, in both locales", async () => {
+    expect(en.legal.terms[0].h).toBe("Terms: nature of content");
+    expect(zh.legal.terms[0].h).toBe("条款：内容性质声明");
+    const enOut = await render("en");
+    expect(enOut).toContain("<h2>Terms: nature of content</h2>");
+    expect(enOut).toContain("not investment, financial, tax or legal advice");
+    expect(enOut).toContain("professional adviser");
+    const zhOut = await render("zh");
+    expect(zhOut).toContain("<h2>条款：内容性质声明</h2>");
+    expect(zhOut).toContain("不构成任何投资、财务、税务或法律建议");
+    expect(zhOut).toContain("专业顾问");
+  });
+
   it("states the dated English facts", async () => {
     const out = await render("en");
     expect(out).toContain("<h1>Privacy &amp; Terms</h1>");

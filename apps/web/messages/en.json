@@ -125,9 +125,9 @@
     ],
     "terms": [
       {
-        "h": "Terms: information only",
+        "h": "Terms: nature of content",
         "p": [
-          "PreBell publishes automatically generated market briefs and earnings summaries for information. Nothing on the site is investment, financial, legal or tax advice, or a recommendation to buy or sell anything."
+          "PreBell's content is generated automatically from public data (market briefs) and SEC filings (earnings checks) and is published for education and information only. It is not investment, financial, tax or legal advice, and not a recommendation to buy or sell any asset. Assess risks against your own situation before investing and consult a professional adviser where needed."
         ]
       },
       {
@@ -178,7 +178,6 @@
     "title": "Page not found",
     "back": "Back to the home page"
   },
-  "disclaimer": "Content on this site is generated automatically from public data for information only. It is not investment advice.",
   "types": {
     "premarket": "Premarket brief",
     "recap": "After-close recap",
@@ -230,7 +229,7 @@
   },
   "partners": {
     "from": "From our partners",
-    "disclosure": "Affiliate links: PreBell may earn a reward if you sign up. Not investment advice."
+    "disclosure": "Affiliate links: PreBell may earn a reward if you sign up."
   },
   "termpocket": {
     "copy": "From the PreBell team. Plan your goals and habits with Pocky, your AI assistant.",

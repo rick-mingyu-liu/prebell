@@ -37,3 +37,4 @@ they are never asked twice. Things decided *not* to do go in `declined.md`.
   batches** (controller's call after the 150-symbol live check could not
   run; reversible in one constant once a live check from another network
   passes).
+- **The not-advice statement lives only on the legal page** ("Terms: nature of content" / "条款：内容性质声明"), modelled on AlphaLab's 内容性质声明; no footer or per-post disclaimer. Rick, 2026-11-05: "just include the not advice section only in legal and privacy policy page instead of showing everywhere".
