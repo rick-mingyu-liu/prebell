@@ -236,6 +236,16 @@ pub(crate) fn theme_names(themes: &[Theme]) -> Vec<&str> {
         .collect()
 }
 
+/// The themes' "and N more" counts the prose may repeat. Counts up to 10
+/// are the checker's small counts and pass already.
+pub(crate) fn theme_allowed(themes: &[Theme]) -> Vec<f64> {
+    themes
+        .iter()
+        .filter(|t| t.more > 10)
+        .map(|t| t.more as f64)
+        .collect()
+}
+
 /// One `## heading` section: code's block (themes list or movers table)
 /// first when there is one, then the LLM body.
 pub(crate) fn section(heading: &str, code: Option<&str>, body: &str) -> String {
@@ -615,12 +625,23 @@ pub async fn write(
     };
     let facts_json = serde_json::to_string_pretty(&for_llm)
         .map_err(|e| vec![format!("draft: facts json: {e}")])?;
+    let mut allowed = numbers_in_facts(f);
+    allowed.extend(theme_allowed(&f.themes));
+    // Company names come from the universe file, so their digits ("3M",
+    // "Phillips 66") are not figures.
+    let names: Vec<&str> = f
+        .gainers
+        .iter()
+        .chain(&f.losers)
+        .map(|m| m.name.as_str())
+        .chain(theme_names(&f.themes))
+        .collect();
     write_with(
         llm,
         prompt(lang),
         &facts_json,
-        &numbers_in_facts(f),
-        &theme_names(&f.themes),
+        &allowed,
+        &names,
         &headings(
             lang,
             has_items(&f.macro_items),
@@ -1691,6 +1712,63 @@ pub(crate) mod tests {
         let mut v = reply_with(&headings(Lang::En, false, true, false), "Quiet.").unwrap();
         v["sections"][1]["markdown"] = json!("Phillips 66 slipped 66%.");
         let bad = || Ok(v.clone());
+        let err = write(&llm(vec![bad(), bad()]), &f, Lang::En)
+            .await
+            .unwrap_err();
+        assert_eq!(err, vec!["66%"]);
+    }
+    #[tokio::test]
+    async fn premarket_more_count_above_ten_passes_the_check() {
+        let mut f = facts();
+        f.themes = two_themes();
+        f.themes[1].more = 12;
+        let heads = headings(Lang::En, false, true, false);
+        let with = |text: &str| {
+            let mut v = reply_with(&heads, "Quiet.").unwrap();
+            v["sections"][1]["markdown"] = json!(text);
+            v
+        };
+        let l = llm(vec![Ok(with(
+            "Micron led storage lower, and 12 more fell.",
+        ))]);
+        write(&l, &f, Lang::En).await.unwrap();
+        assert_eq!(l.prompts.borrow().len(), 1);
+        // A count the facts do not hold still fails.
+        let bad = || Ok(with("Micron led storage lower, and 18 more fell."));
+        let err = write(&llm(vec![bad(), bad()]), &f, Lang::En)
+            .await
+            .unwrap_err();
+        assert_eq!(err, vec!["18"]);
+        // Only counts above 10 are added; 0-10 are the checker's small counts.
+        f.themes[1].more = 7;
+        assert_eq!(theme_allowed(&f.themes), Vec::<f64>::new());
+        f.themes[0].more = 11;
+        assert_eq!(theme_allowed(&f.themes), vec![11.0]);
+    }
+
+    #[tokio::test]
+    async fn premarket_mover_names_with_digits_pass_the_check() {
+        let mut f = facts();
+        f.themes = two_themes();
+        f.gainers[0].name = "Phillips 66".into();
+        f.losers = vec![Mover {
+            quote: quote("MMM", 120.0, -4.0),
+            name: "3M".into(),
+            reasons: vec![],
+        }];
+        assert!(!theme_names(&f.themes).contains(&"Phillips 66"));
+        let heads = headings(Lang::En, false, true, false);
+        let with = |text: &str| {
+            let mut v = reply_with(&heads, "Quiet.").unwrap();
+            v["sections"][2]["markdown"] = json!(text);
+            v
+        };
+        let l = llm(vec![Ok(with("Phillips 66 rose while 3M slipped."))]);
+        let (d, _) = write(&l, &f, Lang::En).await.unwrap();
+        assert_eq!(l.prompts.borrow().len(), 1);
+        assert!(d.sections[2].1.contains("Phillips 66"));
+        // The names' digits back nothing else.
+        let bad = || Ok(with("Phillips 66 rose 66%."));
         let err = write(&llm(vec![bad(), bad()]), &f, Lang::En)
             .await
             .unwrap_err();

@@ -431,7 +431,8 @@ pub(crate) struct MacroPrompt<'a> {
 
 /// Macro news from `queries`, run in order: the first always, each later
 /// one only while its search and the extraction call fit the budget, so
-/// the last query is the first to go. Hits are merged in query order,
+/// the last query is the first to go. An auth or quota error (HTTP 401,
+/// 403 or 429) on the first query skips the rest. Hits are merged in query order,
 /// de-duplicated by url, dated first, capped at `MACRO_HITS_TOTAL`, and
 /// read by one extraction call for up to `MACRO_ITEMS` items.
 pub(crate) async fn macro_items(
@@ -463,7 +464,12 @@ pub(crate) async fn macro_items(
             }
             Err(e) => {
                 d.search_err += 1;
+                // Auth or quota: the later queries would fail the same way.
+                let fatal = i == 0 && matches!(e, ProviderError::Http(401 | 403 | 429));
                 first_err.get_or_insert(e);
+                if fatal {
+                    break;
+                }
             }
         }
     }
@@ -575,13 +581,14 @@ pub(crate) async fn theme_reasons(
         top.group,
         as_of(now)
     );
+    // Held to the movers' hedge rule, as `THEME_RULE` asks.
     top.reasons = extract(
         llm,
         &system,
         &articles_prompt(&header, &hits),
         &hits,
         THEME_REASONS,
-        false,
+        true,
         d,
     )
     .await
@@ -1914,6 +1921,46 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn macro_queries_stop_after_an_auth_error() {
+        let [q1, q2, q3] = PREMARKET_MACRO_QUERIES;
+        for status in [401, 403, 429] {
+            let n = RecNs(
+                ns(vec![
+                    (q1, Err(ProviderError::Http(status))),
+                    (q2, Ok(vec![dated("https://m.test/b", "Macro news.", 1)])),
+                    (q3, Ok(vec![dated("https://m.test/c", "Macro news.", 1)])),
+                ]),
+                RefCell::new(vec![]),
+            );
+            let f = build_facts(&md(&[]), &n, &llm(vec![]), date(), now(), &|| 0).await;
+            assert_eq!(*n.1.borrow(), [q1], "{status}");
+            assert_eq!(f.diagnostics[4], "macro queries=1 hits=0 items=0");
+            assert!(
+                f.diagnostics[3].starts_with("search_err=1 "),
+                "{:?}",
+                f.diagnostics
+            );
+            assert_eq!(
+                f.macro_items,
+                Field::Missing {
+                    reason: ProviderError::Http(status).to_string()
+                }
+            );
+        }
+        // An empty first query, or another error, keeps the later ones.
+        for first in [
+            Ok(vec![]),
+            Err(ProviderError::Http(500)),
+            Err(ProviderError::Empty),
+        ] {
+            let n = RecNs(ns(vec![(q1, first)]), RefCell::new(vec![]));
+            let f = build_facts(&md(&[]), &n, &llm(vec![]), date(), now(), &|| 0).await;
+            assert_eq!(*n.1.borrow(), PREMARKET_MACRO_QUERIES);
+            assert_eq!(f.diagnostics[4], "macro queries=3 hits=0 items=0");
+        }
+    }
+
+    #[tokio::test]
     async fn macro_keeps_up_to_five_items() {
         let src: String = (1..=7)
             .map(|i| format!("Macro item number {i} moved markets overnight. "))
@@ -2059,6 +2106,35 @@ mod tests {
         let asked = n.1.borrow();
         let at = |q: &str| asked.iter().position(|x| x == q).unwrap();
         assert!(at(MEMORY_Q) < at(PREMARKET_MACRO_QUERIES[0]), "{asked:?}");
+    }
+
+    #[tokio::test]
+    async fn hedged_theme_reason_is_dropped() {
+        let n = RecNs(
+            ns(vec![(
+                MEMORY_Q,
+                Ok(vec![dated("https://n.test/memory", MEMORY_SRC, 3)]),
+            )]),
+            RefCell::new(vec![]),
+        );
+        let l = llm(vec![(
+            "Theme: Memory & storage",
+            reasons(
+                "https://n.test/memory",
+                MEMORY_QUOTE,
+                "DRAM contract prices fell, which could explain the drop.",
+            ),
+        )]);
+        let f = build_facts(&md(&memory_down()), &n, &l, date(), now(), &|| 0).await;
+        assert_eq!(queries(&n, MEMORY_Q), 1);
+        assert!(f.themes[0].reasons.is_empty(), "{:?}", f.themes[0].reasons);
+        assert!(
+            f.diagnostics
+                .iter()
+                .any(|l| l.starts_with("reasons ") && l.ends_with(" hedged=1")),
+            "{:?}",
+            f.diagnostics
+        );
     }
 
     #[tokio::test]

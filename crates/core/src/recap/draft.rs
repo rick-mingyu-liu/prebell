@@ -6,7 +6,7 @@ use crate::facts::{Field, Mover, NewsReason};
 use crate::numbers::{check, Lang};
 use crate::premarket::draft::{
     blank_names, cell, fmt_num, fmt_pct, na, no_news, render_sources, render_themes, section,
-    theme_names, without_link_targets, write_with, Draft, MOVERS, THEMES,
+    theme_allowed, theme_names, without_link_targets, write_with, Draft, MOVERS, THEMES,
 };
 use crate::providers::LlmProvider;
 use crate::recap::{numbers_in_facts, RecapFacts, Reported};
@@ -237,13 +237,7 @@ pub async fn write(
     let facts_json = serde_json::to_string_pretty(&for_llm)
         .map_err(|e| vec![format!("draft: facts json: {e}")])?;
     let mut allowed = numbers_in_facts(f);
-    // "and 12 more": counts up to 10 are exempt already.
-    allowed.extend(
-        f.themes
-            .iter()
-            .filter(|t| t.more > 10)
-            .map(|t| t.more as f64),
-    );
+    allowed.extend(theme_allowed(&f.themes));
     let names: Vec<&str> = f
         .gainers
         .iter()
