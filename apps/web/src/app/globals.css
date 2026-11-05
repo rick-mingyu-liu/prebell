@@ -89,25 +89,22 @@ html:lang(zh-Hans) .kicker { letter-spacing: 0.04em; }
 .num.down { color: var(--down); }
 .num.flat { color: var(--muted); }
 
-/* Cover: a 16:9 composition in HTML/CSS. Scene dimmed over near-black, left shade, white tag top-left,
-   two bold lines and an amber bar bottom-left; the text scales with the cover's width. A cover with no scene
-   is flat: light stone ground, ink text, no shade, the amber bar kept. */
-.cover { position: relative; margin: 0; overflow: hidden; height: 240px; background: var(--ink); color: #fff; container-type: inline-size; }
+/* Cover: on paper. The generator's chart graphic fills the slot, contained and bottom-aligned so the whole
+   chart shows (older png/jpg scenes draw the same way, undimmed). The white tag with a rule border, the two
+   ink lines and the amber bar stack top-left in flow; the text scales with the cover's width. A cover with
+   no graphic is flat: light stone ground, same top-left text. */
+.cover { position: relative; margin: 0; overflow: hidden; height: 240px; background: var(--paper); color: var(--ink); container-type: inline-size; }
 .cover-article { height: 240px; }
 .cover-lead { height: 280px; }
 .cover-small { height: 130px; }
-.cover-bg { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; opacity: 0.55; filter: saturate(0.4); }
-.cover-shade { position: absolute; inset: 0; background: linear-gradient(90deg, rgba(0, 0, 0, 0.78), rgba(0, 0, 0, 0) 75%); }
-.cover-in { position: absolute; inset: 0; display: flex; flex-direction: column; justify-content: flex-end; align-items: flex-start; padding: 14px; }
-.cover-tag { position: absolute; top: 12px; left: 12px; display: flex; align-items: center; gap: 6px; background: #fff; color: var(--ink); padding: 3px 8px; font-size: 12px; font-weight: 600; line-height: 1.4; }
+.cover-bg { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; object-position: center bottom; }
+.cover-in { position: absolute; inset: 0; display: flex; flex-direction: column; justify-content: flex-start; align-items: flex-start; padding: 12px; }
+.cover-tag { display: flex; align-items: center; gap: 6px; margin-bottom: 8px; background: #fff; color: var(--ink); border: 1px solid var(--rule); padding: 3px 8px; font-size: 12px; font-weight: 600; line-height: 1.4; }
 .cover-tag img { display: block; height: 18px; width: auto; }
-.cover-stat { margin: 0; max-width: none; font-size: clamp(13px, 5.2cqw, 28px); font-weight: 800; line-height: 1.2; color: #fff; }
+.cover-stat { margin: 0; max-width: none; font-size: clamp(13px, 5.2cqw, 28px); font-weight: 800; line-height: 1.2; color: var(--ink); }
 .cover-bar { display: block; width: 44px; height: 3px; margin-top: 8px; background: var(--cover-bar); }
 .cover-flat { background: var(--cover-flat); color: var(--ink); }
-.cover-flat .cover-shade { display: none; }
-.cover-flat .cover-tag { border: 1px solid var(--muted); }
-.cover-flat .cover-stat { color: var(--ink); }
-.cover-small .cover-tag { top: 8px; left: 8px; padding: 2px 6px; font-size: 11px; }
+.cover-small .cover-tag { margin-bottom: 5px; padding: 2px 6px; font-size: 11px; }
 .cover-small .cover-in { padding: 8px; }
 .cover-small .cover-bar { margin-top: 5px; }
 

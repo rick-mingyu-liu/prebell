@@ -128,10 +128,25 @@ describe("globals.css", () => {
     expect(css).toMatch(/:root \{[^}]*--cover-flat: #e6e1d6;/);
     expect(css.toLowerCase().split("#e6e1d6")).toHaveLength(2);
     expect(css).toMatch(/\.cover-flat \{[^}]*background: var\(--cover-flat\);[^}]*color: var\(--ink\);/);
-    expect(css).toMatch(/\.cover-flat \.cover-shade \{ display: none; \}/);
-    expect(css).toMatch(/\.cover-flat \.cover-stat \{[^}]*color: var\(--ink\);/);
-    expect(css).toMatch(/\.cover-flat \.cover-tag \{[^}]*border: 1px solid var\(--muted\)/);
+    expect(css).not.toMatch(/\.cover-flat \.cover-(shade|stat|tag)/);
     expect(css).not.toMatch(/\.cover-flat \.cover-bar/);
+  });
+
+  it("draws covers on paper: contained graphic, tag in flow with a rule border, no shade", () => {
+    const block = (sel: string) => css.match(new RegExp(`^${sel.replace(/\./g, "\\.")} \\{[^}]*\\}`, "m"))?.[0] ?? "";
+    expect(block(".cover")).toContain("background: var(--paper)");
+    expect(block(".cover")).toContain("color: var(--ink)");
+    const bg = block(".cover-bg");
+    expect(bg).toContain("object-fit: contain");
+    expect(bg).toContain("object-position: center bottom");
+    expect(bg).not.toContain("opacity");
+    expect(bg).not.toContain("filter");
+    expect(block(".cover-in")).toContain("justify-content: flex-start");
+    const tag = block(".cover-tag");
+    expect(tag).toContain("border: 1px solid var(--rule)");
+    expect(tag).not.toContain("position: absolute");
+    expect(block(".cover-stat")).toContain("color: var(--ink)");
+    expect(css).not.toContain("cover-shade");
   });
 
   it("lets the index line scroll in place at every width and never clips its left end", () => {

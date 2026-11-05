@@ -38,7 +38,7 @@ function Lead({ lead, locale, t }: { lead: NonNullable<HomeData["lead"]>; locale
       </p>
       <Cover
         coverKey={lead.coverKey}
-        // A pending translation may carry stale lines; show the scene and label only.
+        // A pending translation may carry stale lines; show the graphic and label only.
         lines={pending ? null : lead.coverLines}
         tag={{ kind: "label", text: `${formatMonthDay(lead.tradingDate, locale)} · ${t(`paper.edition.${edition}`)}` }}
         size="lead"
