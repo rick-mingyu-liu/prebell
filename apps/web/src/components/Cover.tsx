@@ -1,7 +1,7 @@
 import { companyLogo } from "../lib/logos";
 
 export interface CoverProps {
-  /** R2 key of the scene (`covers/<slug>.png`), or null for the flat near-black cover. */
+  /** R2 key of the scene (`covers/<slug>.png`), or null for the flat light cover. */
   coverKey: string | null;
   /** The two bold lines, or null for a tag-only cover. An empty first line counts as null. */
   lines: [string, string] | null;
@@ -18,7 +18,7 @@ export default function Cover({ coverKey, lines, tag, size, alt }: CoverProps) {
   // The lead and article covers sit above the fold, so their scene loads at once; list covers wait.
   const eager = size !== "small";
   return (
-    <figure className={`cover cover-${size}`} aria-label={alt || undefined}>
+    <figure className={`cover cover-${size}${coverKey ? "" : " cover-flat"}`} aria-label={alt || undefined}>
       {coverKey && (
         <img
           className="cover-bg"

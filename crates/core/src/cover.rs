@@ -10,8 +10,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::earnings::draft::{fmt_value, period_label};
 use crate::earnings::facts::{EarningsFacts, Metric, Unit};
-use crate::facts::{Field, Mover, Quote};
+use crate::facts::{Field, Mover, PremarketFacts, Quote};
 use crate::numbers::Lang;
+use crate::recap::RecapFacts;
 use crate::store::Store;
 
 /// The `kv` key the front page reads the latest index snapshot from.
@@ -219,6 +220,30 @@ pub fn brief_lines(
     CoverLines {
         en: [line1(Lang::En), line2.clone()],
         zh: [line1(Lang::Zh), line2],
+    }
+}
+
+/// The cover lines of a stored post, recomputed from its facts JSON. Used to
+/// backfill posts published before covers existed. `content_type` is the
+/// `posts.content_type` value: `premarket`, `recap` or `earnings`.
+pub fn lines_for_facts(content_type: &str, facts_json: &str) -> Result<CoverLines, String> {
+    fn parse<T: serde::de::DeserializeOwned>(kind: &str, json: &str) -> Result<T, String> {
+        serde_json::from_str(json).map_err(|e| format!("bad {kind} facts: {e}"))
+    }
+    match content_type {
+        "premarket" => {
+            let f: PremarketFacts = parse(content_type, facts_json)?;
+            Ok(brief_lines(&f.futures, &f.gainers, &f.losers, true))
+        }
+        "recap" => {
+            let f: RecapFacts = parse(content_type, facts_json)?;
+            Ok(brief_lines(&f.indexes, &f.gainers, &f.losers, false))
+        }
+        "earnings" => Ok(earnings_lines(&parse::<EarningsFacts>(
+            content_type,
+            facts_json,
+        )?)),
+        other => Err(format!("unknown content type: {other}")),
     }
 }
 
@@ -710,6 +735,84 @@ pub(crate) mod tests {
             seen.insert(s);
         }
         assert!(seen.len() >= 4, "too little variety: {seen:?}");
+    }
+
+    fn premarket_json() -> String {
+        let f = crate::facts::PremarketFacts {
+            trading_date: "2026-10-29".parse().unwrap(),
+            as_of_utc: "2026-10-29T12:45:00Z".parse().unwrap(),
+            futures: vec![
+                present("S&P 500 futures", "ES=F", 5800.0, -1.14),
+                missing("Nasdaq 100 futures"),
+            ],
+            gainers: vec![mover("MOS", 17.37)],
+            losers: vec![mover("FIS", -23.67)],
+            macro_items: Field::Missing {
+                reason: "none".into(),
+            },
+            watch_list: Field::Missing {
+                reason: "none".into(),
+            },
+            diagnostics: vec![],
+        };
+        serde_json::to_string(&f).unwrap()
+    }
+
+    #[test]
+    fn lines_for_facts_premarket_labels_futures() {
+        let l = lines_for_facts("premarket", &premarket_json()).unwrap();
+        assert_eq!(l.en, ["S&P futures −1.14%", "MOS +17.37%, FIS −23.67%"]);
+        assert_eq!(l.zh[0], "标普500期货 −1.14%");
+    }
+
+    #[test]
+    fn lines_for_facts_recap_uses_index_labels() {
+        let f = crate::recap::RecapFacts {
+            trading_date: "2026-10-29".parse().unwrap(),
+            as_of_utc: "2026-10-29T20:45:00Z".parse().unwrap(),
+            early_close: false,
+            indexes: vec![
+                present("S&P 500", "^GSPC", 5850.12, 0.51),
+                present("Dow Jones", "^DJI", 42100.0, -1.5),
+            ],
+            gainers: vec![mover("NVDA", 3.08)],
+            losers: vec![],
+            after_hours: Field::Missing {
+                reason: "none".into(),
+            },
+            reported: vec![],
+            diagnostics: vec![],
+        };
+        let json = serde_json::to_string(&f).unwrap();
+        let l = lines_for_facts("recap", &json).unwrap();
+        assert_eq!(l.en, ["Dow −1.50%", "NVDA +3.08%"]);
+        assert_eq!(l.zh[0], "道指 −1.50%");
+    }
+
+    #[test]
+    fn lines_for_facts_earnings_matches_earnings_lines() {
+        let mut f = facts();
+        f.metrics.revenue = fig(
+            10.4e9,
+            Unit::Usd,
+            "$10.4 billion",
+            "revenue of $10.4 billion",
+        );
+        let json = serde_json::to_string(&f).unwrap();
+        assert_eq!(
+            lines_for_facts("earnings", &json).unwrap(),
+            earnings_lines(&f)
+        );
+    }
+
+    #[test]
+    fn lines_for_facts_rejects_unknown_kinds_and_bad_json() {
+        let e = lines_for_facts("weekly", "{}").unwrap_err();
+        assert!(e.contains("weekly"), "{e}");
+        let e = lines_for_facts("recap", "not json").unwrap_err();
+        assert!(e.contains("recap"), "{e}");
+        assert!(lines_for_facts("premarket", "{}").is_err());
+        assert!(lines_for_facts("earnings", &premarket_json()).is_err());
     }
 
     #[tokio::test]

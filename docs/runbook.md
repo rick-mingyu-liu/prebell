@@ -118,6 +118,7 @@ Each published post gets a generated background scene (Flux Schnell on Workers A
 - `CF_AI_TOKEN` is a secret: a Cloudflare API token with the Workers AI "Read" permission. The owner sets it with `cd crates/generator && pnpm exec wrangler secret put CF_AI_TOKEN` (production) or in `crates/generator/.dev.vars` (local). It is never committed and never appears in an error or log line.
 - Both take effect on the next deploy. A missing token or account id logs `secret CF_AI_TOKEN or var CF_ACCOUNT_ID is not set; covers will be plain` once per queue message.
 - A failed scene is logged as `cover: workers ai: <message>` (or `workers ai http <status>` when the body has no message) and never fails the post. One scene is one fetch subrequest: it counts toward the 50-subrequest limit but is not included in the logged `subrequests=`, which is read before the scene is made.
+- **Backfill for posts without cover lines:** `scripts/backfill-covers.sh` (repo root) reads the remote D1 and the `prebell-facts` bucket, recomputes each post's cover lines with the `cover-lines` binary, and writes one `UPDATE` per post and language to `backfill-covers.sql` (git-ignored). It never runs the SQL; the owner reviews it and applies it with `cd crates/generator && pnpm exec wrangler d1 execute prebell --remote --file ../../backfill-covers.sql`, and rerunning the script afterwards lists only the rows still missing lines.
 
 ## Web site (`prebell-web`)
 

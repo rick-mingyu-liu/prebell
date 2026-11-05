@@ -121,7 +121,7 @@ describe("BriefView", () => {
     const meta = at(out, '<p class="story-meta">');
     const time = at(out, "Published Oct 30, 2026, 9:20 AM ET");
     const checked = at(out, '<span class="checked">✓ Numbers checked against source data</span>');
-    const cover = at(out, '<figure class="cover cover-article" aria-label="Tech earnings drag futures lower; Intel plunges premarket">');
+    const cover = at(out, '<figure class="cover cover-article cover-flat" aria-label="Tech earnings drag futures lower; Intel plunges premarket">');
     const tag = at(out, '<span class="cover-tag">Oct 30 · Premarket</span>');
     const body = at(out, '<div class="story-body">');
     const lede = at(out, '<p class="story-lede">US futures fell for a second day as weak tech earnings');

@@ -32,7 +32,7 @@ describe("PostList", () => {
     const out = renderToStaticMarkup(<PostList locale="en" items={[post, withCover]} />);
     const [flat, scene] = out.split('<li class="post-row">').slice(1);
     // Every row: small cover, then the kicker, the serif title link, the summary and the date.
-    expect(flat).toContain('class="cover cover-small"');
+    expect(flat).toContain('class="cover cover-small cover-flat"');
     expect(flat).toContain('<p class="kicker">After-close recap</p>');
     expect(flat).toMatch(/<h3 class="story-title"><a href="\/en\/p\/2026-10-29-recap">Stocks slip into the close<\/a><\/h3>/);
     expect(flat).toContain("Tech led the drop.");
@@ -40,7 +40,7 @@ describe("PostList", () => {
     expect(flat.indexOf("cover-small")).toBeLessThan(flat.indexOf("kicker"));
     expect(flat.indexOf("kicker")).toBeLessThan(flat.indexOf("story-title"));
     expect(flat.indexOf("story-title")).toBeLessThan(flat.indexOf("story-meta"));
-    // No scene and no lines: the flat near-black cover with only its tag.
+    // No scene and no lines: the flat light cover with only its tag.
     expect(flat).not.toContain("cover-bg");
     expect(flat).not.toContain("cover-stat");
     expect(flat).toContain('<span class="cover-tag">Oct 29 · Recap</span>');
