@@ -1,0 +1,29 @@
+# Decisions
+
+Things Rick has decided, with the date and his words where they matter, so
+they are never asked twice. Things decided *not* to do go in `declined.md`.
+
+## 2026-11-04
+
+- **Frontend hosting: Cloudflare Workers, not Vercel.** The web app reads D1
+  and R2 through bindings; Vercel would need HTTP adapters and its Hobby plan
+  bars commercial use. Rick chose "Cloudflare Workers now".
+- **Site look: "B · the front page".** A daily paper: warm off-white, serif
+  headlines, lead story with a cover, movers as a ruled column, no pills, no
+  boxes. Rick: "i think this one ace over: B". Dark mode is dropped.
+  Design: `docs/superpowers/specs/2026-11-04-front-page-redesign-design.md`.
+- **Cover images are AI-generated** (Workers AI, Flux Schnell, free
+  allocation), composed with the logo and two verified figures at render
+  time. Rick: "AI-generated scenes".
+- **Author block** at the end of every article and on About, AlphaLab style,
+  short bio, links: rickmingyuliu.com, GitHub, LinkedIn. Real photo intended;
+  GitHub avatar is only a placeholder.
+- **Email: a weekly digest, like AlphaLab, not a daily email.** Rick:
+  "weekly digest like AlphaLab". Provider Buttondown (free to 100
+  subscribers) behind our own `/api/subscribe` route. Signup ships with the
+  redesign; sending is a separate later project.
+- **Home keeps a recent-posts list and briefs keep previous/next links;
+  the home premarket/recap tabs and the earnings strip on post pages are
+  removed.** (Rick, via the builder-check question.)
+- **Generator LLM stays DeepSeek** (`--var LLM_PROVIDER:deepseek` on deploy)
+  until the Max-plan API credit is claimed, then switch to Claude.
