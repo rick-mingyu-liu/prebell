@@ -23,7 +23,7 @@ export default function GlobalNotFound() {
         </div>
         <main className="wrap">
           <section className="notfound">
-            <p className="notfound-code" aria-hidden="true">
+            <p className="kicker" aria-hidden="true">
               404
             </p>
             <h1>{en.notFound.title}</h1>

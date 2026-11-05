@@ -56,7 +56,8 @@
     "title": "About",
     "p1": "PreBell publishes a short premarket brief every US trading day before the open (index futures, the biggest premarket movers and why they moved, and what to watch) and an after-close recap after the bell (index closes, notable movers and why, and after-hours earnings to watch).",
     "p2": "Every post is generated automatically from public market data and news. Numbers are checked against the source data before publishing, and each post lists its sources. Times are US Eastern.",
-    "p3": "English is published first; the Chinese version follows."
+    "p3": "English is published first; the Chinese version follows.",
+    "whoHeading": "Who is behind it"
   },
   "notFound": {
     "title": "Page not found",

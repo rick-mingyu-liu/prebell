@@ -110,19 +110,13 @@ html:lang(zh-Hans) .kicker { letter-spacing: 0.04em; }
 .table .r, .post-body td.r { text-align: right; }
 .table-wrap { overflow-x: auto; margin: 1rem 0; }
 
-/* Stories: a serif headline over a one-line summary; rows put a small cover on the left. */
+/* Stories: a serif headline over a one-line summary. */
 .story-title { margin: 0; font-family: var(--serif); font-size: 22px; font-weight: 700; line-height: 1.2; }
 .story-title a { text-decoration: none; }
 .story-title a:hover, .story-title a:focus-visible { text-decoration: underline; }
 .story-lead .story-title { font-size: 36px; line-height: 1.12; letter-spacing: -0.015em; }
 .story-sum { margin: 0.4rem 0 0; color: var(--muted); font-size: 15px; line-height: 1.5; }
 .story-meta { margin: 0.3rem 0 0; color: var(--muted); font-size: 12.5px; }
-.story-list { list-style: none; margin: 0; padding: 0; }
-.story-row { display: grid; grid-template-columns: 160px minmax(0, 1fr); gap: 0 16px; padding: 1rem 0; border-top: 1px solid var(--rule); }
-.story-row:first-child { border-top: 0; padding-top: 0.25rem; }
-.story-row .cover { height: 110px; }
-.story-row .story-title { font-size: 20px; }
-.story-row-text { min-width: 0; }
 
 /* Front page: lead story, earnings-check covers and the recent list on the left (about 1.6 : 1); a
    ruled column of top movers and who reports next on the right. Phones stack lead, movers, earnings,
@@ -244,68 +238,82 @@ html:lang(zh-Hans) .partners-strip .partners-label { font-variant-caps: normal; 
 .footer-links { display: flex; gap: 1rem; font-size: 13px; }
 .footer-links a { color: var(--muted); }
 
-/* Blocks the pages still render until their redesign tasks replace them: rows, labels, lists,
-   calendar, filters, notices, not-found. Ruled and flat, in the same tokens. */
-.row { display: flex; justify-content: space-between; align-items: center; gap: 0.75rem; padding: 0.6rem 0; border-bottom: 1px solid var(--rule); }
-.lbl { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); margin: 0.25rem 0 0.4rem; }
-.row-end { display: flex; gap: 0.75rem; align-items: baseline; }
+/* Shared bits: the quiet "more" link, the About column, the pending-translation notice, the logo tile. */
 .tlogo { width: 18px; height: 18px; flex: none; }
 .more { font-weight: 600; font-size: 14px; text-decoration: none; }
 .more:hover, .more:focus-visible { text-decoration: underline; }
-.page-main { min-width: 0; }
-.page-main h1 { font-size: 32px; }
 .prose { max-width: 680px; }
 .prose p { font-size: 16.5px; line-height: 1.7; }
+.prose h2 { font-size: 22px; margin: 0 0 0.25rem; }
+.prose .disclaimer { margin-top: 1.5rem; font-size: 13px; }
+.prose h2 + .author { margin-top: 0.5rem; border-top: 0; padding-top: 0.5rem; }
+.about-tp { margin: 0.5rem 0 1.5rem; color: var(--muted); font-size: 15px; }
+.prose .signup { margin-top: 1.5rem; }
 .notice { max-width: 680px; padding: 0.75rem 1rem; border: 1px solid var(--rule); border-left: 3px solid var(--rule-strong); }
 .notice p { margin: 0.25rem 0; }
-.eyebrow { font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); margin: 0; }
-.pager { display: flex; justify-content: space-between; margin-top: 1.5rem; }
-.pager a { font-weight: 600; text-decoration: none; }
-.pager a:hover, .pager a:focus-visible { text-decoration: underline; }
-.filters { display: flex; gap: 1.25rem; flex-wrap: wrap; margin: 0 0 1rem; border-bottom: 1px solid var(--rule); }
-.filters a { padding: 0.3rem 0; font-size: 13px; font-weight: 600; text-decoration: none; color: var(--muted); border-bottom: 2px solid transparent; }
+
+/* Lists: archive, earnings index and ticker pages share the article's 680px column. Filters, pager and
+   week links are plain small-caps links; the current filter is underlined, never filled. */
+.list-page { max-width: 680px; margin: 0 auto; }
+.list-page h1 { font-size: 32px; }
+.list-page .section-title { margin-top: 2rem; }
+.filters { display: flex; flex-wrap: wrap; gap: 0.15rem 1.25rem; margin: 0 0 1rem; border-bottom: 1px solid var(--rule); font-size: 13px; font-variant-caps: all-small-caps; letter-spacing: 0.08em; }
+html:lang(zh-Hans) .filters { font-variant-caps: normal; }
+.filters a { padding: 0.3rem 0; font-weight: 600; text-decoration: none; color: var(--muted); border-bottom: 2px solid transparent; }
+.filters a:hover, .filters a:focus-visible { color: var(--ink); }
 .filters a[aria-current] { color: var(--ink); border-bottom-color: var(--ink); }
-.tag { flex: none; align-self: flex-start; color: var(--muted); font-size: 12px; font-weight: 600; white-space: nowrap; }
-.post-list, .date-list { list-style: none; margin: 0; padding: 0; }
-.post-row { align-items: flex-start; padding: 0.8rem 0; }
-.post-row:first-child { padding-top: 0.2rem; }
+.pager { display: flex; justify-content: space-between; gap: 1rem; margin-top: 1.5rem; padding-top: 0.75rem; border-top: 1px solid var(--rule); }
+.pager:empty { display: none; }
+.pager a { font-size: 14px; font-weight: 600; text-decoration: none; }
+.pager a:hover, .pager a:focus-visible { text-decoration: underline; }
+
+/* Post list: a ruled row per story, the small cover in a 160px left slot (a flat tag-only cover when the
+   post has none), then kicker, serif headline, one-line summary and date. On a phone the cover goes full
+   width above the text, so its two lines never wrap in a narrow slot. */
+.post-list, .date-list, .cal-list { list-style: none; margin: 0; padding: 0; }
+.post-row { display: grid; grid-template-columns: 160px minmax(0, 1fr); gap: 0 16px; align-items: start; padding: 1rem 0; border-top: 1px solid var(--rule); }
+.post-row:first-child { border-top: 0; padding-top: 0.25rem; }
+.post-row .cover { height: 110px; }
+.post-row .cover-stat { font-size: 12px; }
 .post-main { min-width: 0; }
-.post-main > a { font-family: var(--serif); font-size: 18px; font-weight: 700; line-height: 1.3; text-decoration: none; }
-.post-main > a:hover, .post-main > a:focus-visible { text-decoration: underline; }
-.post-main p { margin: 0.2rem 0 0; color: var(--muted); font-size: 14px; line-height: 1.45; }
-.post-meta { margin: 0 0 1rem; color: var(--muted); font-size: 12.5px; display: flex; flex-wrap: wrap; gap: 0.25rem 0.75rem; align-items: center; }
-.post-main .post-meta { display: block; margin: 0; }
-.date-list .row { gap: 0.25rem 1rem; flex-wrap: wrap; }
-.date-list .row-end { align-items: center; }
-.date-list .more { margin: 0; }
-.legend { max-width: 75ch; margin: 0.5rem 0 0; color: var(--muted); font-size: 13px; line-height: 1.5; }
+.post-main .kicker { margin: 0 0 0.15rem; font-size: 11px; }
+.post-main .story-title { font-size: 20px; }
+.post-main .story-sum { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.post-main .story-meta { display: block; }
+.date-row { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: baseline; gap: 0.25rem 1rem; padding: 0.6rem 0; border-top: 1px solid var(--rule); }
+.date-row:first-child { border-top: 0; padding-top: 0.15rem; }
+.date-end { display: flex; align-items: baseline; gap: 0.75rem; font-size: 14px; }
+.date-end .more { margin: 0; }
+
+/* Calendar: ruled day rows, the date at the left and each report as a bold ticker link with its slot in
+   small caps. The only colour is the tick on a reported entry; an unconfirmed one is muted. */
+.legend { margin: 0.5rem 0 0; color: var(--muted); font-size: 13px; line-height: 1.5; }
 .cal-week { margin-top: 0.5rem; }
-.cal-day { display: grid; grid-template-columns: 9rem minmax(0, 1fr); gap: 0.4rem 1.5rem; padding: 1rem 0; border-bottom: 1px solid var(--rule); }
+.cal-day { display: grid; grid-template-columns: 8rem minmax(0, 1fr); gap: 0.4rem 1.5rem; padding: 1rem 0; border-bottom: 1px solid var(--rule); }
 .cal-date { font-size: 16px; margin: 0; }
 .cal-none { margin: 0; }
-.cal-slots { display: flex; flex-direction: column; gap: 0.75rem; min-width: 0; }
-.cal-slot .lbl { margin: 0 0 0.35rem; }
-.cal-chips { list-style: none; margin: 0; padding: 0; display: flex; flex-wrap: wrap; gap: 0.4rem; }
-.cal-chip { display: inline-flex; align-items: center; gap: 0.45rem; height: 30px; border: 1px solid var(--muted); color: var(--ink); padding: 0.2rem 0.55rem; font-size: 13px; text-decoration: none; white-space: nowrap; }
-.cal-chip:has(.tlogo) { padding-left: 0.25rem; gap: 0.35rem; }
-.cal-chip:hover { border-color: var(--ink); }
-.cal-chip.cal-unconfirmed { border-style: dashed; }
-.cal-chip.cal-reported { border-color: var(--ink); }
-.badge { font-size: 11px; font-weight: 600; color: var(--muted); white-space: nowrap; }
-.badge-confirmed, .badge-reported { color: var(--ink); }
-.notfound { text-align: center; padding: 3rem 0 2rem; }
-.notfound-code { font-family: var(--serif); font-size: 72px; font-weight: 700; line-height: 1; color: var(--muted); margin: 0 auto 0.5rem; }
+.cal-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(10.5rem, 1fr)); gap: 0.4rem 1rem; min-width: 0; }
+.cal-entry { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0 0.5rem; font-size: 14px; }
+.cal-ticker { font-weight: 700; text-decoration: none; }
+.cal-ticker:hover, .cal-ticker:focus-visible { text-decoration: underline; }
+.cal-unconfirmed .cal-ticker { color: var(--muted); font-weight: 400; }
+.cal-slot { color: var(--muted); font-size: 12px; font-variant-caps: all-small-caps; letter-spacing: 0.08em; }
+html:lang(zh-Hans) .cal-slot { font-variant-caps: normal; letter-spacing: 0.02em; }
+.cal-read { flex-basis: 100%; font-size: 12px; font-weight: 600; }
+
+/* Not found: a kicker, the serif title and the way back, centred under the masthead. */
+.notfound { max-width: 680px; margin: 0 auto; padding: 3rem 0 2rem; text-align: center; }
+.notfound .kicker { margin: 0; }
+.notfound h1 { margin: 0.25rem 0 1rem; font-size: 36px; }
 .notfound p { margin-left: auto; margin-right: auto; }
-.notfound [lang="zh-Hans"] { margin-top: 1.5rem; }
+.notfound [lang="zh-Hans"] { margin-top: 1.5rem; padding-top: 1.5rem; border-top: 1px solid var(--rule); }
+.notfound [lang="zh-Hans"] h1 { margin-top: 0; }
 
 /* Phones: the one breakpoint. Smaller type, stacked rows, and the index line scrolls in place. */
 @media (max-width: 720px) {
-  h1, .page-main h1, .story .story-title { font-size: 26px; }
+  h1, .list-page h1, .story .story-title { font-size: 26px; }
   .masthead-name { font-size: 28px; }
   .story-lead .story-title { font-size: 28px; }
-  .story-row { grid-template-columns: 120px minmax(0, 1fr); gap: 0 12px; }
-  .story-row .cover { height: 90px; }
-  .story-row .story-title { font-size: 18px; }
   .cover { height: 200px; }
   .cover-lead { height: 220px; }
   /* Front page: one column; the side column's sections join the grid so movers follow the lead. */
@@ -327,6 +335,9 @@ html:lang(zh-Hans) .partners-strip .partners-label { font-variant-caps: normal; 
   .signup-form { max-width: none; }
   .partners-strip .partners-note { margin-left: 0; flex-basis: 100%; }
   .cal-day { grid-template-columns: minmax(0, 1fr); }
-  .post-row { flex-direction: column; align-items: stretch; gap: 0.3rem; }
-  .post-row .tag { order: -1; }
+  .post-row { grid-template-columns: minmax(0, 1fr); gap: 0.6rem 0; }
+  .post-row .cover { height: 130px; }
+  .post-row .cover-stat { font-size: 13px; }
+  .post-main .story-sum { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; white-space: normal; }
+  .notfound h1 { font-size: 28px; }
 }

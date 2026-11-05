@@ -42,23 +42,41 @@ const pages: [string, () => Promise<React.ReactElement>][] = [
   ["ticker", () => TickerArchive(props({ locale: "en", ticker: "INTC" }))],
 ];
 
-describe("list pages share the article shell", () => {
+describe("list pages are one paper column", () => {
   beforeEach(() => {
     env.db = memoryD1(seed);
   });
 
   for (const [name, page] of pages) {
-    it(`${name}: content then the sidebar, and no in-page language pill`, async () => {
+    it(`${name}: one column with no sidebar and no in-page language pill`, async () => {
       const out = renderToStaticMarkup(await page());
-      expect(out.startsWith('<div class="grid-article"><div class="page-main">')).toBe(true);
-      expect(out).toContain('<aside class="sidebar">');
-      expect(out.indexOf("page-main")).toBeLessThan(out.indexOf("sidebar"));
+      expect(out.startsWith('<div class="list-page">')).toBe(true);
+      expect(out).not.toContain("sidebar");
+      expect(out).not.toContain("grid-article");
       expect(out).not.toContain("lang-pill");
+      expect(out).not.toMatch(/badge|class="tag"/);
     });
   }
 
+  it("the archive shows its rows with a cover, filters and pager as plain links", async () => {
+    const out = renderToStaticMarkup(await pages[0][1]());
+    expect(out).toContain('class="post-row"');
+    expect(out).toContain('class="cover cover-small"');
+    expect(out).toContain('<nav class="filters"');
+  });
+
   it("the calendar page renders the week from D1", async () => {
     const out = renderToStaticMarkup(await pages[1][1]());
-    expect(out).toContain('class="cal-chip cal-reported" href="/en/t/INTC"');
+    expect(out).toContain('<a class="cal-ticker" href="/en/t/INTC">INTC</a>');
+    expect(out).toContain('<span class="num up" aria-hidden="true">✓</span>');
+    expect(out).toContain("Confirmed: the company announced the date.");
+    expect(out).toContain('<nav class="pager">');
+  });
+
+  it("the ticker page lists its checks and its report dates without badges", async () => {
+    const out = renderToStaticMarkup(await pages[2][1]());
+    expect(out).toContain('<li class="date-row">');
+    expect(out).toContain('<span class="num up" aria-hidden="true">✓</span>');
+    expect(out).toContain("Reported");
   });
 });
