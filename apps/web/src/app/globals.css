@@ -182,8 +182,8 @@ html:lang(zh-Hans) .front-slots dt { letter-spacing: 0.02em; }
 .movers-table td.r { white-space: nowrap; }
 
 /* Article: the post page's one 680px reading column. Kicker, serif headline, the meta line with the
-   verified-numbers tag, cover, then the body (a 17px lede, 16px after), the sources, the post's own
-   disclaimer in italics and the previous/next briefs as plain ruled links. */
+   verified-numbers tag, cover, then the body (a 17px lede, 16px after), the sources and the
+   previous/next briefs as plain ruled links. */
 .story { max-width: 680px; margin: 0 auto; }
 .story .story-kicker { margin-bottom: 0.5rem; }
 .story .story-title { margin: 0 0 0.75rem; font-size: 32px; line-height: 1.12; letter-spacing: -0.01em; }
@@ -208,8 +208,6 @@ html:lang(zh-Hans) .sources h2 { letter-spacing: 0.04em; }
 .sources .post-body { color: var(--muted); font-size: 13px; line-height: 1.8; }
 .sources ul { margin: 0; padding-left: 1.1rem; }
 .sources a { color: var(--muted); }
-.story-disclaimer { margin: 1rem 0 0; color: var(--muted); font-size: 13px; font-style: italic; }
-.disclaimer { color: var(--muted); font-size: 13px; font-style: italic; }
 .adjacent { display: flex; justify-content: space-between; gap: 1rem; margin-top: 2rem; padding-top: 1rem; border-top: 1px solid var(--rule); }
 .adjacent a { font-family: var(--serif); font-size: 16px; font-weight: 700; text-decoration: none; }
 .adjacent a:hover, .adjacent a:focus-visible { text-decoration: underline; }
@@ -248,7 +246,7 @@ html:lang(zh-Hans) .partners-strip .partners-label { font-variant-caps: normal; 
 .partners-strip a:hover, .partners-strip a:focus-visible { text-decoration: underline; }
 .partners-strip .partners-note { margin: 0 0 0 auto; color: var(--muted); font-size: 12px; }
 
-/* Footer: the disclaimer, About and the language link. */
+/* Footer: About, Privacy & Terms and the language link. */
 .site-footer { border-top: 3px double var(--rule-strong); margin-top: 2rem; padding: 1rem 0 2rem; }
 .site-footer .wrap > * { margin: 0.25rem 0; }
 .footer-links { display: flex; gap: 1rem; font-size: 13px; }
@@ -264,7 +262,6 @@ html:lang(zh-Hans) .partners-strip .partners-label { font-variant-caps: normal; 
 .prose > ul { margin: 0.25rem 0 1rem; padding-left: 1.25rem; font-size: 16.5px; line-height: 1.7; max-width: 75ch; }
 .prose > ul li + li { margin-top: 0.4rem; }
 .prose-legal > h2 { margin-top: 1.75rem; }
-.prose .disclaimer { margin-top: 1.5rem; font-size: 13px; }
 .prose > h2 + .author { margin-top: 0.5rem; border-top: 0; padding-top: 0.5rem; }
 .prose > .about-tp { margin: 0.5rem 0 1.5rem; color: var(--muted); font-size: 15px; }
 .prose .signup { margin-top: 1.5rem; }

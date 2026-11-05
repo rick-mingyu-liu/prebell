@@ -211,6 +211,15 @@ describe("HomeView front page", () => {
     });
   });
 
+  it("does not carry a not-advice line; that statement lives on the legal page", () => {
+    for (const locale of ["en", "zh"] as const) {
+      const out = render({}, locale);
+      expect(out).not.toMatch(/investment advice/i);
+      expect(out).not.toContain("投资建议");
+      expect(out).not.toContain("disclaimer");
+    }
+  });
+
   it("leaves the signup out until the Buttondown key is set, keeping the partner strip", () => {
     const out = render({}, "en", false);
     expect(out).not.toContain('class="signup"');

@@ -24,7 +24,7 @@ vi.mock("@opennextjs/cloudflare", () => ({ getCloudflareContext: () => ({ env: c
 
 const { default: About } = await import("../src/app/[locale]/about/page");
 
-// The page ends with the async Disclaimer server component, which only a streaming renderer can resolve.
+// A streaming renderer, so any async server component on the page resolves.
 const render = async (locale: Locale) => {
   const { prelude } = await prerender(await About({ params: Promise.resolve({ locale }) } as never));
   return new Response(prelude).text();
@@ -52,7 +52,6 @@ describe("About page", () => {
       at(out, "Rick Liu"),
       at(out, "From the PreBell team."),
       at(out, 'class="signup"'),
-      at(out, 'class="disclaimer"'),
     ];
     expect(order).toEqual([...order].sort((a, b) => a - b));
     // One TermPocket line with the link.
@@ -60,7 +59,8 @@ describe("About page", () => {
     expect(out).toContain("Try TermPocket →");
     // The signup is the About one.
     expect(out).toContain("Get the weekly digest");
-    expect(out).toContain("Content on this site is generated automatically");
+    expect(out).not.toContain('class="disclaimer"');
+    expect(out).not.toContain("investment advice");
   });
 
   it("leaves the signup out without the Buttondown key", async () => {
@@ -69,7 +69,7 @@ describe("About page", () => {
     expect(out).not.toContain('class="signup"');
     expect(out).not.toContain("Get the weekly digest");
     expect(out).toContain('class="author"');
-    expect(out).toContain('class="disclaimer"');
+    expect(out).not.toContain('class="disclaimer"');
   });
 
   it("renders in Chinese", async () => {
@@ -78,7 +78,7 @@ describe("About page", () => {
     expect(out).toContain("来自 PreBell 团队。");
     expect(out).toContain("试用 TermPocket →");
     expect(out).toContain('href="/zh/archive"');
-    expect(out).toContain("本站内容根据公开数据自动生成");
+    expect(out).not.toContain("投资建议");
   });
 });
 

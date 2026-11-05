@@ -2,7 +2,6 @@ import type { Metadata } from "next";
 import { notFound } from "next/navigation";
 import { hasLocale } from "next-intl";
 import { getTranslations, setRequestLocale } from "next-intl/server";
-import Disclaimer from "@/components/Disclaimer";
 import FooterLinks from "@/components/FooterLinks";
 import IndexLine from "@/components/IndexLine";
 import Masthead from "@/components/Masthead";
@@ -64,7 +63,6 @@ export default async function LocaleLayout({ children, params }: LayoutProps<"/[
         <main className="wrap">{children}</main>
         <footer className="site-footer">
           <div className="wrap">
-            <Disclaimer />
             <FooterLinks locale={locale} />
           </div>
         </footer>
