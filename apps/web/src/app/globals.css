@@ -216,7 +216,7 @@ html:lang(zh-Hans) .sources h2 { letter-spacing: 0.04em; }
 
 /* Author block: greyscale round photo, serif name, one line of bio, links. */
 .author { display: flex; align-items: flex-start; gap: 16px; margin: 2rem 0 0; padding: 1.25rem 0; border-top: 1px solid var(--rule); }
-.author-photo { width: 72px; height: 72px; flex: none; border-radius: 50%; object-fit: cover; filter: grayscale(1); }
+.author-photo { width: 72px; height: 72px; flex: none; border-radius: 50%; object-fit: cover; }
 .author-body { min-width: 0; flex: 1; }
 .author-name { margin: 0; font-family: var(--serif); font-size: 20px; font-weight: 700; line-height: 1.2; }
 .author-bio { margin: 0.25rem 0 0.4rem; color: var(--muted); font-size: 15px; line-height: 1.5; }

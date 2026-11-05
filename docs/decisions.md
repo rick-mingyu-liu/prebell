@@ -46,3 +46,4 @@ they are never asked twice. Things decided *not* to do go in `declined.md`.
   mockups: "A · Data graphic"; and, of the AI covers: "they should be more
   about the market instead of just the dark gray shadows". Design:
   `docs/superpowers/specs/2026-11-05-data-covers-design.md`.
+- **Author photo in colour, not greyscale.** Rick, 2026-11-05: "do not make my photo black and white, original colorful". The `.author-photo` grayscale filter is gone; the file itself was always colour.
