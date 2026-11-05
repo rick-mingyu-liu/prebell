@@ -97,6 +97,65 @@ describe("parseFacts premarket", () => {
   });
 });
 
+const theme = (over: Record<string, unknown> = {}) => ({
+  group: "Memory & storage",
+  group_zh: "存储芯片",
+  direction: "Down",
+  members: [
+    { ticker: "MU", name: "Micron Technology", change_pct: -4.12 },
+    { ticker: "SNDK", name: "SanDisk", change_pct: -6.01 },
+  ],
+  more: 2,
+  median_pct: -4.1,
+  reasons: [],
+  ...over,
+});
+
+describe("parseFacts themes", () => {
+  it("is empty when the facts predate themes", () => {
+    expect(parseFacts("premarket", premarket())!.themes).toEqual([]);
+    expect(parseFacts("recap", recap())!.themes).toEqual([]);
+  });
+
+  it("reads themes in both kinds", () => {
+    const up = theme({ group: "Chips", group_zh: "", direction: "Up", median_pct: 2.5, more: 0 });
+    for (const [kind, j] of [["premarket", premarket()], ["recap", recap()]] as const) {
+      const v = parseFacts(kind, { ...j, themes: [theme(), up], theme_candidates: [{ x: 1 }] })!;
+      expect(v.themes).toHaveLength(2);
+      expect(v.themes[0]).toEqual({
+        group: "Memory & storage",
+        groupZh: "存储芯片",
+        direction: "down",
+        medianPct: -4.1,
+        members: [
+          { symbol: "MU", changePct: -4.12 },
+          { symbol: "SNDK", changePct: -6.01 },
+        ],
+        more: 2,
+      });
+      expect(v.themes[1]).toMatchObject({ direction: "up", groupZh: "Chips", more: 0 });
+    }
+  });
+
+  it("skips a malformed entry and keeps the rest", () => {
+    const bad = [
+      theme({ direction: "Sideways" }),
+      theme({ median_pct: null }),
+      theme({ members: "MU" }),
+      theme({ members: [{ ticker: "MU" }] }),
+      null,
+    ];
+    const v = parseFacts("premarket", { ...premarket(), themes: [bad[0], theme(), ...bad.slice(1)] })!;
+    expect(v.themes.map((t) => t.group)).toEqual(["Memory & storage"]);
+  });
+
+  it("treats a non-array themes field as none, without failing the facts", () => {
+    const v = parseFacts("premarket", { ...premarket(), themes: { group: "x" } });
+    expect(v).not.toBeNull();
+    expect(v!.themes).toEqual([]);
+  });
+});
+
 describe("parseFacts recap", () => {
   const v = parseFacts("recap", recap())!;
 

@@ -26,6 +26,22 @@ export interface MoverView {
   reasonUrl: string | null;
 }
 
+export interface ThemeMemberView {
+  symbol: string;
+  changePct: number;
+}
+
+/** A static industry group that moved together; `more` counts members beyond the ones listed. */
+export interface ThemeView {
+  group: string;
+  /** Chinese label; falls back to `group` when the generator wrote none. */
+  groupZh: string;
+  direction: "up" | "down";
+  medianPct: number;
+  members: ThemeMemberView[];
+  more: number;
+}
+
 export interface FactsView {
   kind: "premarket" | "recap";
   tradingDate: string;
@@ -34,6 +50,8 @@ export interface FactsView {
   others: IndexView[];
   gainers: MoverView[];
   losers: MoverView[];
+  /** Empty on posts written before themes existed, or when `themes` is malformed. */
+  themes: ThemeView[];
 }
 
 /** The slice of the R2 binding `loadFacts` uses. */
@@ -118,6 +136,34 @@ function moverView(v: unknown): MoverView {
   };
 }
 
+function themeView(v: unknown): ThemeView {
+  const t = obj(v, "theme");
+  const group = str(t.group, "group").trim();
+  if (!group) fail("group");
+  const direction = t.direction === "Up" ? "up" : t.direction === "Down" ? "down" : fail("direction");
+  const members = arr(t.members, "members").map((m) => {
+    const o = obj(m, "member");
+    return { symbol: str(o.symbol ?? o.ticker, "ticker"), changePct: finite(o.change_pct, "change_pct") };
+  });
+  const more = typeof t.more === "number" && Number.isInteger(t.more) && t.more > 0 ? t.more : 0;
+  const zh = typeof t.group_zh === "string" ? t.group_zh.trim() : "";
+  return { group, groupZh: zh || group, direction, medianPct: finite(t.median_pct, "median_pct"), members, more };
+}
+
+/** Optional and defensive: a missing or non-array `themes` is empty, and a malformed entry is skipped. */
+function themeViews(v: unknown): ThemeView[] {
+  if (!Array.isArray(v)) return [];
+  const out: ThemeView[] = [];
+  for (const e of v) {
+    try {
+      out.push(themeView(e));
+    } catch (err) {
+      if (!(err instanceof ShapeError)) throw err;
+    }
+  }
+  return out;
+}
+
 /** Facts JSON (generator output) to what the pages render; null on any shape error. */
 export function parseFacts(kind: Kind, json: unknown): FactsView | null {
   try {
@@ -131,6 +177,7 @@ export function parseFacts(kind: Kind, json: unknown): FactsView | null {
       others,
       gainers: arr(f.gainers, "gainers").map(moverView),
       losers: arr(f.losers, "losers").map(moverView),
+      themes: themeViews(f.themes),
     };
   } catch (e) {
     if (e instanceof ShapeError) return null;

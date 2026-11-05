@@ -137,6 +137,80 @@ describe("HomeView front page", () => {
     expect(out.indexOf('class="partners-strip"')).toBeGreaterThan(out.indexOf('class="signup"'));
   });
 
+  describe("themes block", () => {
+    const themed = () => {
+      const facts = parseFacts("premarket", {
+        ...(fixture("premarket-2026-10-30.json") as Record<string, unknown>),
+        themes: [
+          {
+            group: "Memory & storage",
+            group_zh: "存储芯片",
+            direction: "Down",
+            members: [
+              { ticker: "MU", name: "Micron", change_pct: -4.12 },
+              { ticker: "SNDK", name: "SanDisk", change_pct: -6.01 },
+              { ticker: "WDC", name: "Western Digital", change_pct: -3.5 },
+              { ticker: "STX", name: "Seagate", change_pct: -3.2 },
+            ],
+            more: 2,
+            median_pct: -4.1,
+            reasons: [],
+          },
+          {
+            group: "Banks",
+            group_zh: "银行",
+            direction: "Up",
+            members: [{ ticker: "JPM", name: "JPMorgan", change_pct: 1.5 }],
+            more: 0,
+            median_pct: 1.5,
+            reasons: [],
+          },
+        ],
+      })!;
+      return { leadFacts: facts };
+    };
+
+    it("renders under the movers and before reporting, with the English labels", () => {
+      const out = render(themed());
+      expect(out).toContain('<h2 class="section-title">Themes</h2>');
+      expect(out).toContain("Memory &amp; storage");
+      expect(out).toContain("Banks");
+      expect(out.match(/class="theme-row"/g)).toHaveLength(2);
+      expect(at(out, "front-movers")).toBeLessThan(at(out, "front-themes"));
+      expect(at(out, "front-themes")).toBeLessThan(at(out, "front-reporting"));
+      expect(out).toContain('class="num down"><span aria-hidden="true">▼</span><span class="sr-only">down </span>−4.10%');
+      expect(out).toContain('class="num up"><span aria-hidden="true">▲</span><span class="sr-only">up </span>+1.50%');
+      // First three tickers with their moves, the rest counted.
+      for (const s of ["MU", "SNDK", "WDC"]) expect(out).toContain(`${s} <span class="num">`);
+      expect(out).not.toContain("STX");
+      expect(out).toContain('class="theme-more">+2<');
+      expect(out).toContain("−6.01%");
+      // The whole row links to the lead post.
+      expect(out).toContain('<a class="theme-link" href="/en/p/premarket-2026-10-30">');
+    });
+
+    it("shows the Chinese labels on the ZH page", () => {
+      const out = render(themed(), "zh");
+      expect(out).toContain('<h2 class="section-title">板块动向</h2>');
+      expect(out).toContain("存储芯片");
+      expect(out).toContain("银行");
+      expect(out).not.toContain("Memory &amp; storage");
+      expect(out).toContain('href="/zh/p/premarket-2026-10-30"');
+    });
+
+    it("shows at most three themes", () => {
+      const facts = themed().leadFacts;
+      const four = { ...facts, themes: [...facts.themes, ...facts.themes.map((t) => ({ ...t, group: t.group + "2" }))] };
+      expect(render({ leadFacts: four }).match(/class="theme-row"/g)).toHaveLength(3);
+    });
+
+    it("is absent when there are no themes", () => {
+      const out = render();
+      expect(out).not.toContain("front-themes");
+      expect(out).not.toContain("Themes");
+    });
+  });
+
   it("leaves the signup out until the Buttondown key is set, keeping the partner strip", () => {
     const out = render({}, "en", false);
     expect(out).not.toContain('class="signup"');

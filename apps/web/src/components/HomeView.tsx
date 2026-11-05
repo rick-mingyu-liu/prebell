@@ -6,14 +6,20 @@ import PendingNotice from "./PendingNotice";
 import SignupForm from "./SignupForm";
 import type { Locale } from "../i18n/routing";
 import type { CalendarEntry } from "../lib/earnings";
+import { fmtPct } from "../lib/format";
 import type { HomeData } from "../lib/home";
 import { pendingTitle, typeLabel } from "../lib/labels";
+import type { ThemeView } from "../lib/facts";
 import type { PostListItem } from "../lib/posts";
 import { formatDate, formatMonthDay } from "../lib/time";
 import { translator } from "../lib/translator";
 
 /** Movers shown per side in the column (the brief shows them all). */
 const MOVERS_PER_SIDE = 3;
+/** Themes shown in the column, and tickers named per theme (the rest are counted). */
+const THEMES_SHOWN = 3;
+const THEME_TICKERS = 3;
+const ARROW = { up: "▲", down: "▼" } as const;
 /** Tickers listed per reporting slot; the rest are counted and left to the calendar. */
 const TICKERS_PER_SLOT = 12;
 
@@ -102,6 +108,33 @@ function Slot({ label, entries, locale, t }: { label: string; entries: CalendarE
   );
 }
 
+/** One theme: the group, its median move, and the first few tickers; the whole row links to the lead post. */
+function Theme({ theme, href, locale, t }: { theme: ThemeView; href: string; locale: Locale; t: T }) {
+  const shown = theme.members.slice(0, THEME_TICKERS);
+  return (
+    <div className="theme-row">
+      <Link className="theme-link" href={href}>
+        <span className="theme-head">
+          <b className="theme-name">{locale === "zh" ? theme.groupZh : theme.group}</b>
+          <span className={`num ${theme.direction}`}>
+            <span aria-hidden="true">{ARROW[theme.direction]}</span>
+            <span className="sr-only">{t(`paper.index.${theme.direction}`)} </span>
+            {fmtPct(theme.medianPct)}
+          </span>
+        </span>
+        <span className="theme-members muted">
+          {shown.map((m) => (
+            <span key={m.symbol} className="theme-member">
+              {m.symbol} <span className="num">{fmtPct(m.changePct)}</span>
+            </span>
+          ))}
+          {theme.more > 0 && <span className="theme-more">{t("home.themesMore", { n: theme.more })}</span>}
+        </span>
+      </Link>
+    </div>
+  );
+}
+
 /**
  * The front page: on the left the lead story, the earnings-check covers and the recent list; on the right
  * a ruled column of top movers and who reports next. Below 721px it stacks lead, movers, earnings, recent,
@@ -114,6 +147,8 @@ export default function HomeView({ data, locale, signup }: { data: HomeData; loc
   const movers = leadFacts
     ? [...leadFacts.gainers.slice(0, MOVERS_PER_SIDE), ...leadFacts.losers.slice(0, MOVERS_PER_SIDE)]
     : [];
+
+  const themes = leadFacts?.themes.slice(0, THEMES_SHOWN) ?? [];
 
   return (
     <>
@@ -179,6 +214,14 @@ export default function HomeView({ data, locale, signup }: { data: HomeData; loc
                   {t("home.moversInBrief")}
                 </Link>
               )}
+            </section>
+          )}
+          {lead && themes.length > 0 && (
+            <section className="front-themes">
+              <h2 className="section-title">{t("home.themes")}</h2>
+              {themes.map((th) => (
+                <Theme key={th.group} theme={th} href={`/${locale}/p/${lead.slug}`} locale={locale} t={t} />
+              ))}
             </section>
           )}
           {reporting && (
