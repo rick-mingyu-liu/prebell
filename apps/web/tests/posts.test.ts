@@ -27,12 +27,12 @@ function post(
   let sql = `INSERT INTO runs VALUES ('${key}','${type}','${date}','published',1,NULL,'${ts}','${ts}');
 INSERT INTO posts (id, run_key, content_type, template_id, trading_date, slug, facts_r2_key, published_at)
 VALUES (${id},'${key}','${type}','${type}:v1','${date}','${slug}',NULL,'${ts}');\n`;
-  if (en) sql += `INSERT INTO post_translations VALUES (${id},'en','${en}','EN ${date}','EN summary ${date}','# EN ${date}','${ts}');\n`;
+  if (en) sql += `INSERT INTO post_translations (post_id, lang, status, title, summary, body_md, updated_at) VALUES (${id},'en','${en}','EN ${date}','EN summary ${date}','# EN ${date}','${ts}');\n`;
   if (zh)
     sql +=
       zh === "published"
-        ? `INSERT INTO post_translations VALUES (${id},'zh','published','中文 ${date}','摘要 ${date}','# 中文 ${date}','${ts}');\n`
-        : `INSERT INTO post_translations VALUES (${id},'zh','${zh}',NULL,NULL,NULL,'${ts}');\n`;
+        ? `INSERT INTO post_translations (post_id, lang, status, title, summary, body_md, updated_at) VALUES (${id},'zh','published','中文 ${date}','摘要 ${date}','# 中文 ${date}','${ts}');\n`
+        : `INSERT INTO post_translations (post_id, lang, status, title, summary, body_md, updated_at) VALUES (${id},'zh','${zh}',NULL,NULL,NULL,'${ts}');\n`;
   return sql;
 }
 

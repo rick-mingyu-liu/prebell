@@ -27,8 +27,8 @@ const seed = `
 INSERT INTO runs VALUES ('earnings:intc','earnings','2026-10-29','published',1,NULL,'2026-10-29T21:00:00Z','2026-10-29T21:00:00Z');
 INSERT INTO posts (id, run_key, content_type, template_id, trading_date, slug, facts_r2_key, published_at)
   VALUES (1,'earnings:intc','earnings','earnings:v1','2026-10-29','earnings-intc-2026-10-29',NULL,'2026-10-29T21:10:00Z');
-INSERT INTO post_translations VALUES (1,'en','published','Intel Q3','Sum','# Intel Q3','2026-10-29T21:10:00Z');
-INSERT INTO post_translations VALUES (1,'zh','published','英特尔 Q3','摘要','# 英特尔 Q3','2026-10-29T21:10:00Z');
+INSERT INTO post_translations (post_id, lang, status, title, summary, body_md, updated_at) VALUES (1,'en','published','Intel Q3','Sum','# Intel Q3','2026-10-29T21:10:00Z');
+INSERT INTO post_translations (post_id, lang, status, title, summary, body_md, updated_at) VALUES (1,'zh','published','英特尔 Q3','摘要','# 英特尔 Q3','2026-10-29T21:10:00Z');
 INSERT INTO earnings_calendar (ticker, report_date, time_slot, status, source, first_seen_at, checked_at, updated_at)
   VALUES ('INTC','2026-10-29','amc','reported','edgar','2026-10-01','2026-10-29','2026-10-29');
 `;

@@ -383,6 +383,7 @@ async fn build<C: Content>(
             slug: c.slug(date),
             facts_r2_key: facts_key,
             published_at: Some(ts.clone()),
+            cover_key: None,
         })
         .await?;
     store
@@ -394,6 +395,8 @@ async fn build<C: Content>(
             summary: en.summary,
             body_md: en_md,
             updated_at: ts.clone(),
+            cover_line1: None,
+            cover_line2: None,
         })
         .await?;
     let (zh_row, zh_err) = match zh {
@@ -466,6 +469,8 @@ fn translation_zh(
         summary,
         body_md,
         updated_at: ts.into(),
+        cover_line1: None,
+        cover_line2: None,
     }
 }
 
@@ -762,6 +767,7 @@ mod tests {
             slug: "premarket-2026-10-29".into(),
             facts_r2_key: "premarket/2026-10-29.json".into(),
             published_at: None,
+            cover_key: None,
         });
         s.runs
             .borrow_mut()
@@ -1139,6 +1145,17 @@ mod tests {
         }
         async fn get_facts(&self, key: &str) -> Result<Option<String>, String> {
             self.inner.get_facts(key).await
+        }
+        async fn put_bytes(
+            &self,
+            key: &str,
+            bytes: &[u8],
+            content_type: &str,
+        ) -> Result<(), String> {
+            self.inner.put_bytes(key, bytes, content_type).await
+        }
+        async fn kv_set(&self, key: &str, value: &str, now: &str) -> Result<(), String> {
+            self.inner.kv_set(key, value, now).await
         }
     }
 

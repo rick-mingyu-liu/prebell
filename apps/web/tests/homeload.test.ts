@@ -12,8 +12,8 @@ function post(id: number, type: string, date: string, publishedAt: string, facts
   return `INSERT INTO runs VALUES ('${key}','${type}','${date}','published',1,NULL,'${publishedAt}','${publishedAt}');
 INSERT INTO posts (id, run_key, content_type, template_id, trading_date, slug, facts_r2_key, published_at)
 VALUES (${id},'${key}','${type}','${type}:v1','${date}','${type}-${date}',${factsKey ? `'${factsKey}'` : "NULL"},'${publishedAt}');
-INSERT INTO post_translations VALUES (${id},'en','published','EN ${type} ${date}','Summary','# Body','${publishedAt}');
-INSERT INTO post_translations VALUES (${id},'zh','published','中文 ${type} ${date}','摘要','# 正文','${publishedAt}');\n`;
+INSERT INTO post_translations (post_id, lang, status, title, summary, body_md, updated_at) VALUES (${id},'en','published','EN ${type} ${date}','Summary','# Body','${publishedAt}');
+INSERT INTO post_translations (post_id, lang, status, title, summary, body_md, updated_at) VALUES (${id},'zh','published','中文 ${type} ${date}','摘要','# 正文','${publishedAt}');\n`;
 }
 
 const seed =

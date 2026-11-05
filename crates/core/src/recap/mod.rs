@@ -968,6 +968,7 @@ mod tests {
             slug: slug.into(),
             facts_r2_key: key,
             published_at: Some(accepted.into()),
+            cover_key: None,
         });
     }
 
@@ -1483,6 +1484,7 @@ mod run_tests {
             slug: "aapl-q4-fy2026-earnings".into(),
             facts_r2_key: "earnings/aapl.json".into(),
             published_at: Some("2026-10-29T20:40:00Z".into()),
+            cover_key: None,
         });
         let (m, l) = (md(true), llm(true, true));
         assert_eq!(
@@ -1764,6 +1766,7 @@ mod run_tests {
             slug: "premarket-2026-10-29".into(),
             facts_r2_key: "premarket/2026-10-29.json".into(),
             published_at: Some("2026-10-29T12:30:00Z".into()),
+            cover_key: None,
         };
         s.runs.borrow_mut().insert(pre.run_key.clone(), pre.clone());
         crate::store::Store::upsert_post(&s, &pre_post)

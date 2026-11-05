@@ -179,8 +179,8 @@ function seed(zh = "published"): string {
     `INSERT INTO runs VALUES ('${type}:${date}','${type}','${date}','published',1,NULL,'${ts}','${ts}');
 INSERT INTO posts (id, run_key, content_type, template_id, trading_date, slug, facts_r2_key, published_at)
 VALUES (${id},'${type}:${date}','${type}','${type}:v1','${date}','${type}-${date}',${key ? `'${key}'` : "NULL"},'${ts}');
-INSERT INTO post_translations VALUES (${id},'en','published','EN ${id}','Sum','# EN ${id}','${ts}');
-INSERT INTO post_translations VALUES (${id},'zh','${zhStatus}',${zhStatus === "published" ? `'ZH ${id}','摘要','# ZH ${id}'` : "NULL,NULL,NULL"},'${ts}');\n`;
+INSERT INTO post_translations (post_id, lang, status, title, summary, body_md, updated_at) VALUES (${id},'en','published','EN ${id}','Sum','# EN ${id}','${ts}');
+INSERT INTO post_translations (post_id, lang, status, title, summary, body_md, updated_at) VALUES (${id},'zh','${zhStatus}',${zhStatus === "published" ? `'ZH ${id}','摘要','# ZH ${id}'` : "NULL,NULL,NULL"},'${ts}');\n`;
   return (
     row(1, "recap", "2026-10-29", "2026-10-29T20:45:00Z", "recap/2026-10-29.json") +
     row(2, "premarket", "2026-10-30", "2026-10-30T13:20:43Z", "premarket/2026-10-30.json", zh) +

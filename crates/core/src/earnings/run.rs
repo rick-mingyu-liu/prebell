@@ -374,6 +374,8 @@ fn empty_translation(post_id: i64, lang: &str, status: &str, ts: &str) -> Transl
         summary: String::new(),
         body_md: String::new(),
         updated_at: ts.into(),
+        cover_line1: None,
+        cover_line2: None,
     }
 }
 
@@ -620,6 +622,7 @@ async fn build(
             slug: post_slug,
             facts_r2_key: facts_key,
             published_at: Some(ts.clone()),
+            cover_key: None,
         })
         .await?;
     for c in &mut chart_rows {
@@ -634,6 +637,8 @@ async fn build(
             summary: en.summary,
             body_md: en_md,
             updated_at: ts.clone(),
+            cover_line1: None,
+            cover_line2: None,
         })
         .await?;
     let zh_err = match zh {
@@ -647,6 +652,8 @@ async fn build(
                     summary: d.summary,
                     body_md: body,
                     updated_at: ts.clone(),
+                    cover_line1: None,
+                    cover_line2: None,
                 })
                 .await?;
             None
@@ -738,6 +745,8 @@ async fn retry_zh(
                     summary: d.summary,
                     body_md: body,
                     updated_at: ts,
+                    cover_line1: None,
+                    cover_line2: None,
                 })
                 .await?;
             es.set_filing_state(&f.accession, "done").await?;
@@ -1455,6 +1464,7 @@ mod tests {
             slug: "aapl-q4-fy2026-earnings".into(),
             facts_r2_key: "x".into(),
             published_at: None,
+            cover_key: None,
         });
         build_tick(poll_time(), &es, base.as_ref(), &fl, &llm(true, true))
             .await

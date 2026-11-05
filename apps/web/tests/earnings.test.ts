@@ -28,8 +28,8 @@ function earnings(id: number, ticker: string, acc: string, date: string, zh: str
 INSERT INTO posts (id, run_key, content_type, template_id, trading_date, slug, facts_r2_key, published_at)
 VALUES (${id},'${key}','earnings','earnings:v1','${date}','${slug}','x','${ts}');
 INSERT INTO earnings_filings VALUES ('${acc}',1,'${ticker}','8-K','2.02','${date}','${date}','${ts}','x.htm','${key}','done','${ts}');
-INSERT INTO post_translations VALUES (${id},'en','published','EN ${ticker}','sum','# EN','${ts}');\n`;
-  if (zh) sql += `INSERT INTO post_translations VALUES (${id},'zh','${zh}','中文 ${ticker}','摘要','# 中文','${ts}');\n`;
+INSERT INTO post_translations (post_id, lang, status, title, summary, body_md, updated_at) VALUES (${id},'en','published','EN ${ticker}','sum','# EN','${ts}');\n`;
+  if (zh) sql += `INSERT INTO post_translations (post_id, lang, status, title, summary, body_md, updated_at) VALUES (${id},'zh','${zh}','中文 ${ticker}','摘要','# 中文','${ts}');\n`;
   return sql;
 }
 
@@ -118,7 +118,7 @@ describe("ticker archive", () => {
     many += `INSERT INTO runs VALUES ('premarket:2026-10-27','premarket','2026-10-27','published',1,NULL,'t','t');
 INSERT INTO posts (id, run_key, content_type, template_id, trading_date, slug, facts_r2_key, published_at)
 VALUES (500,'premarket:2026-10-27','premarket','premarket:v1','2026-10-27','premarket-2026-10-27',NULL,'2026-10-27T12:34:00Z');
-INSERT INTO post_translations VALUES (500,'en','published','Brief','s','# b','t');`;
+INSERT INTO post_translations (post_id, lang, status, title, summary, body_md, updated_at) VALUES (500,'en','published','Brief','s','# b','t');`;
     expect((await listRecentBriefs(memoryD1(many), "en", 10)).map((p) => p.slug)).toEqual(["premarket-2026-10-27"]);
   });
 
