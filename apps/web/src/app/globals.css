@@ -51,6 +51,7 @@ main.wrap { padding-top: 1.5rem; padding-bottom: 3rem; }
 /* Masthead: serif nameplate with its twin name in small grey, dateline and nav in small caps, double rule under. */
 .masthead { text-align: center; padding: 1.25rem 0 0.75rem; border-bottom: 3px double var(--rule-strong); }
 .masthead-name { font-family: var(--serif); font-size: 40px; font-weight: 700; letter-spacing: -0.02em; line-height: 1.1; text-decoration: none; }
+.masthead-mark { vertical-align: -0.14em; margin-right: 0.18em; color: var(--ink); }
 .masthead-name small { font-family: var(--sans); font-size: 12.5px; font-weight: 500; letter-spacing: 0.08em; color: var(--muted); margin-left: 0.4em; }
 .dateline { margin: 0.4rem 0 0; max-width: none; font-size: 12.5px; font-variant-caps: all-small-caps; letter-spacing: 0.1em; color: var(--muted); }
 html:lang(zh-Hans) .dateline { font-variant-caps: normal; }
@@ -170,6 +171,14 @@ html:lang(zh-Hans) .front-slots dt { letter-spacing: 0.02em; }
 .mover-why { margin: 0.15rem 0 0; max-width: none; font-size: 13px; line-height: 1.4; }
 .mover-why a { color: inherit; text-decoration: none; }
 .mover-why a:hover, .mover-why a:focus-visible { text-decoration: underline; }
+.theme-row { border-top: 1px solid var(--rule); font-size: 14px; }
+.theme-row:first-of-type { border-top: 0; }
+.theme-link { display: block; padding: 0.55rem 0; color: inherit; text-decoration: none; }
+.theme-head { display: flex; justify-content: space-between; align-items: baseline; gap: 0.75rem; line-height: 1.35; }
+.theme-name { font-weight: 700; }
+.theme-head .num { flex: none; }
+.theme-members { display: flex; flex-wrap: wrap; gap: 0 0.75rem; margin-top: 0.15rem; font-size: 13px; line-height: 1.4; font-variant-numeric: tabular-nums; }
+.theme-link:hover .theme-name, .theme-link:focus-visible .theme-name { text-decoration: underline; }
 .movers-table td.r { white-space: nowrap; }
 
 /* Article: the post page's one 680px reading column. Kicker, serif headline, the meta line with the
@@ -329,9 +338,9 @@ html:lang(zh-Hans) .cal-slot { font-variant-caps: normal; letter-spacing: 0.02em
   /* Front page: one column; the side column's sections join the grid so movers follow the lead. */
   .front { grid-template-columns: minmax(0, 1fr); grid-template-rows: none; }
   .front-side { display: contents; }
-  .front-lead, .front-earnings, .front-recent, .front-movers, .front-reporting { grid-column: 1; grid-row: auto; min-width: 0; }
+  .front-lead, .front-earnings, .front-recent, .front-movers, .front-themes, .front-reporting { grid-column: 1; grid-row: auto; min-width: 0; }
   .front-lead { order: 1; }
-  .front-movers { order: 2; }
+  .front-movers, .front-themes { order: 2; }
   .front-earnings { order: 3; }
   .front-recent { order: 4; }
   .front-reporting { order: 5; }

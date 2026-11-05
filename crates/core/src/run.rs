@@ -13,10 +13,10 @@ use crate::cover::{
     brief_lines, brief_scene_subject, index_snapshot, make_scene, CoverLines, CoverMaker,
     IndexSnapshot, INDEX_LINE_KEY,
 };
-use crate::facts::{missing_required, Field, NewsReason, PremarketFacts};
+use crate::facts::{missing_required, NewsReason, PremarketFacts};
 use crate::numbers::Lang;
 use crate::premarket::build_facts;
-use crate::premarket::draft::{write, Draft, TEMPLATE_ID};
+use crate::premarket::draft::{source_reasons, write, Draft, TEMPLATE_ID};
 use crate::providers::{LlmProvider, MarketData, NewsSearch};
 use crate::store::{PostRow, RunRow, Store, TranslationRow};
 
@@ -40,7 +40,14 @@ pub trait Content {
     fn zh_retry_due(&self, _t: NaiveTime) -> bool {
         true
     }
-    async fn build_facts(&self, date: NaiveDate, now: DateTime<Utc>) -> Self::Facts;
+    /// `budget` returns the subrequests used so far; optional work checks it
+    /// with `crate::budget::allows` before spending more.
+    async fn build_facts(
+        &self,
+        date: NaiveDate,
+        now: DateTime<Utc>,
+        budget: &dyn Fn() -> usize,
+    ) -> Self::Facts;
     /// Names of required sections that are unavailable; empty = publishable.
     fn missing_required(&self, f: &Self::Facts) -> Vec<&'static str>;
     async fn write(&self, f: &Self::Facts, lang: Lang) -> Result<(Draft, String), Vec<String>>;
@@ -97,8 +104,13 @@ impl Content for Premarket<'_> {
         let w = premarket_window(DayKind::Full);
         (w.start..=w.end).contains(&t) || t.minute() == 0
     }
-    async fn build_facts(&self, date: NaiveDate, now: DateTime<Utc>) -> PremarketFacts {
-        build_facts(self.md, self.ns, self.llm, date, now).await
+    async fn build_facts(
+        &self,
+        date: NaiveDate,
+        now: DateTime<Utc>,
+        budget: &dyn Fn() -> usize,
+    ) -> PremarketFacts {
+        build_facts(self.md, self.ns, self.llm, date, now, budget).await
     }
     fn missing_required(&self, f: &PremarketFacts) -> Vec<&'static str> {
         missing_required(f)
@@ -169,6 +181,7 @@ pub async fn tick_with_log(
     let hooks = Hooks {
         log,
         extra: &Vec::new,
+        budget: &|| 0,
         cover: &crate::cover::NoCover,
     };
     tick_with_hooks(now, store, md, ns, llm, &hooks).await
@@ -196,6 +209,9 @@ pub struct Hooks<'a> {
     /// the stored facts), read when the facts are built, e.g. the Worker's
     /// subrequest count.
     pub extra: &'a dyn Fn() -> Vec<String>,
+    /// Subrequests used so far (the Worker's fetch count); read by
+    /// `build_facts` to skip optional work near the Free plan's limit.
+    pub budget: &'a dyn Fn() -> usize,
     /// Makes the cover's background scene; `NoCover` when none is configured.
     pub cover: &'a dyn CoverMaker,
 }
@@ -372,7 +388,7 @@ async fn build<C: Content>(
     row.updated_at = ts;
     store.upsert_run(&row).await?;
 
-    let facts = c.build_facts(date, now).await;
+    let facts = c.build_facts(date, now, hooks.budget).await;
     let mut lines = c.diagnostics(&facts);
     lines.extend((hooks.extra)());
     // Logged now, before the drafts, so the line survives a build that dies
@@ -548,20 +564,11 @@ fn translation_zh(
     }
 }
 
-/// Every kept reason (gainers, losers, macro), first occurrence per url.
+/// Every kept reason (gainers, losers, macro, themes), first occurrence per
+/// url: the same list the page's sources section shows.
 fn sources(f: &PremarketFacts) -> Vec<NewsReason> {
-    let macro_items = match &f.macro_items {
-        Field::Value(v) => v.as_slice(),
-        Field::Missing { .. } => &[],
-    };
     let mut out: Vec<NewsReason> = Vec::new();
-    for r in f
-        .gainers
-        .iter()
-        .chain(&f.losers)
-        .flat_map(|m| &m.reasons)
-        .chain(macro_items)
-    {
+    for r in source_reasons(f) {
         if !out.iter().any(|o| o.url == r.url) {
             out.push(r.clone());
         }
@@ -649,8 +656,8 @@ mod tests {
     use super::*;
     use crate::cover::tests::{FakeCover, PNG};
     use crate::cover::NoCover;
-    use crate::facts::NewsReason;
     use crate::facts::Quote;
+    use crate::facts::{Field, NewsReason};
     use crate::providers::{ProviderError, SearchHit};
     use crate::store::{MemStore, PostRow, RunRow, TranslationRow};
     use async_trait::async_trait;
@@ -768,9 +775,9 @@ mod tests {
     fn draft_reply(zh: bool, ok: bool) -> Value {
         // The built facts have no watch list, so there is no watch section.
         let heads: [&str; 3] = if zh {
-            ["期货", "盘前异动", "宏观与隔夜"]
+            ["期货", "宏观与隔夜", "盘前异动"]
         } else {
-            ["Futures", "Biggest premarket movers", "Macro & overnight"]
+            ["Futures", "Macro & overnight", "Biggest premarket movers"]
         };
         // 7.5% is not in the facts, so a bad reply fails the number check.
         let body = if ok {
@@ -829,6 +836,8 @@ mod tests {
             watch_list: Field::Missing {
                 reason: "n/a".into(),
             },
+            themes: vec![],
+            theme_candidates: vec![],
             diagnostics: vec![],
         };
         let lines = c.cover_lines(&f);
@@ -952,7 +961,9 @@ mod tests {
             "futures, movers | quotes ok=0 http429={n} http_other=0 empty=0 stale=0 parse=0 net=0 \
              skipped=0; \
              movers liquid=0 gainers=0 losers=0; reasons proposed=0 kept=0 hedged=0; \
-             search_err=1 llm_err=0 news_stale=0 news_noise=0; futures ok=0 err=4"
+             search_err=3 llm_err=0 news_stale=0 news_noise=0; \
+             macro queries=3 hits=0 items=0; themes found=0 kept=0 searched=0; \
+             futures ok=0 err=4"
         );
         for t in ["2026-10-29T12:30:00Z", "2026-10-29T12:35:00Z"] {
             match tick(utc(t), &s, &m, &FakeNs, &l).await {
@@ -982,6 +993,87 @@ mod tests {
         assert!(s.posts.borrow().is_empty());
     }
 
+    /// A `Content` that only records what its `budget` closure returns and
+    /// then fails the gate, so a tick stops right after the facts stage.
+    struct BudgetProbe {
+        seen: Cell<Option<usize>>,
+    }
+
+    #[async_trait(?Send)]
+    impl Content for BudgetProbe {
+        type Facts = u32;
+        fn content_type(&self) -> &'static str {
+            "premarket"
+        }
+        fn template_id(&self) -> &'static str {
+            "probe:v1"
+        }
+        fn label(&self) -> &'static str {
+            "probe"
+        }
+        fn window(&self, day: DayKind) -> Window {
+            premarket_window(day)
+        }
+        fn zh_give_up(&self) -> NaiveTime {
+            NaiveTime::from_hms_opt(18, 0, 0).expect("valid time")
+        }
+        async fn build_facts(
+            &self,
+            _date: NaiveDate,
+            _now: DateTime<Utc>,
+            budget: &dyn Fn() -> usize,
+        ) -> u32 {
+            self.seen.set(Some(budget()));
+            0
+        }
+        fn missing_required(&self, _f: &u32) -> Vec<&'static str> {
+            vec!["probe"]
+        }
+        async fn write(&self, _f: &u32, _lang: Lang) -> Result<(Draft, String), Vec<String>> {
+            Err(vec!["probe writes nothing".into()])
+        }
+        fn sources(&self, _f: &u32) -> Vec<NewsReason> {
+            Vec::new()
+        }
+        fn diagnostics(&self, _f: &u32) -> Vec<String> {
+            Vec::new()
+        }
+        fn cover_lines(&self, _f: &u32) -> CoverLines {
+            CoverLines {
+                en: [String::new(), String::new()],
+                zh: [String::new(), String::new()],
+            }
+        }
+        fn index_snapshot(&self, _f: &u32) -> IndexSnapshot {
+            IndexSnapshot {
+                kind: "premarket".into(),
+                as_of_utc: String::new(),
+                entries: Vec::new(),
+            }
+        }
+        fn scene_subject(&self, _f: &u32) -> String {
+            String::new()
+        }
+    }
+
+    #[tokio::test]
+    async fn build_facts_receives_the_budget() {
+        let s = MemStore::default();
+        let probe = BudgetProbe {
+            seen: Cell::new(None),
+        };
+        let used = Cell::new(37);
+        let budget = || used.get();
+        let hooks = Hooks {
+            log: &|_| {},
+            extra: &Vec::new,
+            budget: &budget,
+            cover: &NoCover,
+        };
+        tick_content(utc("2026-10-29T12:30:00Z"), &s, &probe, &hooks).await;
+        assert_eq!(probe.seen.get(), Some(37));
+    }
+
     #[tokio::test]
     async fn extra_diagnostics_reach_the_log_and_last_error() {
         let s = MemStore::default();
@@ -992,6 +1084,7 @@ mod tests {
         let hooks = Hooks {
             log: &log,
             extra: &extra,
+            budget: &|| 0,
             cover: &NoCover,
         };
         let out = tick_with_hooks(utc("2026-10-29T12:30:00Z"), &s, &m, &FakeNs, &l, &hooks).await;
@@ -1077,6 +1170,7 @@ mod tests {
         let hooks = Hooks {
             log: &log,
             extra: &extra,
+            budget: &|| 0,
             cover: &NoCover,
         };
         let out = tick_with_hooks(utc("2026-10-29T12:30:00Z"), &s, &m, &FakeNs, &spy, &hooks).await;
@@ -1553,6 +1647,7 @@ mod tests {
         let hooks = Hooks {
             log: &log,
             extra: &Vec::new,
+            budget: &|| 0,
             cover: &cover,
         };
         let out = tick_with_hooks(utc(NOV4), &s, &m, &FakeNs, &l, &hooks).await;
@@ -1603,6 +1698,7 @@ mod tests {
             let hooks = Hooks {
                 log: &log,
                 extra: &Vec::new,
+                budget: &|| 0,
                 cover: match &maker {
                     Some(f) => f,
                     None => &NoCover,

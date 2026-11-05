@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { splitTail, trimHead, trimStory } from "../src/lib/trim";
+import { splitAtMovers, splitTail, trimHead, trimStory } from "../src/lib/trim";
 
 /** The live 2026-10-30 premarket bodies, as the generator stored them. */
 const body = (lang: "en" | "zh") =>
@@ -143,5 +143,57 @@ describe("splitTail", () => {
   it("ignores a sources heading or paragraph inside a code fence", () => {
     const md = "## A\n\n```\n## Sources\n\nlast\n```\n";
     expect(splitTail(md)).toEqual({ body: md, sources: "", disclaimer: "" });
+  });
+});
+
+describe("splitAtMovers", () => {
+  /** A section-ordered body as the page splits it: after the head trim, before the sources. */
+  const story = (name: string) => {
+    const md = readFileSync(new URL(`./fixtures/${name}`, import.meta.url), "utf8");
+    return splitTail(trimStory(md, summaryOf(md))).body;
+  };
+
+  it("splits an EN brief at its movers heading, losing nothing", () => {
+    const md = story("premarket-2026-11-05.en.md");
+    const { before, heading, after } = splitAtMovers(md);
+    expect(heading).toBe("Biggest premarket movers");
+    expect(before.startsWith("## Futures")).toBe(true);
+    expect(before.trimEnd().endsWith("weighed on richly valued technology shares.")).toBe(true);
+    expect(before).toContain("## Themes");
+    expect(after.startsWith("Intel (INTC) plunged 26.0%")).toBe(true);
+    expect(after).toContain("## What to watch");
+    expect(`${before}\n## ${heading}\n\n${after}`).toBe(md);
+  });
+
+  it("splits a ZH brief at 盘前异动 and a recap at 个股异动 or Notable movers", () => {
+    const zh = story("premarket-2026-10-30.zh.md");
+    const split = splitAtMovers(zh);
+    expect(split.heading).toBe("盘前异动");
+    expect(split.before.startsWith("## 期货")).toBe(true);
+    expect(`${split.before}\n## ${split.heading}\n\n${split.after}`).toBe(zh);
+
+    expect(splitAtMovers("## 收盘\n\n文字。\n\n## 个股异动 ##\n\n涨跌。\n")).toEqual({
+      before: "## 收盘\n\n文字。\n",
+      heading: "个股异动",
+      after: "涨跌。\n",
+    });
+    expect(splitAtMovers("## Index closes\n\nText.\n\n## Notable movers\n\nProse.\n")).toEqual({
+      before: "## Index closes\n\nText.\n",
+      heading: "Notable movers",
+      after: "Prose.\n",
+    });
+  });
+
+  it("keeps everything before when there is no movers heading", () => {
+    const md = "## Futures\n\nText.\n\n## Movers of note\n\nMore.\n";
+    expect(splitAtMovers(md)).toEqual({ before: md, heading: null, after: "" });
+    expect(splitAtMovers("")).toEqual({ before: "", heading: null, after: "" });
+  });
+
+  it("ignores a movers heading inside a code fence", () => {
+    const md = "## A\n\n```\n## Notable movers\n```\n\nText.\n";
+    expect(splitAtMovers(md)).toEqual({ before: md, heading: null, after: "" });
+    const later = `${md}\n## Notable movers\n\nProse.\n`;
+    expect(splitAtMovers(later)).toEqual({ before: md, heading: "Notable movers", after: "Prose.\n" });
   });
 });

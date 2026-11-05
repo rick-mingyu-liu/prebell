@@ -10,16 +10,17 @@ use serde::{Deserialize, Serialize};
 use crate::clock::{et, recap_window, trading_day, DayKind, Window};
 use crate::cover::{brief_lines, brief_scene_subject, index_snapshot, CoverLines, IndexSnapshot};
 use crate::earnings::facts::EarningsFacts;
-use crate::facts::{quote_numbers, Field, Mover, NewsReason, Quote};
+use crate::facts::{push_themes, quote_numbers, Field, Mover, NewsReason, Quote, Theme, ThemeStat};
 use crate::numbers::Lang;
 use crate::premarket::draft::Draft;
 use crate::premarket::{
-    articles_prompt, as_of, company_name, extract, fresh_news, system_prompt, universe,
-    yahoo_symbol, Diag, EVENT_RULE,
+    articles_prompt, as_of, company_name, extract, fresh_news, macro_items, system_prompt,
+    theme_reasons, universe, yahoo_symbol, Diag, MacroPrompt, EVENT_RULE,
 };
 use crate::providers::{LlmProvider, MarketData, NewsSearch};
 use crate::run::{tick_content, Content, Hooks, TickOutcome};
 use crate::store::Store;
+use crate::themes::{detect_all, RECAP_RULES, THEME_MAX};
 
 /// `(label, Yahoo symbol)`: the indexes themselves, not ETF proxies, so the
 /// levels match what readers see quoted at the close.
@@ -32,13 +33,26 @@ const INDEXES: [(&str, &str); 4] = [
 const MIN_PRICE: f64 = 5.0;
 /// Regular-session shares; every S&P 500 name clears this on a normal day.
 const MIN_VOLUME: u64 = 1_000_000;
-const MOVERS_PER_SIDE: usize = 5;
+const MOVERS_PER_SIDE: usize = 4;
 const HITS_PER_MOVER: usize = 3;
 const MOVER_REASONS: usize = 2;
 const AFTER_HOURS_HITS: usize = 5;
 const AFTER_HOURS_ITEMS: usize = 5;
 /// After-hours previews may come from earlier in the week.
 const AFTER_HOURS_MAX_AGE_DAYS: i64 = 7;
+/// The after-hours step's search and extraction call. It is mandatory and
+/// runs after the optional theme and macro work, so their guards count it
+/// as already spent: theme search while `used + 2 + 4 + 2 <= 40`, each
+/// later macro query while `used + 2 + 2 <= 40` (see
+/// `premarket::MACRO_FULL_COST`).
+const AFTER_HOURS_COST: usize = 2;
+/// The recap macro searches, in order: the close, the day's headline
+/// story, then rates, energy and FX. The later ones give way to the budget.
+pub const RECAP_MACRO_QUERIES: [&str; 3] = [
+    "stock market today closing",
+    "Wall Street markets news today",
+    "Treasury yields oil dollar Federal Reserve today",
+];
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct RecapFacts {
@@ -50,16 +64,34 @@ pub struct RecapFacts {
     pub indexes: Vec<(String, Field<Quote>)>,
     pub gainers: Vec<Mover>,
     pub losers: Vec<Mover>,
+    /// Market-wide and macro news from today's session. Facts stored before
+    /// it existed read as `Missing`.
+    #[serde(default = "missing_default")]
+    pub macro_items: Field<Vec<NewsReason>>,
     /// Companies the news says report after today's close.
     pub after_hours: Field<Vec<NewsReason>>,
     /// Companies whose earnings check this site already published for an
     /// after-close filing today. Absent in facts stored before it existed.
     #[serde(default)]
     pub reported: Vec<Reported>,
+    /// Industry groups moving together, best first. Absent in facts stored
+    /// before themes existed.
+    #[serde(default)]
+    pub themes: Vec<Theme>,
+    /// Breadth of every group with two strong movers, for tuning the theme
+    /// thresholds. Never sent to the LLM.
+    #[serde(default)]
+    pub theme_candidates: Vec<ThemeStat>,
     /// Short counters from the build, for logs and `last_error`. Never sent
     /// to the LLM.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub diagnostics: Vec<String>,
+}
+
+fn missing_default() -> Field<Vec<NewsReason>> {
+    Field::Missing {
+        reason: "not in this facts version".into(),
+    }
 }
 
 /// A company that reported after today's close, with our earnings check.
@@ -107,11 +139,14 @@ pub fn numbers_in_facts(f: &RecapFacts) -> Vec<f64> {
             out.extend(quote_numbers(&r.quote));
         }
     }
-    if let Field::Value(items) = &f.after_hours {
-        for r in items {
-            out.extend(quote_numbers(&r.quote));
+    for items in [&f.macro_items, &f.after_hours] {
+        if let Field::Value(items) = items {
+            for r in items {
+                out.extend(quote_numbers(&r.quote));
+            }
         }
     }
+    push_themes(&mut out, &f.themes);
     out
 }
 
@@ -331,6 +366,7 @@ pub async fn build_facts(
     store: &dyn Store,
     trading_date: NaiveDate,
     now: DateTime<Utc>,
+    budget: &dyn Fn() -> usize,
 ) -> RecapFacts {
     let mut d = Diag::default();
     // Four chart requests, one per index, kept apart from the batched v7
@@ -367,10 +403,15 @@ pub async fn build_facts(
             indexes,
             gainers: vec![],
             losers: vec![],
+            macro_items: Field::Missing {
+                reason: "not gathered: index closes unavailable".into(),
+            },
             after_hours: Field::Missing {
                 reason: "not gathered: index closes unavailable".into(),
             },
             reported: vec![],
+            themes: vec![],
+            theme_candidates: vec![],
             diagnostics: d.lines_as("indexes"),
         };
     }
@@ -379,6 +420,11 @@ pub async fn build_facts(
     let (reported, reported_err) = reported(store, trading_date, early_close).await;
 
     let quotes = liquid_closes(md, trading_date, &mut d).await;
+    // Every liquid close, not only the eight movers, feeds the themes.
+    let (mut themes, theme_candidates) = detect_all(&quotes, &RECAP_RULES);
+    d.themes_found = themes.len();
+    themes.truncate(THEME_MAX);
+    d.themes_kept = themes.len();
     let mut up: Vec<Quote> = quotes
         .iter()
         .filter(|q| q.change_pct > 0.0)
@@ -401,6 +447,33 @@ pub async fn build_facts(
         losers.push(mover(ns, llm, q, now, &mut d).await);
     }
 
+    // Optional work sees the after-hours step as already spent.
+    let reserved = || budget() + AFTER_HOURS_COST;
+    let movers: Vec<&Mover> = gainers.iter().chain(&losers).collect();
+    theme_reasons(
+        ns,
+        llm,
+        &mut themes,
+        &movers,
+        "in today's regular trading session",
+        now,
+        &mut d,
+        &reserved,
+    )
+    .await;
+    let macro_items = macro_items(
+        ns,
+        llm,
+        &RECAP_MACRO_QUERIES,
+        &MacroPrompt {
+            task: "list the market-wide and macro news items that moved the US stock market in today's session",
+            topic: "market-wide and macro news from today's US stock market session",
+        },
+        now,
+        &mut d,
+        &reserved,
+    )
+    .await;
     let after_hours = after_hours(ns, llm, trading_date, now, &reported, &mut d).await;
     let mut diagnostics = d.lines_as("indexes");
     diagnostics.push(format!(
@@ -414,8 +487,11 @@ pub async fn build_facts(
         indexes,
         gainers,
         losers,
+        macro_items,
         after_hours,
         reported,
+        themes,
+        theme_candidates,
         diagnostics,
     }
 }
@@ -453,8 +529,13 @@ impl Content for Recap<'_> {
     fn zh_retry_due(&self, t: NaiveTime) -> bool {
         t.minute() == 0
     }
-    async fn build_facts(&self, date: NaiveDate, now: DateTime<Utc>) -> RecapFacts {
-        build_facts(self.md, self.ns, self.llm, self.store, date, now).await
+    async fn build_facts(
+        &self,
+        date: NaiveDate,
+        now: DateTime<Utc>,
+        budget: &dyn Fn() -> usize,
+    ) -> RecapFacts {
+        build_facts(self.md, self.ns, self.llm, self.store, date, now, budget).await
     }
     fn missing_required(&self, f: &RecapFacts) -> Vec<&'static str> {
         missing_required(f)
@@ -474,20 +555,11 @@ impl Content for Recap<'_> {
     async fn write(&self, f: &RecapFacts, lang: Lang) -> Result<(Draft, String), Vec<String>> {
         draft::write(self.llm, f, lang).await
     }
-    /// Every kept reason (movers, then after-hours), first occurrence per url.
+    /// Every kept reason (movers, macro, themes, after-hours), first
+    /// occurrence per url: the same list the page's sources section shows.
     fn sources(&self, f: &RecapFacts) -> Vec<NewsReason> {
-        let after_hours = match &f.after_hours {
-            Field::Value(v) => v.as_slice(),
-            Field::Missing { .. } => &[],
-        };
         let mut out: Vec<NewsReason> = Vec::new();
-        for r in f
-            .gainers
-            .iter()
-            .chain(&f.losers)
-            .flat_map(|m| &m.reasons)
-            .chain(after_hours)
-        {
+        for r in draft::sources(f) {
             if !out.iter().any(|o| o.url == r.url) {
                 out.push(r.clone());
             }
@@ -519,6 +591,7 @@ pub async fn tick_with_log(
     let hooks = Hooks {
         log,
         extra: &Vec::new,
+        budget: &|| 0,
         cover: &crate::cover::NoCover,
     };
     tick_with_hooks(now, store, md, ns, llm, &hooks).await
@@ -710,6 +783,7 @@ mod tests {
             &MemStore::default(),
             date(),
             now(),
+            &|| 0,
         )
         .await;
         assert_eq!(f.trading_date, date());
@@ -744,6 +818,7 @@ mod tests {
             &MemStore::default(),
             date(),
             now(),
+            &|| 0,
         )
         .await;
         // The four index closes are single requests (chart); only the
@@ -765,6 +840,7 @@ mod tests {
             &MemStore::default(),
             date(),
             now(),
+            &|| 0,
         )
         .await;
         let n = universe().len();
@@ -778,7 +854,10 @@ mod tests {
                 "closes ok=1 other_day=519".to_string(),
                 "movers liquid=1 gainers=1 losers=0".to_string(),
                 "reasons proposed=0 kept=0 hedged=0".to_string(),
-                "search_err=2 llm_err=0 news_stale=0 news_noise=0".to_string(),
+                // One mover search, three macro searches, after-hours.
+                "search_err=5 llm_err=0 news_stale=0 news_noise=0".to_string(),
+                "macro queries=3 hits=0 items=0".to_string(),
+                "themes found=0 kept=0 searched=0".to_string(),
                 "indexes ok=4 err=0".to_string(),
                 "reported=0 reported_err=0".to_string(),
             ]
@@ -801,6 +880,7 @@ mod tests {
             &MemStore::default(),
             date(),
             now(),
+            &|| 0,
         )
         .await;
         assert!(
@@ -816,7 +896,16 @@ mod tests {
         let mut m = md(&[q("NVDA", 182.35, 3.08, Some(210_000_000))]);
         m.indexes.remove("^RUT");
         let l = llm(vec![]);
-        let f = build_facts(&m, &ns(vec![]), &l, &MemStore::default(), date(), now()).await;
+        let f = build_facts(
+            &m,
+            &ns(vec![]),
+            &l,
+            &MemStore::default(),
+            date(),
+            now(),
+            &|| 0,
+        )
+        .await;
         // No movers or news work while the required section is missing.
         assert!(f.gainers.is_empty() && l.prompts.borrow().is_empty());
         assert_eq!(m.sessions.borrow().len(), 4);
@@ -850,9 +939,10 @@ mod tests {
             &MemStore::default(),
             date(),
             now(),
+            &|| 0,
         )
         .await;
-        assert_eq!(syms(&f.gainers), ["TSLA", "META", "AMZN", "NVDA", "MSFT"]);
+        assert_eq!(syms(&f.gainers), ["TSLA", "META", "AMZN", "NVDA"]);
         assert_eq!(syms(&f.losers), ["GOOGL", "BRK.B"]);
         assert_eq!(f.losers[1].name, "Berkshire Hathaway");
         // Movers are optional.
@@ -886,7 +976,16 @@ mod tests {
                 ),
             ),
         ]);
-        let f = build_facts(&md(&stocks), &n, &l, &MemStore::default(), date(), now()).await;
+        let f = build_facts(
+            &md(&stocks),
+            &n,
+            &l,
+            &MemStore::default(),
+            date(),
+            now(),
+            &|| 0,
+        )
+        .await;
         assert_eq!(f.gainers[0].reasons.len(), 1);
         assert_eq!(f.gainers[0].reasons[0].quote, QUOTE);
         assert_eq!(f.losers[0].reasons, vec![]);
@@ -911,7 +1010,16 @@ mod tests {
         };
         let n = ns(vec![(NVDA_Q, Ok(vec![stale]))]);
         let l = llm(vec![("NVDA", reasons(URL, QUOTE, "Nvidia rose."))]);
-        let f = build_facts(&md(&stocks), &n, &l, &MemStore::default(), date(), now()).await;
+        let f = build_facts(
+            &md(&stocks),
+            &n,
+            &l,
+            &MemStore::default(),
+            date(),
+            now(),
+            &|| 0,
+        )
+        .await;
         assert_eq!(f.gainers[0].reasons, vec![]);
         assert!(l.prompts.borrow().iter().all(|(_, u)| !u.contains("NVDA")));
         assert!(
@@ -923,7 +1031,16 @@ mod tests {
         );
 
         let n = ns(vec![(NVDA_Q, Ok(vec![hit(URL, ARTICLE)]))]);
-        let f = build_facts(&md(&stocks), &n, &l, &MemStore::default(), date(), now()).await;
+        let f = build_facts(
+            &md(&stocks),
+            &n,
+            &l,
+            &MemStore::default(),
+            date(),
+            now(),
+            &|| 0,
+        )
+        .await;
         assert_eq!(f.gainers[0].reasons.len(), 1);
         let p = l.prompts.borrow();
         let (sys, _) = p.iter().find(|(_, u)| u.contains("NVDA")).unwrap();
@@ -941,7 +1058,7 @@ mod tests {
                 {"url": "https://news.test/ah", "title": "T", "quote": "Apple will report results after the bell tonight", "summary_en": "Apple reports."}
             ]})),
         )]);
-        let f = build_facts(&md(&[]), &n, &l, &MemStore::default(), date(), now()).await;
+        let f = build_facts(&md(&[]), &n, &l, &MemStore::default(), date(), now(), &|| 0).await;
         match &f.after_hours {
             Field::Value(v) => {
                 assert_eq!(v.len(), 1);
@@ -1032,7 +1149,7 @@ mod tests {
                 {"url": "https://news.test/ah", "title": "T", "quote": "Intel and Amazon are scheduled to report quarterly results after the bell", "summary_en": "Intel and Amazon report after the close."}
             ]})),
         )]);
-        let f = build_facts(&md(&[]), &n, &l, &s, date(), now()).await;
+        let f = build_facts(&md(&[]), &n, &l, &s, date(), now(), &|| 0).await;
         assert_eq!(
             f.reported,
             vec![Reported {
@@ -1114,7 +1231,7 @@ mod tests {
                 {"url": "https://news.test/ah", "title": "T", "quote": "Amazon is scheduled to report quarterly results after the bell", "summary_en": "Amazon reports now after the bell."}
             ]})),
         )]);
-        let f = build_facts(&md(&[]), &n, &l, &s, date(), now()).await;
+        let f = build_facts(&md(&[]), &n, &l, &s, date(), now(), &|| 0).await;
         assert_eq!(f.reported.len(), 2);
         match &f.after_hours {
             Field::Value(v) => {
@@ -1144,7 +1261,16 @@ mod tests {
             "2026-10-29T20:10:00Z",
         );
         *s.fail_facts_key.borrow_mut() = Some("earnings/aapl-q4-fy2026-earnings.json".into());
-        let f = build_facts(&md(&[]), &ns(vec![]), &llm(vec![]), &s, date(), now()).await;
+        let f = build_facts(
+            &md(&[]),
+            &ns(vec![]),
+            &llm(vec![]),
+            &s,
+            date(),
+            now(),
+            &|| 0,
+        )
+        .await;
         let tickers: Vec<&str> = f.reported.iter().map(|r| r.ticker.as_str()).collect();
         assert_eq!(tickers, ["INTC"]);
         assert_eq!(f.diagnostics.last().unwrap(), "reported=1 reported_err=1");
@@ -1162,7 +1288,16 @@ mod tests {
             "2026-10-29T20:30:41Z",
         );
         s.fail_posts_on.set(true);
-        let f = build_facts(&md(&[]), &ns(vec![]), &llm(vec![]), &s, date(), now()).await;
+        let f = build_facts(
+            &md(&[]),
+            &ns(vec![]),
+            &llm(vec![]),
+            &s,
+            date(),
+            now(),
+            &|| 0,
+        )
+        .await;
         assert!(f.reported.is_empty());
         assert_eq!(f.diagnostics.last().unwrap(), "reported=0 reported_err=1");
         assert!(missing_required(&f).is_empty());
@@ -1171,7 +1306,16 @@ mod tests {
     #[tokio::test]
     async fn facts_stored_before_reported_existed_still_load() {
         let s = MemStore::default();
-        let f = build_facts(&md(&[]), &ns(vec![]), &llm(vec![]), &s, date(), now()).await;
+        let f = build_facts(
+            &md(&[]),
+            &ns(vec![]),
+            &llm(vec![]),
+            &s,
+            date(),
+            now(),
+            &|| 0,
+        )
+        .await;
         let mut v = serde_json::to_value(&f).unwrap();
         v.as_object_mut().unwrap().remove("reported");
         let back: RecapFacts = serde_json::from_value(v).unwrap();
@@ -1206,12 +1350,17 @@ mod tests {
             &MemStore::default(),
             date(),
             now(),
+            &|| 0,
         )
         .await;
-        assert_eq!(
-            *n.0.borrow(),
-            vec![(AH_Q.to_string(), now() - chrono::Duration::days(7))]
-        );
+        // The macro searches keep the news cutoff; only after-hours reaches back.
+        let cutoff = crate::premarket::news_cutoff(now());
+        let mut want: Vec<(String, DateTime<Utc>)> = RECAP_MACRO_QUERIES
+            .iter()
+            .map(|q| (q.to_string(), cutoff))
+            .collect();
+        want.push((AH_Q.to_string(), now() - chrono::Duration::days(7)));
+        assert_eq!(*n.0.borrow(), want);
     }
 
     #[tokio::test]
@@ -1223,6 +1372,7 @@ mod tests {
             &MemStore::default(),
             date(),
             now(),
+            &|| 0,
         )
         .await;
         assert_eq!(
@@ -1236,7 +1386,7 @@ mod tests {
             "after the US market close",
             Err(ProviderError::Http(503)),
         )]);
-        let f = build_facts(&md(&[]), &n, &l, &MemStore::default(), date(), now()).await;
+        let f = build_facts(&md(&[]), &n, &l, &MemStore::default(), date(), now(), &|| 0).await;
         assert_eq!(
             f.after_hours,
             Field::Missing {
@@ -1257,6 +1407,7 @@ mod tests {
             &MemStore::default(),
             d,
             now(),
+            &|| 0,
         )
         .await;
         assert!(f.early_close);
@@ -1280,10 +1431,12 @@ mod tests {
             &MemStore::default(),
             date(),
             now(),
+            &|| 0,
         )
         .await;
         f.gainers[0].reasons = vec![reason("Nvidia shares rose 3% on a $5 billion deal")];
         f.after_hours = Field::Value(vec![reason("Intel expects revenue of $13.4 billion")]);
+        f.macro_items = Field::Value(vec![reason("The 10-year Treasury yield rose to 4.27%")]);
         let n = numbers_in_facts(&f);
         for v in [
             2025.0,
@@ -1298,6 +1451,7 @@ mod tests {
             -3.0,
             5e9,
             13.4e9,
+            4.27,
         ] {
             assert!(
                 n.iter().any(|x| (x - v).abs() < 1e-6),
@@ -1306,6 +1460,429 @@ mod tests {
         }
         let s = serde_json::to_string(&f).unwrap();
         assert_eq!(serde_json::from_str::<RecapFacts>(&s).unwrap(), f);
+    }
+
+    /// `FakeNs` that records every query it is asked.
+    struct RecNs(FakeNs, RefCell<Vec<String>>);
+    #[async_trait(?Send)]
+    impl NewsSearch for RecNs {
+        async fn search(&self, query: &str, max: usize) -> Result<Vec<SearchHit>, ProviderError> {
+            self.1.borrow_mut().push(query.into());
+            self.0.search(query, max).await
+        }
+    }
+
+    const MACRO_SRC: &str =
+        "Stocks closed higher on Thursday as Treasury yields fell after the Fed decision.";
+    fn macro_ns() -> RecNs {
+        RecNs(
+            ns(vec![
+                (
+                    RECAP_MACRO_QUERIES[0],
+                    Ok(vec![hit("https://news.test/close", MACRO_SRC)]),
+                ),
+                (
+                    RECAP_MACRO_QUERIES[1],
+                    Ok(vec![
+                        hit("https://news.test/close", MACRO_SRC),
+                        hit(
+                            "https://news.test/street",
+                            "Wall Street rallied on the jobs data.",
+                        ),
+                    ]),
+                ),
+                (
+                    RECAP_MACRO_QUERIES[2],
+                    Ok(vec![hit(
+                        "https://news.test/rates",
+                        "Oil fell and the dollar slipped.",
+                    )]),
+                ),
+            ]),
+            RefCell::new(vec![]),
+        )
+    }
+
+    #[tokio::test]
+    async fn recap_facts_have_macro_items() {
+        let n = macro_ns();
+        let l = llm(vec![(
+            "Topic: market-wide",
+            reasons(
+                "https://news.test/close",
+                "Stocks closed higher on Thursday as Treasury yields fell",
+                "Stocks rose as yields fell.",
+            ),
+        )]);
+        let f = build_facts(&md(&[]), &n, &l, &MemStore::default(), date(), now(), &|| 0).await;
+        let asked: Vec<String> = n.1.borrow().clone();
+        assert_eq!(asked[..3], RECAP_MACRO_QUERIES);
+        match &f.macro_items {
+            Field::Value(v) => {
+                assert_eq!(v.len(), 1);
+                assert!(v[0].quote.starts_with("Stocks closed higher"));
+            }
+            other => panic!("{other:?}"),
+        }
+        // One extraction over the three unique articles, dated as of the close.
+        let p = l.prompts.borrow();
+        let macro_p: Vec<&(String, String)> = p
+            .iter()
+            .filter(|(_, u)| u.contains("Topic: market-wide"))
+            .collect();
+        assert_eq!(macro_p.len(), 1);
+        let (sys, user) = macro_p[0];
+        assert_eq!(user.matches("<article id=").count(), 3, "{user}");
+        assert!(user.contains("As of: 2026-10-29 16:45 ET"), "{user}");
+        assert!(sys.contains("at most 5 reasons"), "{sys}");
+        // The macro line follows the search line; the theme line follows it.
+        let i = f
+            .diagnostics
+            .iter()
+            .position(|l| l.starts_with("search_err="))
+            .unwrap();
+        assert_eq!(f.diagnostics[i + 1], "macro queries=3 hits=3 items=1");
+        assert_eq!(f.diagnostics[i + 2], "themes found=0 kept=0 searched=0");
+        assert_eq!(f.diagnostics[i + 3], "indexes ok=4 err=0");
+    }
+
+    #[tokio::test]
+    async fn recap_macro_skips_later_queries_when_budget_is_tight() {
+        let n = macro_ns();
+        let f = build_facts(
+            &md(&[]),
+            &n,
+            &llm(vec![]),
+            &MemStore::default(),
+            date(),
+            now(),
+            &|| 39,
+        )
+        .await;
+        assert!(!n.1.borrow().iter().any(|q| q == RECAP_MACRO_QUERIES[1]));
+        assert!(!n.1.borrow().iter().any(|q| q == RECAP_MACRO_QUERIES[2]));
+        assert!(f
+            .diagnostics
+            .contains(&"macro queries=1 hits=1 items=0".to_string()));
+    }
+
+    #[tokio::test]
+    async fn recap_facts_without_macro_items_deserialize() {
+        let f = build_facts(
+            &md(&[]),
+            &ns(vec![]),
+            &llm(vec![]),
+            &MemStore::default(),
+            date(),
+            now(),
+            &|| 0,
+        )
+        .await;
+        let mut v = serde_json::to_value(&f).unwrap();
+        v.as_object_mut().unwrap().remove("macro_items");
+        let old: RecapFacts = serde_json::from_value(v).unwrap();
+        assert_eq!(
+            old.macro_items,
+            Field::Missing {
+                reason: "not in this facts version".into()
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn recap_without_index_closes_gathers_no_macro() {
+        let mut m = md(&[]);
+        m.indexes.remove("^RUT");
+        let n = macro_ns();
+        let f = build_facts(
+            &m,
+            &n,
+            &llm(vec![]),
+            &MemStore::default(),
+            date(),
+            now(),
+            &|| 0,
+        )
+        .await;
+        assert!(n.1.borrow().is_empty());
+        assert!(matches!(f.macro_items, Field::Missing { .. }));
+    }
+
+    /// Four memory names closing down 4% to 6%: one "Memory & storage"
+    /// theme under the recap rules, and the four losers among the movers.
+    fn memory_down() -> Vec<Quote> {
+        [("MU", -6.0), ("SNDK", -5.5), ("WDC", -5.0), ("STX", -4.0)]
+            .map(|(s, p)| q(s, 100.0, p, Some(2_000_000)))
+            .to_vec()
+    }
+    const MEMORY_Q: &str = "Memory & storage stocks fall today";
+    const MEMORY_SRC: &str =
+        "Memory chip stocks slid after a report showed DRAM contract prices fell in October.";
+    const MEMORY_QUOTE: &str =
+        "Memory chip stocks slid after a report showed DRAM contract prices fell";
+    fn memory_reason() -> Result<Value, ProviderError> {
+        reasons(
+            "https://news.test/memory",
+            MEMORY_QUOTE,
+            "A report showed DRAM contract prices fell.",
+        )
+    }
+    fn asked(n: &RecNs, q: &str) -> usize {
+        n.1.borrow().iter().filter(|x| *x == q).count()
+    }
+
+    #[tokio::test]
+    async fn recap_themes_reuse_reasons_of_top_movers() {
+        let wdc = "Western Digital shares fell after the company cut its hard drive outlook.";
+        let n = RecNs(
+            ns(vec![(
+                "Western Digital (WDC) stock",
+                Ok(vec![hit("https://news.test/wdc", wdc)]),
+            )]),
+            RefCell::new(vec![]),
+        );
+        let l = llm(vec![(
+            "Ticker: WDC",
+            reasons(
+                "https://news.test/wdc",
+                "Western Digital shares fell after the company cut its hard drive outlook",
+                "Western Digital cut its hard drive outlook.",
+            ),
+        )]);
+        let f = build_facts(
+            &md(&memory_down()),
+            &n,
+            &l,
+            &MemStore::default(),
+            date(),
+            now(),
+            &|| 0,
+        )
+        .await;
+        assert_eq!(f.themes.len(), 1);
+        assert_eq!(f.themes[0].group, "Memory & storage");
+        assert_eq!(f.themes[0].reasons.len(), 1);
+        assert_eq!(f.themes[0].reasons[0].url, "https://news.test/wdc");
+        assert_eq!(asked(&n, MEMORY_Q), 0);
+        assert_eq!(f.theme_candidates.len(), 1);
+        let i = f
+            .diagnostics
+            .iter()
+            .position(|l| l.starts_with("macro queries="))
+            .unwrap();
+        assert_eq!(f.diagnostics[i + 1], "themes found=1 kept=1 searched=0");
+        assert_eq!(f.diagnostics[i + 2], "indexes ok=4 err=0");
+    }
+
+    #[tokio::test]
+    async fn recap_top_theme_without_mover_reason_searches_once() {
+        let n = RecNs(
+            ns(vec![(
+                MEMORY_Q,
+                Ok(vec![hit("https://news.test/memory", MEMORY_SRC)]),
+            )]),
+            RefCell::new(vec![]),
+        );
+        let l = llm(vec![("Theme: Memory & storage", memory_reason())]);
+        let f = build_facts(
+            &md(&memory_down()),
+            &n,
+            &l,
+            &MemStore::default(),
+            date(),
+            now(),
+            &|| 0,
+        )
+        .await;
+        assert_eq!(asked(&n, MEMORY_Q), 1);
+        assert_eq!(f.themes[0].reasons.len(), 1);
+        assert_eq!(f.themes[0].reasons[0].quote, MEMORY_QUOTE);
+        let p = l.prompts.borrow();
+        let (sys, user) = p.iter().find(|(_, u)| u.contains("Theme:")).unwrap();
+        assert!(sys.contains("today's regular trading session"), "{sys}");
+        assert!(user.contains("As of: 2026-10-29 16:45 ET"), "{user}");
+        assert!(f
+            .diagnostics
+            .contains(&"themes found=1 kept=1 searched=1".to_string()));
+    }
+
+    #[tokio::test]
+    async fn recap_theme_search_reserves_macro_and_after_hours() {
+        // Counting every search and LLM call. The recap's theme search needs
+        // 2 + 4 + 2 (after hours): it runs at 32 used and not at 33, the
+        // macro queries all run either way, and the facts stage never passes
+        // BUDGET_SOFT.
+        for (base, searched) in [(28, 1), (29, 0)] {
+            let mut items: Vec<(&str, Result<Vec<SearchHit>, ProviderError>)> = vec![
+                (
+                    MEMORY_Q,
+                    Ok(vec![hit("https://news.test/memory", MEMORY_SRC)]),
+                ),
+                (
+                    AH_Q,
+                    Ok(vec![hit(
+                        "https://news.test/ah",
+                        "Intel reports after the bell.",
+                    )]),
+                ),
+            ];
+            for (i, mq) in RECAP_MACRO_QUERIES.iter().enumerate() {
+                let u = format!("https://news.test/macro{i}");
+                items.push((mq, Ok(vec![hit(&u, MACRO_SRC)])));
+            }
+            let n = RecNs(ns(items), RefCell::new(vec![]));
+            let l = llm(vec![("Theme: Memory & storage", memory_reason())]);
+            // Four mover searches come first, with no LLM call.
+            let used = || base + n.1.borrow().len() + l.prompts.borrow().len();
+            let f = build_facts(
+                &md(&memory_down()),
+                &n,
+                &l,
+                &MemStore::default(),
+                date(),
+                now(),
+                &used,
+            )
+            .await;
+            assert_eq!(asked(&n, MEMORY_Q), searched, "base={base}");
+            assert_eq!(asked(&n, AH_Q), 1, "base={base}");
+            assert!(
+                f.diagnostics
+                    .iter()
+                    .any(|l| l.starts_with("macro queries=3 ")),
+                "base={base}: {:?}",
+                f.diagnostics
+            );
+            assert!(
+                used() <= crate::budget::BUDGET_SOFT,
+                "base={base}: {}",
+                used()
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn recap_theme_search_is_skipped_at_nominal_usage() {
+        // Nominal usage when the theme step starts: 4 index charts + cookie 1
+        // + crumb 1 + the v7 batches (universe size / `QUOTE_BATCH`, rounded
+        // up: 11) + 8 mover searches + 8 extractions = 33. With the
+        // after-hours step (2) reserved, the theme search (2) and the full
+        // macro step after it (4) do not fit: 33 + 2 + 2 + 4 = 41 >
+        // BUDGET_SOFT (40). The recap's macro step (all 3 queries) and the
+        // after-hours search still run.
+        let batches = universe().len().div_ceil(crate::yahoo::QUOTE_BATCH);
+        let used = 4 + 1 + 1 + batches + 2 * 2 * MOVERS_PER_SIDE;
+        assert_eq!(used, 33);
+        assert!(!crate::budget::allows(
+            used + AFTER_HOURS_COST,
+            crate::premarket::THEME_SEARCH_COST + crate::premarket::MACRO_FULL_COST
+        ));
+        let n = RecNs(
+            ns(vec![(
+                MEMORY_Q,
+                Ok(vec![hit("https://news.test/memory", MEMORY_SRC)]),
+            )]),
+            RefCell::new(vec![]),
+        );
+        let f = build_facts(
+            &md(&memory_down()),
+            &n,
+            &llm(vec![]),
+            &MemStore::default(),
+            date(),
+            now(),
+            &|| used,
+        )
+        .await;
+        assert_eq!(asked(&n, MEMORY_Q), 0);
+        assert!(f
+            .diagnostics
+            .contains(&"themes found=1 kept=1 searched=0".to_string()));
+        for mq in RECAP_MACRO_QUERIES {
+            assert_eq!(asked(&n, mq), 1, "{mq}");
+        }
+        assert!(
+            f.diagnostics
+                .iter()
+                .any(|l| l.starts_with("macro queries=3 ")),
+            "{:?}",
+            f.diagnostics
+        );
+        assert_eq!(asked(&n, AH_Q), 1);
+    }
+
+    #[tokio::test]
+    async fn recap_macro_reserves_after_hours() {
+        // At 37 used, a second macro query (1) and the extraction (1) would
+        // fit, but not with the after-hours search and extraction (2) still
+        // to come.
+        for (used, queries) in [(36, 3), (37, 1)] {
+            let n = macro_ns();
+            let f = build_facts(
+                &md(&[]),
+                &n,
+                &llm(vec![]),
+                &MemStore::default(),
+                date(),
+                now(),
+                &|| used,
+            )
+            .await;
+            assert!(
+                f.diagnostics
+                    .iter()
+                    .any(|l| l.starts_with(&format!("macro queries={queries} "))),
+                "used={used}: {:?}",
+                f.diagnostics
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn recap_facts_without_theme_fields_deserialize() {
+        let f = build_facts(
+            &md(&memory_down()),
+            &ns(vec![]),
+            &llm(vec![]),
+            &MemStore::default(),
+            date(),
+            now(),
+            &|| 0,
+        )
+        .await;
+        assert_eq!(f.themes.len(), 1);
+        let s = serde_json::to_string(&f).unwrap();
+        let back: RecapFacts = serde_json::from_str(&s).unwrap();
+        assert_eq!(back.themes, f.themes);
+        assert_eq!(back.theme_candidates, f.theme_candidates);
+        let mut v = serde_json::to_value(&f).unwrap();
+        let o = v.as_object_mut().unwrap();
+        o.remove("themes");
+        o.remove("theme_candidates");
+        let old: RecapFacts = serde_json::from_value(v).unwrap();
+        assert!(old.themes.is_empty() && old.theme_candidates.is_empty());
+    }
+
+    #[tokio::test]
+    async fn recap_numbers_include_theme_moves_and_medians() {
+        let mut f = build_facts(
+            &md(&memory_down()),
+            &ns(vec![]),
+            &llm(vec![]),
+            &MemStore::default(),
+            date(),
+            now(),
+            &|| 0,
+        )
+        .await;
+        f.themes[0].reasons = vec![reason("DRAM contract prices fell 7% in October")];
+        let n = numbers_in_facts(&f);
+        for v in [-6.0, -5.5, -5.0, -4.0, -5.25, 7.0] {
+            assert!(
+                n.iter().any(|x| (x - v).abs() < 1e-9),
+                "{v} missing from {n:?}"
+            );
+        }
     }
 }
 
@@ -1519,6 +2096,7 @@ mod run_tests {
         let hooks = crate::run::Hooks {
             log: &|_| {},
             extra: &extra,
+            budget: &|| 0,
             cover: &crate::cover::NoCover,
         };
         let out = tick_with_hooks(utc("2026-10-29T20:45:00Z"), &s, &m, &FakeNs, &l, &hooks).await;
@@ -1604,7 +2182,9 @@ mod run_tests {
         let (m, l) = (md(false), llm(true, true));
         let want = "indexes | quotes ok=0 http429=0 http_other=0 empty=0 stale=0 parse=0 net=0 \
                     skipped=0; movers liquid=0 gainers=0 losers=0; reasons proposed=0 kept=0 hedged=0; \
-                    search_err=0 llm_err=0 news_stale=0 news_noise=0; indexes ok=3 err=1";
+                    search_err=0 llm_err=0 news_stale=0 news_noise=0; \
+                    macro queries=0 hits=0 items=0; themes found=0 kept=0 searched=0; \
+                    indexes ok=3 err=1";
         for t in ["2026-11-06T21:45:00Z", "2026-11-06T23:55:00Z"] {
             assert_eq!(
                 tick(utc(t), &s, &m, &FakeNs, &l).await,
@@ -1802,10 +2382,15 @@ mod run_tests {
                 name: "Fidelity National".into(),
                 reasons: vec![],
             }],
+            macro_items: Field::Missing {
+                reason: "n/a".into(),
+            },
             after_hours: Field::Missing {
                 reason: "n/a".into(),
             },
             reported: vec![],
+            themes: vec![],
+            theme_candidates: vec![],
             diagnostics: vec![],
         };
         let lines = c.cover_lines(&f);

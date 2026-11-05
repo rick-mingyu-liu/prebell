@@ -13,7 +13,7 @@ import { pendingTitle, typeLabel } from "../lib/labels";
 import type { PostListItem } from "../lib/posts";
 import { formatDate, formatDayShort, formatEt, formatMonthDay } from "../lib/time";
 import { translator } from "../lib/translator";
-import { splitTail, trimHead, trimStory } from "../lib/trim";
+import { splitAtMovers, splitTail, trimHead, trimStory } from "../lib/trim";
 
 export interface BriefViewProps {
   data: BriefData;
@@ -24,8 +24,10 @@ export interface BriefViewProps {
 
 /**
  * A post page as one reading column: kicker, serif headline, publish time with the checked tag, cover,
- * then the body. A brief with facts leads with its summary and the movers table, and its body loses
- * the tables the facts replace; without facts, and for an earnings check, the body keeps its tables
+ * then the body. A brief with facts leads with its summary, its body loses the tables the facts
+ * replace, and the movers table sits under the body's movers heading, right before the movers prose;
+ * a body without that heading (an older post) and a pending page show the table first under a generic
+ * heading. Without facts, and for an earnings check, the body keeps its tables
  * (the key-figure table exactly as written) and an earnings check adds its charts. Then the sources,
  * the post's own disclaimer, the author, the signup (when enabled), a brief's neighbours and the partner strip.
  */
@@ -39,11 +41,20 @@ export default function BriefView({ data, locale, signup }: BriefViewProps) {
   const movers = facts ? [...facts.gainers, ...facts.losers] : [];
   // The headline and lede show the title and summary, so the body starts after them.
   const story = pending ? null : splitTail(facts ? trimStory(post.bodyMd, post.summary) : trimHead(post.bodyMd, post.summary));
+  // The movers table goes under the body's movers heading when there is one.
+  const split = story && movers.length > 0 ? splitAtMovers(story.body) : null;
+  const inline = split?.heading ? { before: split.before, heading: split.heading, after: split.after } : null;
   const tag: CoverProps["tag"] = kind
     ? { kind: "label", text: `${formatMonthDay(post.tradingDate, locale)} · ${t(`paper.edition.${kind}`)}` }
     : post.ticker
       ? { kind: "logo", ticker: post.ticker }
       : { kind: "label", text: typeLabel(t, post.contentType) };
+  const moversSection = (heading: string) => (
+    <section className="story-movers" aria-labelledby="movers">
+      <h2 id="movers">{heading}</h2>
+      <MoversTable movers={movers} locale={locale} variant="table" showPrice priceLabel={facts?.kind === "recap" ? "close" : "last"} />
+    </section>
+  );
   const neighbour = (p: PostListItem) => `${typeLabel(t, p.contentType)} · ${formatDayShort(p.tradingDate, locale)}`;
 
   return (
@@ -76,20 +87,15 @@ export default function BriefView({ data, locale, signup }: BriefViewProps) {
 
       <div className="story-body">
         {story && post.summary && <p className="story-lede">{post.summary}</p>}
-        {movers.length > 0 && (
-          <section className="story-movers" aria-labelledby="movers">
-            <h2 id="movers">{t("brief.movers")}</h2>
-            <MoversTable
-              movers={movers}
-              locale={locale}
-              variant="table"
-              showPrice
-              priceLabel={facts?.kind === "recap" ? "close" : "last"}
-            />
-          </section>
-        )}
+        {movers.length > 0 && !inline && moversSection(t("brief.movers"))}
         {!story ? (
           <PendingNotice slug={post.slug} locale={locale} />
+        ) : inline ? (
+          <>
+            {inline.before && <PostBody markdown={inline.before} sources={sources} colorSigned />}
+            {moversSection(inline.heading)}
+            {inline.after && <PostBody markdown={inline.after} sources={sources} colorSigned />}
+          </>
         ) : (
           story.body && <PostBody markdown={story.body} sources={sources} colorSigned={facts !== null} />
         )}
