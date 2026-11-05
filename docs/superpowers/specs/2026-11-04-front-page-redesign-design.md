@@ -107,13 +107,16 @@ at 1.6–1.7 line height; metadata 12.5px.
 
 **Masthead.** Centred "PreBell" in the serif with 盘前铃 beside it in small
 grey, a date line underneath in small caps ("Wednesday, November 4, 2026 ·
-After the close" / "Before the bell"), then navigation (Briefs, Earnings,
+After the close" / "Before the bell", and "Weekend edition" on Saturday and
+Sunday), then navigation (Briefs, Earnings,
 Calendar, About, 中文/EN) in the same small-caps line, and a double rule.
 The Chinese edition shows the Chinese name first and the English second.
 
 **Index line.** One centred grey line under the masthead on every page: S&P
 500, Nasdaq 100, Dow, Russell 2000 with level and ▲/▼ percentage in muted
-green/red, tabular figures, and the as-of time. The data comes from a small
+green/red, tabular figures, and the as-of time (with the month and day in
+front, "as of Nov 4, 4:46 PM ET", when the snapshot is from an earlier ET
+day). The data comes from a small
 snapshot the generator writes to the existing D1 `kv` table (key
 `index_line`, JSON with the four indexes, their level, change, percentage
 and as-of time, EN labels only; the web localizes) each time a brief
@@ -174,9 +177,9 @@ text, so the page never waits on the image.
 on the About page under "Who is behind it". Greyscale round photo (72px),
 committed under `apps/web/public/author.jpg` so the site never hotlinks
 anything. A real head-and-shoulders photo of Rick is the intent; the
-GitHub avatar is only the placeholder until he supplies one, and if no
-photo is supplied by launch the block renders with no image rather than
-the cartoon avatar. Name "Rick Liu" in
+site ships no image until he supplies `apps/web/public/author.jpg`; until
+then the block renders with no image (the GitHub avatar placeholder was
+removed after the final review). Name "Rick Liu" in
 the serif, one line: "AI & software engineer, University of Waterloo. Built
 PreBell to read earnings the way an analyst would, without the analyst."
 Links: rickmingyuliu.com, GitHub (github.com/rick-mingyu-liu), LinkedIn
@@ -187,13 +190,15 @@ the archive. Chinese edition: name in Latin letters, bio translated.
 footer area: "Get the weekly digest" heading, one line of copy ("One email a
 week: the week's briefs and earnings checks. No spam, unsubscribe anytime."),
 an email field and a Subscribe button in ink on paper, and after submission
-an inline confirmation ("Check your inbox to confirm.") or error. Below it a
+an inline confirmation ("Check your inbox to confirm.", or "You're already
+on the list." for an address already subscribed) or error. Below it a
 small "Already subscribed? Manage preferences" link to Buttondown's portal.
+The block renders only once `BUTTONDOWN_API_KEY` is set.
 
 **Partner strip.** One line above the footer: "From our partners" in small
 caps, the four partner names as plain links (moomoo, Wealthsimple, OKX,
-Crypto.com; current geo rules unchanged), and "Affiliate links · not
-investment advice" at the right. The sidebar box and the TermPocket card go
+Crypto.com; current geo rules unchanged), and "Affiliate links: PreBell may
+earn a reward if you sign up. Not investment advice." at the right. The sidebar box and the TermPocket card go
 away; TermPocket becomes a line in the About page.
 
 **Footer.** The existing disclaimer sentence, About, 中文/EN. No RSS link:
@@ -207,11 +212,13 @@ the site has no feed yet; a feed is a separate follow-up.
   (`CF_AI_TOKEN`, Workers AI read/run) set as a Worker secret. Steps 4,
   size 1024×576.
 - Prompt: a quiet, documentary, desaturated photograph of a place tied to the
-  story's subject; no people, no faces, no text, no logos, no charts. The
-  subject comes from facts: for earnings, the company's industry and
-  products (a short descriptor the generator already knows or derives from
-  the company name); for briefs, a trading-floor / city-skyline / exchange
-  exterior family rotated by weekday. The exact prompt wording and negative
+  story's subject; no people, no faces, no text, no signage, no logos, no
+  charts. The prompt never names the company: for earnings, one of eight
+  generic, people-free and text-free settings (office tower, laboratory
+  bench, automated factory floor, container port, data center, wind farm,
+  pharmacy shelf, highway interchange) picked by a stable hash of the
+  ticker; for briefs, an empty exchange hall / exchange exterior / skyline /
+  river bridge / harbour family rotated by weekday. The exact prompt wording and negative
   prompt are the builder's.
 - Stored in R2 `prebell-facts` under `covers/<slug>.png` (the model returns
   PNG; convert to JPEG only if a pure-Rust encoder is already a dependency,
@@ -339,8 +346,8 @@ the site has no feed yet; a feed is a separate follow-up.
 - Home keeps a recent-posts list and brief pages keep previous/next links;
   the home tabs and the post-page earnings strip are removed. (Rick,
   2026-11-04, from the builder check's question.)
-- Author photo is the GitHub avatar; links are site, GitHub and LinkedIn.
-  (Rick.)
+- Author photo: no image until Rick supplies `apps/web/public/author.jpg`;
+  links are site, GitHub and LinkedIn. (Rick.)
 
 ## Amendments after the code inventory (2026-11-04, my calls)
 
@@ -372,8 +379,9 @@ the site has no feed yet; a feed is a separate follow-up.
   premarket), non-exact, and shows the date it found in its heading.
 - **Newsreader is self-hosted** via `@fontsource-variable/newsreader` and
   `next/font/local`, matching how Inter is loaded; no Google Fonts request.
-- **`cover=` diagnostics** are appended to the logged line for briefs only
-  (not stored in facts); earnings has no diagnostics line, so the Worker's
+- **`cover=` diagnostics** are logged for briefs only, as a second line
+  after the scene step; the facts-time `diagnostics:` line is logged before
+  the drafts (not stored in facts, not in `last_error`); earnings has no diagnostics line, so the Worker's
   cover client logs its own warn on failure.
 - **Migration 0006** adds the three nullable columns; web test seeds that
   insert into `post_translations` positionally are converted to column
