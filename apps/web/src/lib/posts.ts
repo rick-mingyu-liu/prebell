@@ -22,7 +22,17 @@ export interface D1Like {
   prepare(sql: string): D1StatementLike;
 }
 
-export interface PostView {
+/** What a post's cover and kicker need: the R2 cover image, its two lines in this language, the ticker. */
+export interface PostCover {
+  /** R2 key of the cover image (`FACTS` bucket, served at `/<key>`), if the generator stored one. */
+  coverKey: string | null;
+  /** The cover's two headline lines in this language (the second may be ""), or null without a cover. */
+  coverLines: [string, string] | null;
+  /** The earnings filing's ticker; null for briefs. */
+  ticker: string | null;
+}
+
+export interface PostView extends PostCover {
   slug: string;
   contentType: string;
   tradingDate: string;
@@ -41,7 +51,7 @@ export interface PostView {
 /** A post's heading data: a `PostView` without the body and its sources. */
 export type PostHead = Omit<PostView, "bodyMd" | "sources">;
 
-export interface PostListItem {
+export interface PostListItem extends PostCover {
   slug: string;
   contentType: string;
   tradingDate: string;
@@ -60,7 +70,7 @@ export interface AdjacentPosts {
 
 const other = (lang: Lang): Lang => (lang === "en" ? "zh" : "en");
 
-interface Row {
+interface Row extends CoverRow {
   id: number;
   slug: string;
   content_type: string;
@@ -74,19 +84,39 @@ interface Row {
   facts_r2_key: string | null;
 }
 
+/** Columns every post SELECT adds; `f` is the LEFT JOINed `earnings_filings`. */
+export const COVER_COLUMNS = `p.cover_key, t.cover_line1, t.cover_line2, f.ticker`;
+export const JOIN_FILING = `LEFT JOIN earnings_filings f ON f.run_key = p.run_key`;
+
+export interface CoverRow {
+  cover_key: string | null;
+  cover_line1: string | null;
+  cover_line2: string | null;
+  ticker: string | null;
+}
+
+export function toCover(r: CoverRow): PostCover {
+  return {
+    coverKey: r.cover_key,
+    coverLines: r.cover_line1 === null ? null : [r.cover_line1, r.cover_line2 ?? ""],
+    ticker: r.ticker,
+  };
+}
+
 // A post is shown in `lang` when that translation is published, or (ZH only)
 // pending while the EN text is published — the page then links to English.
 const VISIBLE = `(t.status = 'published' OR (t.lang = 'zh' AND t.status = 'pending' AND o.status = 'published'))`;
 
 const HEAD_COLUMNS = `p.id, p.slug, p.content_type, p.trading_date, p.published_at, p.facts_r2_key, t.status, t.title,
-  t.summary, o.status AS other_status`;
+  t.summary, o.status AS other_status, ${COVER_COLUMNS}`;
 const FROM_VIEW = `FROM posts p
 JOIN post_translations t ON t.post_id = p.id AND t.lang = ?
-LEFT JOIN post_translations o ON o.post_id = p.id AND o.lang = ?`;
+LEFT JOIN post_translations o ON o.post_id = p.id AND o.lang = ?
+${JOIN_FILING}`;
 const SELECT_VIEW = `SELECT ${HEAD_COLUMNS}, t.body_md ${FROM_VIEW}`;
 const SELECT_HEAD = `SELECT ${HEAD_COLUMNS} ${FROM_VIEW}`;
 
-interface ListRow {
+interface ListRow extends CoverRow {
   slug: string;
   content_type: string;
   trading_date: string;
@@ -103,6 +133,7 @@ function toListItem(r: ListRow): PostListItem {
     publishedAt: r.published_at,
     title: r.title ?? "",
     summary: r.summary ?? "",
+    ...toCover(r),
   };
 }
 
@@ -117,6 +148,7 @@ function toHead(row: Row): PostHead {
     status: row.status === "pending" ? "pending" : "published",
     hasOtherLang: row.other_status === "published",
     factsKey: row.facts_r2_key,
+    ...toCover(row),
   };
 }
 
@@ -170,8 +202,9 @@ export async function listPosts(
   const p = Number.isFinite(page) && page >= 1 ? Math.floor(page) : 1;
   const { results } = await db
     .prepare(
-      `SELECT p.slug, p.content_type, p.trading_date, p.published_at, t.title, t.summary
+      `SELECT p.slug, p.content_type, p.trading_date, p.published_at, t.title, t.summary, ${COVER_COLUMNS}
        FROM posts p JOIN post_translations t ON t.post_id = p.id AND t.lang = ?
+       ${JOIN_FILING}
        WHERE t.status = 'published' AND p.content_type IN (?, ?)
        ORDER BY p.trading_date DESC, p.published_at DESC, p.id DESC
        LIMIT ? OFFSET ?`,
@@ -197,8 +230,9 @@ export async function getAdjacentPosts(
   const side = (dir: "prev" | "next") => {
     const [cmp, order] = dir === "prev" ? ["<", "DESC"] : [">", "ASC"];
     return `SELECT * FROM (
-       SELECT '${dir}' AS dir, p.slug, p.content_type, p.trading_date, p.published_at, t.title, t.summary
+       SELECT '${dir}' AS dir, p.slug, p.content_type, p.trading_date, p.published_at, t.title, t.summary, ${COVER_COLUMNS}
        FROM posts p CROSS JOIN post_translations t ON t.post_id = p.id AND t.lang = ?
+       ${JOIN_FILING}
        WHERE t.status = 'published' AND p.content_type IN ('premarket', 'recap')
          AND p.trading_date ${cmp}= ? AND (p.trading_date, p.published_at, p.slug) ${cmp} (?, ?, ?)
        ORDER BY p.trading_date ${order}, p.published_at ${order}, p.slug ${order} LIMIT 1)`;

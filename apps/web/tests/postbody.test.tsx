@@ -17,7 +17,7 @@ const expectNoEvil = (out: string) => {
 describe("PostBody", () => {
   it("renders GFM tables", () => {
     const out = html("| Contract | Last | Change |\n|---|---:|---:|\n| S&P 500 | 5,912.25 | +0.42% |\n");
-    expect(out).toContain('<div class="table-wrap"><table>');
+    expect(out).toContain('<div class="table-wrap"><table class="table">');
     expect(out).toContain("<th>Contract</th>");
     expect(out).toContain('<td style="text-align:right">+0.42%</td>');
   });
@@ -81,7 +81,7 @@ describe("PostBody", () => {
     const out = html(
       "| Ticker | Why |\n|---|---|\n| AAPL | [x](https://evil.example/a) ![i](https://evil.example/i.png) www.evil.example HTTPS://evil.example/b |\n",
     );
-    expect(out).toContain("<table>");
+    expect(out).toContain('<table class="table">');
     expect(out).not.toContain("<a");
     expectNoEvil(out);
   });

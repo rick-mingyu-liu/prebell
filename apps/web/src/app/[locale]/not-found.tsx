@@ -6,7 +6,7 @@ export default async function NotFound() {
   const t = await getTranslations("notFound");
   return (
     <section className="notfound">
-      <p className="notfound-code" aria-hidden="true">
+      <p className="kicker" aria-hidden="true">
         404
       </p>
       <h1>{t("title")}</h1>

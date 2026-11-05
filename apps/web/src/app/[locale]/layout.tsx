@@ -4,10 +4,17 @@ import { notFound } from "next/navigation";
 import { hasLocale } from "next-intl";
 import { getTranslations, setRequestLocale } from "next-intl/server";
 import Disclaimer from "@/components/Disclaimer";
+import IndexLine from "@/components/IndexLine";
 import LangSwitch from "@/components/LangSwitch";
-import { htmlLang, routing } from "@/i18n/routing";
-import { inter } from "@/lib/fonts";
+import Masthead from "@/components/Masthead";
+import { getDb } from "@/lib/db";
+import { todayEt } from "@/lib/earnings";
+import { inter, newsreader } from "@/lib/fonts";
+import { type IndexLineView, loadIndexLine } from "@/lib/indexline";
 import { siteOrigin } from "@/lib/seo";
+import { editionAt, formatDate } from "@/lib/time";
+import { translator } from "@/lib/translator";
+import { htmlLang, routing, type Locale } from "@/i18n/routing";
 import "../globals.css";
 
 // Every page reads D1 per request; the edge caches them for 60s (next.config headers).
@@ -24,38 +31,45 @@ export async function generateMetadata({ params }: LayoutProps<"/[locale]">): Pr
   };
 }
 
+/** "Wednesday, November 4, 2026 · After the close": today's ET date and the edition of the moment. */
+function defaultDateline(locale: Locale): string {
+  const t = translator(locale);
+  const edition = t(`paper.dateline.${editionAt()}`);
+  return `${formatDate(todayEt(), locale, "full")} · ${edition}`;
+}
+
+/** The index snapshot, or null: a missing or unreadable one must not take a page down. */
+async function indexLine(): Promise<IndexLineView | null> {
+  try {
+    return await loadIndexLine(getDb());
+  } catch (err) {
+    console.error("index line unavailable", err);
+    return null;
+  }
+}
+
 export default async function LocaleLayout({ children, params }: LayoutProps<"/[locale]">) {
   const { locale } = await params;
   if (!hasLocale(routing.locales, locale)) notFound();
   setRequestLocale(locale);
   const t = await getTranslations("site");
   const beacon = process.env.CF_BEACON_TOKEN;
+  const line = await indexLine();
 
   return (
-    <html lang={htmlLang(locale)} className={inter.variable}>
+    <html lang={htmlLang(locale)} className={`${inter.variable} ${newsreader.variable}`}>
       <body>
-        <header className="site-header">
-          <div className="wrap">
-            <Link href={`/${locale}`} className="wordmark">
-              <span>{t.rich("wordmark", { b: (chunks) => <b>{chunks}</b> })}</span>
-              <small lang="zh-Hans">{t("wordmarkSub")}</small>
-            </Link>
-            <nav className="site-nav" aria-label={t("navLabel")}>
-              <Link href={`/${locale}/archive`}>{t("briefs")}</Link>
-              <Link href={`/${locale}/archive?type=earnings`}>{t("earnings")}</Link>
-              <Link href={`/${locale}/earnings`}>{t("calendar")}</Link>
-              <Link href={`/${locale}/about`}>{t("about")}</Link>
-              <LangSwitch locale={locale} />
-            </nav>
-          </div>
-        </header>
+        <div className="wrap">
+          <Masthead locale={locale} dateline={defaultDateline(locale)} />
+          <IndexLine line={line} locale={locale} />
+        </div>
         <main className="wrap">{children}</main>
         <footer className="site-footer">
           <div className="wrap">
             <Disclaimer />
             <p className="footer-links">
               <Link href={`/${locale}/about`}>{t("about")}</Link>
-              <LangSwitch locale={locale} className="footer-lang" />
+              <LangSwitch locale={locale} />
             </p>
           </div>
         </footer>

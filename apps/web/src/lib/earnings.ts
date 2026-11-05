@@ -1,6 +1,6 @@
 /** Read-only queries over the earnings tables (migrations/0003_earnings.sql). */
 
-import type { D1Like, Lang, PostListItem } from "./posts";
+import { COVER_COLUMNS, JOIN_FILING, toCover, type CoverRow, type D1Like, type Lang, type PostListItem } from "./posts";
 
 export type Slot = "bmo" | "amc" | "unknown";
 export type CalendarStatus = "unconfirmed" | "confirmed" | "reported";
@@ -182,7 +182,7 @@ export async function listTickerCalendar(db: D1Like, ticker: string, lang: Lang)
   return results.map(toEntry);
 }
 
-interface ListRow {
+interface ListRow extends CoverRow {
   slug: string;
   content_type: string;
   trading_date: string;
@@ -198,9 +198,10 @@ const toItem = (r: ListRow): PostListItem => ({
   publishedAt: r.published_at,
   title: r.title ?? "",
   summary: r.summary ?? "",
+  ...toCover(r),
 });
 
-const EARNINGS_LIST = `SELECT p.slug, p.content_type, p.trading_date, p.published_at, t.title, t.summary
+const EARNINGS_LIST = `SELECT p.slug, p.content_type, p.trading_date, p.published_at, t.title, t.summary, ${COVER_COLUMNS}
   FROM posts p
   JOIN earnings_filings f ON f.run_key = p.run_key
   JOIN post_translations t ON t.post_id = p.id AND t.lang = ?
@@ -228,8 +229,9 @@ export async function listLatestEarnings(db: D1Like, lang: Lang, n: number): Pro
 export async function listRecentBriefs(db: D1Like, lang: Lang, n: number): Promise<PostListItem[]> {
   const { results } = await db
     .prepare(
-      `SELECT p.slug, p.content_type, p.trading_date, p.published_at, t.title, t.summary
+      `SELECT p.slug, p.content_type, p.trading_date, p.published_at, t.title, t.summary, ${COVER_COLUMNS}
        FROM posts p JOIN post_translations t ON t.post_id = p.id AND t.lang = ?
+       ${JOIN_FILING}
        WHERE t.status = 'published' AND p.content_type <> 'earnings'
        ORDER BY p.trading_date DESC, p.published_at DESC, p.id DESC LIMIT ?`,
     )

@@ -10,7 +10,6 @@
     "earnings": "财报",
     "briefs": "简报",
     "calendar": "日历",
-    "wordmark": "Pre<b>Bell</b>",
     "wordmarkSub": "盘前铃",
     "navLabel": "主导航"
   },
@@ -26,14 +25,23 @@
     "panelTabs": "涨跌榜与财报速评",
     "noMovers": "本期暂无涨跌榜。",
     "allEarnings": "全部财报速评 →",
-    "moversInBrief": "涨跌榜见完整简报 →"
+    "moversInBrief": "涨跌榜见完整简报 →",
+    "leadRead": "阅读完整回顾 →",
+    "earningsChecks": "财报速评",
+    "topMovers": "涨跌榜",
+    "reporting": "{date}财报",
+    "recentSection": "近期",
+    "beforeOpen": "盘前",
+    "afterClose": "盘后",
+    "timeTbd": "时间待定"
   },
   "post": {
     "permalink": "本文链接",
     "published": "发布于 {time}",
     "pendingTitle": "{type} {date}",
     "pending": "中文版稍后推出",
-    "readEnglish": "阅读英文版"
+    "readEnglish": "阅读英文版",
+    "sources": "来源"
   },
   "archive": {
     "title": "归档",
@@ -48,7 +56,8 @@
     "title": "关于",
     "p1": "盘前铃 PreBell 在每个美股交易日开盘前发布一份简短的盘前简报（股指期货、盘前涨跌幅最大的个股及其原因、当日关注要点），并在收盘后发布收盘回顾（主要指数收盘、异动个股及其原因、盘后财报关注）。",
     "p2": "所有文章均根据公开的市场数据和新闻自动生成。发布前会将数字与源数据逐一核对，并列出所有来源。时间均为美东时间。",
-    "p3": "英文版先行发布，中文版随后推出。"
+    "p3": "英文版先行发布，中文版随后推出。",
+    "whoHeading": "关于作者"
   },
   "notFound": {
     "title": "页面不存在",
@@ -85,7 +94,8 @@
     "dates": "财报日期",
     "readCheck": "阅读速评",
     "charts": "图表（GAAP）",
-    "chartsNote": "图表为美国证监会文件中的 GAAP 数据；标为 8-K 的最后一栏为本次公布数据。空缺表示公司未单独公布该季度数据。"
+    "chartsNote": "图表为美国证监会文件中的 GAAP 数据；标为 8-K 的最后一栏为本次公布数据。空缺表示公司未单独公布该季度数据。",
+    "checkedFiling": "✓ 每个数字均出自申报文件"
   },
   "index": {
     "es": "标普500期货",
@@ -99,12 +109,19 @@
     "rut": "罗素2000"
   },
   "movers": {
-    "noNews": "暂无明确消息"
+    "noNews": "暂无明确消息",
+    "company": "公司",
+    "reason": "原因",
+    "last": "最新价",
+    "change": "涨跌幅",
+    "close": "收盘价"
   },
   "partners": {
     "brokers": "券商",
     "crypto": "加密交易所",
-    "disclosure": "推广链接：通过链接注册，PreBell 可能获得奖励。不构成投资建议。"
+    "disclosure": "推广链接：通过链接注册，PreBell 可能获得奖励。不构成投资建议。",
+    "from": "合作伙伴",
+    "affiliateNote": "推广链接 · 不构成投资建议"
   },
   "termpocket": {
     "name": "TermPocket",
@@ -119,6 +136,48 @@
     "movers": "涨跌榜",
     "adjacent": "更多简报",
     "prev": "上一篇",
-    "next": "下一篇"
+    "next": "下一篇",
+    "kickerEarnings": "财报速评 · {ticker}"
+  },
+  "paper": {
+    "masthead": {
+      "main": "盘前铃",
+      "sub": "PreBell"
+    },
+    "dateline": {
+      "premarket": "盘前",
+      "recap": "收盘后",
+      "earnings": "财报速评"
+    },
+    "index": {
+      "asOf": "截至 {time}",
+      "up": "上涨",
+      "down": "下跌"
+    },
+    "edition": {
+      "premarket": "盘前",
+      "recap": "收盘回顾"
+    }
+  },
+  "author": {
+    "name": "Rick Liu",
+    "bio": "滑铁卢大学 AI 与软件工程师。做盘前铃，是为了像分析师一样读财报，但不需要分析师。",
+    "website": "rickmingyuliu.com",
+    "github": "GitHub",
+    "linkedin": "LinkedIn",
+    "allBriefs": "全部简报 →",
+    "heading": "关于作者"
+  },
+  "signup": {
+    "heading": "订阅每周精选",
+    "copy": "每周一封邮件：本周的简报与财报速评。不发垃圾邮件，随时可退订。",
+    "emailLabel": "邮箱地址",
+    "placeholder": "you@example.com",
+    "submit": "订阅",
+    "sending": "正在订阅…",
+    "success": "请查收邮件并确认订阅。",
+    "error": "出了点问题，请稍后再试。",
+    "invalid": "请输入有效的邮箱地址。",
+    "manage": "已经订阅？管理订阅偏好"
   }
 }

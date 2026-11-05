@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { trimStory } from "../src/lib/trim";
+import { splitTail, trimHead, trimStory } from "../src/lib/trim";
 
 /** The live 2026-10-30 premarket bodies, as the generator stored them. */
 const body = (lang: "en" | "zh") =>
@@ -96,5 +96,52 @@ describe("trimStory", () => {
     trimStory(md);
     // A generous bound: the quadratic regex this guards against takes far longer at this size.
     expect(performance.now() - start).toBeLessThan(1000);
+  });
+});
+
+describe("trimHead", () => {
+  it("drops the title and summary and keeps the tables", () => {
+    const md = body("en");
+    const out = trimHead(md, summaryOf(md));
+    expect(out).not.toMatch(/^# /m);
+    expect(out).not.toContain("US futures fell for a second day as weak tech earnings drove a rotation");
+    expect(out.startsWith("| Contract | Last | Change |")).toBe(true);
+    expect(out).toContain("| INTC | Intel | 68.13 | -26.00% |");
+    expect(out).toContain("## Sources");
+  });
+
+  it("keeps a first paragraph that is not the summary", () => {
+    expect(trimHead("# T\n\nSomething else.\n\n## A\n\nx\n", "The summary.")).toBe("Something else.\n\n## A\n\nx\n");
+  });
+});
+
+describe("splitTail", () => {
+  it("splits the sources list and the closing disclaimer off a brief", () => {
+    const md = body("en");
+    const { body: rest, sources, disclaimer } = splitTail(trimStory(md, summaryOf(md)));
+    expect(rest.startsWith("## Futures")).toBe(true);
+    expect(rest.trimEnd().endsWith("## What to watch\n\nn/a")).toBe(true);
+    expect(rest).not.toContain("## Sources");
+    expect(sources.startsWith("- [Why Is Mondelez")).toBe(true);
+    expect(links(sources)).toEqual(links(md));
+    expect(disclaimer).toBe("This brief is generated automatically from public data for information only. It is not investment advice.");
+  });
+
+  it("splits a ZH brief at its 来源 heading", () => {
+    const { body: rest, sources, disclaimer } = splitTail(trimStory(body("zh")));
+    expect(rest).not.toContain("## 来源");
+    expect(links(sources)).toHaveLength(links(body("zh")).length);
+    expect(disclaimer).toBe("本简报根据公开数据自动生成，仅供参考，不构成投资建议。");
+  });
+
+  it("finds the disclaimer without a sources section, and nothing without a section heading", () => {
+    expect(splitTail("## A\n\nText.\n\nNot advice.\n")).toEqual({ body: "## A\n\nText.\n", sources: "", disclaimer: "Not advice." });
+    expect(splitTail("Only a paragraph.\n")).toEqual({ body: "Only a paragraph.\n", sources: "", disclaimer: "" });
+    expect(splitTail("## A\n\n- one\n- two\n")).toEqual({ body: "## A\n\n- one\n- two\n", sources: "", disclaimer: "" });
+  });
+
+  it("ignores a sources heading or paragraph inside a code fence", () => {
+    const md = "## A\n\n```\n## Sources\n\nlast\n```\n";
+    expect(splitTail(md)).toEqual({ body: md, sources: "", disclaimer: "" });
   });
 });

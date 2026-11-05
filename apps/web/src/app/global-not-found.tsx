@@ -1,6 +1,6 @@
 import type { Metadata } from "next";
 import Link from "next/link";
-import { inter } from "@/lib/fonts";
+import { inter, newsreader } from "@/lib/fonts";
 import en from "../../messages/en.json";
 import zh from "../../messages/zh.json";
 import "./globals.css";
@@ -12,21 +12,18 @@ export const metadata: Metadata = { title: `${en.notFound.title} · ${zh.notFoun
 
 export default function GlobalNotFound() {
   return (
-    <html lang="en" className={inter.variable}>
+    <html lang="en" className={`${inter.variable} ${newsreader.variable}`}>
       <body>
-        <header className="site-header">
-          <div className="wrap">
-            <Link href="/en" className="wordmark">
-              <span>
-                Pre<b>Bell</b>
-              </span>
-              <small lang="zh-Hans">{zh.site.wordmarkSub}</small>
+        <div className="wrap">
+          <header className="masthead">
+            <Link href="/en" className="masthead-name">
+              PreBell <small lang="zh-Hans">{zh.site.wordmarkSub}</small>
             </Link>
-          </div>
-        </header>
+          </header>
+        </div>
         <main className="wrap">
           <section className="notfound">
-            <p className="notfound-code" aria-hidden="true">
+            <p className="kicker" aria-hidden="true">
               404
             </p>
             <h1>{en.notFound.title}</h1>

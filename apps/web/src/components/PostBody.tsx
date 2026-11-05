@@ -32,7 +32,7 @@ function components(sources: ReadonlySet<string>): Components {
     table({ children }) {
       return (
         <div className="table-wrap">
-          <table>{children}</table>
+          <table className="table">{children}</table>
         </div>
       );
     },

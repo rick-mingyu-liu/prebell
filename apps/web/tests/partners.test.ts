@@ -6,6 +6,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import nextConfig from "../next.config";
 import { GET } from "../src/app/api/partners/route";
 import { PartnerBoxes } from "../src/components/PartnerLinks";
+import PartnersStrip from "../src/components/PartnersStrip";
 import Sidebar from "../src/components/Sidebar";
 import { countryOf, partnersFor, type PartnersResponse } from "../src/lib/partners";
 
@@ -140,6 +141,12 @@ describe("next.config headers", () => {
   const rulesFor = async (path: string) =>
     (await nextConfig.headers!()).filter((rule) => getPathMatch(rule.source)(path) !== false);
 
+  it("marks /api/subscribe private, no-store too", async () => {
+    const rules = await rulesFor("/api/subscribe");
+    const values = rules.flatMap((r) => r.headers).filter((h) => h.key.toLowerCase() === "cache-control");
+    expect(values.map((h) => h.value)).toEqual(["private, no-store"]);
+  });
+
   it("marks /api/partners private, no-store and keeps the cacheable locale rule off it", async () => {
     const rules = await rulesFor("/api/partners");
     const values = rules.flatMap((r) => r.headers).filter((h) => h.key.toLowerCase() === "cache-control");
@@ -170,6 +177,43 @@ describe("Sidebar", () => {
     expect(out).not.toContain("/logos/partners/");
     expect(out).not.toContain(DISCLOSURE_ZH);
     expect(out).toContain("来自 PreBell 团队。用 AI 助手 Pocky 规划你的目标与习惯。");
+  });
+});
+
+describe("PartnersStrip", () => {
+  const PARTNER_HOSTS = ["moomoo.com", "okx.com", "crypto.com", "wealthsimple.com"];
+
+  it("renders the heading and the disclosure, no partner hosts server-side", () => {
+    const out = renderToStaticMarkup(createElement(PartnersStrip, { locale: "en" }));
+    expect(out).toContain('<aside class="partners-strip"');
+    expect(out).toContain("From our partners");
+    expect(out).toContain("Affiliate links · not investment advice");
+    for (const host of PARTNER_HOSTS) expect(out).not.toContain(host);
+    expect(out).not.toContain("/logos/partners/");
+  });
+
+  it("uses the Chinese copy on ZH pages", () => {
+    const out = renderToStaticMarkup(createElement(PartnersStrip, { locale: "zh" }));
+    expect(out).toContain("合作伙伴");
+    expect(out).toContain("推广链接 · 不构成投资建议");
+  });
+
+  it("lists the partner names as plain sponsored links, no logos, no group headings", () => {
+    const out = renderToStaticMarkup(
+      createElement(PartnerBoxes, {
+        variant: "strip",
+        labels: { brokers: "Brokers", crypto: "Crypto exchanges", disclosure: "x" },
+        data: {
+          brokers: [{ id: "moomoo", name: "moomoo", url: "https://j.moomoo.com/0J1BGf", logo: "/logos/partners/moomoo.png" }],
+          crypto: [{ id: "okx", name: "OKX", url: "https://okx.com/join/AIAFMP3U" }],
+        },
+      }),
+    );
+    expect(out).toContain('<a href="https://j.moomoo.com/0J1BGf" target="_blank" rel="sponsored noopener noreferrer">moomoo</a>');
+    expect(out).toContain('rel="sponsored noopener noreferrer">OKX</a>');
+    expect(out).not.toContain("<img");
+    expect(out).not.toContain("Brokers");
+    expect(out).not.toContain("side-box");
   });
 });
 

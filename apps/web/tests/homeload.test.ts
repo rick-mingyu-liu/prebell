@@ -16,10 +16,28 @@ INSERT INTO post_translations (post_id, lang, status, title, summary, body_md, u
 INSERT INTO post_translations (post_id, lang, status, title, summary, body_md, updated_at) VALUES (${id},'zh','published','中文 ${type} ${date}','摘要','# 正文','${publishedAt}');\n`;
 }
 
+/** A published EN earnings check for `ticker`, published at 21:00Z on `date`; slug `<ticker>-<date>-earnings`. */
+function check(id: number, ticker: string, date: string): string {
+  const key = `earnings:${ticker}:${id}`;
+  const ts = `${date}T21:00:00Z`;
+  return `INSERT INTO runs VALUES ('${key}','earnings','${date}','published',1,NULL,'${ts}','${ts}');
+INSERT INTO posts (id, run_key, content_type, template_id, trading_date, slug, facts_r2_key, published_at)
+VALUES (${id},'${key}','earnings','earnings:v1','${date}','${ticker.toLowerCase()}-${date}-earnings','x','${ts}');
+INSERT INTO earnings_filings VALUES ('acc-${id}',1,'${ticker}','8-K','2.02','${date}','${date}','${ts}','x.htm','${key}','done','${ts}');
+INSERT INTO post_translations (post_id, lang, status, title, summary, body_md, updated_at) VALUES (${id},'en','published','EN ${ticker}','sum','# EN','${ts}');\n`;
+}
+
+function cal(ticker: string, date: string, slot: string): string {
+  return `INSERT INTO earnings_calendar VALUES ('${ticker}','${date}','${slot}','confirmed','yahoo',NULL,NULL,NULL,'t','t',NULL,'t');\n`;
+}
+
 const seed =
   post(1, "premarket", "2026-10-30", "2026-10-30T13:20:43Z", "premarket/2026-10-30.json") +
   post(2, "recap", "2026-10-29", "2026-10-29T20:45:00Z", "recap/2026-10-29.json") +
   post(3, "premarket", "2026-10-29", "2026-10-29T12:34:00Z", "premarket/2026-10-29.json");
+
+/** The recap of 2026-10-30, published after that day's premarket. */
+const laterRecap = post(4, "recap", "2026-10-30", "2026-10-30T20:45:00Z", "recap/2026-10-29.json");
 
 /** An R2 bucket holding the fixtures that records every key it is asked for. */
 function fakeR2() {
@@ -38,43 +56,34 @@ function fakeR2() {
   return { bucket, gets };
 }
 
-const TODAY = "2026-10-30";
+const TODAY = "2026-10-30"; // a Friday
 
 describe("loadHome", () => {
-  it("defaults to the later-published brief and reads only its facts", async () => {
-    const { bucket, gets } = fakeR2();
-    const home = await loadHome(memoryD1(seed), bucket, "en", undefined, TODAY);
-    expect(home.tab).toBe("premarket");
-    expect(home.tabs).toEqual(["premarket", "recap"]);
-    expect(home.post?.slug).toBe("premarket-2026-10-30");
-    expect(gets).toEqual(["premarket/2026-10-30.json"]);
-    expect(home.facts?.kind).toBe("premarket");
-    expect(home.facts?.tradingDate).toBe("2026-10-30");
-  });
+  it("leads with the later-published brief and reads only its facts", async () => {
+    const pm = fakeR2();
+    const home = await loadHome(memoryD1(seed), pm.bucket, "en", TODAY);
+    expect(home.lead?.slug).toBe("premarket-2026-10-30");
+    expect(pm.gets).toEqual(["premarket/2026-10-30.json"]);
+    expect(home.leadFacts?.kind).toBe("premarket");
+    expect(home.leadFacts?.tradingDate).toBe("2026-10-30");
 
-  it("follows ?tab=recap: the recap post, its key and the recap kind", async () => {
-    const { bucket, gets } = fakeR2();
-    const home = await loadHome(memoryD1(seed), bucket, "zh", "recap", TODAY);
-    expect(home.tab).toBe("recap");
-    expect(home.post?.slug).toBe("recap-2026-10-29");
-    expect(gets).toEqual(["recap/2026-10-29.json"]);
-    expect(home.facts?.kind).toBe("recap");
-    expect(home.facts?.lead.symbol).toBe("^GSPC");
-  });
+    const rc = fakeR2();
+    const later = await loadHome(memoryD1(seed + laterRecap), rc.bucket, "zh", TODAY);
+    expect(later.lead?.slug).toBe("recap-2026-10-30");
+    expect(rc.gets).toEqual(["recap/2026-10-29.json"]);
+    expect(later.leadFacts?.kind).toBe("recap");
+    expect(later.leadFacts?.lead.symbol).toBe("^GSPC");
 
-  it("defaults to the recap when it was published last", async () => {
-    const { bucket, gets } = fakeR2();
-    const later = seed + post(4, "recap", "2026-10-30", "2026-10-30T20:45:00Z", "recap/2026-10-29.json");
-    const home = await loadHome(memoryD1(later), bucket, "en", undefined, TODAY);
-    expect(home.tab).toBe("recap");
-    expect(home.post?.slug).toBe("recap-2026-10-30");
-    expect(gets).toHaveLength(1);
+    // Published at the same moment: the premarket wins.
+    const tie = post(4, "recap", "2026-10-30", "2026-10-30T13:20:43Z", "recap/2026-10-29.json");
+    const tied = await loadHome(memoryD1(seed + tie), fakeR2().bucket, "en", TODAY);
+    expect(tied.lead?.slug).toBe("premarket-2026-10-30");
   });
 
   it("makes no R2 read without a post or without a facts key", async () => {
     const none = fakeR2();
-    const empty = await loadHome(memoryD1(""), none.bucket, "en", "recap", TODAY);
-    expect(empty).toMatchObject({ tab: null, tabs: [], post: null, facts: null });
+    const empty = await loadHome(memoryD1(""), none.bucket, "en", TODAY);
+    expect(empty).toEqual({ lead: null, leadFacts: null, earnings: [], recent: [], reporting: null });
     expect(none.gets).toEqual([]);
 
     const keyless = fakeR2();
@@ -82,19 +91,99 @@ describe("loadHome", () => {
       memoryD1(post(1, "premarket", "2026-10-30", "2026-10-30T13:20:43Z", null)),
       keyless.bucket,
       "en",
-      undefined,
       TODAY,
     );
-    expect(home.post?.slug).toBe("premarket-2026-10-30");
-    expect(home.facts).toBeNull();
+    expect(home.lead?.slug).toBe("premarket-2026-10-30");
+    expect(home.leadFacts).toBeNull();
     expect(keyless.gets).toEqual([]);
   });
 
-  it("lists recent briefs without the two shown in the tabs", async () => {
-    const { bucket } = fakeR2();
-    const home = await loadHome(memoryD1(seed), bucket, "en", undefined, TODAY);
-    expect(home.recent.map((p) => p.slug)).toEqual(["premarket-2026-10-29"]);
-    expect(home.earnings).toEqual([]);
-    expect(home.strip).toBeNull();
+  it("reports a facts failure with the lead's key", async () => {
+    const errors: (string | null)[] = [];
+    const bucket: R2Like = {
+      async get() {
+        return { text: async () => "{not json" };
+      },
+    };
+    const home = await loadHome(memoryD1(seed), bucket, "en", TODAY, (_e, key) => errors.push(key));
+    expect(home.leadFacts).toBeNull();
+    expect(errors).toEqual(["premarket/2026-10-30.json"]);
+  });
+
+  it("reporting comes from the day after a recap lead's date and today for a premarket lead", async () => {
+    const calendar = cal("KO", "2026-10-30", "bmo") + cal("AAPL", "2026-11-02", "amc") + cal("MCD", "2026-11-02", "bmo");
+
+    const premarket = await loadHome(memoryD1(seed + calendar), fakeR2().bucket, "en", TODAY);
+    expect(premarket.reporting?.date).toBe("2026-10-30");
+    expect(premarket.reporting?.bmo.map((e) => e.ticker)).toEqual(["KO"]);
+
+    // From Saturday, non-exact: the next day with reports is Monday.
+    const recap = await loadHome(memoryD1(seed + laterRecap + calendar), fakeR2().bucket, "en", TODAY);
+    expect(recap.reporting?.date).toBe("2026-11-02");
+    expect(recap.reporting?.bmo.map((e) => e.ticker)).toEqual(["MCD"]);
+    expect(recap.reporting?.amc.map((e) => e.ticker)).toEqual(["AAPL"]);
+
+    const quiet = await loadHome(memoryD1(seed), fakeR2().bucket, "en", TODAY);
+    expect(quiet.reporting).toBeNull();
+  });
+
+  it("reporting starts today while yesterday's recap still leads, and never before today", async () => {
+    const calendar = cal("KO", "2026-10-30", "bmo") + cal("AAPL", "2026-11-02", "amc");
+
+    // Past ET midnight, before the premarket publishes: the lead is yesterday's recap.
+    const overnight = post(2, "recap", "2026-10-29", "2026-10-29T20:45:00Z", "recap/2026-10-29.json");
+    const early = await loadHome(memoryD1(overnight + calendar), fakeR2().bucket, "en", TODAY);
+    expect(early.lead?.slug).toBe("recap-2026-10-29");
+    expect(early.reporting?.date).toBe("2026-10-30");
+    expect(early.reporting?.bmo.map((e) => e.ticker)).toEqual(["KO"]);
+
+    // A stale recap (the generator stopped for a week) still counts from today, not from its date.
+    const stale = post(2, "recap", "2026-10-20", "2026-10-20T20:45:00Z", null) + cal("OLD", "2026-10-21", "amc");
+    const late = await loadHome(memoryD1(stale + calendar), fakeR2().bucket, "en", TODAY);
+    expect(late.reporting?.date).toBe("2026-10-30");
+  });
+
+  it("recent excludes the lead and is capped at eight", async () => {
+    // A week of briefs before the lead, and five earnings checks.
+    let sql = post(1, "premarket", "2026-10-30", "2026-10-30T13:20:43Z", "premarket/2026-10-30.json");
+    let id = 10;
+    for (let day = 23; day <= 29; day++) {
+      sql += post(id++, "premarket", `2026-10-${day}`, `2026-10-${day}T12:30:00Z`, null);
+      sql += post(id++, "recap", `2026-10-${day}`, `2026-10-${day}T20:45:00Z`, null);
+    }
+    sql += check(50, "AAPL", "2026-10-29") + check(51, "AMZN", "2026-10-28") + check(52, "MSFT", "2026-10-27");
+    sql += check(53, "META", "2026-10-26") + check(54, "KO", "2026-10-25");
+
+    const home = await loadHome(memoryD1(sql), fakeR2().bucket, "en", TODAY);
+    expect(home.lead?.slug).toBe("premarket-2026-10-30");
+    expect(home.earnings.map((p) => p.slug)).toEqual([
+      "aapl-2026-10-29-earnings",
+      "amzn-2026-10-28-earnings",
+      "msft-2026-10-27-earnings",
+    ]);
+    // Newest first by publish time; checks beyond the three shown join the briefs.
+    expect(home.recent.map((p) => p.slug)).toEqual([
+      "recap-2026-10-29",
+      "premarket-2026-10-29",
+      "recap-2026-10-28",
+      "premarket-2026-10-28",
+      "recap-2026-10-27",
+      "premarket-2026-10-27",
+      "meta-2026-10-26-earnings",
+      "recap-2026-10-26",
+    ]);
+  });
+
+  it("fills recent from briefs alone when there are no older checks", async () => {
+    let sql = post(1, "premarket", "2026-10-30", "2026-10-30T13:20:43Z", null);
+    let id = 10;
+    for (let day = 25; day <= 29; day++) {
+      sql += post(id++, "premarket", `2026-10-${day}`, `2026-10-${day}T12:30:00Z`, null);
+      sql += post(id++, "recap", `2026-10-${day}`, `2026-10-${day}T20:45:00Z`, null);
+    }
+    const home = await loadHome(memoryD1(sql), fakeR2().bucket, "en", TODAY);
+    expect(home.recent).toHaveLength(8);
+    expect(home.recent.map((p) => p.slug)).not.toContain("premarket-2026-10-30");
+    expect(home.recent.at(-1)?.slug).toBe("premarket-2026-10-26");
   });
 });
