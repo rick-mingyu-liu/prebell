@@ -10,6 +10,7 @@ vi.mock("../src/components/LangSwitchLink", () => ({
 
 const { default: Masthead } = await import("../src/components/Masthead");
 const { default: IndexLine } = await import("../src/components/IndexLine");
+const { default: FooterLinks } = await import("../src/components/FooterLinks");
 
 const recap: IndexLineView = {
   kind: "recap",
@@ -49,6 +50,14 @@ describe("paper shell", () => {
     for (const label of ["Briefs", "Earnings", "Calendar", "About", "中文"]) expect(out).toContain(label);
     expect(out).toContain('href="/en/archive?type=earnings"');
     expect(out).toContain('href="/en/earnings"');
+  });
+
+  it("links About and Privacy & Terms from the footer, in both locales", () => {
+    const en = renderToStaticMarkup(<FooterLinks locale="en" />);
+    expect(en).toContain('<a href="/en/about">About</a><a href="/en/legal">Privacy &amp; Terms</a>');
+    const zh = renderToStaticMarkup(<FooterLinks locale="zh" />);
+    expect(zh).toContain('<a href="/zh/about">关于</a><a href="/zh/legal">隐私与条款</a>');
+    expect(en.indexOf("/en/legal")).toBeLessThan(en.indexOf("中文"));
   });
 
   it("puts the Chinese name first on the Chinese edition", () => {

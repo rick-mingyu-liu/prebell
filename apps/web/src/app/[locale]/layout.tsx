@@ -1,11 +1,10 @@
 import type { Metadata } from "next";
-import Link from "next/link";
 import { notFound } from "next/navigation";
 import { hasLocale } from "next-intl";
 import { getTranslations, setRequestLocale } from "next-intl/server";
 import Disclaimer from "@/components/Disclaimer";
+import FooterLinks from "@/components/FooterLinks";
 import IndexLine from "@/components/IndexLine";
-import LangSwitch from "@/components/LangSwitch";
 import Masthead from "@/components/Masthead";
 import { getDb } from "@/lib/db";
 import { todayEt } from "@/lib/earnings";
@@ -52,7 +51,6 @@ export default async function LocaleLayout({ children, params }: LayoutProps<"/[
   const { locale } = await params;
   if (!hasLocale(routing.locales, locale)) notFound();
   setRequestLocale(locale);
-  const t = await getTranslations("site");
   const beacon = process.env.CF_BEACON_TOKEN;
   const line = await indexLine();
 
@@ -67,10 +65,7 @@ export default async function LocaleLayout({ children, params }: LayoutProps<"/[
         <footer className="site-footer">
           <div className="wrap">
             <Disclaimer />
-            <p className="footer-links">
-              <Link href={`/${locale}/about`}>{t("about")}</Link>
-              <LangSwitch locale={locale} />
-            </p>
+            <FooterLinks locale={locale} />
           </div>
         </footer>
         {beacon && (
