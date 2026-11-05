@@ -88,6 +88,11 @@ pub fn fmt_eps(value: f64) -> String {
     format!("{}${:.2}", minus_if_negative(value, 2), value.abs())
 }
 
+/// "7.08美元", "−0.50美元": `fmt_value` signs with an ASCII hyphen.
+fn fmt_eps_zh(value: f64) -> String {
+    format!("{}{:.2}美元", minus_if_negative(value, 2), value.abs())
+}
+
 /// "+3.03%", "−23.67%" (U+2212); a move that rounds to zero is "0.00%".
 pub fn fmt_signed_pct(p: f64) -> String {
     let minus = minus_if_negative(p, 2);
@@ -116,18 +121,12 @@ pub fn earnings_lines(f: &EarningsFacts) -> CoverLines {
     let (line2_en, line2_zh) = if let Some(e) = fig(Metric::EpsGaap) {
         (
             format!("GAAP EPS {}", fmt_eps(e.value)),
-            format!(
-                "GAAP每股收益 {}",
-                fmt_value(e.value, Unit::UsdPerShare, Lang::Zh)
-            ),
+            format!("GAAP每股收益 {}", fmt_eps_zh(e.value)),
         )
     } else if let Some(e) = fig(Metric::EpsNonGaap) {
         (
             format!("Non-GAAP EPS {}", fmt_eps(e.value)),
-            format!(
-                "非GAAP每股收益 {}",
-                fmt_value(e.value, Unit::UsdPerShare, Lang::Zh)
-            ),
+            format!("非GAAP每股收益 {}", fmt_eps_zh(e.value)),
         )
     } else {
         let en = match &f.fiscal_period {
@@ -408,6 +407,23 @@ mod tests {
         assert_eq!(l.en[1], "Non-GAAP EPS $1.85");
         assert_eq!(l.zh[1], "非GAAP每股收益 1.85美元");
 
+        f.metrics.eps_non_gaap = fig(
+            -0.5,
+            Unit::UsdPerShare,
+            "$(0.50)",
+            "non-GAAP loss of $(0.50)",
+        );
+        let l = earnings_lines(&f);
+        assert_eq!(l.en[1], "Non-GAAP EPS −$0.50");
+        assert_eq!(l.zh[1], "非GAAP每股收益 −0.50美元");
+        f.metrics.eps_gaap = fig(-0.5, Unit::UsdPerShare, "$(0.50)", "GAAP loss of $(0.50)");
+        let l = earnings_lines(&f);
+        assert_eq!(l.en[1], "GAAP EPS −$0.50");
+        assert_eq!(l.zh[1], "GAAP每股收益 −0.50美元");
+        f.metrics.eps_gaap = Field::Missing {
+            reason: "absent".into(),
+        };
+
         f.metrics.eps_non_gaap = Field::Missing {
             reason: "absent".into(),
         };
@@ -504,7 +520,7 @@ mod tests {
     fn scene_prompt_contains_no_people_no_text_cues() {
         let p = scene_prompt("a harbour of container ships");
         assert!(p.starts_with("a harbour of container ships"));
-        for cue in ["no people", "no faces", "no text", "no logos"] {
+        for cue in ["no people", "no faces", "no text", "no logos", "no charts"] {
             assert!(p.contains(cue), "missing {cue}: {p}");
         }
     }
@@ -522,6 +538,21 @@ mod tests {
     #[test]
     fn earnings_scene_subject_names_the_company() {
         assert!(earnings_scene_subject(&facts()).contains("the industry of Apple"));
+    }
+
+    #[test]
+    fn earnings_scene_subject_truncates_and_strips_control_characters() {
+        let mut f = facts();
+        f.company = format!("A\nB{}", "x".repeat(68));
+        let s = earnings_scene_subject(&f);
+        let name = s
+            .split("the industry of ")
+            .nth(1)
+            .and_then(|r| r.split(':').next())
+            .unwrap();
+        assert!(!name.contains('\n'));
+        assert_eq!(name.chars().count(), 60);
+        assert!(name.starts_with("AB"));
     }
 
     #[tokio::test]
