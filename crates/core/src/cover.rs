@@ -772,6 +772,8 @@ pub(crate) mod tests {
             watch_list: Field::Missing {
                 reason: "none".into(),
             },
+            themes: vec![],
+            theme_candidates: vec![],
             diagnostics: vec![],
         };
         serde_json::to_string(&f).unwrap()
@@ -796,10 +798,15 @@ pub(crate) mod tests {
             ],
             gainers: vec![mover("NVDA", 3.08)],
             losers: vec![],
+            macro_items: Field::Missing {
+                reason: "none".into(),
+            },
             after_hours: Field::Missing {
                 reason: "none".into(),
             },
             reported: vec![],
+            themes: vec![],
+            theme_candidates: vec![],
             diagnostics: vec![],
         };
         let json = serde_json::to_string(&f).unwrap();
