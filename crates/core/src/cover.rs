@@ -223,28 +223,48 @@ pub fn brief_lines(
     }
 }
 
+fn parse_facts<T: serde::de::DeserializeOwned>(kind: &str, json: &str) -> Result<T, String> {
+    serde_json::from_str(json).map_err(|e| format!("bad {kind} facts: {e}"))
+}
+
 /// The cover lines of a stored post, recomputed from its facts JSON. Used to
 /// backfill posts published before covers existed. `content_type` is the
 /// `posts.content_type` value: `premarket`, `recap` or `earnings`.
 pub fn lines_for_facts(content_type: &str, facts_json: &str) -> Result<CoverLines, String> {
-    fn parse<T: serde::de::DeserializeOwned>(kind: &str, json: &str) -> Result<T, String> {
-        serde_json::from_str(json).map_err(|e| format!("bad {kind} facts: {e}"))
-    }
     match content_type {
         "premarket" => {
-            let f: PremarketFacts = parse(content_type, facts_json)?;
+            let f: PremarketFacts = parse_facts(content_type, facts_json)?;
             Ok(brief_lines(&f.futures, &f.gainers, &f.losers, true))
         }
         "recap" => {
-            let f: RecapFacts = parse(content_type, facts_json)?;
+            let f: RecapFacts = parse_facts(content_type, facts_json)?;
             Ok(brief_lines(&f.indexes, &f.gainers, &f.losers, false))
         }
-        "earnings" => Ok(earnings_lines(&parse::<EarningsFacts>(
+        "earnings" => Ok(earnings_lines(&parse_facts::<EarningsFacts>(
             content_type,
             facts_json,
         )?)),
         other => Err(format!("unknown content type: {other}")),
     }
+}
+
+/// The scene prompt the generator sends for a stored post, recomputed from
+/// its facts JSON. Used to backfill scene images for posts published before
+/// they existed. Same `content_type` values as `lines_for_facts`.
+pub fn scene_prompt_for_facts(content_type: &str, facts_json: &str) -> Result<String, String> {
+    let subject = match content_type {
+        "premarket" => brief_scene_subject(
+            parse_facts::<PremarketFacts>(content_type, facts_json)?.trading_date,
+        ),
+        "recap" => {
+            brief_scene_subject(parse_facts::<RecapFacts>(content_type, facts_json)?.trading_date)
+        }
+        "earnings" => {
+            earnings_scene_subject(&parse_facts::<EarningsFacts>(content_type, facts_json)?)
+        }
+        other => return Err(format!("unknown content type: {other}")),
+    };
+    Ok(scene_prompt(&subject))
 }
 
 /// "png" for a PNG, "jpg" for a JPEG, `None` for anything else.
@@ -832,6 +852,32 @@ pub(crate) mod tests {
         assert!(e.contains("recap"), "{e}");
         assert!(lines_for_facts("premarket", "{}").is_err());
         assert!(lines_for_facts("earnings", &premarket_json()).is_err());
+    }
+
+    #[test]
+    fn scene_prompt_for_facts_matches_the_generator_prompt() {
+        // 2026-10-29 is a Thursday.
+        let p = scene_prompt_for_facts("premarket", &premarket_json()).unwrap();
+        assert_eq!(
+            p,
+            scene_prompt(&brief_scene_subject("2026-10-29".parse().unwrap()))
+        );
+        assert!(p.starts_with(BRIEF_SCENES[3]), "{p}");
+
+        let f = facts();
+        let json = serde_json::to_string(&f).unwrap();
+        assert_eq!(
+            scene_prompt_for_facts("earnings", &json).unwrap(),
+            scene_prompt(&earnings_scene_subject(&f))
+        );
+    }
+
+    #[test]
+    fn scene_prompt_for_facts_rejects_unknown_kinds_and_bad_json() {
+        let e = scene_prompt_for_facts("weekly", "{}").unwrap_err();
+        assert!(e.contains("weekly"), "{e}");
+        assert!(scene_prompt_for_facts("recap", "not json").is_err());
+        assert!(scene_prompt_for_facts("earnings", &premarket_json()).is_err());
     }
 
     #[tokio::test]
