@@ -63,6 +63,9 @@ describe("list pages are one paper column", () => {
     expect(out).toContain('class="post-row"');
     expect(out).toContain('class="cover cover-small"');
     expect(out).toContain('<nav class="filters"');
+    // The outline is h1 then h2 row titles, with no skipped level.
+    expect(out).toContain('<h2 class="story-title">');
+    expect(out).not.toContain("<h3");
   });
 
   it("the calendar page renders the week from D1", async () => {

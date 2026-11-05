@@ -22,7 +22,16 @@ function coverTag(p: PostListItem, locale: Locale, t: T) {
  * Posts as ruled rows: a small cover on the left (flat, tag only, for a post with no scene or lines), then
  * the kicker, the serif headline, a one-line summary and the date. The type is the kicker, not a tag.
  */
-export default function PostList({ locale, items }: { locale: Locale; items: PostListItem[] }) {
+export default function PostList({
+  locale,
+  items,
+  headingLevel: Heading = "h3",
+}: {
+  locale: Locale;
+  items: PostListItem[];
+  /** The row titles' heading level: one below the section heading above the list. */
+  headingLevel?: "h2" | "h3";
+}) {
   const t = translator(locale);
   return (
     <ul className="post-list">
@@ -33,9 +42,9 @@ export default function PostList({ locale, items }: { locale: Locale; items: Pos
             <Cover coverKey={p.coverKey} lines={p.coverLines} tag={coverTag(p, locale, t)} size="small" alt={title} />
             <div className="post-main">
               <p className="kicker">{typeLabel(t, p.contentType)}</p>
-              <h3 className="story-title">
+              <Heading className="story-title">
                 <Link href={`/${locale}/p/${p.slug}`}>{title}</Link>
-              </h3>
+              </Heading>
               {p.summary && <p className="story-sum">{p.summary}</p>}
               <time className="story-meta" dateTime={p.tradingDate}>
                 {formatDate(p.tradingDate, locale)}

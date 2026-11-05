@@ -54,6 +54,13 @@ describe("PostList", () => {
     expect(out).not.toContain('class="row');
   });
 
+  it("row titles use the heading level the page asks for", () => {
+    expect(renderToStaticMarkup(<PostList locale="en" items={[post]} />)).toContain('<h3 class="story-title">');
+    const h2 = renderToStaticMarkup(<PostList locale="en" items={[post]} headingLevel="h2" />);
+    expect(h2).toContain('<h2 class="story-title">');
+    expect(h2).not.toContain("<h3");
+  });
+
   it("labels the kicker and the cover tag in Chinese", () => {
     const out = renderToStaticMarkup(<PostList locale="zh" items={[post]} />);
     expect(out).toContain('<p class="kicker">收盘回顾</p>');
@@ -96,7 +103,7 @@ describe("CalendarWeek", () => {
     // Unconfirmed entries are muted and say so in text.
     expect(out).toMatch(/<li class="cal-entry cal-unconfirmed">.*?<span class="sr-only">Unconfirmed<\/span>/);
     // A reported entry with a post also links to the check.
-    expect(out).toContain('href="/en/p/intc-q3"');
+    expect(out).toMatch(/<a class="cal-read" aria-label="Read the check: INTC" href="\/en\/p\/intc-q3">Read the check →<\/a>/);
     expect(out).toContain("No reports.");
   });
 
@@ -104,7 +111,7 @@ describe("CalendarWeek", () => {
     const out = renderToStaticMarkup(<CalendarWeek days={days} locale="en" />);
     expect(out).toContain('<section class="cal-day" aria-labelledby="cal-2026-11-02"><h2 class="cal-date" id="cal-2026-11-02">');
     expect(out).toContain('aria-labelledby="cal-2026-11-03"');
-    expect(out).not.toContain("aria-label=");
+    expect(out).not.toMatch(/<section[^>]*aria-label=/);
   });
 
   it("uses Chinese labels on ZH pages", () => {

@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { prerender } from "react-dom/static";
 import { describe, expect, it, vi } from "vitest";
 import type { Locale } from "../src/i18n/routing";
@@ -61,5 +62,22 @@ describe("About page", () => {
     expect(out).toContain("试用 TermPocket →");
     expect(out).toContain('href="/zh/archive"');
     expect(out).toContain("本站内容根据公开数据自动生成");
+  });
+});
+
+describe("About article styles", () => {
+  const css = readFileSync(new URL("../src/app/globals.css", import.meta.url), "utf8");
+
+  it("sizes only its own paragraphs and headings, so the embedded author and signup blocks keep their type", () => {
+    // `.prose p` would beat .author-name, .author-bio, .signup-copy and the like (specificity 0,1,1).
+    expect(css).not.toMatch(/\.prose\s+(p|h[1-6])\b/);
+    expect(css).toMatch(/^\.prose > p \{/m);
+    expect(css).toMatch(/^\.prose > h2 \{/m);
+  });
+
+  it("puts the author and signup blocks directly under the article, not inside a paragraph", async () => {
+    const out = await render("en");
+    expect(out).toMatch(/<\/h2><section class="author">/);
+    expect(out).not.toMatch(/<p(?: [^>]*)?>(?:(?!<\/p>).)*<section/s);
   });
 });

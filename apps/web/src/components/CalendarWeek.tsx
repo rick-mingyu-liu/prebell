@@ -52,7 +52,11 @@ export default function CalendarWeek({ days, locale }: { days: CalendarDay[]; lo
                     )}
                     {e.status === "unconfirmed" && <span className="sr-only">{statusLabel.unconfirmed}</span>}
                     {e.postSlug && (
-                      <Link className="cal-read" href={`/${locale}/p/${e.postSlug}`}>
+                      <Link
+                        className="cal-read"
+                        href={`/${locale}/p/${e.postSlug}`}
+                        aria-label={`${t("earnings.readCheck")}: ${e.ticker}`}
+                      >
                         {t("earnings.readCheck")} →
                       </Link>
                     )}

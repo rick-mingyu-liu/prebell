@@ -243,10 +243,11 @@ html:lang(zh-Hans) .partners-strip .partners-label { font-variant-caps: normal; 
 .more { font-weight: 600; font-size: 14px; text-decoration: none; }
 .more:hover, .more:focus-visible { text-decoration: underline; }
 .prose { max-width: 680px; }
-.prose p { font-size: 16.5px; line-height: 1.7; }
-.prose h2 { font-size: 22px; margin: 0 0 0.25rem; }
+/* Direct children only: the author and signup blocks inside the article set their own type. */
+.prose > p { font-size: 16.5px; line-height: 1.7; }
+.prose > h2 { font-size: 22px; margin: 0 0 0.25rem; }
 .prose .disclaimer { margin-top: 1.5rem; font-size: 13px; }
-.prose h2 + .author { margin-top: 0.5rem; border-top: 0; padding-top: 0.5rem; }
+.prose > h2 + .author { margin-top: 0.5rem; border-top: 0; padding-top: 0.5rem; }
 .about-tp { margin: 0.5rem 0 1.5rem; color: var(--muted); font-size: 15px; }
 .prose .signup { margin-top: 1.5rem; }
 .notice { max-width: 680px; padding: 0.75rem 1rem; border: 1px solid var(--rule); border-left: 3px solid var(--rule-strong); }

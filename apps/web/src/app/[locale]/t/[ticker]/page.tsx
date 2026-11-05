@@ -72,7 +72,11 @@ export default async function TickerArchive({ params }: PageProps<"/[locale]/t/[
                     {status[d.status]}
                   </span>
                   {d.postSlug && (
-                    <Link className="more" href={`/${locale}/p/${d.postSlug}`}>
+                    <Link
+                      className="more"
+                      href={`/${locale}/p/${d.postSlug}`}
+                      aria-label={`${t("readCheck")}: ${formatDate(d.date, locale)}`}
+                    >
                       {t("readCheck")} →
                     </Link>
                   )}

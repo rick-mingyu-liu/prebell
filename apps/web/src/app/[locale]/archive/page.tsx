@@ -60,7 +60,7 @@ export default async function Archive({ params, searchParams }: PageProps<"/[loc
           </Link>
         ))}
       </nav>
-      {items.length === 0 ? <p>{t("archive.empty")}</p> : <PostList locale={locale} items={items} />}
+      {items.length === 0 ? <p>{t("archive.empty")}</p> : <PostList locale={locale} items={items} headingLevel="h2" />}
       <nav className="pager">
         {page > 1 && <Link href={href(type, page - 1)}>← {t("archive.newer")}</Link>}
         {items.length === PAGE_SIZE && <Link href={href(type, page + 1)}>{t("archive.older")} →</Link>}
