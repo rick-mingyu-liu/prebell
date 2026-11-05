@@ -1115,6 +1115,21 @@ mod tests {
     }
 
     #[test]
+    fn prompts_lead_the_summary_with_a_market_wide_story() {
+        assert!(
+            PROMPT_EN.contains(
+                "If the macro items or a theme describe a market-wide story, the first sentence of the summary names it."
+            ),
+            "{PROMPT_EN}"
+        );
+        assert!(
+            PROMPT_ZH
+                .contains("如果宏观条目或某个主题讲的是影响整个市场的事件，摘要的第一句要点明它。"),
+            "{PROMPT_ZH}"
+        );
+    }
+
+    #[test]
     fn sources_are_unique() {
         let mut f = facts();
         f.losers = vec![Mover {

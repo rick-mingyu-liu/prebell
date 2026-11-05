@@ -317,6 +317,9 @@ mod tests {
                 reasons: vec![reason("https://news.test/nvda", "Nvidia rises")],
             }],
             losers: vec![],
+            macro_items: Field::Missing {
+                reason: "empty result".into(),
+            },
             after_hours: Field::Missing {
                 reason: "empty result".into(),
             },
@@ -487,6 +490,21 @@ mod tests {
                 && PROMPT_ZH.contains("`after_hours` 没有条目时，“盘后财报关注”的 `markdown` 留空")
                 && PROMPT_ZH.contains("列在用户消息末尾")
                 && !PROMPT_ZH.contains("暂缺"),
+            "{PROMPT_ZH}"
+        );
+    }
+
+    #[test]
+    fn prompts_lead_the_summary_with_a_market_wide_story() {
+        assert!(
+            PROMPT_EN.contains(
+                "If the macro items or a theme describe a market-wide story, the first sentence of the summary names it."
+            ),
+            "{PROMPT_EN}"
+        );
+        assert!(
+            PROMPT_ZH
+                .contains("如果宏观条目或某个主题讲的是影响整个市场的事件，摘要的第一句要点明它。"),
             "{PROMPT_ZH}"
         );
     }

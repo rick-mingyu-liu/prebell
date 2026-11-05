@@ -14,8 +14,8 @@ use crate::facts::{quote_numbers, Field, Mover, NewsReason, Quote};
 use crate::numbers::Lang;
 use crate::premarket::draft::Draft;
 use crate::premarket::{
-    articles_prompt, as_of, company_name, extract, fresh_news, system_prompt, universe,
-    yahoo_symbol, Diag, EVENT_RULE,
+    articles_prompt, as_of, company_name, extract, fresh_news, macro_items, system_prompt,
+    universe, yahoo_symbol, Diag, MacroPrompt, EVENT_RULE,
 };
 use crate::providers::{LlmProvider, MarketData, NewsSearch};
 use crate::run::{tick_content, Content, Hooks, TickOutcome};
@@ -39,6 +39,13 @@ const AFTER_HOURS_HITS: usize = 5;
 const AFTER_HOURS_ITEMS: usize = 5;
 /// After-hours previews may come from earlier in the week.
 const AFTER_HOURS_MAX_AGE_DAYS: i64 = 7;
+/// The recap macro searches, in order: the close, the day's headline
+/// story, then rates, energy and FX. The later ones give way to the budget.
+pub const RECAP_MACRO_QUERIES: [&str; 3] = [
+    "stock market today closing",
+    "Wall Street markets news today",
+    "Treasury yields oil dollar Federal Reserve today",
+];
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct RecapFacts {
@@ -50,6 +57,10 @@ pub struct RecapFacts {
     pub indexes: Vec<(String, Field<Quote>)>,
     pub gainers: Vec<Mover>,
     pub losers: Vec<Mover>,
+    /// Market-wide and macro news from today's session. Facts stored before
+    /// it existed read as `Missing`.
+    #[serde(default = "missing_default")]
+    pub macro_items: Field<Vec<NewsReason>>,
     /// Companies the news says report after today's close.
     pub after_hours: Field<Vec<NewsReason>>,
     /// Companies whose earnings check this site already published for an
@@ -60,6 +71,12 @@ pub struct RecapFacts {
     /// to the LLM.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub diagnostics: Vec<String>,
+}
+
+fn missing_default() -> Field<Vec<NewsReason>> {
+    Field::Missing {
+        reason: "not in this facts version".into(),
+    }
 }
 
 /// A company that reported after today's close, with our earnings check.
@@ -107,9 +124,11 @@ pub fn numbers_in_facts(f: &RecapFacts) -> Vec<f64> {
             out.extend(quote_numbers(&r.quote));
         }
     }
-    if let Field::Value(items) = &f.after_hours {
-        for r in items {
-            out.extend(quote_numbers(&r.quote));
+    for items in [&f.macro_items, &f.after_hours] {
+        if let Field::Value(items) = items {
+            for r in items {
+                out.extend(quote_numbers(&r.quote));
+            }
         }
     }
     out
@@ -331,8 +350,7 @@ pub async fn build_facts(
     store: &dyn Store,
     trading_date: NaiveDate,
     now: DateTime<Utc>,
-    // Read by the optional searches added after this change.
-    #[allow(unused_variables)] budget: &dyn Fn() -> usize,
+    budget: &dyn Fn() -> usize,
 ) -> RecapFacts {
     let mut d = Diag::default();
     // Four chart requests, one per index, kept apart from the batched v7
@@ -369,6 +387,9 @@ pub async fn build_facts(
             indexes,
             gainers: vec![],
             losers: vec![],
+            macro_items: Field::Missing {
+                reason: "not gathered: index closes unavailable".into(),
+            },
             after_hours: Field::Missing {
                 reason: "not gathered: index closes unavailable".into(),
             },
@@ -403,6 +424,19 @@ pub async fn build_facts(
         losers.push(mover(ns, llm, q, now, &mut d).await);
     }
 
+    let macro_items = macro_items(
+        ns,
+        llm,
+        &RECAP_MACRO_QUERIES,
+        &MacroPrompt {
+            task: "list the market-wide and macro news items that moved the US stock market in today's session",
+            topic: "market-wide and macro news from today's US stock market session",
+        },
+        now,
+        &mut d,
+        budget,
+    )
+    .await;
     let after_hours = after_hours(ns, llm, trading_date, now, &reported, &mut d).await;
     let mut diagnostics = d.lines_as("indexes");
     diagnostics.push(format!(
@@ -416,6 +450,7 @@ pub async fn build_facts(
         indexes,
         gainers,
         losers,
+        macro_items,
         after_hours,
         reported,
         diagnostics,
@@ -789,7 +824,9 @@ mod tests {
                 "closes ok=1 other_day=519".to_string(),
                 "movers liquid=1 gainers=1 losers=0".to_string(),
                 "reasons proposed=0 kept=0 hedged=0".to_string(),
-                "search_err=2 llm_err=0 news_stale=0 news_noise=0".to_string(),
+                // One mover search, three macro searches, after-hours.
+                "search_err=5 llm_err=0 news_stale=0 news_noise=0".to_string(),
+                "macro queries=3 hits=0 items=0".to_string(),
                 "indexes ok=4 err=0".to_string(),
                 "reported=0 reported_err=0".to_string(),
             ]
@@ -1285,10 +1322,14 @@ mod tests {
             &|| 0,
         )
         .await;
-        assert_eq!(
-            *n.0.borrow(),
-            vec![(AH_Q.to_string(), now() - chrono::Duration::days(7))]
-        );
+        // The macro searches keep the news cutoff; only after-hours reaches back.
+        let cutoff = crate::premarket::news_cutoff(now());
+        let mut want: Vec<(String, DateTime<Utc>)> = RECAP_MACRO_QUERIES
+            .iter()
+            .map(|q| (q.to_string(), cutoff))
+            .collect();
+        want.push((AH_Q.to_string(), now() - chrono::Duration::days(7)));
+        assert_eq!(*n.0.borrow(), want);
     }
 
     #[tokio::test]
@@ -1364,6 +1405,7 @@ mod tests {
         .await;
         f.gainers[0].reasons = vec![reason("Nvidia shares rose 3% on a $5 billion deal")];
         f.after_hours = Field::Value(vec![reason("Intel expects revenue of $13.4 billion")]);
+        f.macro_items = Field::Value(vec![reason("The 10-year Treasury yield rose to 4.27%")]);
         let n = numbers_in_facts(&f);
         for v in [
             2025.0,
@@ -1378,6 +1420,7 @@ mod tests {
             -3.0,
             5e9,
             13.4e9,
+            4.27,
         ] {
             assert!(
                 n.iter().any(|x| (x - v).abs() < 1e-6),
@@ -1386,6 +1429,151 @@ mod tests {
         }
         let s = serde_json::to_string(&f).unwrap();
         assert_eq!(serde_json::from_str::<RecapFacts>(&s).unwrap(), f);
+    }
+
+    /// `FakeNs` that records every query it is asked.
+    struct RecNs(FakeNs, RefCell<Vec<String>>);
+    #[async_trait(?Send)]
+    impl NewsSearch for RecNs {
+        async fn search(&self, query: &str, max: usize) -> Result<Vec<SearchHit>, ProviderError> {
+            self.1.borrow_mut().push(query.into());
+            self.0.search(query, max).await
+        }
+    }
+
+    const MACRO_SRC: &str =
+        "Stocks closed higher on Thursday as Treasury yields fell after the Fed decision.";
+    fn macro_ns() -> RecNs {
+        RecNs(
+            ns(vec![
+                (
+                    RECAP_MACRO_QUERIES[0],
+                    Ok(vec![hit("https://news.test/close", MACRO_SRC)]),
+                ),
+                (
+                    RECAP_MACRO_QUERIES[1],
+                    Ok(vec![
+                        hit("https://news.test/close", MACRO_SRC),
+                        hit(
+                            "https://news.test/street",
+                            "Wall Street rallied on the jobs data.",
+                        ),
+                    ]),
+                ),
+                (
+                    RECAP_MACRO_QUERIES[2],
+                    Ok(vec![hit(
+                        "https://news.test/rates",
+                        "Oil fell and the dollar slipped.",
+                    )]),
+                ),
+            ]),
+            RefCell::new(vec![]),
+        )
+    }
+
+    #[tokio::test]
+    async fn recap_facts_have_macro_items() {
+        let n = macro_ns();
+        let l = llm(vec![(
+            "Topic: market-wide",
+            reasons(
+                "https://news.test/close",
+                "Stocks closed higher on Thursday as Treasury yields fell",
+                "Stocks rose as yields fell.",
+            ),
+        )]);
+        let f = build_facts(&md(&[]), &n, &l, &MemStore::default(), date(), now(), &|| 0).await;
+        let asked: Vec<String> = n.1.borrow().clone();
+        assert_eq!(asked[..3], RECAP_MACRO_QUERIES);
+        match &f.macro_items {
+            Field::Value(v) => {
+                assert_eq!(v.len(), 1);
+                assert!(v[0].quote.starts_with("Stocks closed higher"));
+            }
+            other => panic!("{other:?}"),
+        }
+        // One extraction over the three unique articles, dated as of the close.
+        let p = l.prompts.borrow();
+        let macro_p: Vec<&(String, String)> = p
+            .iter()
+            .filter(|(_, u)| u.contains("Topic: market-wide"))
+            .collect();
+        assert_eq!(macro_p.len(), 1);
+        let (sys, user) = macro_p[0];
+        assert_eq!(user.matches("<article id=").count(), 3, "{user}");
+        assert!(user.contains("As of: 2026-10-29 16:45 ET"), "{user}");
+        assert!(sys.contains("at most 5 reasons"), "{sys}");
+        // The macro line sits between the search line and the index line.
+        let i = f
+            .diagnostics
+            .iter()
+            .position(|l| l.starts_with("search_err="))
+            .unwrap();
+        assert_eq!(f.diagnostics[i + 1], "macro queries=3 hits=3 items=1");
+        assert_eq!(f.diagnostics[i + 2], "indexes ok=4 err=0");
+    }
+
+    #[tokio::test]
+    async fn recap_macro_skips_later_queries_when_budget_is_tight() {
+        let n = macro_ns();
+        let f = build_facts(
+            &md(&[]),
+            &n,
+            &llm(vec![]),
+            &MemStore::default(),
+            date(),
+            now(),
+            &|| 39,
+        )
+        .await;
+        assert!(!n.1.borrow().iter().any(|q| q == RECAP_MACRO_QUERIES[1]));
+        assert!(!n.1.borrow().iter().any(|q| q == RECAP_MACRO_QUERIES[2]));
+        assert!(f
+            .diagnostics
+            .contains(&"macro queries=1 hits=1 items=0".to_string()));
+    }
+
+    #[tokio::test]
+    async fn recap_facts_without_macro_items_deserialize() {
+        let f = build_facts(
+            &md(&[]),
+            &ns(vec![]),
+            &llm(vec![]),
+            &MemStore::default(),
+            date(),
+            now(),
+            &|| 0,
+        )
+        .await;
+        let mut v = serde_json::to_value(&f).unwrap();
+        v.as_object_mut().unwrap().remove("macro_items");
+        let old: RecapFacts = serde_json::from_value(v).unwrap();
+        assert_eq!(
+            old.macro_items,
+            Field::Missing {
+                reason: "not in this facts version".into()
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn recap_without_index_closes_gathers_no_macro() {
+        let mut m = md(&[]);
+        m.indexes.remove("^RUT");
+        let n = macro_ns();
+        let f = build_facts(
+            &m,
+            &n,
+            &llm(vec![]),
+            &MemStore::default(),
+            date(),
+            now(),
+            &|| 0,
+        )
+        .await;
+        assert!(n.1.borrow().is_empty());
+        assert!(matches!(f.macro_items, Field::Missing { .. }));
     }
 }
 
@@ -1685,7 +1873,8 @@ mod run_tests {
         let (m, l) = (md(false), llm(true, true));
         let want = "indexes | quotes ok=0 http429=0 http_other=0 empty=0 stale=0 parse=0 net=0 \
                     skipped=0; movers liquid=0 gainers=0 losers=0; reasons proposed=0 kept=0 hedged=0; \
-                    search_err=0 llm_err=0 news_stale=0 news_noise=0; indexes ok=3 err=1";
+                    search_err=0 llm_err=0 news_stale=0 news_noise=0; \
+                    macro queries=0 hits=0 items=0; indexes ok=3 err=1";
         for t in ["2026-11-06T21:45:00Z", "2026-11-06T23:55:00Z"] {
             assert_eq!(
                 tick(utc(t), &s, &m, &FakeNs, &l).await,
@@ -1883,6 +2072,9 @@ mod run_tests {
                 name: "Fidelity National".into(),
                 reasons: vec![],
             }],
+            macro_items: Field::Missing {
+                reason: "n/a".into(),
+            },
             after_hours: Field::Missing {
                 reason: "n/a".into(),
             },

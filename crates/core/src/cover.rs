@@ -796,6 +796,9 @@ pub(crate) mod tests {
             ],
             gainers: vec![mover("NVDA", 3.08)],
             losers: vec![],
+            macro_items: Field::Missing {
+                reason: "none".into(),
+            },
             after_hours: Field::Missing {
                 reason: "none".into(),
             },

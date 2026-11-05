@@ -23,6 +23,6 @@ Reply with JSON exactly in this shape and nothing else:
 {"title": "...", "summary": "...", "sections": [{"heading": "...", "markdown": "..."}]}
 
 - `title`: one headline line.
-- `summary`: at most 40 words.
+- `summary`: at most 40 words. If the macro items or a theme describe a market-wide story, the first sentence of the summary names it.
 - `sections`: the sections to write are listed at the end of the user message. Write exactly those sections, in that order, with those exact headings, and no others. "Macro & overnight" exists only when `macro_items` has items, and "What to watch" only when `watch_list` has items.
 - Each `markdown` is the section body in Markdown, without its heading.

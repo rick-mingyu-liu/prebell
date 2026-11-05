@@ -15,6 +15,7 @@ use regex::Regex;
 use serde_json::Value;
 
 use crate::anchor::verify_reason;
+use crate::budget::allows;
 use crate::clock::{et, previous_close};
 use crate::facts::{Field, Mover, NewsReason, PremarketFacts, Quote};
 use crate::premarket::draft::reject_markup;
@@ -31,9 +32,18 @@ const MIN_VOLUME: u64 = 50_000;
 const MOVERS_PER_SIDE: usize = 5;
 const HITS_PER_MOVER: usize = 3;
 const MOVER_REASONS: usize = 2;
-const MACRO_QUERY: &str = "stock market futures today";
+/// The premarket macro searches, in order: futures, the day's headline
+/// story, then rates, energy and FX. The later ones give way to the budget.
+pub const PREMARKET_MACRO_QUERIES: [&str; 3] = [
+    "stock market futures today",
+    "Wall Street markets news today",
+    "Treasury yields oil dollar Federal Reserve today",
+];
+/// Fresh hits kept per macro query.
 const MACRO_HITS: usize = 5;
-const MACRO_ITEMS: usize = 3;
+/// Merged macro hits sent to the one extraction call.
+const MACRO_HITS_TOTAL: usize = 8;
+const MACRO_ITEMS: usize = 5;
 const MAX_CONTENT_CHARS: usize = 6_000;
 /// News older than this (by its published date) is never a reason: a
 /// week-old article cannot explain this session's move. After a weekend or
@@ -85,6 +95,12 @@ pub(crate) struct Diag {
     pub(crate) reasons_hedged: usize,
     pub(crate) futures_ok: usize,
     pub(crate) futures_err: usize,
+    /// Macro searches run (the later ones give way to the budget).
+    pub(crate) macro_queries: usize,
+    /// Macro hits after merging, de-duplicating and capping.
+    pub(crate) macro_hits: usize,
+    /// Macro items kept after verification.
+    pub(crate) macro_items_kept: usize,
 }
 
 impl Diag {
@@ -132,6 +148,10 @@ impl Diag {
             format!(
                 "search_err={} llm_err={} news_stale={} news_noise={}",
                 self.search_err, self.llm_err, self.news_stale, self.news_noise
+            ),
+            format!(
+                "macro queries={} hits={} items={}",
+                self.macro_queries, self.macro_hits, self.macro_items_kept
             ),
             format!("{head} ok={} err={}", self.futures_ok, self.futures_err),
         ]);
@@ -368,36 +388,67 @@ async fn mover_reasons(
     .unwrap_or_default()
 }
 
-async fn macro_items(
+/// What the macro extraction asks for: the LLM's task and the prompt's
+/// `Topic:` line.
+pub(crate) struct MacroPrompt<'a> {
+    pub(crate) task: &'a str,
+    pub(crate) topic: &'a str,
+}
+
+/// Macro news from `queries`, run in order: the first always, each later
+/// one only while its search and the extraction call fit the budget, so
+/// the last query is the first to go. Hits are merged in query order,
+/// de-duplicated by url, dated first, capped at `MACRO_HITS_TOTAL`, and
+/// read by one extraction call for up to `MACRO_ITEMS` items.
+pub(crate) async fn macro_items(
     ns: &dyn NewsSearch,
     llm: &dyn LlmProvider,
+    queries: &[&str],
+    prompt: &MacroPrompt<'_>,
     now: DateTime<Utc>,
     d: &mut Diag,
+    budget: &dyn Fn() -> usize,
 ) -> Field<Vec<NewsReason>> {
-    let hits = match fresh_news(ns, MACRO_QUERY, MACRO_HITS, now, d).await {
-        // Missing, not an empty list. Either way the brief leaves out its
-        // macro section rather than narrating that no news was found.
-        Ok(h) if h.is_empty() => {
-            return Field::Missing {
-                reason: "no fresh news".into(),
+    let mut hits: Vec<SearchHit> = Vec::new();
+    let mut first_err = None;
+    let mut any_ok = false;
+    for (i, query) in queries.iter().enumerate() {
+        // One search plus the extraction call it may feed.
+        if i > 0 && !allows(budget(), 2) {
+            break;
+        }
+        d.macro_queries += 1;
+        match fresh_news(ns, query, MACRO_HITS, now, d).await {
+            Ok(found) => {
+                any_ok = true;
+                for h in found {
+                    if !hits.iter().any(|k| k.url == h.url) {
+                        hits.push(h);
+                    }
+                }
+            }
+            Err(e) => {
+                d.search_err += 1;
+                first_err.get_or_insert(e);
             }
         }
-        Ok(h) => h,
-        Err(e) => {
-            d.search_err += 1;
-            return Field::Missing {
-                reason: e.to_string(),
-            };
-        }
-    };
-    let system = system_prompt(
-        "list the overnight and macro news items that matter for today's US stock market open",
-        MACRO_ITEMS,
-    );
-    let header = format!(
-        "Topic: overnight and macro news ahead of the US stock market open\n{}",
-        as_of(now)
-    );
+    }
+    // Stable: query order holds within the dated and the undated hits.
+    hits.sort_by_key(|h| h.published.is_none());
+    hits.truncate(MACRO_HITS_TOTAL);
+    d.macro_hits = hits.len();
+    if hits.is_empty() {
+        // Missing, not an empty list. Either way the brief leaves out its
+        // macro section rather than narrating that no news was found.
+        return Field::Missing {
+            reason: match first_err {
+                Some(e) if !any_ok => e.to_string(),
+                _ => "no fresh news".into(),
+            },
+        };
+    }
+    let system = system_prompt(prompt.task, MACRO_ITEMS);
+    let header = format!("Topic: {}\n{}", prompt.topic, as_of(now));
     match extract(
         llm,
         &system,
@@ -409,7 +460,10 @@ async fn macro_items(
     )
     .await
     {
-        Ok(v) => Field::Value(v),
+        Ok(v) => {
+            d.macro_items_kept = v.len();
+            Field::Value(v)
+        }
         Err(e) => Field::Missing {
             reason: e.to_string(),
         },
@@ -447,8 +501,7 @@ pub async fn build_facts(
     llm: &dyn LlmProvider,
     trading_date: NaiveDate,
     now: DateTime<Utc>,
-    // Read by the optional searches added after this change.
-    #[allow(unused_variables)] budget: &dyn Fn() -> usize,
+    budget: &dyn Fn() -> usize,
 ) -> PremarketFacts {
     let mut d = Diag::default();
     let mut futures = Vec::with_capacity(FUTURES.len());
@@ -491,7 +544,19 @@ pub async fn build_facts(
     for q in down {
         losers.push(to_mover(ns, llm, q, now, &mut d).await);
     }
-    let macro_items = macro_items(ns, llm, now, &mut d).await;
+    let macro_items = macro_items(
+        ns,
+        llm,
+        &PREMARKET_MACRO_QUERIES,
+        &MacroPrompt {
+            task: "list the overnight and macro news items that matter for today's US stock market open",
+            topic: "overnight and macro news ahead of the US stock market open",
+        },
+        now,
+        &mut d,
+        budget,
+    )
+    .await;
 
     PremarketFacts {
         trading_date,
@@ -709,16 +774,17 @@ mod tests {
         assert_eq!(f.gainers[0].reasons, vec![]);
         // Nothing fresh to read, so the mover costs no LLM call.
         assert!(l.prompts.borrow().iter().all(|(_, u)| !u.contains("AAPL")));
+        // The three macro searches fail; the mover's hit is stale.
         assert_eq!(
             f.diagnostics[3],
-            "search_err=1 llm_err=0 news_stale=1 news_noise=0"
+            "search_err=3 llm_err=0 news_stale=1 news_noise=0"
         );
     }
 
     #[tokio::test]
     async fn macro_with_only_stale_news_is_missing() {
         let n = ns(vec![(
-            MACRO_QUERY,
+            PREMARKET_MACRO_QUERIES[0],
             Ok(vec![dated(
                 "https://n.test/m",
                 "Futures slid overnight.",
@@ -855,7 +921,7 @@ mod tests {
                 Ok(vec![dated("https://n.test/arm", arm, 12)]),
             ),
             (
-                MACRO_QUERY,
+                PREMARKET_MACRO_QUERIES[0],
                 Ok(vec![dated(
                     "https://n.test/m",
                     "Futures slid overnight.",
@@ -1160,7 +1226,7 @@ mod tests {
         let src =
             "Stock futures rose overnight as Treasury yields fell after the Fed signaled patience.";
         let n = ns(vec![(
-            MACRO_QUERY,
+            PREMARKET_MACRO_QUERIES[0],
             Ok(vec![hit("https://news.test/macro", src)]),
         )]);
         let l = llm(vec![(
@@ -1418,7 +1484,7 @@ mod tests {
         let src =
             "Stock futures rose overnight as Treasury yields fell after the Fed signaled patience.";
         let n = ns(vec![(
-            "stock market futures today",
+            PREMARKET_MACRO_QUERIES[0],
             Ok(vec![hit("https://news.test/macro", src)]),
         )]);
         let l = llm(vec![(
@@ -1452,7 +1518,7 @@ mod tests {
     #[tokio::test]
     async fn macro_llm_error_is_missing_and_zero_verified_is_empty() {
         let n = ns(vec![(
-            "stock market futures today",
+            PREMARKET_MACRO_QUERIES[0],
             Ok(vec![hit(
                 "https://news.test/m",
                 "Some macro text here, long enough.",
@@ -1496,7 +1562,8 @@ mod tests {
                 ),
                 "movers liquid=0 gainers=0 losers=0".to_string(),
                 "reasons proposed=0 kept=0 hedged=0".to_string(),
-                "search_err=1 llm_err=0 news_stale=0 news_noise=0".to_string(),
+                "search_err=3 llm_err=0 news_stale=0 news_noise=0".to_string(),
+                "macro queries=3 hits=0 items=0".to_string(),
                 "futures ok=4 err=0".to_string(),
             ]
         );
@@ -1532,12 +1599,13 @@ mod tests {
             )
         );
         assert_eq!(f.diagnostics[1], "movers liquid=2 gainers=1 losers=1");
-        // Two mover searches and the macro search all fail.
+        // Two mover searches and the three macro searches all fail.
         assert_eq!(
             f.diagnostics[3],
-            "search_err=3 llm_err=0 news_stale=0 news_noise=0"
+            "search_err=5 llm_err=0 news_stale=0 news_noise=0"
         );
-        assert_eq!(f.diagnostics[4], "futures ok=0 err=4");
+        assert_eq!(f.diagnostics[4], "macro queries=3 hits=0 items=0");
+        assert_eq!(f.diagnostics[5], "futures ok=0 err=4");
     }
 
     #[tokio::test]
@@ -1563,9 +1631,10 @@ mod tests {
         ]);
         let f = build_facts(&m, &n, &l, date(), now(), &|| 0).await;
         assert_eq!(f.diagnostics[2], "reasons proposed=2 kept=1 hedged=0");
+        // The three macro searches fail.
         assert_eq!(
             f.diagnostics[3],
-            "search_err=1 llm_err=1 news_stale=0 news_noise=0"
+            "search_err=3 llm_err=1 news_stale=0 news_noise=0"
         );
     }
 
@@ -1578,5 +1647,159 @@ mod tests {
         assert_eq!(f.diagnostics[1], "yahoo_session=crumb_http429 refreshes=0");
         assert!(f.diagnostics[2].starts_with("movers "));
         assert_eq!(*m.asked_at.borrow(), Some(now()));
+    }
+
+    /// `FakeNs` that records every query it is asked.
+    struct RecNs(FakeNs, RefCell<Vec<String>>);
+    #[async_trait(?Send)]
+    impl NewsSearch for RecNs {
+        async fn search(&self, query: &str, max: usize) -> Result<Vec<SearchHit>, ProviderError> {
+            self.1.borrow_mut().push(query.into());
+            self.0.search(query, max).await
+        }
+    }
+
+    /// Macro hits for the three premarket queries: 13 distinct urls, three
+    /// of them shared between queries, and one undated hit in the first.
+    fn macro_ns() -> RecNs {
+        let [q1, q2, q3] = PREMARKET_MACRO_QUERIES;
+        let page = |u: &str| format!("Item {u}: stocks moved on macro news overnight.");
+        let d = |u: &str, h| dated(&format!("https://m.test/{u}"), &page(u), h);
+        RecNs(
+            ns(vec![
+                (
+                    q1,
+                    Ok(vec![
+                        hit("https://m.test/undated", &page("undated")),
+                        d("a1", 1),
+                        d("a2", 2),
+                        d("a3", 3),
+                        d("a4", 4),
+                    ]),
+                ),
+                (
+                    q2,
+                    Ok(vec![
+                        d("a3", 3),
+                        d("a4", 4),
+                        d("b1", 1),
+                        d("b2", 2),
+                        d("b3", 3),
+                    ]),
+                ),
+                (
+                    q3,
+                    Ok(vec![
+                        d("b3", 3),
+                        d("c1", 1),
+                        d("c2", 2),
+                        d("c3", 3),
+                        d("c4", 4),
+                    ]),
+                ),
+            ]),
+            RefCell::new(vec![]),
+        )
+    }
+    /// Five verified macro reasons, one per article a1..a4 and b1.
+    fn five_macro_reasons() -> Result<Value, ProviderError> {
+        let items: Vec<Value> = ["a1", "a2", "a3", "a4", "b1"]
+            .iter()
+            .map(|u| {
+                json!({"url": format!("https://m.test/{u}"), "title": "T",
+                       "quote": format!("Item {u}: stocks moved on macro news"),
+                       "summary_en": "Stocks moved on macro news."})
+            })
+            .collect();
+        Ok(json!({ "reasons": items }))
+    }
+    fn macro_prompts(l: &FakeLlm) -> Vec<String> {
+        l.prompts
+            .borrow()
+            .iter()
+            .filter(|(_, u)| u.contains("Topic:"))
+            .map(|(_, u)| u.clone())
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn macro_merges_three_queries_dedupes_urls_and_caps_hits() {
+        let n = macro_ns();
+        let l = llm(vec![("Topic:", five_macro_reasons())]);
+        let f = build_facts(&md(&[]), &n, &l, date(), now(), &|| 0).await;
+        assert_eq!(*n.1.borrow(), PREMARKET_MACRO_QUERIES);
+        // One extraction call over the merged hits.
+        let prompts = macro_prompts(&l);
+        assert_eq!(prompts.len(), 1, "{prompts:?}");
+        let urls: Vec<&str> = prompts[0]
+            .lines()
+            .filter_map(|l| l.strip_prefix("url: https://m.test/"))
+            .collect();
+        // Query order, each url once, dated before undated, at most 8.
+        assert_eq!(urls, ["a1", "a2", "a3", "a4", "b1", "b2", "b3", "c1"]);
+        match &f.macro_items {
+            Field::Value(v) => assert_eq!(v.len(), 5),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn macro_line_follows_the_search_line() {
+        let n = macro_ns();
+        let l = llm(vec![("Topic:", five_macro_reasons())]);
+        let f = build_facts(&md(&[]), &n, &l, date(), now(), &|| 0).await;
+        assert_eq!(
+            f.diagnostics[3],
+            "search_err=0 llm_err=0 news_stale=0 news_noise=0"
+        );
+        assert_eq!(f.diagnostics[4], "macro queries=3 hits=8 items=5");
+        assert_eq!(f.diagnostics[5], "futures ok=4 err=0");
+    }
+
+    #[tokio::test]
+    async fn macro_skips_later_queries_when_budget_is_tight() {
+        let n = macro_ns();
+        let l = llm(vec![]);
+        let f = build_facts(&md(&[]), &n, &l, date(), now(), &|| 39).await;
+        assert_eq!(*n.1.borrow(), [PREMARKET_MACRO_QUERIES[0]]);
+        assert_eq!(f.diagnostics[4], "macro queries=1 hits=5 items=0");
+        assert_eq!(macro_prompts(&l).len(), 1);
+
+        // Each search uses one subrequest: the third query goes first.
+        let n = macro_ns();
+        let used = || 37 + n.1.borrow().len();
+        let f = build_facts(&md(&[]), &n, &llm(vec![]), date(), now(), &used).await;
+        assert_eq!(*n.1.borrow(), PREMARKET_MACRO_QUERIES[..2]);
+        assert_eq!(f.diagnostics[4], "macro queries=2 hits=8 items=0");
+    }
+
+    #[tokio::test]
+    async fn macro_keeps_up_to_five_items() {
+        let src: String = (1..=7)
+            .map(|i| format!("Macro item number {i} moved markets overnight. "))
+            .collect();
+        let n = ns(vec![(
+            PREMARKET_MACRO_QUERIES[0],
+            Ok(vec![hit("https://news.test/macro", &src)]),
+        )]);
+        let items: Vec<Value> = (1..=7)
+            .map(|i| {
+                json!({"url": "https://news.test/macro", "title": "T",
+                       "quote": format!("Macro item number {i} moved markets overnight"),
+                       "summary_en": "Markets moved."})
+            })
+            .collect();
+        let l = llm(vec![("Topic:", Ok(json!({ "reasons": items })))]);
+        let f = build_facts(&md(&[]), &n, &l, date(), now(), &|| 0).await;
+        match &f.macro_items {
+            Field::Value(v) => assert_eq!(v.len(), MACRO_ITEMS),
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(MACRO_ITEMS, 5);
+        let p = l.prompts.borrow();
+        let (sys, _) = p.iter().find(|(_, u)| u.contains("Topic:")).unwrap();
+        assert!(sys.contains("at most 5 reasons"), "{sys}");
+        // The two unregistered queries fail; the items come from the first.
+        assert_eq!(f.diagnostics[4], "macro queries=3 hits=1 items=5");
     }
 }
