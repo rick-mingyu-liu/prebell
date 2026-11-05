@@ -51,6 +51,7 @@ main.wrap { padding-top: 1.5rem; padding-bottom: 3rem; }
 /* Masthead: serif nameplate with its twin name in small grey, dateline and nav in small caps, double rule under. */
 .masthead { text-align: center; padding: 1.25rem 0 0.75rem; border-bottom: 3px double var(--rule-strong); }
 .masthead-name { font-family: var(--serif); font-size: 40px; font-weight: 700; letter-spacing: -0.02em; line-height: 1.1; text-decoration: none; }
+.masthead-mark { vertical-align: -0.14em; margin-right: 0.18em; color: var(--ink); }
 .masthead-name small { font-family: var(--sans); font-size: 12.5px; font-weight: 500; letter-spacing: 0.08em; color: var(--muted); margin-left: 0.4em; }
 .dateline { margin: 0.4rem 0 0; max-width: none; font-size: 12.5px; font-variant-caps: all-small-caps; letter-spacing: 0.1em; color: var(--muted); }
 html:lang(zh-Hans) .dateline { font-variant-caps: normal; }
