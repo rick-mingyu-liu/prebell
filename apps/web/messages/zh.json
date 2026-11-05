@@ -25,6 +25,8 @@
     "leadRead": "阅读完整回顾 →",
     "earningsChecks": "财报速评",
     "topMovers": "涨跌榜",
+    "themes": "板块动向",
+    "themesMore": "+{n}",
     "reporting": "{date}财报",
     "recentSection": "近期",
     "beforeOpen": "盘前",

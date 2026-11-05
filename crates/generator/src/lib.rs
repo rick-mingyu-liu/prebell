@@ -227,6 +227,7 @@ impl JobRunner for Runner<'_> {
         let hooks = Hooks {
             log: &log,
             extra: &extra,
+            budget: &|| self.http.count(),
             cover: cover.as_ref(),
         };
         let at = now(env);
