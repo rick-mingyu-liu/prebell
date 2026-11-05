@@ -9,6 +9,7 @@ import {
   PAGE_SIZE,
   parseContentType,
   resolvePost,
+  toCover,
   type D1Like,
 } from "../src/lib/posts";
 import { memoryD1 } from "./d1";
@@ -27,12 +28,12 @@ function post(
   let sql = `INSERT INTO runs VALUES ('${key}','${type}','${date}','published',1,NULL,'${ts}','${ts}');
 INSERT INTO posts (id, run_key, content_type, template_id, trading_date, slug, facts_r2_key, published_at)
 VALUES (${id},'${key}','${type}','${type}:v1','${date}','${slug}',NULL,'${ts}');\n`;
-  if (en) sql += `INSERT INTO post_translations VALUES (${id},'en','${en}','EN ${date}','EN summary ${date}','# EN ${date}','${ts}');\n`;
+  if (en) sql += `INSERT INTO post_translations (post_id, lang, status, title, summary, body_md, updated_at) VALUES (${id},'en','${en}','EN ${date}','EN summary ${date}','# EN ${date}','${ts}');\n`;
   if (zh)
     sql +=
       zh === "published"
-        ? `INSERT INTO post_translations VALUES (${id},'zh','published','中文 ${date}','摘要 ${date}','# 中文 ${date}','${ts}');\n`
-        : `INSERT INTO post_translations VALUES (${id},'zh','${zh}',NULL,NULL,NULL,'${ts}');\n`;
+        ? `INSERT INTO post_translations (post_id, lang, status, title, summary, body_md, updated_at) VALUES (${id},'zh','published','中文 ${date}','摘要 ${date}','# 中文 ${date}','${ts}');\n`
+        : `INSERT INTO post_translations (post_id, lang, status, title, summary, body_md, updated_at) VALUES (${id},'zh','${zh}',NULL,NULL,NULL,'${ts}');\n`;
   return sql;
 }
 
@@ -350,5 +351,69 @@ describe("isPublishedIn", () => {
     expect(await isPublishedIn(db, "premarket-2026-10-29", "zh")).toBe(false);
     expect(await isPublishedIn(db, "premarket-2026-10-26", "en")).toBe(false);
     expect(await isPublishedIn(db, "nope", "en")).toBe(false);
+  });
+});
+
+describe("cover fields and ticker", () => {
+  const ts = "2026-10-30T21:00:00Z";
+  const coverSeed =
+    post(10, "2026-10-29", "published", "published") +
+    `INSERT INTO runs VALUES ('earnings:AMGN:acc1','earnings','2026-10-30','published',1,NULL,'${ts}','${ts}');
+INSERT INTO posts (id, run_key, content_type, template_id, trading_date, slug, facts_r2_key, published_at, cover_key)
+VALUES (11,'earnings:AMGN:acc1','earnings','earnings:v1','2026-10-30','amgn-q3-fy2026-earnings','x','${ts}','covers/amgn-q3-fy2026-earnings.png');
+INSERT INTO earnings_filings VALUES ('acc1',1,'AMGN','8-K','2.02','2026-10-30','2026-10-30','${ts}','x.htm','earnings:AMGN:acc1','done','${ts}');
+INSERT INTO post_translations (post_id, lang, status, title, summary, body_md, cover_line1, cover_line2, updated_at)
+VALUES (11,'en','published','EN AMGN','sum','# EN','Amgen beats','',  '${ts}');
+INSERT INTO post_translations (post_id, lang, status, title, summary, body_md, cover_line1, cover_line2, updated_at)
+VALUES (11,'zh','published','中文 AMGN','摘要','# 中文','安进超预期','营收创新高','${ts}');`;
+
+  it("lists cover key, lines and ticker on heads, lists and neighbours", async () => {
+    const db = memoryD1(coverSeed);
+    const earn = { ticker: "AMGN", coverKey: "covers/amgn-q3-fy2026-earnings.png" };
+    const none = { ticker: null, coverKey: null, coverLines: null };
+
+    const view = await getPostBySlug(db, "amgn-q3-fy2026-earnings", "zh");
+    expect(view).toMatchObject({ ...earn, coverLines: ["安进超预期", "营收创新高"] });
+    const en = await getPostBySlug(db, "amgn-q3-fy2026-earnings", "en");
+    expect(en!.coverLines).toEqual(["Amgen beats", ""]);
+
+    const head = await getLatestPost(db, "en", "earnings");
+    expect(head).toMatchObject({ ...earn, coverLines: ["Amgen beats", ""] });
+    expect(await getLatestPost(db, "en", "premarket")).toMatchObject(none);
+
+    const list = await listPosts(db, "zh", 1, "earnings");
+    expect(list).toHaveLength(1);
+    expect(list[0]).toMatchObject({ ...earn, coverLines: ["安进超预期", "营收创新高"] });
+    const briefs = await listPosts(db, "en", 1);
+    expect(briefs).toHaveLength(1);
+    expect(briefs[0]).toMatchObject(none);
+
+    const adj = await getAdjacentPosts(db, "en", {
+      tradingDate: "2026-10-30",
+      publishedAt: ts,
+      slug: "zzz",
+    });
+    expect(adj.prev).toMatchObject(none);
+  });
+});
+
+describe("toCover", () => {
+  const row = { cover_key: "covers/amgn-q3-fy2026-earnings.png", cover_line1: "Rev +8%", cover_line2: null, ticker: "AMGN" };
+
+  it("passes a generator-written cover key through", () => {
+    expect(toCover(row)).toEqual({ coverKey: "covers/amgn-q3-fy2026-earnings.png", coverLines: ["Rev +8%", ""], ticker: "AMGN" });
+    expect(toCover({ ...row, cover_key: "covers/recap-2026-10-29.jpg" }).coverKey).toBe("covers/recap-2026-10-29.jpg");
+  });
+
+  it("drops a cover key the covers route would not serve", () => {
+    for (const bad of ["charts/x.png", "covers/../facts.json", "covers/AMGN.png", "covers/x.gif", "covers/x.png?x=1", "", "/covers/x.png"])
+      expect(toCover({ ...row, cover_key: bad }).coverKey, bad).toBeNull();
+    expect(toCover({ ...row, cover_key: null }).coverKey).toBeNull();
+  });
+
+  it("treats a missing first line, null or undefined, as no cover lines", () => {
+    expect(toCover({ ...row, cover_line1: null }).coverLines).toBeNull();
+    // A driver that leaves the column out entirely yields undefined, not null.
+    expect(toCover({ ...row, cover_line1: undefined as unknown as null }).coverLines).toBeNull();
   });
 });

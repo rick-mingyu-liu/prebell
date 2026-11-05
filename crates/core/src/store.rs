@@ -3,7 +3,7 @@
 //! schema's allowed values. Task 11 implements `Store` on D1/R2.
 
 use std::cell::{Cell, RefCell};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use async_trait::async_trait;
 
@@ -35,6 +35,8 @@ pub struct PostRow {
     pub slug: String,
     pub facts_r2_key: String,
     pub published_at: Option<String>,
+    /// R2 key of the rendered cover image, once one exists.
+    pub cover_key: Option<String>,
 }
 
 /// `post_translations` row. `lang`: en | zh; `status`: published | pending | failed.
@@ -47,6 +49,9 @@ pub struct TranslationRow {
     pub summary: String,
     pub body_md: String,
     pub updated_at: String,
+    /// The two text lines drawn on the cover image.
+    pub cover_line1: Option<String>,
+    pub cover_line2: Option<String>,
 }
 
 #[async_trait(?Send)]
@@ -80,6 +85,10 @@ pub trait Store {
     /// Stores the facts JSON (R2 in production) under `key`.
     async fn put_facts(&self, key: &str, json: &str) -> Result<(), String>;
     async fn get_facts(&self, key: &str) -> Result<Option<String>, String>;
+    /// Stores binary content (an image in R2 in production) under `key`.
+    async fn put_bytes(&self, key: &str, bytes: &[u8], content_type: &str) -> Result<(), String>;
+    /// Insert or replace the kv row `key`; `now` is its `updated_at`.
+    async fn kv_set(&self, key: &str, value: &str, now: &str) -> Result<(), String>;
 }
 
 /// In-memory `Store` for tests.
@@ -92,6 +101,9 @@ pub struct MemStore {
     /// `(run_key, level, message)` in insertion order.
     pub alerts: RefCell<Vec<(String, String, String)>>,
     pub facts: RefCell<HashMap<String, String>>,
+    /// `key -> (bytes, content type)` written by `put_bytes`.
+    pub bytes: RefCell<BTreeMap<String, (Vec<u8>, String)>>,
+    pub kv: RefCell<BTreeMap<String, String>>,
     /// Makes `posts_on` fail, as a D1 outage would.
     pub fail_posts_on: Cell<bool>,
     /// Makes `get_facts` fail for this key, as an R2 outage would.
@@ -190,5 +202,78 @@ impl Store for MemStore {
             return Err(format!("r2: get {key} failed"));
         }
         Ok(self.facts.borrow().get(key).cloned())
+    }
+    async fn put_bytes(&self, key: &str, bytes: &[u8], content_type: &str) -> Result<(), String> {
+        self.bytes
+            .borrow_mut()
+            .insert(key.into(), (bytes.to_vec(), content_type.into()));
+        Ok(())
+    }
+    async fn kv_set(&self, key: &str, value: &str, _now: &str) -> Result<(), String> {
+        self.kv.borrow_mut().insert(key.into(), value.into());
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn post() -> PostRow {
+        PostRow {
+            id: None,
+            run_key: "brief:2026-11-04".into(),
+            content_type: "brief".into(),
+            template_id: "t".into(),
+            trading_date: "2026-11-04".into(),
+            slug: "s".into(),
+            facts_r2_key: "facts/x.json".into(),
+            published_at: Some("2026-11-04T12:00:00Z".into()),
+            cover_key: Some("covers/x.png".into()),
+        }
+    }
+
+    #[tokio::test]
+    async fn mem_store_round_trips_cover_fields() {
+        let s = MemStore::default();
+        let id = s.upsert_post(&post()).await.unwrap();
+        let got = s
+            .get_post_by_run("brief:2026-11-04")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(got.cover_key.as_deref(), Some("covers/x.png"));
+
+        let t = TranslationRow {
+            post_id: id,
+            lang: "en".into(),
+            status: "published".into(),
+            title: "T".into(),
+            summary: "S".into(),
+            body_md: "B".into(),
+            updated_at: "2026-11-04T12:00:00Z".into(),
+            cover_line1: Some("Revenue $10.4B".into()),
+            cover_line2: None,
+        };
+        s.upsert_translation(&t).await.unwrap();
+        let got = s.get_translation(id, "en").await.unwrap().unwrap();
+        assert_eq!(got.cover_line1.as_deref(), Some("Revenue $10.4B"));
+        assert_eq!(got.cover_line2, None);
+    }
+
+    #[tokio::test]
+    async fn mem_store_put_bytes_and_kv_set() {
+        let s = MemStore::default();
+        s.put_bytes("covers/x.png", &[1, 2, 3], "image/png")
+            .await
+            .unwrap();
+        assert_eq!(
+            s.bytes.borrow()["covers/x.png"],
+            (vec![1, 2, 3], "image/png".to_string())
+        );
+        s.kv_set("index_line", "{}", "2026-11-04T00:00:00Z")
+            .await
+            .unwrap();
+        assert_eq!(s.kv.borrow()["index_line"], "{}");
     }
 }

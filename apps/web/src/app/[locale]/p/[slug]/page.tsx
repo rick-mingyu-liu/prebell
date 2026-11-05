@@ -7,10 +7,10 @@ import BriefView from "@/components/BriefView";
 import type { Locale } from "@/i18n/routing";
 import { loadBrief } from "@/lib/brief";
 import { getDb } from "@/lib/db";
-import { todayEt } from "@/lib/earnings";
 import { pendingTitle } from "@/lib/labels";
 import { resolvePost } from "@/lib/posts";
 import { pairedAlternates } from "@/lib/seo";
+import { signupEnabled } from "@/lib/signup";
 
 // One lookup shared by generateMetadata and the page.
 const resolve = cache((slug: string, locale: Locale) => resolvePost(getDb(), slug, locale));
@@ -45,5 +45,5 @@ export default async function PostPage({ params }: PageProps<"/[locale]/p/[slug]
   const data = await loadBrief(getDb(), getCloudflareContext().env.FACTS, post, locale, (e) =>
     console.error(`post facts ${post.factsKey}:`, e),
   );
-  return <BriefView locale={locale} today={todayEt()} {...data} />;
+  return <BriefView data={data} locale={locale} signup={signupEnabled()} />;
 }

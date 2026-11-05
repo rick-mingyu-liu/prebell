@@ -9,6 +9,10 @@ use serde::de::DeserializeOwned;
 use serde::Serialize;
 
 use crate::clock::{decide, et, premarket_window, trading_day, DayKind, SlotDecision, Window};
+use crate::cover::{
+    brief_lines, brief_scene_subject, index_snapshot, make_scene, CoverLines, CoverMaker,
+    IndexSnapshot, INDEX_LINE_KEY,
+};
 use crate::facts::{missing_required, Field, NewsReason, PremarketFacts};
 use crate::numbers::Lang;
 use crate::premarket::build_facts;
@@ -44,6 +48,12 @@ pub trait Content {
     fn sources(&self, f: &Self::Facts) -> Vec<NewsReason>;
     /// Build counters carried in the facts, for the log and `last_error`.
     fn diagnostics(&self, f: &Self::Facts) -> Vec<String>;
+    /// The two lines printed on the post's cover.
+    fn cover_lines(&self, f: &Self::Facts) -> CoverLines;
+    /// The market snapshot the front page's index line is built from.
+    fn index_snapshot(&self, f: &Self::Facts) -> IndexSnapshot;
+    /// What the cover's generated background shows.
+    fn scene_subject(&self, f: &Self::Facts) -> String;
 
     fn run_key(&self, date: NaiveDate) -> String {
         format!("{}:{}", self.content_type(), date.format("%Y-%m-%d"))
@@ -102,6 +112,15 @@ impl Content for Premarket<'_> {
     fn diagnostics(&self, f: &PremarketFacts) -> Vec<String> {
         f.diagnostics.clone()
     }
+    fn cover_lines(&self, f: &PremarketFacts) -> CoverLines {
+        brief_lines(&f.futures, &f.gainers, &f.losers, true)
+    }
+    fn index_snapshot(&self, f: &PremarketFacts) -> IndexSnapshot {
+        index_snapshot("premarket", f.as_of_utc, &f.futures)
+    }
+    fn scene_subject(&self, f: &PremarketFacts) -> String {
+        brief_scene_subject(f.trading_date)
+    }
 }
 /// A `building` run younger than this is assumed to be in flight. A build
 /// takes 3-8 minutes and the cron fires every 5, so this must cover several
@@ -137,7 +156,8 @@ pub async fn tick(
     tick_with_log(now, store, md, ns, llm, &|_| {}).await
 }
 
-/// `tick`, passing the build's diagnostics line to `log` once when it builds.
+/// `tick`, passing the build's diagnostics line to `log` once when it builds
+/// (and the scene outcome, `cover=ok|skip|err`, when it gets that far).
 pub async fn tick_with_log(
     now: DateTime<Utc>,
     store: &dyn Store,
@@ -149,6 +169,7 @@ pub async fn tick_with_log(
     let hooks = Hooks {
         log,
         extra: &Vec::new,
+        cover: &crate::cover::NoCover,
     };
     tick_with_hooks(now, store, md, ns, llm, &hooks).await
 }
@@ -167,12 +188,16 @@ pub async fn tick_with_hooks(
 
 /// What the caller adds to a tick.
 pub struct Hooks<'a> {
-    /// Receives the build's diagnostics line, once when it builds.
+    /// Receives the build's diagnostics line, once when the facts are built
+    /// (before the drafts), then `cover=ok|skip|err` after the scene step,
+    /// and a failed index-line write.
     pub log: &'a dyn Fn(&str),
     /// Lines appended to the build's diagnostics (log and `last_error`, not
     /// the stored facts), read when the facts are built, e.g. the Worker's
     /// subrequest count.
     pub extra: &'a dyn Fn() -> Vec<String>,
+    /// Makes the cover's background scene; `NoCover` when none is configured.
+    pub cover: &'a dyn CoverMaker,
 }
 
 /// One cron firing for content type `c`. A store error is reported as `Retrying`.
@@ -253,6 +278,10 @@ async fn reconcile<C: Content>(
         return Ok(None);
     }
     let ts = iso(now);
+    let facts: Option<C::Facts> = match store.get_facts(&post.facts_r2_key).await? {
+        Some(json) => Some(serde_json::from_str(&json).map_err(|e| format!("facts json: {e}"))?),
+        None => None,
+    };
     if store.get_translation(post_id, "zh").await?.is_none() {
         let pending = translation_zh(
             post_id,
@@ -260,15 +289,14 @@ async fn reconcile<C: Content>(
             String::new(),
             String::new(),
             String::new(),
+            facts.as_ref().map(|f| c.cover_lines(f).zh),
             &ts,
         );
         store.upsert_translation(&pending).await?;
     }
     // The failed write may have been `add_sources`; it replaces, so redo it.
-    if let Some(json) = store.get_facts(&post.facts_r2_key).await? {
-        let facts: C::Facts =
-            serde_json::from_str(&json).map_err(|e| format!("facts json: {e}"))?;
-        store.add_sources(post_id, &c.sources(&facts)).await?;
+    if let Some(facts) = &facts {
+        store.add_sources(post_id, &c.sources(facts)).await?;
     }
     let mut row = run.unwrap_or_else(|| new_run(now, c, date));
     row.status = "published".into();
@@ -341,16 +369,36 @@ async fn build<C: Content>(
     let mut row = run.unwrap_or_else(|| new_run(now, c, date));
     row.status = "building".into();
     row.attempts += 1;
-    row.updated_at = ts.clone();
+    row.updated_at = ts;
     store.upsert_run(&row).await?;
 
     let facts = c.build_facts(date, now).await;
     let mut lines = c.diagnostics(&facts);
     lines.extend((hooks.extra)());
-    let diagnostics = lines.join("; ");
-    (hooks.log)(&format!("diagnostics: {diagnostics}"));
-    let missing = c.missing_required(&facts);
+    // Logged now, before the drafts, so the line survives a build that dies
+    // in them (CPU or subrequest limits).
+    (hooks.log)(&format!("diagnostics: {}", lines.join("; ")));
+    publish(now, store, c, hooks, date, row, &facts, &lines).await
+}
+
+/// The rest of `build` once the facts are in: gate, drafts, scene, rows.
+/// `lines` (the diagnostics) go into `last_error` when the gate fails; the
+/// scene outcome is logged on its own line.
+#[allow(clippy::too_many_arguments)]
+async fn publish<C: Content>(
+    now: DateTime<Utc>,
+    store: &dyn Store,
+    c: &C,
+    hooks: &Hooks<'_>,
+    date: NaiveDate,
+    mut row: RunRow,
+    facts: &C::Facts,
+    lines: &[String],
+) -> Result<TickOutcome, String> {
+    let ts = iso(now);
+    let missing = c.missing_required(facts);
     if !missing.is_empty() {
+        let diagnostics = lines.join("; ");
         let mut err = missing.join(", ");
         if !diagnostics.is_empty() {
             err = format!("{err} | {diagnostics}");
@@ -358,19 +406,22 @@ async fn build<C: Content>(
         return retry_later(store, row, err).await;
     }
 
-    let (en, en_md) = match c.write(&facts, Lang::En).await {
+    let (en, en_md) = match c.write(facts, Lang::En).await {
         Ok(x) => x,
         Err(e) => return retry_later(store, row, format!("en: {}", e.join("; "))).await,
     };
-    let zh = c.write(&facts, Lang::Zh).await;
+    let zh = c.write(facts, Lang::Zh).await;
 
     // The build took minutes; another tick may have finished this run since
     // it was read. If so, keep its post and facts untouched.
     if superseded(store, &row.run_key).await? {
         return Ok(TickOutcome::Nothing);
     }
+    let slug = c.slug(date);
+    let (cover_key, outcome) = make_scene(store, hooks.cover, &slug, &c.scene_subject(facts)).await;
+    (hooks.log)(&format!("cover={outcome}"));
     let facts_key = c.facts_key(date);
-    let json = serde_json::to_string(&facts).map_err(|e| format!("facts json: {e}"))?;
+    let json = serde_json::to_string(facts).map_err(|e| format!("facts json: {e}"))?;
     store.put_facts(&facts_key, &json).await?;
 
     let post_id = store
@@ -380,11 +431,22 @@ async fn build<C: Content>(
             content_type: c.content_type().into(),
             template_id: c.template_id().into(),
             trading_date: row.trading_date.clone(),
-            slug: c.slug(date),
+            slug,
             facts_r2_key: facts_key,
             published_at: Some(ts.clone()),
+            cover_key,
         })
         .await?;
+    // The front page's index line; a failed write keeps the previous one.
+    let index_line = match serde_json::to_string(&c.index_snapshot(facts)) {
+        Ok(json) => store.kv_set(INDEX_LINE_KEY, &json, &ts).await,
+        Err(e) => Err(format!("index snapshot json: {e}")),
+    };
+    if let Err(e) = index_line {
+        (hooks.log)(&format!("index line not written: {e}"));
+    }
+    let cover = c.cover_lines(facts);
+    let [en_line1, en_line2] = cover.en;
     store
         .upsert_translation(&TranslationRow {
             post_id,
@@ -394,11 +456,21 @@ async fn build<C: Content>(
             summary: en.summary,
             body_md: en_md,
             updated_at: ts.clone(),
+            cover_line1: Some(en_line1),
+            cover_line2: Some(en_line2),
         })
         .await?;
     let (zh_row, zh_err) = match zh {
         Ok((d, body)) => (
-            translation_zh(post_id, "published", d.title, d.summary, body, &ts),
+            translation_zh(
+                post_id,
+                "published",
+                d.title,
+                d.summary,
+                body,
+                Some(cover.zh),
+                &ts,
+            ),
             None,
         ),
         Err(e) => (
@@ -408,13 +480,14 @@ async fn build<C: Content>(
                 String::new(),
                 String::new(),
                 String::new(),
+                Some(cover.zh),
                 &ts,
             ),
             Some(format!("zh: {}", e.join("; "))),
         ),
     };
     store.upsert_translation(&zh_row).await?;
-    store.add_sources(post_id, &c.sources(&facts)).await?;
+    store.add_sources(post_id, &c.sources(facts)).await?;
 
     row.status = "published".into();
     row.last_error = zh_err.clone();
@@ -450,14 +523,18 @@ async fn retry_later(
     Ok(TickOutcome::Retrying(err))
 }
 
+/// A ZH row. Every write carries the cover `lines`: the upsert replaces the
+/// whole row, so a write without them would erase them.
 fn translation_zh(
     post_id: i64,
     status: &str,
     title: String,
     summary: String,
     body_md: String,
+    lines: Option<[String; 2]>,
     ts: &str,
 ) -> TranslationRow {
+    let [cover_line1, cover_line2] = lines.map_or([None, None], |l| l.map(Some));
     TranslationRow {
         post_id,
         lang: "zh".into(),
@@ -466,6 +543,8 @@ fn translation_zh(
         summary,
         body_md,
         updated_at: ts.into(),
+        cover_line1,
+        cover_line2,
     }
 }
 
@@ -519,6 +598,7 @@ async fn retry_zh<C: Content>(
         .ok_or("facts not found")?;
     let facts: C::Facts = serde_json::from_str(&json).map_err(|e| format!("facts json: {e}"))?;
     let ts = iso(now);
+    let lines = c.cover_lines(&facts).zh;
     match c.write(&facts, Lang::Zh).await {
         Ok((d, body)) => {
             store
@@ -528,6 +608,7 @@ async fn retry_zh<C: Content>(
                     d.title,
                     d.summary,
                     body,
+                    Some(lines),
                     &ts,
                 ))
                 .await?;
@@ -542,6 +623,7 @@ async fn retry_zh<C: Content>(
                     String::new(),
                     String::new(),
                     String::new(),
+                    Some(lines),
                     &ts,
                 );
                 store.upsert_translation(&failed).await?;
@@ -565,6 +647,8 @@ async fn retry_zh<C: Content>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cover::tests::{FakeCover, PNG};
+    use crate::cover::NoCover;
     use crate::facts::NewsReason;
     use crate::facts::Quote;
     use crate::providers::{ProviderError, SearchHit};
@@ -711,6 +795,56 @@ mod tests {
     }
 
     #[test]
+    fn premarket_cover_and_snapshot_come_from_the_futures() {
+        let (md, llm) = (md(true), llm(true, true));
+        let c = Premarket {
+            md: &md,
+            ns: &FakeNs,
+            llm: &llm,
+        };
+        let f = PremarketFacts {
+            trading_date: "2026-10-29".parse().unwrap(),
+            as_of_utc: utc("2026-10-29T12:30:09Z"),
+            futures: vec![
+                (
+                    "S&P 500 futures".into(),
+                    Field::Value(q("ES=F", 5800.0, -1.14)),
+                ),
+                (
+                    "Nasdaq 100 futures".into(),
+                    Field::Missing {
+                        reason: "HTTP 429".into(),
+                    },
+                ),
+            ],
+            gainers: vec![crate::facts::Mover {
+                quote: q("AAPL", 230.0, 8.0),
+                name: "Apple".into(),
+                reasons: vec![],
+            }],
+            losers: vec![],
+            macro_items: Field::Missing {
+                reason: "n/a".into(),
+            },
+            watch_list: Field::Missing {
+                reason: "n/a".into(),
+            },
+            diagnostics: vec![],
+        };
+        let lines = c.cover_lines(&f);
+        assert_eq!(lines.en, ["S&P futures −1.14%", "AAPL +8.00%"]);
+        assert_eq!(lines.zh[0], "标普500期货 −1.14%");
+        let snap = c.index_snapshot(&f);
+        assert_eq!(snap.kind, "premarket");
+        assert_eq!(snap.as_of_utc, "2026-10-29T12:30:09Z");
+        assert_eq!(snap.entries.len(), 1);
+        assert_eq!(
+            c.scene_subject(&f),
+            "a suspension bridge over a calm river at first light"
+        );
+    }
+
+    #[test]
     fn run_key_format() {
         assert_eq!(run_key(NaiveDate::from_ymd_opt(2026, 10, 29).unwrap()), KEY);
     }
@@ -762,6 +896,7 @@ mod tests {
             slug: "premarket-2026-10-29".into(),
             facts_r2_key: "premarket/2026-10-29.json".into(),
             published_at: None,
+            cover_key: None,
         });
         s.runs
             .borrow_mut()
@@ -857,6 +992,7 @@ mod tests {
         let hooks = Hooks {
             log: &log,
             extra: &extra,
+            cover: &NoCover,
         };
         let out = tick_with_hooks(utc("2026-10-29T12:30:00Z"), &s, &m, &FakeNs, &l, &hooks).await;
         match out {
@@ -891,17 +1027,68 @@ mod tests {
             TickOutcome::Published
         );
         {
+            // The facts line, then the scene outcome on its own line.
             let logs = logs.borrow();
-            assert_eq!(logs.len(), 1, "{logs:?}");
+            assert_eq!(logs.len(), 2, "{logs:?}");
             assert!(logs[0].starts_with("diagnostics: quotes ok=1 "), "{logs:?}");
             assert!(
                 logs[0].contains("; movers liquid=1 gainers=1 losers=0"),
                 "{logs:?}"
             );
+            assert!(!logs[0].contains("cover="), "{logs:?}");
+            assert_eq!(logs[1], "cover=skip");
         }
         // No build, no diagnostics line.
         tick_with_log(now, &s, &m, &FakeNs, &l, &log).await;
-        assert_eq!(logs.borrow().len(), 1);
+        assert_eq!(logs.borrow().len(), 2);
+        // The scene outcome is not part of the stored facts.
+        assert!(!s.facts.borrow()["premarket/2026-10-29.json"].contains("cover="));
+    }
+
+    /// An LLM that records what had been logged when the first draft was asked for.
+    struct DraftSpy<'a> {
+        inner: FakeLlm,
+        logs: &'a std::cell::RefCell<Vec<String>>,
+        at_draft: std::cell::RefCell<Option<Vec<String>>>,
+    }
+    #[async_trait(?Send)]
+    impl LlmProvider for DraftSpy<'_> {
+        async fn complete_json(&self, system: &str, user: &str) -> Result<Value, ProviderError> {
+            if system.starts_with("You write the US premarket") && self.at_draft.borrow().is_none()
+            {
+                *self.at_draft.borrow_mut() = Some(self.logs.borrow().clone());
+            }
+            self.inner.complete_json(system, user).await
+        }
+    }
+
+    #[tokio::test]
+    async fn diagnostics_are_logged_before_the_drafts_and_cover_after_the_scene() {
+        let s = MemStore::default();
+        let m = md(true);
+        let logs = std::cell::RefCell::new(Vec::<String>::new());
+        let spy = DraftSpy {
+            inner: llm(true, true),
+            logs: &logs,
+            at_draft: std::cell::RefCell::new(None),
+        };
+        let log = |m: &str| logs.borrow_mut().push(m.to_string());
+        let extra = || vec!["subrequests=7".to_string()];
+        let hooks = Hooks {
+            log: &log,
+            extra: &extra,
+            cover: &NoCover,
+        };
+        let out = tick_with_hooks(utc("2026-10-29T12:30:00Z"), &s, &m, &FakeNs, &spy, &hooks).await;
+        assert_eq!(out, TickOutcome::Published);
+        let at_draft = spy.at_draft.borrow().clone().expect("no draft was written");
+        assert_eq!(at_draft.len(), 1, "{at_draft:?}");
+        assert!(at_draft[0].starts_with("diagnostics: "), "{at_draft:?}");
+        assert!(at_draft[0].ends_with("; subrequests=7"), "{at_draft:?}");
+        assert_eq!(
+            *logs.borrow(),
+            [at_draft[0].clone(), "cover=skip".to_string()]
+        );
     }
 
     #[tokio::test]
@@ -1077,6 +1264,8 @@ mod tests {
         fail_published_run: Cell<bool>,
         fail_zh_row: Cell<bool>,
         fail_get_run: Cell<bool>,
+        fail_put_bytes: Cell<bool>,
+        fail_kv_set: Cell<bool>,
         get_run_calls: Cell<usize>,
         /// `(call number, status)`: on that `get_run` call, first set the
         /// stored run to `status`, as a concurrent tick finishing would.
@@ -1139,6 +1328,23 @@ mod tests {
         }
         async fn get_facts(&self, key: &str) -> Result<Option<String>, String> {
             self.inner.get_facts(key).await
+        }
+        async fn put_bytes(
+            &self,
+            key: &str,
+            bytes: &[u8],
+            content_type: &str,
+        ) -> Result<(), String> {
+            if self.fail_put_bytes.get() {
+                return Err("r2: put_bytes failed".into());
+            }
+            self.inner.put_bytes(key, bytes, content_type).await
+        }
+        async fn kv_set(&self, key: &str, value: &str, now: &str) -> Result<(), String> {
+            if self.fail_kv_set.get() {
+                return Err("d1: kv_set failed".into());
+            }
+            self.inner.kv_set(key, value, now).await
         }
     }
 
@@ -1205,6 +1411,9 @@ mod tests {
         assert_eq!(out, TickOutcome::Published);
         assert_eq!(run_status(&s.inner), "published");
         assert_eq!(tr_status(&s.inner, "zh"), "published");
+        let zh = s.inner.translations.borrow()[&(1, "zh".to_string())].clone();
+        let want = stored_lines(&s.inner, "premarket/2026-10-29.json").zh;
+        assert_eq!([zh.cover_line1.unwrap(), zh.cover_line2.unwrap()], want);
         // Only the ZH draft ran: no market data, one LLM call.
         assert_eq!((m.calls.get(), l.calls.get()), (md_calls, llm_calls + 1));
         assert_eq!(s.inner.posts.borrow().len(), 1);
@@ -1312,5 +1521,153 @@ mod tests {
         let out = tick(utc("2026-10-29T12:30:00Z"), &s, &m, &FakeNs, &l).await;
         assert_eq!(out, TickOutcome::Nothing);
         assert_eq!(run_status(&s.inner), "skipped");
+    }
+
+    const NOV4: &str = "2026-11-04T13:30:00Z";
+    const NOV4_KEY: &str = "premarket:2026-11-04";
+    const NOV4_FACTS: &str = "premarket/2026-11-04.json";
+
+    /// The cover lines of the facts stored under `key`.
+    fn stored_lines(s: &MemStore, key: &str) -> CoverLines {
+        let f: PremarketFacts = serde_json::from_str(&s.facts.borrow()[key]).unwrap();
+        let (m, l) = (md(true), llm(true, true));
+        let c = Premarket {
+            md: &m,
+            ns: &FakeNs,
+            llm: &l,
+        };
+        c.cover_lines(&f)
+    }
+    fn lines_of(s: &MemStore, lang: &str) -> [Option<String>; 2] {
+        let t = s.translations.borrow()[&(1, lang.to_string())].clone();
+        [t.cover_line1, t.cover_line2]
+    }
+
+    #[tokio::test]
+    async fn build_stores_cover_lines_scene_and_index_snapshot() {
+        let s = MemStore::default();
+        let (m, l) = (md(true), llm(true, true));
+        let cover = FakeCover::new(Ok(PNG.to_vec()));
+        let logs = std::cell::RefCell::new(Vec::<String>::new());
+        let log = |m: &str| logs.borrow_mut().push(m.to_string());
+        let hooks = Hooks {
+            log: &log,
+            extra: &Vec::new,
+            cover: &cover,
+        };
+        let out = tick_with_hooks(utc(NOV4), &s, &m, &FakeNs, &l, &hooks).await;
+        assert_eq!(out, TickOutcome::Published);
+
+        let key = "covers/premarket-2026-11-04.png";
+        assert_eq!(s.posts.borrow()[0].cover_key.as_deref(), Some(key));
+        assert_eq!(
+            s.bytes.borrow()[key],
+            (PNG.to_vec(), "image/png".to_string())
+        );
+        let date: NaiveDate = "2026-11-04".parse().unwrap();
+        assert_eq!(
+            *cover.prompts.borrow(),
+            [crate::cover::scene_prompt(&brief_scene_subject(date))]
+        );
+
+        let lines = stored_lines(&s, NOV4_FACTS);
+        assert_eq!(lines.en[1], "AAPL +8.00%");
+        assert_eq!(lines_of(&s, "en"), lines.en.map(Some));
+        assert_eq!(lines_of(&s, "zh"), lines.zh.map(Some));
+
+        let snap: IndexSnapshot =
+            serde_json::from_str(&s.kv.borrow()[crate::cover::INDEX_LINE_KEY]).unwrap();
+        assert_eq!(snap.kind, "premarket");
+        assert_eq!(snap.as_of_utc, NOV4);
+        assert_eq!(snap.entries.len(), 4);
+
+        let logs = logs.borrow();
+        assert_eq!(logs.len(), 2, "{logs:?}");
+        assert!(logs[0].starts_with("diagnostics: "), "{logs:?}");
+        assert_eq!(logs[1], "cover=ok");
+    }
+
+    #[tokio::test]
+    async fn build_publishes_without_scene_when_maker_fails() {
+        // A maker error, an unconfigured maker, a failed image write.
+        for (maker, fail_put, want) in [
+            (Some(FakeCover::new(Err("boom".into()))), false, "cover=err"),
+            (None, false, "cover=skip"),
+            (Some(FakeCover::new(Ok(PNG.to_vec()))), true, "cover=err"),
+        ] {
+            let s = FailStore::default();
+            s.fail_put_bytes.set(fail_put);
+            let (m, l) = (md(true), llm(true, true));
+            let logs = std::cell::RefCell::new(Vec::<String>::new());
+            let log = |m: &str| logs.borrow_mut().push(m.to_string());
+            let hooks = Hooks {
+                log: &log,
+                extra: &Vec::new,
+                cover: match &maker {
+                    Some(f) => f,
+                    None => &NoCover,
+                },
+            };
+            let out = tick_with_hooks(utc(NOV4), &s, &m, &FakeNs, &l, &hooks).await;
+            assert_eq!(out, TickOutcome::Published, "{want}");
+            assert_eq!(s.inner.runs.borrow()[NOV4_KEY].status, "published");
+            assert_eq!(s.inner.posts.borrow()[0].cover_key, None, "{want}");
+            assert!(s.inner.bytes.borrow().is_empty());
+            // The lines and the snapshot do not depend on the scene.
+            assert!(lines_of(&s.inner, "en")[1].is_some());
+            assert!(s.inner.kv.borrow().contains_key("index_line"));
+            assert_eq!(logs.borrow().len(), 2, "{:?}", logs.borrow());
+            assert_eq!(logs.borrow()[1], want, "{:?}", logs.borrow());
+        }
+    }
+
+    #[tokio::test]
+    async fn index_line_write_error_is_logged_and_the_build_publishes() {
+        let s = FailStore::default();
+        s.fail_kv_set.set(true);
+        let (m, l) = (md(true), llm(true, true));
+        let logs = std::cell::RefCell::new(Vec::<String>::new());
+        let log = |m: &str| logs.borrow_mut().push(m.to_string());
+        let out = tick_with_log(utc(NOV4), &s, &m, &FakeNs, &l, &log).await;
+        assert_eq!(out, TickOutcome::Published);
+        assert!(
+            logs.borrow()
+                .iter()
+                .any(|m| m.contains("d1: kv_set failed")),
+            "{:?}",
+            logs.borrow()
+        );
+    }
+
+    #[tokio::test]
+    async fn retry_zh_keeps_cover_lines() {
+        let s = MemStore::default();
+        let (m, l) = (md(true), llm(true, false));
+        let now = utc("2026-10-29T12:30:00Z");
+        assert_eq!(
+            tick(now, &s, &m, &FakeNs, &l).await,
+            TickOutcome::PublishedEnOnly
+        );
+        let lines = stored_lines(&s, "premarket/2026-10-29.json");
+        // The pending row already carries the Chinese lines.
+        assert_eq!(lines_of(&s, "zh"), lines.zh.clone().map(Some));
+        l.zh_ok.set(true);
+        assert_eq!(
+            tick(utc("2026-10-29T12:35:00Z"), &s, &m, &FakeNs, &l).await,
+            TickOutcome::Published
+        );
+        assert_eq!(tr_status(&s, "zh"), "published");
+        assert_eq!(lines_of(&s, "zh"), lines.zh.map(Some));
+    }
+
+    #[tokio::test]
+    async fn failed_zh_keeps_cover_lines() {
+        let s = MemStore::default();
+        let (m, l) = (md(true), llm(true, false));
+        tick(utc("2026-10-29T12:30:00Z"), &s, &m, &FakeNs, &l).await;
+        tick(utc("2026-10-29T22:05:00Z"), &s, &m, &FakeNs, &l).await;
+        assert_eq!(tr_status(&s, "zh"), "failed");
+        let lines = stored_lines(&s, "premarket/2026-10-29.json");
+        assert_eq!(lines_of(&s, "zh"), lines.zh.map(Some));
     }
 }

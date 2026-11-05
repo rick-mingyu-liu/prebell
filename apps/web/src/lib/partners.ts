@@ -1,4 +1,4 @@
-/** Sidebar invite links and where each may be shown. Change a link or a rule here only. */
+/** Partner invite links and where each may be shown. Change a link or a rule here only. */
 // Server-only so the gated URLs can never be bundled into client JS; client code imports types only.
 import "server-only";
 
@@ -9,7 +9,7 @@ export interface Partner {
   name: string;
   url: string;
   group: PartnerGroup;
-  /** A square logo tile under /public, shown before the name; `logoDark` replaces it on the dark sidebar. Optional. */
+  /** A square logo tile under /public. The partner strip shows names only, so it is not drawn; `logoDark` is its dark variant. Optional. */
   logo?: string;
   logoDark?: string;
   /** `country` is an ISO 3166 alpha-2 code, or null when Cloudflare doesn't know it. */

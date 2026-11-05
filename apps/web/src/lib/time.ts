@@ -1,3 +1,4 @@
+import { todayEt } from "./earnings";
 import type { Lang } from "./posts";
 
 const TZ = "America/New_York";
@@ -23,14 +24,32 @@ export function formatEt(iso: string | null | undefined, lang: Lang): string {
   return `${zh.format(d).replace(/[  ]/g, " ")}（美东）`;
 }
 
-/** A trading date (YYYY-MM-DD) as a calendar date, independent of time zone. */
-export function formatDate(date: string, lang: Lang): string {
+/** A trading date (YYYY-MM-DD) as a calendar date, independent of time zone; "full" adds the weekday and long month. */
+export function formatDate(date: string, lang: Lang, style: "medium" | "full" = "medium"): string {
   const d = new Date(`${date}T12:00:00Z`);
   if (Number.isNaN(d.getTime())) return date;
   return new Intl.DateTimeFormat(lang === "en" ? "en-US" : "zh-CN", {
     timeZone: "UTC",
-    dateStyle: lang === "en" ? "medium" : "long",
+    dateStyle: style === "full" ? "full" : lang === "en" ? "medium" : "long",
   }).format(d);
+}
+
+const etHour = new Intl.DateTimeFormat("en-US", { timeZone: TZ, hour: "numeric", hourCycle: "h23" });
+
+/** The edition the front page is in at `now`: the premarket brief until 4:00 PM US Eastern, the recap after. */
+export function editionAt(now: Date = new Date()): "premarket" | "recap" {
+  return Number(etHour.format(now)) < 16 ? "premarket" : "recap";
+}
+
+const etWeekday = new Intl.DateTimeFormat("en-US", { timeZone: TZ, weekday: "short" });
+
+/**
+ * Which dateline the masthead shows at `now`: on a weekday the edition of the moment, on Saturday
+ * and Sunday (US Eastern) the weekend edition, since no brief runs until Monday.
+ */
+export function datelineAt(now: Date = new Date()): "premarket" | "recap" | "weekend" {
+  const day = etWeekday.format(now);
+  return day === "Sat" || day === "Sun" ? "weekend" : editionAt(now);
 }
 
 const enTime = new Intl.DateTimeFormat("en-US", { timeZone: TZ, timeStyle: "short" });
@@ -54,4 +73,26 @@ export function formatDayShort(date: string, lang: Lang): string {
   const d = new Date(`${date}T12:00:00Z`);
   if (Number.isNaN(d.getTime())) return date;
   return lang === "en" ? enDay.format(d) : `${zhMonthDay.format(d)} ${zhWeekday.format(d)}`;
+}
+
+const enMonthDay = new Intl.DateTimeFormat("en-US", { timeZone: "UTC", month: "short", day: "numeric" });
+
+/** A trading date as month and day only: "Nov 4" / "11月4日". */
+export function formatMonthDay(date: string, lang: Lang): string {
+  const d = new Date(`${date}T12:00:00Z`);
+  if (Number.isNaN(d.getTime())) return date;
+  return (lang === "en" ? enMonthDay : zhMonthDay).format(d);
+}
+
+/**
+ * A UTC ISO timestamp as an as-of label: the Eastern time of day when it falls on today's Eastern
+ * date ("4:46 PM ET"), with the month and day in front otherwise ("Nov 4, 4:46 PM ET" /
+ * "11月4日 下午4:46（美东）"), so a stale snapshot never reads as today's.
+ */
+export function formatEtDateTime(iso: string | null | undefined, lang: Lang, now: Date = new Date()): string {
+  const time = formatEtTime(iso, lang);
+  if (!time) return "";
+  const day = todayEt(new Date(iso!));
+  if (day === todayEt(now)) return time;
+  return lang === "en" ? `${formatMonthDay(day, lang)}, ${time}` : `${formatMonthDay(day, lang)} ${time}`;
 }

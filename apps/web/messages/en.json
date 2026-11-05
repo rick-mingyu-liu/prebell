@@ -10,7 +10,6 @@
     "earnings": "Earnings",
     "briefs": "Briefs",
     "calendar": "Calendar",
-    "wordmark": "Pre<b>Bell</b>",
     "wordmarkSub": "盘前铃",
     "navLabel": "Main"
   },
@@ -19,21 +18,26 @@
     "empty": "Nothing has been published yet.",
     "allBriefs": "All posts",
     "noEarnings": "No earnings checks yet.",
-    "briefTabs": "Daily brief",
     "readFull": "Read the full brief →",
-    "tabMovers": "Top movers",
-    "tabEarnings": "Earnings checks",
-    "panelTabs": "Movers and earnings checks",
     "noMovers": "No movers for this brief.",
     "allEarnings": "All earnings checks →",
-    "moversInBrief": "Movers are in the full brief →"
+    "moversInBrief": "Movers are in the full brief →",
+    "leadRead": "Read the full recap →",
+    "earningsChecks": "Earnings checks",
+    "topMovers": "Top movers",
+    "reporting": "Reporting {date}",
+    "recentSection": "Recent",
+    "beforeOpen": "Before the open",
+    "afterClose": "After the close",
+    "timeTbd": "Time not set"
   },
   "post": {
     "permalink": "Permalink",
     "published": "Published {time}",
     "pendingTitle": "{type}, {date}",
     "pending": "The Chinese version is coming soon.",
-    "readEnglish": "Read the English version"
+    "readEnglish": "Read the English version",
+    "sources": "Sources"
   },
   "archive": {
     "title": "Archive",
@@ -48,7 +52,8 @@
     "title": "About",
     "p1": "PreBell publishes a short premarket brief every US trading day before the open (index futures, the biggest premarket movers and why they moved, and what to watch) and an after-close recap after the bell (index closes, notable movers and why, and after-hours earnings to watch).",
     "p2": "Every post is generated automatically from public market data and news. Numbers are checked against the source data before publishing, and each post lists its sources. Times are US Eastern.",
-    "p3": "English is published first; the Chinese version follows."
+    "p3": "English is published first; the Chinese version follows.",
+    "whoHeading": "Who is behind it"
   },
   "notFound": {
     "title": "Page not found",
@@ -72,9 +77,6 @@
     "confirmed": "Confirmed",
     "reported": "Reported",
     "none": "No reports.",
-    "stripLabel": "Earnings · {date}",
-    "stripToday": "Earnings today",
-    "stripUnknown": "Time TBD",
     "stripAll": "Full calendar →",
     "stripMore": "+{count} more",
     "prevWeek": "Previous week",
@@ -85,7 +87,8 @@
     "dates": "Report dates",
     "readCheck": "Read the check",
     "charts": "Charts (GAAP)",
-    "chartsNote": "Charts show GAAP figures from SEC filings; the last bar marked 8-K is this release. A gap means the company did not report that quarter separately."
+    "chartsNote": "Charts show GAAP figures from SEC filings; the last bar marked 8-K is this release. A gap means the company did not report that quarter separately.",
+    "checkedFiling": "✓ Every figure traced to the filing"
   },
   "index": {
     "es": "S&P 500 futures",
@@ -99,26 +102,70 @@
     "rut": "Russell 2000"
   },
   "movers": {
-    "noNews": "No clear news"
+    "noNews": "No clear news",
+    "company": "Company",
+    "reason": "Reason",
+    "last": "Last",
+    "change": "Change",
+    "close": "Close"
   },
   "partners": {
-    "brokers": "Brokers",
-    "crypto": "Crypto exchanges",
+    "from": "From our partners",
     "disclosure": "Affiliate links: PreBell may earn a reward if you sign up. Not investment advice."
   },
   "termpocket": {
-    "name": "TermPocket",
     "copy": "From the PreBell team. Plan your goals and habits with Pocky, your AI assistant.",
     "cta": "Try TermPocket →"
   },
   "brief": {
-    "crumbLabel": "Breadcrumb",
-    "premarket": "Premarket",
-    "recap": "Recap",
     "checked": "✓ Numbers checked against source data",
     "movers": "Top movers",
     "adjacent": "More briefs",
     "prev": "Previous",
-    "next": "Next"
+    "next": "Next",
+    "kickerEarnings": "Earnings check · {ticker}"
+  },
+  "paper": {
+    "masthead": {
+      "main": "PreBell",
+      "sub": "盘前铃"
+    },
+    "dateline": {
+      "premarket": "Before the bell",
+      "recap": "After the close",
+      "earnings": "Earnings check",
+      "weekend": "Weekend edition"
+    },
+    "index": {
+      "asOf": "as of {time}",
+      "up": "up",
+      "down": "down"
+    },
+    "edition": {
+      "premarket": "Premarket",
+      "recap": "Recap"
+    }
+  },
+  "author": {
+    "name": "Rick Liu",
+    "bio": "AI & software engineer, University of Waterloo. Built PreBell to read earnings the way an analyst would, without the analyst.",
+    "website": "rickmingyuliu.com",
+    "github": "GitHub",
+    "linkedin": "LinkedIn",
+    "allBriefs": "All briefs →",
+    "heading": "Who is behind it"
+  },
+  "signup": {
+    "heading": "Get the weekly digest",
+    "copy": "One email a week: the week's briefs and earnings checks. No spam, unsubscribe anytime.",
+    "emailLabel": "Email address",
+    "placeholder": "you@example.com",
+    "submit": "Subscribe",
+    "sending": "Subscribing…",
+    "success": "Check your inbox to confirm.",
+    "already": "You're already on the list.",
+    "error": "Something went wrong. Please try again.",
+    "invalid": "Enter a valid email address.",
+    "manage": "Already subscribed? Manage preferences"
   }
 }

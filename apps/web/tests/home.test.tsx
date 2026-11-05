@@ -1,251 +1,256 @@
 import { readFileSync } from "node:fs";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
-import HomeView, { type HomeViewProps } from "../src/components/HomeView";
+import HomeView from "../src/components/HomeView";
+import type { Locale } from "../src/i18n/routing";
 import type { StripDay } from "../src/lib/earnings";
 import { parseFacts } from "../src/lib/facts";
-import { selectTab } from "../src/lib/home";
-import type { PostListItem, PostView } from "../src/lib/posts";
+import type { HomeData } from "../src/lib/home";
+import type { PostHead, PostListItem } from "../src/lib/posts";
 
 const fixture = (name: string): unknown =>
   JSON.parse(readFileSync(new URL(`./fixtures/${name}`, import.meta.url), "utf8"));
 const premarketFacts = () => parseFacts("premarket", fixture("premarket-2026-10-30.json"))!;
 
-const post = (over: Partial<PostView> = {}): PostView => ({
+const lead = (over: Partial<PostHead> = {}): PostHead => ({
   slug: "premarket-2026-10-30",
   contentType: "premarket",
   tradingDate: "2026-10-30",
   publishedAt: "2026-10-30T12:40:00Z",
   title: "Futures slide as Intel sinks",
   summary: "Stock futures are lower before the open.",
-  bodyMd: "# Futures slide as Intel sinks\n\nStock futures are lower before the open.",
   status: "published",
-  sources: [],
   hasOtherLang: true,
   factsKey: "premarket/2026-10-30.json",
+  coverKey: "covers/premarket-2026-10-30.png",
+  coverLines: ["S&P futures −1.14%", "Intel −26%"],
+  ticker: null,
   ...over,
 });
 
-const recapPost = (over: Partial<PostView> = {}): PostView =>
-  post({
-    slug: "recap-2026-10-29",
-    contentType: "recap",
-    tradingDate: "2026-10-29",
-    publishedAt: "2026-10-29T20:45:00Z",
-    title: "Stocks close mixed",
-    summary: "The S&P 500 ended flat.",
-    factsKey: "recap/2026-10-29.json",
-    ...over,
-  });
-
-const check: PostListItem = {
-  slug: "earnings-aapl-2026-10-29",
+const item = (over: Partial<PostListItem> = {}): PostListItem => ({
+  slug: "aapl-2026-10-29-earnings",
   contentType: "earnings",
   tradingDate: "2026-10-29",
   publishedAt: "2026-10-29T21:00:00Z",
   title: "Apple Q4: revenue up 8%",
   summary: "Services carried the quarter.",
-};
-
-const props = (over: Partial<HomeViewProps> = {}): HomeViewProps => ({
-  locale: "en",
-  tab: "premarket",
-  tabs: ["premarket", "recap"],
-  post: post(),
-  facts: premarketFacts(),
-  earnings: [check],
-  strip: null,
-  today: "2026-10-30",
+  coverKey: "covers/aapl-2026-10-29-earnings.png",
+  coverLines: ["Rev +8%", "EPS $1.85"],
+  ticker: "AAPL",
   ...over,
 });
 
-const render = (over: Partial<HomeViewProps> = {}) => renderToStaticMarkup(<HomeView {...props(over)} />);
-
-describe("selectTab", () => {
-  const pm = post();
-  const rc = recapPost();
-
-  it("defaults to the more recently published of the two", () => {
-    expect(selectTab(pm, rc, undefined)).toBe("premarket");
-    expect(selectTab(pm, recapPost({ publishedAt: "2026-10-30T20:45:00Z" }), undefined)).toBe("recap");
-  });
-
-  it("uses the requested tab when that post exists", () => {
-    expect(selectTab(pm, rc, "recap")).toBe("recap");
-    expect(selectTab(pm, rc, ["recap", "premarket"])).toBe("recap");
-    expect(selectTab(pm, null, "recap")).toBe("premarket");
-    expect(selectTab(pm, rc, "earnings")).toBe("premarket");
-  });
-
-  it("takes whichever exists, prefers premarket on a tie, and is null with no posts", () => {
-    expect(selectTab(null, rc, undefined)).toBe("recap");
-    expect(selectTab(pm, recapPost({ publishedAt: pm.publishedAt }), undefined)).toBe("premarket");
-    expect(selectTab(post({ publishedAt: null }), rc, undefined)).toBe("recap");
-    expect(selectTab(null, null, "recap")).toBeNull();
-  });
+const recap = item({
+  slug: "recap-2026-10-29",
+  contentType: "recap",
+  publishedAt: "2026-10-29T20:45:00Z",
+  title: "Stocks close mixed",
+  summary: "The S&P 500 ended flat.",
+  coverKey: null,
+  coverLines: null,
+  ticker: null,
 });
 
-describe("HomeView with facts", () => {
-  it("shows the lead number, its change and the index tiles", () => {
-    const out = render();
-    expect(out).toContain("S&amp;P 500 futures");
-    expect(out).toContain('class="big"');
-    expect(out).toContain("7,665.50");
-    expect(out).toContain("−1.14%");
-    expect(out).toContain('class="tiles"');
-  });
+const reporting: StripDay = {
+  date: "2026-11-02",
+  bmo: [{ ticker: "KO", date: "2026-11-02", slot: "bmo", status: "confirmed", postSlug: null }],
+  amc: [
+    { ticker: "AAPL", date: "2026-11-02", slot: "amc", status: "confirmed", postSlug: null },
+    { ticker: "BRK.B", date: "2026-11-02", slot: "amc", status: "unconfirmed", postSlug: null },
+  ],
+  unknown: [],
+};
 
-  it("shows the headline, summary and a link to the brief", () => {
+const data = (over: Partial<HomeData> = {}): HomeData => ({
+  lead: lead(),
+  leadFacts: premarketFacts(),
+  earnings: [item()],
+  recent: [recap],
+  reporting,
+  ...over,
+});
+
+const render = (over: Partial<HomeData> = {}, locale: Locale = "en", signup = true) =>
+  renderToStaticMarkup(<HomeView data={data(over)} locale={locale} signup={signup} />);
+
+/** Where each section opens in the markup, in document order. */
+const at = (out: string, cls: string) => {
+  const i = out.indexOf(`class="${cls}"`);
+  expect(i, cls).toBeGreaterThan(-1);
+  return i;
+};
+
+describe("HomeView front page", () => {
+  it("renders lead, earnings row, recent list, movers column and reporting block in order", () => {
     const out = render();
-    expect(out).toContain("Futures slide as Intel sinks");
+    // The lead scene's preload link comes first in a fragment; in a full document React moves it to <head>.
+    expect(out).toMatch(/^(<link rel="preload" as="image" [^>]*\/>)?<div class="front">/);
+    const order = ["front-lead", "front-earnings", "front-recent", "front-side", "front-movers", "front-reporting"];
+    const offsets = order.map((c) => at(out, c));
+    expect([...offsets].sort((a, b) => a - b)).toEqual(offsets);
+
+    // Lead: edition kicker, wide cover with the date-and-type label, serif h1, summary, read link.
+    expect(out).toContain("Before the bell");
+    expect(out).toContain('class="cover cover-lead"');
+    expect(out).toContain('src="/covers/premarket-2026-10-30.png"');
+    expect(out).toContain(">Oct 30 · Premarket</span>");
+    expect(out).toContain("S&amp;P futures −1.14%");
+    expect(out).toMatch(/<h1[^>]*><a href="\/en\/p\/premarket-2026-10-30">Futures slide as Intel sinks<\/a><\/h1>/);
     expect(out).toContain("Stock futures are lower before the open.");
-    expect(out).toContain('href="/en/p/premarket-2026-10-30"');
     expect(out).toContain("Read the full brief →");
-    expect(out).toMatch(/<h1[^>]*>.*Futures slide as Intel sinks/);
+    expect(out).not.toContain("recap →");
+
+    // Earnings checks: a small cover with the company logo, a serif headline linking to the check.
+    expect(out).toContain('<h2 class="section-title">Earnings checks</h2>');
+    expect(out).toContain('class="cover cover-small"');
+    expect(out).toContain('<img src="/logos/companies/AAPL.svg" alt="AAPL" loading="lazy"/>');
+    expect(out).toContain('href="/en/p/aapl-2026-10-29-earnings"');
+    expect(out).toContain("Apple Q4: revenue up 8%");
+
+    // Recent: kicker, title, date.
+    expect(out).toContain('<h2 class="section-title">Recent</h2>');
+    expect(out).toContain(">After-close recap</p>");
+    expect(out).toContain('href="/en/p/recap-2026-10-29"');
+    expect(out).toContain("Oct 29, 2026");
+
+    // Movers: three per side; name, grey ticker, signed percent in the number colours.
+    expect(out).toContain('<h2 class="section-title">Top movers</h2>');
+    expect(out).toContain('<ol class="movers-col">');
+    for (const s of ["MDLZ", "REGN", "CL", "INTC", "HPQ", "DELL"]) expect(out).toContain(`>${s}</span>`);
+    for (const s of ["AZN", "EFX", "SYK", "ARM"]) expect(out).not.toContain(`>${s}</span>`);
+    expect(out).toContain("Mondelez International");
+    expect(out).toContain('class="num up">+7.08%');
+    expect(out).toContain('class="num down">−26.00%');
+    expect(out).toContain("Shares surged in premarket trading");
+
+    // Reporting: the found date, the slots, tickers linking to their pages.
+    expect(out).toContain("Reporting Nov 2, 2026");
+    expect(out).toContain("Before the open");
+    expect(out).toContain("After the close");
+    expect(out).toContain('href="/en/t/KO"');
+    expect(out).toContain('href="/en/t/BRK.B"');
+    expect(out.indexOf("/en/t/KO")).toBeLessThan(out.indexOf("/en/t/AAPL"));
+
+    // The weekly-digest signup and the partner strip close the page.
+    expect(out.indexOf('class="signup"')).toBeGreaterThan(offsets[offsets.length - 1]);
+    expect(out.indexOf('class="partners-strip"')).toBeGreaterThan(out.indexOf('class="signup"'));
   });
 
-  it("shows three movers per side as pills", () => {
+  it("leaves the signup out until the Buttondown key is set, keeping the partner strip", () => {
+    const out = render({}, "en", false);
+    expect(out).not.toContain('class="signup"');
+    expect(out).not.toContain("Get the weekly digest");
+    expect(out).toContain('class="partners-strip"');
+    expect(render({}, "en", true)).toContain('id="signup-email-home"');
+  });
+
+  it('renders "No clear news" quietly in the movers column', () => {
     const out = render();
-    for (const s of ["MDLZ", "REGN", "CL", "INTC", "HPQ", "DELL"]) expect(out).toContain(`<b>${s}</b>`);
-    for (const s of ["AZN", "EFX", "SYK", "ARM"]) expect(out).not.toContain(`<b>${s}</b>`);
-    expect(out).toMatch(/class="pill up"/);
-    expect(out).toMatch(/class="pill down"/);
+    expect(out).toContain('<p class="mover-why muted"><i>No clear news</i></p>');
+    // No pills, tiles, logos or letter avatars in the rows.
+    for (const cls of ["pill", "tlogo", "tiles", "big"]) expect(out).not.toMatch(new RegExp(`class="[^"]*\\b${cls}\\b`));
   });
 
-  it("never renders the facts diagnostics", () => {
-    expect(render()).not.toContain("diagnostics");
-  });
-});
-
-describe("HomeView without facts", () => {
-  it("falls back to the title, summary and link", () => {
-    const out = render({ facts: null });
-    expect(out).not.toContain('class="big"');
-    expect(out).not.toContain('class="pill');
-    expect(out).toContain("Futures slide as Intel sinks");
-    expect(out).toContain("Stock futures are lower before the open.");
-    expect(out).toContain('href="/en/p/premarket-2026-10-30"');
-    expect(out).toContain("Movers are in the full brief →");
-    expect(out).not.toContain("No movers for this brief.");
+  it("links a reason to its source", () => {
+    const out = render();
+    expect(out).toMatch(
+      /<a href="https:\/\/finance\.yahoo\.com\/[^"]*" rel="nofollow noopener" target="_blank">Shares surged in premarket trading/,
+    );
   });
 
-  it("says there were no movers only when the facts have none", () => {
-    const facts = { ...premarketFacts(), gainers: [], losers: [] };
-    const out = render({ facts });
-    expect(out).toContain('class="big"');
-    expect(out).toContain("No movers for this brief.");
-    expect(out).not.toContain("Movers are in the full brief");
+  it("shows the empty earnings message", () => {
+    const out = render({ earnings: [] });
+    expect(out).toContain('<h2 class="section-title">Earnings checks</h2>');
+    expect(out).toContain("No earnings checks yet.");
+    expect(out).not.toContain("cover-small");
+    expect(render({ earnings: [] }, "zh")).toContain("暂无财报速评。");
   });
-});
 
-describe("HomeView ZH pending", () => {
-  it("keeps the numbers and movers, and shows the notice instead of the story", () => {
+  it("labels a check without a ticker as an earnings check", () => {
+    const out = render({ earnings: [item({ ticker: null, title: "Amgen: revenue up 8%" })] });
+    expect(out).toContain('<span class="cover-tag">Earnings check</span>');
+    const zh = render({ earnings: [item({ ticker: null, title: "安进：营收增长8%" })] }, "zh");
+    expect(zh).toContain('<span class="cover-tag">财报速评</span>');
+  });
+
+  it("names the recap edition in the kicker, the cover label and the link", () => {
     const out = render({
-      locale: "zh",
-      // A pending row may carry stale text; none of it may show.
-      post: post({ status: "pending", title: "旧标题", summary: "旧摘要", hasOtherLang: true }),
+      lead: lead({ slug: "recap-2026-10-30", contentType: "recap", title: "Stocks rally" }),
+      leadFacts: null,
     });
-    expect(out).not.toContain("旧标题");
-    expect(out).not.toContain("旧摘要");
-    expect(out).not.toContain('class="home-sum"');
-    expect(out).toContain("标普500期货");
-    expect(out).toContain("7,665.50");
-    expect(out).toContain("<b>INTC</b>");
-    expect(out).toContain("中文版稍后推出");
-    expect(out).toContain('href="/en/p/premarket-2026-10-30"');
-    expect(out).toMatch(/<h1[^>]*>盘前简报 2026年10月30日<\/h1>/);
-    expect(out).not.toContain("阅读完整简报");
+    expect(out).toContain("After the close");
+    expect(out).toContain(">Oct 30 · Recap</span>");
+    expect(out).toContain("Read the full recap →");
+    expect(render({ lead: lead({ contentType: "recap" }) }, "zh")).toContain(">10月30日 · 收盘回顾</span>");
+    expect(out).toContain('href="/en/p/recap-2026-10-30"');
   });
-});
 
-/** The brief tab link with this text: its href and whether it is marked current. */
-function tabLink(out: string, text: string) {
-  const a = out.match(new RegExp(`<a ([^>]*)>${text}</a>`))?.[1] ?? "";
-  return { href: a.match(/href="([^"]*)"/)?.[1], current: a.includes('aria-current="page"') };
-}
+  it("points to the brief for movers when the facts are missing, and says so when there are none", () => {
+    const missing = render({ leadFacts: null });
+    expect(missing).not.toContain("movers-col");
+    expect(missing).toContain("Movers are in the full brief →");
 
-describe("HomeView tabs", () => {
-  it("links both brief tabs and marks the selected one", () => {
+    const none = render({ leadFacts: { ...premarketFacts(), gainers: [], losers: [] } });
+    expect(none).toContain("No movers for this brief.");
+    expect(none).not.toContain("Movers are in the full brief");
+  });
+
+  it("drops the reporting block when nothing is on the calendar", () => {
+    const out = render({ reporting: null });
+    expect(out).not.toContain("front-reporting");
+    expect(out).not.toContain("Reporting");
+  });
+
+  it("drops the recent section when there is nothing else", () => {
+    expect(render({ recent: [] })).not.toContain("front-recent");
+  });
+
+  it("says nothing is published when there is no lead", () => {
+    const out = render({ lead: null, leadFacts: null, earnings: [], recent: [], reporting: null });
+    expect(out).toContain("Nothing has been published yet.");
+    expect(out).not.toContain("front-movers");
+    expect(out).toContain("No earnings checks yet.");
+  });
+
+  it("never renders the facts diagnostics, the old tabs or a script", () => {
     const out = render();
-    expect(tabLink(out, "Premarket brief")).toEqual({ href: "/en?tab=premarket", current: true });
-    expect(tabLink(out, "After-close recap")).toEqual({ href: "/en?tab=recap", current: false });
-  });
-
-  it("only offers tabs that have a post", () => {
-    const out = render({ tabs: ["premarket"] });
-    expect(out).toContain('href="/en?tab=premarket"');
-    expect(out).not.toContain("tab=recap");
-  });
-
-  it("selects the recap with its own link text", () => {
-    const out = render({ tab: "recap", post: recapPost(), facts: null, locale: "zh" });
-    expect(tabLink(out, "收盘回顾")).toEqual({ href: "/zh?tab=recap", current: true });
-    expect(out).toContain('href="/zh/p/recap-2026-10-29"');
-  });
-
-  it("puts movers and earnings checks behind a CSS-only toggle, movers first", () => {
-    const out = render();
-    expect(out).toMatch(/<input[^>]*type="radio"[^>]*checked=""/);
-    expect(out).toMatch(/role="radiogroup" aria-label="Movers and earnings checks"/);
-    // Headings for the stacked (below 1024px) layout, where the radios are hidden.
-    expect(out).toContain('<h2 class="panel-title">Top movers</h2>');
-    expect(out).toContain('<h2 class="panel-title">Earnings checks</h2>');
-    expect(out.indexOf("panel-movers")).toBeLessThan(out.indexOf("panel-earnings"));
-    expect(out).toContain("Top movers");
-    expect(out).toContain("Earnings checks");
+    expect(out).not.toContain("diagnostics");
+    expect(out).not.toContain("?tab=");
+    expect(out).not.toContain('type="radio"');
+    expect(out).not.toContain("estrip");
+    expect(out).not.toContain('class="sidebar"');
     expect(out).not.toContain("<script");
   });
 });
 
-describe("HomeView earnings checks", () => {
-  it("lists the latest checks and links to all of them", () => {
-    const out = render();
-    expect(out).toContain('href="/en/p/earnings-aapl-2026-10-29"');
-    expect(out).toContain("Apple Q4: revenue up 8%");
-    expect(out).toContain("Services carried the quarter.");
-    expect(out).toContain('href="/en/archive?type=earnings"');
-    expect(out).toContain("All earnings checks →");
+describe("HomeView ZH", () => {
+  it("omits the English reasons and uses Chinese labels", () => {
+    const out = render({}, "zh");
+    expect(out).toContain("盘前");
+    expect(out).toContain(">10月30日 · 盘前</span>");
+    expect(out).toContain("<h2 class=\"section-title\">涨跌榜</h2>");
+    expect(out).toContain(">INTC</span>");
+    expect(out).not.toContain("Shares surged");
+    expect(out).not.toContain("mover-why");
+    expect(out).toContain("2026年11月2日财报");
+    expect(out).toContain('href="/zh/t/KO"');
   });
 
-  it("says so when there are none (ZH)", () => {
-    const out = render({ locale: "zh", earnings: [] });
-    expect(out).toContain("暂无财报速评。");
-    expect(out).toContain(">财报速评</label>");
-    expect(out).toContain("全部财报速评 →");
-    expect(out).toContain('href="/zh/archive?type=earnings"');
-  });
-});
-
-describe("HomeView shell", () => {
-  const day: StripDay = {
-    date: "2026-11-02",
-    bmo: [{ ticker: "KO", date: "2026-11-02", slot: "bmo", status: "confirmed", postSlug: null }],
-    amc: [],
-    unknown: [],
-  };
-
-  it("puts the earnings strip first, then the portal grid with the sidebar", () => {
-    const out = render({ strip: day });
-    expect(out.startsWith('<section class="estrip"')).toBe(true);
-    expect(out).toContain("Earnings · Mon, Nov 2");
-    expect(out).toContain("grid-portal");
-    expect(out).toContain('href="https://www.termpocket.com"');
-    for (const host of ["moomoo.com", "okx.com", "crypto.com", "wealthsimple.com"]) expect(out).not.toContain(host);
-  });
-
-  it("renders recent posts passed as children before the sidebar", () => {
-    const out = renderToStaticMarkup(
-      <HomeView {...props()}>
-        <section id="recent-slot">recent</section>
-      </HomeView>,
+  it("keeps the cover and movers of a pending lead and shows the notice instead of the story", () => {
+    const out = render(
+      // A pending row may carry stale text; none of it may show.
+      { lead: lead({ status: "pending", title: "旧标题", summary: "旧摘要", coverLines: ["旧行", ""] }) },
+      "zh",
     );
-    expect(out.indexOf("recent-slot")).toBeGreaterThan(out.indexOf("All earnings checks"));
-    expect(out.indexOf("recent-slot")).toBeLessThan(out.indexOf('class="sidebar"'));
-  });
-
-  it("says nothing is published when there is no brief", () => {
-    const out = render({ tab: null, tabs: [], post: null, facts: null });
-    expect(out).toContain("Nothing has been published yet.");
-    expect(out).not.toContain("tab=");
+    expect(out).not.toContain("旧标题");
+    expect(out).not.toContain("旧摘要");
+    expect(out).not.toContain("旧行");
+    expect(out).toContain('class="cover cover-lead"');
+    expect(out).toContain(">INTC</span>");
+    expect(out).toContain("中文版稍后推出");
+    expect(out).toContain('href="/en/p/premarket-2026-10-30"');
+    expect(out).toMatch(/<h1[^>]*>盘前简报 2026年10月30日<\/h1>/);
+    expect(out).not.toContain("阅读完整简报");
   });
 });

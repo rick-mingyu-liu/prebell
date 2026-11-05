@@ -99,15 +99,36 @@ After each queue message, `pnpm exec wrangler tail` in `crates/generator` shows 
 
 ### Reading the diagnostics line
 
-Each build logs one `diagnostics:` line, and a retrying run stores it in `runs.last_error`. Besides the quote, mover and search counts, these show why news was dropped:
+Each build logs one `diagnostics:` line as soon as its facts are built, before the drafts, so the line is there even when a build dies in them; a retrying run stores it in `runs.last_error`. Premarket and recap builds that get as far as the scene step then log a second, short line, `cover=ok|skip|err`. Besides the quote, mover and search counts, these show why news was dropped:
 
 - `hedged=` on the `reasons` part counts mover reasons dropped because `summary_en` hedged its cause ("which could support the gain"). In code the counter is `reasons_hedged`.
 - `news_noise=` counts search hits dropped as noise before any LLM call: MarketBeat filing alerts, 13F, holdings and institutional-ownership pages, "trims position"-style titles, analyst consensus-rating alerts ("Has Consensus Price Target of", "Average Rating of"), and Tavily's own company-profile pages (`tavily.com/knowledge/`). Each mover and macro news query asks Tavily for `NEWS_EXTRA_HITS` (2) more hits than it keeps, so stale and noise hits do not use up a mover's slots; after filtering, the prompt still gets at most the usual number of articles. `news_stale=` and `news_noise=` count every dropped hit, including the extra ones.
 - `reported=N reported_err=M` (recap only, last part) counts the earnings checks published today that the recap links as already reported. `reported_err=M` above 0 means that many D1 or R2 reads failed; the recap still publishes and lists the checks it could read.
+- `cover=ok|skip|err` (premarket and recap only, its own line after the scene step; never in `runs.last_error` or the stored facts) says what happened to the post's cover scene. `ok`: the Workers AI image was stored in R2 under `covers/<slug>.<ext>`. `skip`: no scene maker is configured (`CF_AI_TOKEN` or `CF_ACCOUNT_ID` is missing), so the post has the plain cover. `err`: the scene call failed, the image was neither PNG nor JPEG, or the R2 write failed; the post still publishes with the plain cover. When the scene call itself failed, `wrangler tail` also shows `cover: <message>`, for example the API's quota or auth error. Earnings posts get covers the same way but log no `cover=` line. Scene prompts never name the company: an earnings scene is one of eight generic, people-free and text-free settings picked by a stable hash of the ticker, and a brief scene rotates by weekday through five such settings.
 
 ### CPU overruns
 
 An invocation over 10 ms of CPU is killed. In `wrangler tail` it shows with outcome `exceededCpu`. If that happens, or if `subrequests=` gets near 50, the fix is Workers Paid ($5/month): 5 minutes of CPU (30 seconds by default) and 10,000 subrequests per invocation. No code change is needed.
+
+## Cover images (Workers AI)
+
+Each published post gets a generated background scene (Flux Schnell on Workers AI, one request per post, no retry). Without the credentials below, posts publish with the plain cover and the log says `cover=skip`.
+
+- `CF_ACCOUNT_ID` is a plain var in `crates/generator/wrangler.toml` under `[vars]`. It is the Cloudflare account id, not a secret.
+- `CF_AI_TOKEN` is a secret: a Cloudflare API token with the Workers AI "Read" permission. The owner sets it with `cd crates/generator && pnpm exec wrangler secret put CF_AI_TOKEN` (production) or in `crates/generator/.dev.vars` (local). It is never committed and never appears in an error or log line.
+- Both take effect on the next deploy. A missing token or account id logs `secret CF_AI_TOKEN or var CF_ACCOUNT_ID is not set; covers will be plain` once per queue message.
+- A failed scene is logged as `cover: workers ai: <message>` (or `workers ai http <status>` when the body has no message) and never fails the post. One scene is one fetch subrequest: it counts toward the 50-subrequest limit but is not included in the logged `subrequests=`, which is read before the scene is made.
+
+## Web site (`prebell-web`)
+
+The site is the OpenNext Worker in `apps/web` (`wrangler.jsonc`, name `prebell-web`). It reads the same D1 database and R2 bucket as the generator: posts and the `kv` row `index_line` (the masthead's index line) from D1, facts, charts and cover scenes from R2 (`/covers/<slug>.png` serves the R2 object `covers/<slug>.png`; any other path there, or a missing object, is a 404).
+
+- `BUTTONDOWN_API_KEY` is the site's one secret: the Buttondown API key behind the weekly-digest signup. The owner sets it with `cd apps/web && pnpm exec wrangler secret put BUTTONDOWN_API_KEY` (it lands on `prebell-web`). Until it is set, no page shows the signup form (home, post pages and About check for the key on every request) and `/api/subscribe` returns 503; the form appears once the key is set, with no redeploy. Nothing else depends on it. An address that is already subscribed gets "You're already on the list." instead of the confirmation line. A Buttondown failure logs only `buttondown subscribe failed, status <code>`, never the body or the key.
+- **Deploy order** (owner only): first apply any new D1 migrations, then deploy the generator, then the site.
+  1. `cd crates/generator && pnpm exec wrangler d1 migrations apply prebell --remote`. Migration `0006_covers.sql` adds `posts.cover_key` and `post_translations.cover_line1` / `cover_line2`; both Workers read them, so it must run before either deploys.
+  2. `pnpm exec wrangler deploy` in `crates/generator`.
+  3. `cd apps/web && pnpm exec opennextjs-cloudflare build && pnpm exec opennextjs-cloudflare deploy`.
+- **Local preview:** the site's preview uses the generator's local state (`--persist-to ../../crates/generator/.wrangler/state`), so the local D1 needs the migrations too. From `crates/generator`: `pnpm exec wrangler d1 migrations apply prebell --local`, then `pnpm exec wrangler d1 execute prebell --local --file ../../db/seed-preview.sql` and `bash ../../db/load-preview-facts.sh`. Then `cd ../../apps/web && pnpm preview` (add `--port <n>` if 8787 is taken). Without migration 0006 the post queries fail with a `no such column` error.
 
 ## Earnings
 
@@ -120,7 +141,7 @@ An invocation over 10 ms of CPU is killed. In `wrangler tail` it shows with outc
 
 ## Logos
 
-Company logos (earnings strip, calendar chips, movers rows) and partner logos (sidebar) are static files in `apps/web/public/logos/`, served as Workers static assets. Pages never fetch a logo from a third party. `apps/web/scripts/build-logos.mjs` (`pnpm logos` in `apps/web`) builds every file, the manifest `apps/web/src/lib/logos.generated.ts` and `apps/web/public/logos/LICENSES.md`. Never edit those by hand. For each watchlist ticker the script takes the first of:
+Company logos (the white tag on earnings-check covers) and partner logos are static files in `apps/web/public/logos/`, served as Workers static assets. Pages never fetch a logo from a third party. `apps/web/scripts/build-logos.mjs` (`pnpm logos` in `apps/web`) builds every file, the manifest `apps/web/src/lib/logos.generated.ts` and `apps/web/public/logos/LICENSES.md`. Never edit those by hand. For each watchlist ticker the script takes the first of:
 
 1. **Simple Icons** (`COMPANIES` in the script): a CC0 glyph from the pinned `simple-icons` devDependency, drawn as a 32px SVG tile.
 2. **Wikimedia Commons via Wikidata:** the script finds the company's Wikidata item by the SEC CIK in `watchlist.tsv` (or `WIKIDATA` in the script) and takes its P8972 "small logo", else its P154 "logo". Files in `COMMONS` in the script go first. Only files Commons lists as public domain, CC0, CC BY or CC BY-SA are used. A logo wider than 2.2:1 loses to a site icon, and one wider than 4.5:1 is never used.
@@ -128,10 +149,10 @@ Company logos (earnings strip, calendar chips, movers rows) and partner logos (s
 
 Tiers 2 and 3 become 64px PNG tiles: a full-bleed app icon fills the tile, and anything else sits on a white tile (near-black when the mark is too pale for white). `SKIP` in the script keeps a ticker as a text chip on purpose. Partner marks (`PARTNERS`) are square tiles shown before the partner's name: OKX from Simple Icons, the others from each partner's own site or newsroom.
 
-- **Run it:** downloads go out one per second with the User-Agent `PreBell logo build (https://prebell.ai)`. Definitive answers (2xx, and 4xx other than 408/429) are cached in `apps/web/node_modules/.cache/logos`, so a rerun gives the same files; `pnpm logos --offline` uses only the cache. Delete the cache to fetch everything again (a full run takes about 8 minutes). The script prints each tier's tickers, the ones left without a logo, and why a Commons file was skipped. Before committing, look at every new or changed tile at 18px in light and dark.
+- **Run it:** downloads go out one per second with the User-Agent `PreBell logo build (https://prebell.ai)`. Definitive answers (2xx, and 4xx other than 408/429) are cached in `apps/web/node_modules/.cache/logos`, so a rerun gives the same files; `pnpm logos --offline` uses only the cache. Delete the cache to fetch everything again (a full run takes about 8 minutes). The script prints each tier's tickers, the ones left without a logo, and why a Commons file was skipped. Before committing, look at every new or changed tile at 18px on the white cover tag.
 - **When it fails:** the script builds in `apps/web/node_modules/.cache/logos-build` and moves the result into `public/logos/` and `src/lib/logos.generated.ts` only when the whole run succeeds. A failed run leaves the committed files as they were. It stops with an error when Wikidata, Commons or a partner file doesn't answer (a timeout, 429 or 5xx is never cached, so just run it again later). It also stops when a ticker that has a logo in the committed manifest would lose it; pass `--allow-shrink` only if that is intended. Company sites that fail the same way are reported at the end and retried on the next run.
 - **Browser caching:** `apps/web/public/_headers` serves `/logos/*` with a one-year `immutable` Cache-Control, so a tile replaced under the same file name may keep showing the old image to returning visitors for up to a year.
 - **Add or fix a company logo:** if Simple Icons has the brand, add `TICKER: "slug"` to `COMPANIES`. Otherwise, if Wikidata picks a wordmark that is too wide, find the company's own square mark on Commons and add `TICKER: "File name.svg"` to `COMMONS` (the licence check still applies). If the result is unreadable at 18px, add the ticker to `SKIP` with the reason. Use only the company's own current mark.
 - **Refresh all logos:** bump `simple-icons` (exact version) in `apps/web/package.json`, set `FETCHED` in the script to that day, delete the cache and run `pnpm logos`. If a brand was removed upstream (usually because the brand asked), the script stops with `simple-icons X has no "slug"`. Remove that ticker from `COMPANIES` too.
-- **Partner logos:** set `url` (the partner's own file) and `page` (where it is linked) in `PARTNERS`, run `pnpm logos`, then set `logo` on the partner in `apps/web/src/lib/partners.ts`. `logoDark` is only needed for a mark that doesn't read on both themes. A partner without `logo` shows its name alone.
-- Without a logo, a ticker shows the plain text chip, and in movers rows a grey lettered tile. Nothing breaks if a file is missing; the tests check that every manifest entry exists, and that every file has a `LICENSES.md` row.
+- **Partner logos:** set `url` (the partner's own file) and `page` (where it is linked) in `PARTNERS`, run `pnpm logos`, then set `logo` on the partner in `apps/web/src/lib/partners.ts`. The partner strip shows names only, so a logo is kept on disk and in the `/api/partners` response but not drawn; `logoDark` is optional.
+- Without a logo, a cover's tag shows the ticker as text. Nothing breaks if a file is missing; the tests check that every manifest entry exists, and that every file has a `LICENSES.md` row.

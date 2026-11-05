@@ -1,12 +1,14 @@
 //! Generator Worker: cron -> queue -> `tick`, backed by D1 + R2.
 
 mod alerts;
+mod cover;
 mod earnings_store;
 mod http;
 mod store;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
+use prebell_core::cover::{CoverMaker, NoCover};
 use prebell_core::earnings::calendar::{refresh_tick, yahoo_seeding, CalendarSource};
 use prebell_core::earnings::run::{build_tick, poll_job};
 use prebell_core::edgar::Edgar;
@@ -25,6 +27,7 @@ use prebell_core::yahoo_calendar::YahooCalendar;
 use serde::{Deserialize, Serialize};
 use worker::*;
 
+use crate::cover::WorkersAiCover;
 use crate::http::{WorkerHttp, WorkerTimer};
 use crate::store::D1Store;
 
@@ -58,6 +61,24 @@ fn secret_or_empty(env: &Env, name: &str) -> String {
         console_warn!("secret {name} is not set; provider calls will fail");
     }
     v
+}
+
+/// Logs a failed scene to the Worker log, where a quota or auth error can be
+/// read; core records only `cover=err`. The error goes on unchanged.
+struct LoggedCover<'a>(Box<dyn CoverMaker + 'a>);
+
+#[async_trait(?Send)]
+impl CoverMaker for LoggedCover<'_> {
+    async fn scene(&self, prompt: &str) -> std::result::Result<Vec<u8>, String> {
+        let r = self.0.scene(prompt).await;
+        // `NoCover` is already warned about once, when the maker was chosen.
+        if let Err(e) = &r {
+            if !e.contains("not configured") {
+                console_warn!("cover: {e}");
+            }
+        }
+        r
+    }
 }
 
 /// Wall clock from the JS runtime; `FORCE_NOW_UTC` (RFC 3339) overrides it for local testing.
@@ -151,6 +172,30 @@ impl Runner<'_> {
         })
     }
 
+    /// The cover scene maker, built per message: Workers AI when `CF_AI_TOKEN`
+    /// and `CF_ACCOUNT_ID` are both set, else none (plain covers). Failures
+    /// are logged, never the token.
+    fn cover(&self) -> Box<dyn CoverMaker + '_> {
+        let token = self
+            .env
+            .secret("CF_AI_TOKEN")
+            .ok()
+            .map(|v| v.to_string())
+            .unwrap_or_default();
+        let inner: Box<dyn CoverMaker + '_> = match (text(self.env, "CF_ACCOUNT_ID"), token) {
+            (Some(account), token) if !token.is_empty() => {
+                Box::new(WorkersAiCover::new(&self.http, account, token))
+            }
+            _ => {
+                console_warn!(
+                    "secret CF_AI_TOKEN or var CF_ACCOUNT_ID is not set; covers will be plain"
+                );
+                Box::new(NoCover)
+            }
+        };
+        Box::new(LoggedCover(inner))
+    }
+
     /// EDGAR as `SEC_CONTACT`; SEC blocks anonymous clients, so the
     /// placeholder is a config error.
     fn edgar(&self) -> std::result::Result<Edgar<CountingHttp<WorkerHttp>, WorkerTimer>, String> {
@@ -178,9 +223,11 @@ impl JobRunner for Runner<'_> {
         // Read when the facts are built, so a retrying run's last_error says
         // how close the build came to the Free plan's 50.
         let extra = || vec![format!("subrequests={}", self.http.count())];
+        let cover = self.cover();
         let hooks = Hooks {
             log: &log,
             extra: &extra,
+            cover: cover.as_ref(),
         };
         let at = now(env);
         let store = self.store;
@@ -236,7 +283,8 @@ impl JobRunner for Runner<'_> {
             }
             EarningsStep::Build => {
                 let llm = self.llm(&[])?;
-                let o = build_tick(t, store, store, &edgar, llm.as_ref()).await?;
+                let cover = self.cover();
+                let o = build_tick(t, store, store, &edgar, llm.as_ref(), cover.as_ref()).await?;
                 Ok(format!("{o:?}"))
             }
             EarningsStep::Calendar => {

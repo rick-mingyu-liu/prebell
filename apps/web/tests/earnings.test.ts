@@ -28,8 +28,8 @@ function earnings(id: number, ticker: string, acc: string, date: string, zh: str
 INSERT INTO posts (id, run_key, content_type, template_id, trading_date, slug, facts_r2_key, published_at)
 VALUES (${id},'${key}','earnings','earnings:v1','${date}','${slug}','x','${ts}');
 INSERT INTO earnings_filings VALUES ('${acc}',1,'${ticker}','8-K','2.02','${date}','${date}','${ts}','x.htm','${key}','done','${ts}');
-INSERT INTO post_translations VALUES (${id},'en','published','EN ${ticker}','sum','# EN','${ts}');\n`;
-  if (zh) sql += `INSERT INTO post_translations VALUES (${id},'zh','${zh}','中文 ${ticker}','摘要','# 中文','${ts}');\n`;
+INSERT INTO post_translations (post_id, lang, status, title, summary, body_md, updated_at) VALUES (${id},'en','published','EN ${ticker}','sum','# EN','${ts}');\n`;
+  if (zh) sql += `INSERT INTO post_translations (post_id, lang, status, title, summary, body_md, updated_at) VALUES (${id},'zh','${zh}','中文 ${ticker}','摘要','# 中文','${ts}');\n`;
   return sql;
 }
 
@@ -118,7 +118,7 @@ describe("ticker archive", () => {
     many += `INSERT INTO runs VALUES ('premarket:2026-10-27','premarket','2026-10-27','published',1,NULL,'t','t');
 INSERT INTO posts (id, run_key, content_type, template_id, trading_date, slug, facts_r2_key, published_at)
 VALUES (500,'premarket:2026-10-27','premarket','premarket:v1','2026-10-27','premarket-2026-10-27',NULL,'2026-10-27T12:34:00Z');
-INSERT INTO post_translations VALUES (500,'en','published','Brief','s','# b','t');`;
+INSERT INTO post_translations (post_id, lang, status, title, summary, body_md, updated_at) VALUES (500,'en','published','Brief','s','# b','t');`;
     expect((await listRecentBriefs(memoryD1(many), "en", 10)).map((p) => p.slug)).toEqual(["premarket-2026-10-27"]);
   });
 
@@ -128,6 +128,33 @@ INSERT INTO post_translations VALUES (500,'en','published','Brief','s','# b','t'
       "aapl-2026-10-30-earnings",
       "msft-2026-10-28-earnings",
     ]);
+  });
+});
+
+describe("cover fields in lists", () => {
+  it("latest earnings carry ticker and cover fields", async () => {
+    const ts = "2026-10-30T21:00:00Z";
+    const db = memoryD1(
+      seed +
+        `UPDATE posts SET cover_key = 'covers/aapl-2026-10-30-earnings.png' WHERE id = 1;
+UPDATE post_translations SET cover_line1 = 'Apple beats', cover_line2 = 'on services' WHERE post_id = 1 AND lang = 'en';
+INSERT INTO runs VALUES ('premarket:2026-10-31','premarket','2026-10-31','published',1,NULL,'${ts}','${ts}');
+INSERT INTO posts (id, run_key, content_type, template_id, trading_date, slug, facts_r2_key, published_at)
+VALUES (9,'premarket:2026-10-31','premarket','premarket:v1','2026-10-31','premarket-2026-10-31',NULL,'${ts}');
+INSERT INTO post_translations (post_id, lang, status, title, summary, body_md, updated_at) VALUES (9,'en','published','EN pm','s','# x','${ts}');`,
+    );
+    const [aapl] = await listLatestEarnings(db, "en", 5);
+    expect(aapl).toMatchObject({
+      slug: "aapl-2026-10-30-earnings",
+      ticker: "AAPL",
+      coverKey: "covers/aapl-2026-10-30-earnings.png",
+      coverLines: ["Apple beats", "on services"],
+    });
+    const [msft] = (await listLatestEarnings(db, "en", 5)).filter((p) => p.ticker === "MSFT");
+    expect(msft).toMatchObject({ coverKey: null, coverLines: null });
+    expect((await listTickerPosts(db, "AAPL", "en"))[0]).toMatchObject({ ticker: "AAPL" });
+    const [brief] = await listRecentBriefs(db, "en", 1);
+    expect(brief).toMatchObject({ slug: "premarket-2026-10-31", ticker: null, coverKey: null, coverLines: null });
   });
 });
 

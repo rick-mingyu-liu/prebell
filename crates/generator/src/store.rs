@@ -8,7 +8,7 @@ use prebell_core::store::{PostRow, RunRow, Store, TranslationRow};
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use worker::wasm_bindgen::JsValue;
-use worker::{Bucket, D1Database};
+use worker::{Bucket, D1Database, HttpMetadata};
 
 pub struct D1Store {
     pub db: D1Database,
@@ -51,6 +51,7 @@ struct PostRec {
     slug: String,
     facts_r2_key: Option<String>,
     published_at: Option<String>,
+    cover_key: Option<String>,
 }
 
 impl From<PostRec> for PostRow {
@@ -64,6 +65,7 @@ impl From<PostRec> for PostRow {
             slug: p.slug,
             facts_r2_key: p.facts_r2_key.unwrap_or_default(),
             published_at: p.published_at,
+            cover_key: p.cover_key,
         }
     }
 }
@@ -77,6 +79,8 @@ struct TrRec {
     summary: Option<String>,
     body_md: Option<String>,
     updated_at: Option<String>,
+    cover_line1: Option<String>,
+    cover_line2: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -108,6 +112,16 @@ impl D1Store {
     ) -> Result<Option<T>, String> {
         let stmt = self.db.prepare(sql).bind(args).map_err(|e| err(sql, e))?;
         stmt.first::<T>(None).await.map_err(|e| err(sql, e))
+    }
+
+    /// Insert or replace a `kv` row; shared by the `Store` and `EarningsStore` impls.
+    pub(crate) async fn kv_upsert(&self, key: &str, value: &str, now: &str) -> Result<(), String> {
+        self.run(
+            "INSERT INTO kv (key, value, updated_at) VALUES (?1, ?2, ?3) \
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
+            &[s(key), s(value), s(now)],
+        )
+        .await
     }
 
     pub(crate) async fn run(&self, sql: &str, args: &[JsValue]) -> Result<(), String> {
@@ -186,7 +200,7 @@ impl Store for D1Store {
 
     async fn get_post_by_run(&self, run_key: &str) -> Result<Option<PostRow>, String> {
         let r: Option<PostRec> = self.first(
-            "SELECT id, run_key, content_type, template_id, trading_date, slug, facts_r2_key, published_at \
+            "SELECT id, run_key, content_type, template_id, trading_date, slug, facts_r2_key, published_at, cover_key \
              FROM posts WHERE run_key = ?1",
             &[s(run_key)],
         )
@@ -199,7 +213,7 @@ impl Store for D1Store {
         content_type: &str,
         trading_date: &str,
     ) -> Result<Vec<PostRow>, String> {
-        let sql = "SELECT id, run_key, content_type, template_id, trading_date, slug, facts_r2_key, published_at \
+        let sql = "SELECT id, run_key, content_type, template_id, trading_date, slug, facts_r2_key, published_at, cover_key \
                    FROM posts WHERE content_type = ?1 AND trading_date = ?2 AND published_at IS NOT NULL ORDER BY id";
         let r = self
             .db
@@ -216,11 +230,12 @@ impl Store for D1Store {
     async fn upsert_post(&self, p: &PostRow) -> Result<i64, String> {
         let r: Option<IdRec> = self
             .first(
-                "INSERT INTO posts (run_key, content_type, template_id, trading_date, slug, facts_r2_key, published_at) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7) \
+                "INSERT INTO posts (run_key, content_type, template_id, trading_date, slug, facts_r2_key, published_at, cover_key) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8) \
                  ON CONFLICT(run_key) DO UPDATE SET content_type = excluded.content_type, \
                  template_id = excluded.template_id, trading_date = excluded.trading_date, slug = excluded.slug, \
-                 facts_r2_key = excluded.facts_r2_key, published_at = excluded.published_at \
+                 facts_r2_key = excluded.facts_r2_key, published_at = excluded.published_at, \
+                 cover_key = excluded.cover_key \
                  RETURNING id",
                 &[
                     s(&p.run_key),
@@ -230,6 +245,7 @@ impl Store for D1Store {
                     s(&p.slug),
                     s(&p.facts_r2_key),
                     opt(p.published_at.as_deref()),
+                    opt(p.cover_key.as_deref()),
                 ],
             )
             .await?;
@@ -244,7 +260,7 @@ impl Store for D1Store {
     ) -> Result<Option<TranslationRow>, String> {
         let r: Option<TrRec> = self
             .first(
-                "SELECT post_id, lang, status, title, summary, body_md, updated_at \
+                "SELECT post_id, lang, status, title, summary, body_md, updated_at, cover_line1, cover_line2 \
              FROM post_translations WHERE post_id = ?1 AND lang = ?2",
                 &[int(post_id), s(lang)],
             )
@@ -257,16 +273,29 @@ impl Store for D1Store {
             summary: t.summary.unwrap_or_default(),
             body_md: t.body_md.unwrap_or_default(),
             updated_at: t.updated_at.unwrap_or_default(),
+            cover_line1: t.cover_line1,
+            cover_line2: t.cover_line2,
         }))
     }
 
     async fn upsert_translation(&self, t: &TranslationRow) -> Result<(), String> {
         self.run(
-            "INSERT INTO post_translations (post_id, lang, status, title, summary, body_md, updated_at) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7) \
+            "INSERT INTO post_translations (post_id, lang, status, title, summary, body_md, updated_at, cover_line1, cover_line2) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9) \
              ON CONFLICT(post_id, lang) DO UPDATE SET status = excluded.status, title = excluded.title, \
-             summary = excluded.summary, body_md = excluded.body_md, updated_at = excluded.updated_at",
-            &[int(t.post_id), s(&t.lang), s(&t.status), s(&t.title), s(&t.summary), s(&t.body_md), s(&t.updated_at)],
+             summary = excluded.summary, body_md = excluded.body_md, updated_at = excluded.updated_at, \
+             cover_line1 = excluded.cover_line1, cover_line2 = excluded.cover_line2",
+            &[
+                int(t.post_id),
+                s(&t.lang),
+                s(&t.status),
+                s(&t.title),
+                s(&t.summary),
+                s(&t.body_md),
+                s(&t.updated_at),
+                opt(t.cover_line1.as_deref()),
+                opt(t.cover_line2.as_deref()),
+            ],
         )
         .await
     }
@@ -342,5 +371,22 @@ impl Store for D1Store {
             .body()
             .ok_or_else(|| format!("{ctx}: object has no body"))?;
         body.text().await.map(Some).map_err(|e| err(&ctx, e))
+    }
+
+    async fn put_bytes(&self, key: &str, bytes: &[u8], content_type: &str) -> Result<(), String> {
+        self.facts
+            .put(key, bytes.to_vec())
+            .http_metadata(HttpMetadata {
+                content_type: Some(content_type.into()),
+                ..Default::default()
+            })
+            .execute()
+            .await
+            .map(|_| ())
+            .map_err(|e| err("R2 put", e))
+    }
+
+    async fn kv_set(&self, key: &str, value: &str, now: &str) -> Result<(), String> {
+        self.kv_upsert(key, value, now).await
     }
 }

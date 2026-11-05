@@ -5,8 +5,8 @@ import { getPathMatch } from "next/dist/shared/lib/router/utils/path-match";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import nextConfig from "../next.config";
 import { GET } from "../src/app/api/partners/route";
-import { PartnerBoxes } from "../src/components/PartnerLinks";
-import Sidebar from "../src/components/Sidebar";
+import { PartnerNames } from "../src/components/PartnerLinks";
+import PartnersStrip from "../src/components/PartnersStrip";
 import { countryOf, partnersFor, type PartnersResponse } from "../src/lib/partners";
 
 const cf = vi.hoisted(() => ({
@@ -24,9 +24,6 @@ vi.mock("@opennextjs/cloudflare", () => ({
 const ids = (country: string | null) => partnersFor(country).map((p) => p.id);
 const req = (headers: Record<string, string> = {}) =>
   new Request("https://prebell.example/api/partners", { headers });
-
-const DISCLOSURE_EN = "Affiliate links: PreBell may earn a reward if you sign up. Not investment advice.";
-const DISCLOSURE_ZH = "推广链接：通过链接注册，PreBell 可能获得奖励。不构成投资建议。";
 
 describe("partnersFor", () => {
   it("shows nothing in mainland China", () => {
@@ -140,6 +137,12 @@ describe("next.config headers", () => {
   const rulesFor = async (path: string) =>
     (await nextConfig.headers!()).filter((rule) => getPathMatch(rule.source)(path) !== false);
 
+  it("marks /api/subscribe private, no-store too", async () => {
+    const rules = await rulesFor("/api/subscribe");
+    const values = rules.flatMap((r) => r.headers).filter((h) => h.key.toLowerCase() === "cache-control");
+    expect(values.map((h) => h.value)).toEqual(["private, no-store"]);
+  });
+
   it("marks /api/partners private, no-store and keeps the cacheable locale rule off it", async () => {
     const rules = await rulesFor("/api/partners");
     const values = rules.flatMap((r) => r.headers).filter((h) => h.key.toLowerCase() === "cache-control");
@@ -152,64 +155,47 @@ describe("next.config headers", () => {
   });
 });
 
-describe("Sidebar", () => {
+describe("PartnersStrip", () => {
   const PARTNER_HOSTS = ["moomoo.com", "okx.com", "crypto.com", "wealthsimple.com"];
 
-  it("server-renders only the TermPocket card: no partner link, logo or disclosure", () => {
-    const out = renderToStaticMarkup(createElement(Sidebar, { locale: "en" }));
+  it("renders the heading and the disclosure, no partner hosts server-side", () => {
+    const out = renderToStaticMarkup(createElement(PartnersStrip, { locale: "en" }));
+    expect(out).toContain('<aside class="partners-strip"');
+    expect(out).toContain("From our partners");
+    expect(out).toContain('<p class="partners-note">Affiliate links: PreBell may earn a reward if you sign up. Not investment advice.</p>');
     for (const host of PARTNER_HOSTS) expect(out).not.toContain(host);
     expect(out).not.toContain("/logos/partners/");
-    expect(out).not.toContain(DISCLOSURE_EN);
-    expect(out).toContain('href="https://www.termpocket.com"');
-    expect(out).toContain("From the PreBell team. Plan your goals and habits with Pocky, your AI assistant.");
   });
 
   it("uses the Chinese copy on ZH pages", () => {
-    const out = renderToStaticMarkup(createElement(Sidebar, { locale: "zh" }));
-    for (const host of PARTNER_HOSTS) expect(out).not.toContain(host);
-    expect(out).not.toContain("/logos/partners/");
-    expect(out).not.toContain(DISCLOSURE_ZH);
-    expect(out).toContain("来自 PreBell 团队。用 AI 助手 Pocky 规划你的目标与习惯。");
+    const out = renderToStaticMarkup(createElement(PartnersStrip, { locale: "zh" }));
+    expect(out).toContain("合作伙伴");
+    expect(out).toContain("推广链接：通过链接注册，PreBell 可能获得奖励。不构成投资建议。");
+  });
+
+  it("lists the partner names as plain sponsored links, no logos, no group headings", () => {
+    const out = renderToStaticMarkup(
+      createElement(PartnerNames, {
+        data: {
+          brokers: [{ id: "moomoo", name: "moomoo", url: "https://j.moomoo.com/0J1BGf", logo: "/logos/partners/moomoo.png" }],
+          crypto: [{ id: "okx", name: "OKX", url: "https://okx.com/join/AIAFMP3U" }],
+        },
+      }),
+    );
+    expect(out).toContain('<a href="https://j.moomoo.com/0J1BGf" target="_blank" rel="sponsored noopener noreferrer">moomoo</a>');
+    expect(out).toContain('rel="sponsored noopener noreferrer">OKX</a>');
+    expect(out).not.toContain("<img");
+    expect(out).not.toContain("Brokers");
   });
 });
 
-describe("PartnerBoxes", () => {
-  const labels = { brokers: "Brokers", crypto: "Crypto exchanges", disclosure: DISCLOSURE_EN };
+describe("PartnerNames", () => {
   const okx = { id: "okx", name: "OKX", url: "https://okx.com/join/AIAFMP3U" };
-  const render = (data: PartnersResponse | null) =>
-    renderToStaticMarkup(createElement(PartnerBoxes, { data, labels }));
+  const render = (data: PartnersResponse | null) => renderToStaticMarkup(createElement(PartnerNames, { data }));
 
-  it("opens links in a new tab as sponsored", () => {
+  it("drops an empty group and keeps the other's links", () => {
     const out = render({ brokers: [], crypto: [okx] });
-    expect(out).toContain('href="https://okx.com/join/AIAFMP3U"');
-    expect(out).toContain('target="_blank"');
-    expect(out).toContain('rel="sponsored noopener noreferrer"');
-  });
-
-  it("drops a box with no links and shows the disclosure under the boxes", () => {
-    const out = render({ brokers: [], crypto: [okx] });
-    expect(out).toContain("Crypto exchanges");
-    expect(out).not.toContain("Brokers");
-    expect(out).toContain(DISCLOSURE_EN);
-    expect(out.indexOf(DISCLOSURE_EN)).toBeGreaterThan(out.indexOf("OKX"));
-  });
-
-  it("shows a partner's logo tile before its name, switching file in dark mode when there is a dark one", () => {
-    const out = render({
-      brokers: [],
-      crypto: [{ ...okx, logo: "/logos/partners/okx.svg", logoDark: "/logos/partners/okx-dark.svg" }],
-    });
-    expect(out).toContain('<source srcSet="/logos/partners/okx-dark.svg" media="(prefers-color-scheme: dark)"/>');
-    expect(out).toMatch(/<img src="\/logos\/partners\/okx.svg" alt="" width="18" height="18"\/><\/picture>OKX<\/span>/);
-  });
-
-  it("shows the name alone without a logo, and needs no dark variant", () => {
-    const named = render({ brokers: [], crypto: [okx] });
-    expect(named).toContain('<span class="side-name">OKX</span>');
-    expect(named).not.toContain("<img");
-    const lightOnly = render({ brokers: [], crypto: [{ ...okx, logo: "/logos/partners/okx.svg" }] });
-    expect(lightOnly).toContain(">OKX</span>");
-    expect(lightOnly).not.toContain("<source");
+    expect(out).toBe('<a href="https://okx.com/join/AIAFMP3U" target="_blank" rel="sponsored noopener noreferrer">OKX</a>');
   });
 
   it("keeps every bundled partner logo on disk", () => {
@@ -218,7 +204,7 @@ describe("PartnerBoxes", () => {
         expect(existsSync(new URL(`../public${path}`, import.meta.url))).toBe(true);
   });
 
-  it("renders nothing, disclosure included, when both groups are empty", () => {
+  it("renders nothing when both groups are empty", () => {
     expect(render({ brokers: [], crypto: [] })).toBe("");
   });
 

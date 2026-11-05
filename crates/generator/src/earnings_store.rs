@@ -256,11 +256,6 @@ impl EarningsStore for D1Store {
     }
 
     async fn kv_set(&self, key: &str, value: &str, now: &str) -> Result<(), String> {
-        self.run(
-            "INSERT INTO kv (key, value, updated_at) VALUES (?1, ?2, ?3) \
-             ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
-            &[s(key), s(value), s(now)],
-        )
-        .await
+        self.kv_upsert(key, value, now).await
     }
 }

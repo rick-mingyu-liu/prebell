@@ -2,7 +2,6 @@ import type { Metadata } from "next";
 import Link from "next/link";
 import { getTranslations, setRequestLocale } from "next-intl/server";
 import CalendarWeek from "@/components/CalendarWeek";
-import Sidebar from "@/components/Sidebar";
 import type { Locale } from "@/i18n/routing";
 import { getDb } from "@/lib/db";
 import { addDays, INDEXED_WEEKS, isDate, listCalendarWeek, todayEt, weekStart } from "@/lib/earnings";
@@ -38,20 +37,17 @@ export default async function EarningsCalendar({ params, searchParams }: PagePro
   const href = (d: string) => `/${locale}/earnings?week=${d}`;
 
   return (
-    <div className="grid-article">
-      <div className="page-main">
-        <h1>{t("calendarTitle")}</h1>
-        <p className="meta">
-          {t("weekOf", { date: formatDate(start, locale) })} · {t("timesEt")}
-        </p>
-        <p className="tile legend">{t("legend")}</p>
-        <CalendarWeek days={days} locale={locale} />
-        <nav className="pager">
-          <Link href={href(addDays(start, -7))}>← {t("prevWeek")}</Link>
-          <Link href={href(addDays(start, 7))}>{t("nextWeek")} →</Link>
-        </nav>
-      </div>
-      <Sidebar locale={locale} />
+    <div className="list-page">
+      <h1>{t("calendarTitle")}</h1>
+      <p className="meta">
+        {t("weekOf", { date: formatDate(start, locale) })} · {t("timesEt")}
+      </p>
+      <p className="legend">{t("legend")}</p>
+      <CalendarWeek days={days} locale={locale} />
+      <nav className="pager">
+        <Link href={href(addDays(start, -7))}>← {t("prevWeek")}</Link>
+        <Link href={href(addDays(start, 7))}>{t("nextWeek")} →</Link>
+      </nav>
     </div>
   );
 }

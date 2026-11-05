@@ -8,6 +8,7 @@ use chrono::{DateTime, Datelike, Duration, NaiveDate, NaiveTime, Timelike, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::clock::{et, recap_window, trading_day, DayKind, Window};
+use crate::cover::{brief_lines, brief_scene_subject, index_snapshot, CoverLines, IndexSnapshot};
 use crate::earnings::facts::EarningsFacts;
 use crate::facts::{quote_numbers, Field, Mover, NewsReason, Quote};
 use crate::numbers::Lang;
@@ -461,6 +462,15 @@ impl Content for Recap<'_> {
     fn diagnostics(&self, f: &RecapFacts) -> Vec<String> {
         f.diagnostics.clone()
     }
+    fn cover_lines(&self, f: &RecapFacts) -> CoverLines {
+        brief_lines(&f.indexes, &f.gainers, &f.losers, false)
+    }
+    fn index_snapshot(&self, f: &RecapFacts) -> IndexSnapshot {
+        index_snapshot("recap", f.as_of_utc, &f.indexes)
+    }
+    fn scene_subject(&self, f: &RecapFacts) -> String {
+        brief_scene_subject(f.trading_date)
+    }
     async fn write(&self, f: &RecapFacts, lang: Lang) -> Result<(Draft, String), Vec<String>> {
         draft::write(self.llm, f, lang).await
     }
@@ -509,6 +519,7 @@ pub async fn tick_with_log(
     let hooks = Hooks {
         log,
         extra: &Vec::new,
+        cover: &crate::cover::NoCover,
     };
     tick_with_hooks(now, store, md, ns, llm, &hooks).await
 }
@@ -968,6 +979,7 @@ mod tests {
             slug: slug.into(),
             facts_r2_key: key,
             published_at: Some(accepted.into()),
+            cover_key: None,
         });
     }
 
@@ -1483,6 +1495,7 @@ mod run_tests {
             slug: "aapl-q4-fy2026-earnings".into(),
             facts_r2_key: "earnings/aapl.json".into(),
             published_at: Some("2026-10-29T20:40:00Z".into()),
+            cover_key: None,
         });
         let (m, l) = (md(true), llm(true, true));
         assert_eq!(
@@ -1506,6 +1519,7 @@ mod run_tests {
         let hooks = crate::run::Hooks {
             log: &|_| {},
             extra: &extra,
+            cover: &crate::cover::NoCover,
         };
         let out = tick_with_hooks(utc("2026-10-29T20:45:00Z"), &s, &m, &FakeNs, &l, &hooks).await;
         assert!(
@@ -1526,8 +1540,9 @@ mod run_tests {
             TickOutcome::Published
         );
         {
+            // The facts line, then the scene outcome on its own line.
             let logs = logs.borrow();
-            assert_eq!(logs.len(), 1, "{logs:?}");
+            assert_eq!(logs.len(), 2, "{logs:?}");
             let n = crate::premarket::universe().len();
             assert!(
                 logs[0].starts_with(&format!(
@@ -1546,16 +1561,38 @@ mod run_tests {
                 logs[0].ends_with("; indexes ok=4 err=0; reported=0 reported_err=0"),
                 "{logs:?}"
             );
+            assert_eq!(logs[1], "cover=skip");
         }
         // No build, no diagnostics line.
         tick_with_log(now, &s, &m, &FakeNs, &l, &log).await;
-        assert_eq!(logs.borrow().len(), 1);
+        assert_eq!(logs.borrow().len(), 2);
         // Diagnostics are stored with the facts.
         let facts: RecapFacts =
             serde_json::from_str(&s.facts.borrow()["recap/2026-10-29.json"]).unwrap();
         assert_eq!(
             facts.diagnostics.last().unwrap(),
             "reported=0 reported_err=0"
+        );
+    }
+
+    #[tokio::test]
+    async fn recap_build_writes_index_snapshot_with_closes() {
+        let s = MemStore::default();
+        let (m, l) = (md(true), llm(true, true));
+        let now = utc("2026-10-29T20:45:00Z");
+        assert_eq!(tick(now, &s, &m, &FakeNs, &l).await, TickOutcome::Published);
+        let snap: crate::cover::IndexSnapshot =
+            serde_json::from_str(&s.kv.borrow()[crate::cover::INDEX_LINE_KEY]).unwrap();
+        assert_eq!(snap.kind, "recap");
+        assert_eq!(snap.entries.len(), 4);
+        assert!(snap.entries.iter().all(|e| e.last == 5850.12));
+        let tr = s.translations.borrow();
+        let en = &tr[&(1, "en".to_string())];
+        assert_eq!(en.cover_line1.as_deref(), Some("S&P 500 +0.51%"));
+        assert_eq!(en.cover_line2.as_deref(), Some("NVDA +3.08%"));
+        assert_eq!(
+            tr[&(1, "zh".to_string())].cover_line1.as_deref(),
+            Some("标普500 +0.51%")
         );
     }
 
@@ -1742,6 +1779,47 @@ mod run_tests {
         assert!(s.posts.borrow().is_empty());
     }
 
+    #[test]
+    fn recap_cover_and_snapshot_come_from_the_index_closes() {
+        let (md, llm, store) = (md(true), llm(true, true), MemStore::default());
+        let c = Recap {
+            md: &md,
+            ns: &FakeNs,
+            llm: &llm,
+            store: &store,
+        };
+        let f = RecapFacts {
+            trading_date: "2026-10-29".parse().unwrap(),
+            as_of_utc: utc("2026-10-29T20:45:00Z"),
+            early_close: false,
+            indexes: vec![
+                ("S&P 500".into(), Field::Value(q("^GSPC", 5850.12, 0.51))),
+                ("Dow Jones".into(), Field::Value(q("^DJI", 43000.0, -1.2))),
+            ],
+            gainers: vec![],
+            losers: vec![Mover {
+                quote: q("FIS", 60.0, -23.67),
+                name: "Fidelity National".into(),
+                reasons: vec![],
+            }],
+            after_hours: Field::Missing {
+                reason: "n/a".into(),
+            },
+            reported: vec![],
+            diagnostics: vec![],
+        };
+        let lines = c.cover_lines(&f);
+        assert_eq!(lines.en, ["Dow −1.20%", "FIS −23.67%"]);
+        assert_eq!(lines.zh[0], "道指 −1.20%");
+        let snap = c.index_snapshot(&f);
+        assert_eq!(snap.kind, "recap");
+        assert_eq!(snap.entries.len(), 2);
+        assert_eq!(
+            c.scene_subject(&f),
+            "a suspension bridge over a calm river at first light"
+        );
+    }
+
     #[tokio::test]
     async fn premarket_and_recap_keep_separate_runs() {
         let s = MemStore::default();
@@ -1764,6 +1842,7 @@ mod run_tests {
             slug: "premarket-2026-10-29".into(),
             facts_r2_key: "premarket/2026-10-29.json".into(),
             published_at: Some("2026-10-29T12:30:00Z".into()),
+            cover_key: None,
         };
         s.runs.borrow_mut().insert(pre.run_key.clone(), pre.clone());
         crate::store::Store::upsert_post(&s, &pre_post)
