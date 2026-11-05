@@ -25,7 +25,7 @@
 - R2 key `covers/{slug}.svg`, content type `image/svg+xml`. The web key pattern is `^covers\/[a-z0-9-]{1,80}\.(png|jpg|svg)$`; old png/jpg keys stay valid.
 - Log line `cover=ok|err|none`, its own line after the cover write, for premarket, recap and earnings builds. It is never in `runs.last_error` or the stored facts.
 - Tests: `cargo test -p prebell-core --locked` (538 now), `cargo test --workspace --locked` (545 now), `cargo check -p prebell-generator --target wasm32-unknown-unknown --locked`, `cargo clippy --workspace --all-targets --locked -- -D warnings`, `cargo fmt --all --check`. Web, from `apps/web`: `pnpm test` (309 now), `pnpm typecheck`, `pnpm lint`, `pnpm cf:build`.
-- Deploy (owner, after merge, not in this plan): generator first, then web. There is no migration. The owner applies `backfill-graphics.sql`.
+- Deploy (owner, after merge, not in this plan): **web first, then generator** (the web must accept `.svg` keys before the generator writes any; the old generator's png/jpg keys stay served). There is no migration. The owner applies `backfill-graphics.sql`.
 - Commit trailers: `Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>` and `Claude-Session: https://claude.ai/code/session_01C33suxkNuxRbEfR6iUqCky`.
 
 ## Review Focus
@@ -215,7 +215,7 @@ Algorithm for `earnings_graphic_checked`:
 The script follows the shape of `scripts/backfill-covers.sh`: `set -euo pipefail`, it needs `jq`, `BUCKET=prebell-facts`, wrangler runs from `crates/generator`, and a temp dir is removed on exit.
 - It selects `SELECT slug, content_type, facts_r2_key FROM posts WHERE published_at IS NOT NULL AND facts_r2_key IS NOT NULL AND (cover_key IS NULL OR cover_key NOT LIKE '%.svg')` from remote D1.
 - It skips a slug that does not match `^[a-z0-9-]{1,80}$`. Otherwise it downloads the facts and renders to `backfill-graphics/<slug>.svg`.
-- On exit 3 it logs `skip <slug>: no graphic (keeps its current cover)`. On any other failure it logs the reason.
+- On exit 3 it logs `flat <slug>: no graphic (cover_key -> NULL)` and appends `UPDATE posts SET cover_key = NULL WHERE slug = '<slug>';` to `backfill-graphics.sql` (the spec: an old scene must not show under the paper styling). On any other failure it logs the reason and leaves the row alone.
 - It uploads with `wrangler r2 object put "$BUCKET/covers/<slug>.svg" --file … --content-type image/svg+xml --remote`, checking for `Upload complete`.
 - It appends `UPDATE posts SET cover_key = 'covers/<slug>.svg' WHERE slug = '<slug>';` to `backfill-graphics.sql`.
 - It ends with the counts and the apply command `cd crates/generator && pnpm exec wrangler d1 execute prebell --remote --file ../../backfill-graphics.sql`. It never runs the SQL.
