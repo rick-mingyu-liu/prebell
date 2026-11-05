@@ -33,7 +33,7 @@ const INDEXES: [(&str, &str); 4] = [
 const MIN_PRICE: f64 = 5.0;
 /// Regular-session shares; every S&P 500 name clears this on a normal day.
 const MIN_VOLUME: u64 = 1_000_000;
-const MOVERS_PER_SIDE: usize = 5;
+const MOVERS_PER_SIDE: usize = 4;
 const HITS_PER_MOVER: usize = 3;
 const MOVER_REASONS: usize = 2;
 const AFTER_HOURS_HITS: usize = 5;
@@ -420,7 +420,7 @@ pub async fn build_facts(
     let (reported, reported_err) = reported(store, trading_date, early_close).await;
 
     let quotes = liquid_closes(md, trading_date, &mut d).await;
-    // Every liquid close, not only the ten movers, feeds the themes.
+    // Every liquid close, not only the eight movers, feeds the themes.
     let (mut themes, theme_candidates) = detect_all(&quotes, &RECAP_RULES);
     d.themes_found = themes.len();
     themes.truncate(THEME_MAX);
@@ -942,7 +942,7 @@ mod tests {
             &|| 0,
         )
         .await;
-        assert_eq!(syms(&f.gainers), ["TSLA", "META", "AMZN", "NVDA", "MSFT"]);
+        assert_eq!(syms(&f.gainers), ["TSLA", "META", "AMZN", "NVDA"]);
         assert_eq!(syms(&f.losers), ["GOOGL", "BRK.B"]);
         assert_eq!(f.losers[1].name, "Berkshire Hathaway");
         // Movers are optional.
@@ -1759,6 +1759,43 @@ mod tests {
                 used()
             );
         }
+    }
+
+    #[tokio::test]
+    async fn recap_theme_search_is_skipped_at_nominal_usage() {
+        // Nominal usage when the theme step starts: 4 index charts + cookie 1
+        // + crumb 1 + 11 v7 batches + 8 mover searches + 8 extractions = 33.
+        // With the after-hours step (2) reserved, the theme search (2) and
+        // the full macro step after it (4) do not fit: 33 + 2 + 2 + 4 = 41 >
+        // BUDGET_SOFT (40). The recap's macro step (3 searches + 1
+        // extraction, 4 more, so 37 in all) and after hours still run.
+        let used = 4 + 1 + 1 + 11 + 2 * 2 * MOVERS_PER_SIDE;
+        assert_eq!(used, 33);
+        assert!(!crate::budget::allows(
+            used + AFTER_HOURS_COST,
+            crate::premarket::THEME_SEARCH_COST + crate::premarket::MACRO_FULL_COST
+        ));
+        let n = RecNs(
+            ns(vec![(
+                MEMORY_Q,
+                Ok(vec![hit("https://news.test/memory", MEMORY_SRC)]),
+            )]),
+            RefCell::new(vec![]),
+        );
+        let f = build_facts(
+            &md(&memory_down()),
+            &n,
+            &llm(vec![]),
+            &MemStore::default(),
+            date(),
+            now(),
+            &|| used,
+        )
+        .await;
+        assert_eq!(asked(&n, MEMORY_Q), 0);
+        assert!(f
+            .diagnostics
+            .contains(&"themes found=1 kept=1 searched=0".to_string()));
     }
 
     #[tokio::test]

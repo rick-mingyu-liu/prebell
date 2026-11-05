@@ -30,7 +30,7 @@ const FUTURES: [(&str, &str); 4] = [
 ];
 const MIN_PRICE: f64 = 5.0;
 const MIN_VOLUME: u64 = 50_000;
-const MOVERS_PER_SIDE: usize = 5;
+const MOVERS_PER_SIDE: usize = 4;
 const HITS_PER_MOVER: usize = 3;
 const MOVER_REASONS: usize = 2;
 /// The premarket macro searches, in order: futures, the day's headline
@@ -640,7 +640,7 @@ pub async fn build_facts(
     }
 
     let quotes = liquid_quotes(md, now, &mut d).await;
-    // Every liquid quote, not only the ten movers, feeds the themes.
+    // Every liquid quote, not only the eight movers, feeds the themes.
     let (mut themes, theme_candidates) = detect_all(&quotes, &PREMARKET_RULES);
     d.themes_found = themes.len();
     themes.truncate(THEME_MAX);
@@ -1525,7 +1525,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn gainers_only_positive_losers_only_negative_top_five() {
+    async fn gainers_only_positive_losers_only_negative_top_four() {
         let stocks: Vec<Quote> = ["AAPL", "MSFT", "NVDA", "AMZN", "META", "TSLA", "GOOGL"]
             .iter()
             .enumerate()
@@ -1543,7 +1543,7 @@ mod tests {
         .await;
         assert!(f.gainers.is_empty());
         let pcts: Vec<f64> = f.losers.iter().map(|m| m.quote.change_pct).collect();
-        assert_eq!(pcts, vec![-7.0, -6.0, -5.0, -4.0, -3.0]);
+        assert_eq!(pcts, vec![-7.0, -6.0, -5.0, -4.0]);
         assert_eq!(missing_required(&f), vec!["movers"]);
     }
 
@@ -1564,7 +1564,7 @@ mod tests {
         )
         .await;
         let syms: Vec<&str> = f.gainers.iter().map(|m| m.quote.symbol.as_str()).collect();
-        assert_eq!(syms, vec!["TSLA", "META", "AMZN", "NVDA", "MSFT"]);
+        assert_eq!(syms, vec!["TSLA", "META", "AMZN", "NVDA"]);
         assert!(f.losers.is_empty());
     }
 
@@ -2174,6 +2174,35 @@ mod tests {
                 used()
             );
         }
+    }
+
+    #[tokio::test]
+    async fn premarket_theme_search_runs_at_nominal_usage() {
+        // Nominal usage when the theme step starts: cookie 1 + crumb 1 +
+        // 11 v7 batches + 4 futures + 8 mover searches + 8 extractions = 33.
+        // The theme search (2) and the full macro step after it (4) fit:
+        // 33 + 2 + 4 = 39 <= BUDGET_SOFT (40).
+        let used = 1 + 1 + 11 + 4 + 2 * 2 * MOVERS_PER_SIDE;
+        assert_eq!(used, 33);
+        assert!(allows(used, THEME_SEARCH_COST + MACRO_FULL_COST));
+        let n = RecNs(
+            ns(vec![(
+                MEMORY_Q,
+                Ok(vec![dated("https://n.test/memory", MEMORY_SRC, 3)]),
+            )]),
+            RefCell::new(vec![]),
+        );
+        let f = build_facts(
+            &md(&memory_down()),
+            &n,
+            &llm(vec![]),
+            date(),
+            now(),
+            &|| used,
+        )
+        .await;
+        assert_eq!(queries(&n, MEMORY_Q), 1);
+        assert_eq!(f.diagnostics[5], "themes found=1 kept=1 searched=1");
     }
 
     #[tokio::test]
