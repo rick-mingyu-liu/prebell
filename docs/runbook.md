@@ -104,10 +104,20 @@ Each build logs one `diagnostics:` line, and a retrying run stores it in `runs.l
 - `hedged=` on the `reasons` part counts mover reasons dropped because `summary_en` hedged its cause ("which could support the gain"). In code the counter is `reasons_hedged`.
 - `news_noise=` counts search hits dropped as noise before any LLM call: MarketBeat filing alerts, 13F, holdings and institutional-ownership pages, "trims position"-style titles, analyst consensus-rating alerts ("Has Consensus Price Target of", "Average Rating of"), and Tavily's own company-profile pages (`tavily.com/knowledge/`). Each mover and macro news query asks Tavily for `NEWS_EXTRA_HITS` (2) more hits than it keeps, so stale and noise hits do not use up a mover's slots; after filtering, the prompt still gets at most the usual number of articles. `news_stale=` and `news_noise=` count every dropped hit, including the extra ones.
 - `reported=N reported_err=M` (recap only, last part) counts the earnings checks published today that the recap links as already reported. `reported_err=M` above 0 means that many D1 or R2 reads failed; the recap still publishes and lists the checks it could read.
+- `cover=ok|skip|err` (premarket and recap only, last part) says what happened to the post's cover scene. `ok`: the Workers AI image was stored in R2 under `covers/<slug>.<ext>`. `skip`: no scene maker is configured (`CF_AI_TOKEN` or `CF_ACCOUNT_ID` is missing), so the post has the plain cover. `err`: the scene call failed, the image was neither PNG nor JPEG, or the R2 write failed; the post still publishes with the plain cover. When the scene call itself failed, `wrangler tail` also shows `cover: <message>`, for example the API's quota or auth error. Earnings posts get covers the same way but log no `cover=` part.
 
 ### CPU overruns
 
 An invocation over 10 ms of CPU is killed. In `wrangler tail` it shows with outcome `exceededCpu`. If that happens, or if `subrequests=` gets near 50, the fix is Workers Paid ($5/month): 5 minutes of CPU (30 seconds by default) and 10,000 subrequests per invocation. No code change is needed.
+
+## Cover images (Workers AI)
+
+Each published post gets a generated background scene (Flux Schnell on Workers AI, one request per post, no retry). Without the credentials below, posts publish with the plain cover and the log says `cover=skip`.
+
+- `CF_ACCOUNT_ID` is a plain var in `crates/generator/wrangler.toml` under `[vars]`. It is the Cloudflare account id, not a secret.
+- `CF_AI_TOKEN` is a secret: a Cloudflare API token with the Workers AI "Read" permission. The owner sets it with `cd crates/generator && pnpm exec wrangler secret put CF_AI_TOKEN` (production) or in `crates/generator/.dev.vars` (local). It is never committed and never appears in an error or log line.
+- Both take effect on the next deploy. A missing token or account id logs `secret CF_AI_TOKEN or var CF_ACCOUNT_ID is not set; covers will be plain` once per queue message.
+- A failed scene is logged as `cover: workers ai: <message>` (or `workers ai http <status>` when the body has no message) and never fails the post. One scene is one fetch subrequest, shown in `subrequests=`.
 
 ## Earnings
 
