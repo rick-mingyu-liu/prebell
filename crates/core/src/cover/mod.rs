@@ -15,6 +15,9 @@ use crate::numbers::Lang;
 use crate::recap::RecapFacts;
 use crate::store::Store;
 
+pub mod graphic;
+pub use graphic::{brief_graphic, cover_movers, CoverMover, Session};
+
 /// The `kv` key the front page reads the latest index snapshot from.
 pub const INDEX_LINE_KEY: &str = "index_line";
 
