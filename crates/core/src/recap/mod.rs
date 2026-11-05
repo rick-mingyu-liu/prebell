@@ -8,7 +8,9 @@ use chrono::{DateTime, Datelike, Duration, NaiveDate, NaiveTime, Timelike, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::clock::{et, recap_window, trading_day, DayKind, Window};
-use crate::cover::{brief_lines, brief_scene_subject, index_snapshot, CoverLines, IndexSnapshot};
+use crate::cover::{
+    brief_graphic, brief_lines, cover_movers, index_snapshot, CoverLines, IndexSnapshot, Session,
+};
 use crate::earnings::facts::EarningsFacts;
 use crate::facts::{push_themes, quote_numbers, Field, Mover, NewsReason, Quote, Theme, ThemeStat};
 use crate::numbers::Lang;
@@ -549,8 +551,8 @@ impl Content for Recap<'_> {
     fn index_snapshot(&self, f: &RecapFacts) -> IndexSnapshot {
         index_snapshot("recap", f.as_of_utc, &f.indexes)
     }
-    fn scene_subject(&self, f: &RecapFacts) -> String {
-        brief_scene_subject(f.trading_date)
+    fn cover_graphic(&self, f: &RecapFacts) -> Option<String> {
+        brief_graphic(&cover_movers(&f.gainers, &f.losers), Session::Recap)
     }
     async fn write(&self, f: &RecapFacts, lang: Lang) -> Result<(Draft, String), Vec<String>> {
         draft::write(self.llm, f, lang).await
@@ -579,7 +581,8 @@ pub async fn tick(
     tick_with_log(now, store, md, ns, llm, &|_| {}).await
 }
 
-/// `tick`, passing the build's diagnostics line to `log` once when it builds.
+/// `tick`, passing the build's diagnostics line to `log` once when it builds
+/// (and the cover outcome, `cover=ok|err|none`, when it gets that far).
 pub async fn tick_with_log(
     now: DateTime<Utc>,
     store: &dyn Store,
@@ -592,7 +595,6 @@ pub async fn tick_with_log(
         log,
         extra: &Vec::new,
         budget: &|| 0,
-        cover: &crate::cover::NoCover,
     };
     tick_with_hooks(now, store, md, ns, llm, &hooks).await
 }
@@ -2097,7 +2099,6 @@ mod run_tests {
             log: &|_| {},
             extra: &extra,
             budget: &|| 0,
-            cover: &crate::cover::NoCover,
         };
         let out = tick_with_hooks(utc("2026-10-29T20:45:00Z"), &s, &m, &FakeNs, &l, &hooks).await;
         assert!(
@@ -2118,7 +2119,7 @@ mod run_tests {
             TickOutcome::Published
         );
         {
-            // The facts line, then the scene outcome on its own line.
+            // The facts line, then the cover outcome on its own line.
             let logs = logs.borrow();
             assert_eq!(logs.len(), 2, "{logs:?}");
             let n = crate::premarket::universe().len();
@@ -2139,7 +2140,7 @@ mod run_tests {
                 logs[0].ends_with("; indexes ok=4 err=0; reported=0 reported_err=0"),
                 "{logs:?}"
             );
-            assert_eq!(logs[1], "cover=skip");
+            assert_eq!(logs[1], "cover=ok");
         }
         // No build, no diagnostics line.
         tick_with_log(now, &s, &m, &FakeNs, &l, &log).await;
@@ -2399,10 +2400,9 @@ mod run_tests {
         let snap = c.index_snapshot(&f);
         assert_eq!(snap.kind, "recap");
         assert_eq!(snap.entries.len(), 2);
-        assert_eq!(
-            c.scene_subject(&f),
-            "a highway interchange at night seen from above"
-        );
+        let svg = c.cover_graphic(&f).unwrap();
+        assert!(svg.contains(">FIS<"), "{svg}");
+        assert!(svg.contains(">BIGGEST MOVES AT THE CLOSE<"), "{svg}");
     }
 
     #[tokio::test]

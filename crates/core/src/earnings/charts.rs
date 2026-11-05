@@ -26,7 +26,7 @@ const BAR: RGBColor = RGBColor(0x2f, 0x7d, 0xc4);
 /// Text and baseline: neutral grey with >= 3:1 contrast on white and on #141414.
 const INK: RGBColor = RGBColor(0x80, 0x80, 0x80);
 /// Fewer points than this is not a trend.
-const MIN_BARS: usize = 2;
+pub(crate) const MIN_BARS: usize = 2;
 /// Widest slot per bar (bar plus gap), in px.
 const MAX_SLOT: i32 = 96;
 const RELEASE_LABEL: &str = "8-K";
@@ -51,9 +51,21 @@ pub struct Chart {
 /// SVG serves both languages): the quarter's period end as `YYYY-MM`, and
 /// `8-K` for this press release's figure.
 #[derive(Debug, Clone, PartialEq)]
-struct Bar {
-    label: String,
-    value: f64,
+pub(crate) struct Bar {
+    pub(crate) label: String,
+    pub(crate) value: f64,
+}
+
+/// One bar series of the trend, shared by the charts and the earnings cover.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct Series {
+    /// `revenue` or `eps`.
+    pub(crate) name: &'static str,
+    /// In time order; `None` is a missing quarter. The first and last slots
+    /// hold bars when the vector is non-empty.
+    pub(crate) slots: Vec<Option<Bar>>,
+    /// This 8-K's figure, when it is the last slot.
+    pub(crate) release: Option<f64>,
 }
 
 fn quarter_bar(p: &QuarterPoint) -> Bar {
@@ -194,33 +206,44 @@ fn release_value(f: &EarningsFacts, m: Metric, points: &[QuarterPoint]) -> Optio
         .filter(|v| series_max == 0.0 || v.abs() <= MAX_RELEASE_RATIO * series_max)
 }
 
+/// Revenue then EPS, each with the XBRL trend's bars plus this release's
+/// 8-K bar. Empty when the trend is missing.
+pub(crate) fn series(f: &EarningsFacts) -> Vec<Series> {
+    let Field::Value(trend) = &f.trend else {
+        return vec![];
+    };
+    [
+        ("revenue", Metric::Revenue, &trend.revenue),
+        ("eps", Metric::EpsGaap, &trend.eps_diluted),
+    ]
+    .into_iter()
+    .map(|(name, metric, points)| {
+        let release = release_value(f, metric, points);
+        Series {
+            name,
+            slots: bars(points, release, f.filing_date),
+            release,
+        }
+    })
+    .collect()
+}
+
 /// One chart per series with at least two GAAP points. Value labels go on
 /// the first and last bars only; a chart whose labels fail the number check
 /// is dropped.
 pub fn charts(f: &EarningsFacts) -> Vec<Chart> {
-    let Field::Value(trend) = &f.trend else {
-        return vec![];
-    };
     let allowed = numbers_in_facts(f);
-    let series = [
-        (
-            "revenue",
-            &trend.revenue,
-            release_value(f, Metric::Revenue, &trend.revenue),
-            "quarterly revenue (GAAP)",
-            "季度营收（GAAP）",
-        ),
-        (
-            "eps",
-            &trend.eps_diluted,
-            release_value(f, Metric::EpsGaap, &trend.eps_diluted),
-            "quarterly diluted EPS (GAAP)",
-            "季度摊薄每股收益（GAAP）",
-        ),
-    ];
     let mut out = Vec::new();
-    for (name, points, release, what_en, what_zh) in series {
-        let b = bars(points, release, f.filing_date);
+    for Series {
+        name,
+        slots: b,
+        release,
+    } in series(f)
+    {
+        let (what_en, what_zh) = match name {
+            "revenue" => ("quarterly revenue (GAAP)", "季度营收（GAAP）"),
+            _ => ("quarterly diluted EPS (GAAP)", "季度摊薄每股收益（GAAP）"),
+        };
         if b.iter().flatten().count() < MIN_BARS {
             continue;
         }
@@ -293,6 +316,59 @@ mod tests {
         assert_eq!(c[1].labels, ["$1.80", "$1.85"]);
         assert!(rev.alt_en.contains("this 8-K"));
         assert!(rev.alt_zh.contains("本次8-K"));
+    }
+
+    #[test]
+    fn series_lists_revenue_then_eps_with_the_release_last() {
+        let s = series(&facts());
+        assert_eq!(
+            s.iter().map(|s| s.name).collect::<Vec<_>>(),
+            ["revenue", "eps"]
+        );
+        assert_eq!(s[0].slots.len(), 3);
+        assert_eq!(s[0].slots[0].as_ref().unwrap().label, "2026-03");
+        assert_eq!(s[0].slots[2].as_ref().unwrap().label, "8-K");
+        assert_eq!(s[0].release, Some(102.5e9));
+        assert_eq!(s[1].release, Some(1.85));
+        let mut f = facts();
+        f.trend = Field::Missing { reason: "x".into() };
+        assert!(series(&f).is_empty());
+    }
+
+    #[test]
+    fn series_leaves_an_empty_slot_for_a_missing_quarter() {
+        let qp = |end: &str, v: f64| QuarterPoint {
+            period_end: end.parse().unwrap(),
+            value: v,
+            form: "10-Q".into(),
+            filed: "2026-08-01".parse().unwrap(),
+        };
+        // The 2025-12 quarter is missing between 2025-09 and 2026-03.
+        let mut f = facts();
+        if let Field::Value(t) = &mut f.trend {
+            t.revenue = vec![
+                qp("2025-09-27", 98.0e9),
+                qp("2026-03-28", 100.4e9),
+                qp("2026-06-27", 99.8e9),
+            ];
+        }
+        let rev = &series(&f)[0];
+        let labels: Vec<Option<&str>> = rev
+            .slots
+            .iter()
+            .map(|s| s.as_ref().map(|b| b.label.as_str()))
+            .collect();
+        assert_eq!(
+            labels,
+            [
+                Some("2025-09"),
+                None,
+                Some("2026-03"),
+                Some("2026-06"),
+                Some("8-K")
+            ]
+        );
+        assert_eq!(rev.release, Some(102.5e9));
     }
 
     #[test]

@@ -402,7 +402,7 @@ describe("toCover", () => {
 
   it("passes a generator-written cover key through", () => {
     expect(toCover(row)).toEqual({ coverKey: "covers/amgn-q3-fy2026-earnings.png", coverLines: ["Rev +8%", ""], ticker: "AMGN" });
-    expect(toCover({ ...row, cover_key: "covers/recap-2026-10-29.jpg" }).coverKey).toBe("covers/recap-2026-10-29.jpg");
+    expect(toCover({ ...row, cover_key: "covers/recap-2026-10-29.svg" }).coverKey).toBe("covers/recap-2026-10-29.svg");
   });
 
   it("drops a cover key the covers route would not serve", () => {

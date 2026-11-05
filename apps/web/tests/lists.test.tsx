@@ -30,7 +30,7 @@ describe("PostList", () => {
 
   it("archive rows show a small cover (flat when the post has none), kicker, title and date", () => {
     const out = renderToStaticMarkup(<PostList locale="en" items={[post, withCover]} />);
-    const [flat, scene] = out.split('<li class="post-row">').slice(1);
+    const [flat, image] = out.split('<li class="post-row">').slice(1);
     // Every row: small cover, then the kicker, the serif title link, the summary and the date.
     expect(flat).toContain('class="cover cover-small cover-flat"');
     expect(flat).toContain('<p class="kicker">After-close recap</p>');
@@ -40,15 +40,16 @@ describe("PostList", () => {
     expect(flat.indexOf("cover-small")).toBeLessThan(flat.indexOf("kicker"));
     expect(flat.indexOf("kicker")).toBeLessThan(flat.indexOf("story-title"));
     expect(flat.indexOf("story-title")).toBeLessThan(flat.indexOf("story-meta"));
-    // No scene and no lines: the flat light cover with only its tag.
+    // No image and no lines: the flat light cover with only its tag.
     expect(flat).not.toContain("cover-bg");
     expect(flat).not.toContain("cover-stat");
     expect(flat).toContain('<span class="cover-tag">Oct 29 · Recap</span>');
-    // A post with a scene and lines shows both, and the company logo as its tag.
-    expect(scene).toContain('src="/covers/aapl-2026-10-29-earnings.png"');
-    expect(scene).toContain("Rev +8%");
-    expect(scene).toContain('alt="AAPL"');
-    expect(scene).toContain('<p class="kicker">Earnings check</p>');
+    // A post with an image and lines renders both, and the company logo as its tag. The lines stay in the
+    // markup; the small-cover CSS hides them so only the tag and the chart show (see layout.test.tsx).
+    expect(image).toContain('src="/covers/aapl-2026-10-29-earnings.png"');
+    expect(image).toContain("Rev +8%");
+    expect(image).toContain('alt="AAPL"');
+    expect(image).toContain('<p class="kicker">Earnings check</p>');
     // The type is the kicker's job: no tag pill.
     expect(out).not.toContain('class="tag"');
     expect(out).not.toContain('class="row');

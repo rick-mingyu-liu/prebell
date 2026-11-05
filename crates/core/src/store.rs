@@ -108,6 +108,8 @@ pub struct MemStore {
     pub fail_posts_on: Cell<bool>,
     /// Makes `get_facts` fail for this key, as an R2 outage would.
     pub fail_facts_key: RefCell<Option<String>>,
+    /// Makes `put_bytes` fail and store nothing, as an R2 outage would.
+    pub fail_put_bytes: Cell<bool>,
 }
 
 #[async_trait(?Send)]
@@ -204,6 +206,9 @@ impl Store for MemStore {
         Ok(self.facts.borrow().get(key).cloned())
     }
     async fn put_bytes(&self, key: &str, bytes: &[u8], content_type: &str) -> Result<(), String> {
+        if self.fail_put_bytes.get() {
+            return Err("r2: put_bytes failed".into());
+        }
         self.bytes
             .borrow_mut()
             .insert(key.into(), (bytes.to_vec(), content_type.into()));

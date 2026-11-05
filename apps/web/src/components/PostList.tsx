@@ -19,7 +19,7 @@ function coverTag(p: PostListItem, locale: Locale, t: T) {
 }
 
 /**
- * Posts as ruled rows: a small cover on the left (flat, tag only, for a post with no scene or lines), then
+ * Posts as ruled rows: a small cover on the left (flat, tag only, for a post with no graphic or lines), then
  * the kicker, the serif headline, a one-line summary and the date. The type is the kicker, not a tag.
  */
 export default function PostList({

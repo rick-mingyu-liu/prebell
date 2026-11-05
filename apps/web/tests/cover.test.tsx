@@ -7,7 +7,7 @@ import { companyLogo } from "../src/lib/logos";
 const render = (over: Partial<CoverProps> = {}) =>
   renderToStaticMarkup(
     createElement(Cover, {
-      coverKey: "covers/aapl-q4.png",
+      coverKey: "covers/aapl-q4.svg",
       lines: ["Revenue $94.9B", "Beat by 2.1%"],
       tag: { kind: "logo", ticker: "AAPL" },
       size: "lead",
@@ -17,17 +17,24 @@ const render = (over: Partial<CoverProps> = {}) =>
   );
 
 describe("Cover", () => {
-  it("renders scene, tag logo and two lines for an earnings cover", () => {
+  it("renders graphic, tag logo and two lines for an earnings cover", () => {
     const logo = companyLogo("AAPL");
     expect(logo).not.toBeNull();
     const out = render();
     expect(out).toContain('<figure class="cover cover-lead" aria-label="Apple earnings">');
-    expect(out).toContain('<img class="cover-bg" src="/covers/aapl-q4.png" alt="" loading="eager" fetchPriority="high"/>');
-    expect(out).toContain('<div class="cover-shade"></div>');
+    expect(out).toContain('<img class="cover-bg" src="/covers/aapl-q4.svg" alt="" loading="eager" fetchPriority="high"/>');
+    expect(out).not.toContain("cover-shade");
     expect(out).toContain('<div class="cover-in">');
     expect(out).toContain(`<span class="cover-tag"><img src="${logo}" alt="AAPL" loading="lazy"/></span>`);
     expect(out).toContain('<p class="cover-stat">Revenue $94.9B<br/>Beat by 2.1%</p>');
     expect(out).toContain('<span class="cover-bar"></span>');
+  });
+
+  it("renders an old png image key with the same paper styling", () => {
+    const out = render({ coverKey: "covers/aapl-q4.png" });
+    expect(out).toContain('<img class="cover-bg" src="/covers/aapl-q4.png"');
+    expect(out).not.toContain("cover-shade");
+    expect(out).not.toContain("cover-flat");
   });
 
   it("renders a flat tag-only cover without key or lines", () => {
@@ -39,7 +46,7 @@ describe("Cover", () => {
     expect(out).toContain('<span class="cover-tag">Nov 4 · Recap</span>');
   });
 
-  it("marks only the scene-less cover as flat", () => {
+  it("marks only the cover without an image as flat", () => {
     expect(render({ coverKey: null })).toContain('<figure class="cover cover-lead cover-flat"');
     expect(render({ coverKey: null, lines: null, size: "small" })).toContain('class="cover cover-small cover-flat"');
     expect(render()).not.toContain("cover-flat");
@@ -69,14 +76,14 @@ describe("Cover", () => {
     expect(none).not.toContain("cover-bar");
   });
 
-  it("loads the lead and article scenes at once and preloads them; list covers stay lazy", () => {
+  it("loads the lead and article graphics at once and preloads them; list covers stay lazy", () => {
     for (const size of ["lead", "article"] as const) {
       const out = render({ size });
-      expect(out).toContain('<img class="cover-bg" src="/covers/aapl-q4.png" alt="" loading="eager" fetchPriority="high"/>');
-      expect(out).toContain('<link rel="preload" as="image" href="/covers/aapl-q4.png" fetchPriority="high"/>');
+      expect(out).toContain('<img class="cover-bg" src="/covers/aapl-q4.svg" alt="" loading="eager" fetchPriority="high"/>');
+      expect(out).toContain('<link rel="preload" as="image" href="/covers/aapl-q4.svg" fetchPriority="high"/>');
     }
     const small = render({ size: "small" });
-    expect(small).toContain('<img class="cover-bg" src="/covers/aapl-q4.png" alt="" loading="lazy"/>');
+    expect(small).toContain('<img class="cover-bg" src="/covers/aapl-q4.svg" alt="" loading="lazy"/>');
     // A lazy image is not hoisted into a preload link.
     expect(small).not.toContain("<link");
   });

@@ -14,7 +14,8 @@ they are never asked twice. Things decided *not* to do go in `declined.md`.
   Design: `docs/superpowers/specs/2026-11-04-front-page-redesign-design.md`.
 - **Cover images are AI-generated** (Workers AI, Flux Schnell, free
   allocation), composed with the logo and two verified figures at render
-  time. Rick: "AI-generated scenes".
+  time. Rick: "AI-generated scenes". **Superseded on 2026-11-05** by "Covers
+  are data graphics, not AI scenes" below.
 - **Author block** at the end of every article and on About, AlphaLab style,
   short bio, links: rickmingyuliu.com, GitHub, LinkedIn. Real photo intended;
   GitHub avatar is only a placeholder.
@@ -38,4 +39,11 @@ they are never asked twice. Things decided *not* to do go in `declined.md`.
   run; reversible in one constant once a live check from another network
   passes).
 - **The not-advice statement lives only on the legal page** ("Terms: nature of content" / "条款：内容性质声明"), modelled on AlphaLab's 内容性质声明; no footer or per-post disclaimer. Rick, 2026-11-05: "just include the not advice section only in legal and privacy policy page instead of showing everywhere".
+- **Covers are data graphics, not AI scenes** (replaces the 2026-11-04
+  AI-generated covers entry): the generator draws the story's own figures as
+  an SVG chart in the paper palette, a brief's biggest movers and an earnings
+  check's recent revenue, with no Workers AI call. Rick, choosing among four
+  mockups: "A · Data graphic"; and, of the AI covers: "they should be more
+  about the market instead of just the dark gray shadows". Design:
+  `docs/superpowers/specs/2026-11-05-data-covers-design.md`.
 - **Author photo in colour, not greyscale.** Rick, 2026-11-05: "do not make my photo black and white, original colorful". The `.author-photo` grayscale filter is gone; the file itself was always colour.

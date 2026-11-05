@@ -82,7 +82,7 @@ export default function BriefView({ data, locale, signup }: BriefViewProps) {
           <span className="checked">{kind ? t("brief.checked") : t("earnings.checkedFiling")}</span>
         </p>
       )}
-      {/* A pending translation may carry stale lines; show the scene and the tag only. */}
+      {/* A pending translation may carry stale lines; show the graphic and the tag only. */}
       <Cover coverKey={post.coverKey} lines={pending ? null : post.coverLines} tag={tag} size="article" alt={title} />
 
       <div className="story-body">
