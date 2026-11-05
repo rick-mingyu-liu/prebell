@@ -124,6 +124,53 @@ html:lang(zh-Hans) .kicker { letter-spacing: 0.04em; }
 .story-row .story-title { font-size: 20px; }
 .story-row-text { min-width: 0; }
 
+/* Front page: lead story, earnings-check covers and the recent list on the left (about 1.6 : 1); a
+   ruled column of top movers and who reports next on the right. Phones stack lead, movers, earnings,
+   recent, reporting (see the breakpoint). The side column spans every left row; its extra height
+   goes to the last row, so the left sections never drift apart. */
+.front { display: grid; grid-template-columns: minmax(0, 1.6fr) minmax(0, 1fr); grid-template-rows: auto auto 1fr; gap: 0 32px; align-items: start; }
+.front-lead, .front-earnings, .front-recent { grid-column: 1; min-width: 0; }
+.front-side { grid-column: 2; grid-row: 1 / span 3; min-width: 0; padding-left: 24px; border-left: 1px solid var(--rule); }
+.front-side .section-title { font-size: 18px; }
+.front-side > section:first-child > .section-title { margin-top: 0; }
+.front-lead .kicker { margin-bottom: 0.5rem; }
+.front-lead .story-title { margin: 0.9rem 0 0.5rem; font-size: 36px; line-height: 1.12; letter-spacing: -0.015em; }
+.front-lead .story-sum { color: var(--ink); font-size: 16.5px; line-height: 1.6; }
+.front-lead .more { display: inline-block; margin-top: 0.6rem; }
+.front-checks { list-style: none; margin: 0 0 0.75rem; padding: 0; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; }
+.front-check { min-width: 0; }
+.front-check .story-title { margin-top: 0.5rem; font-size: 16px; line-height: 1.25; }
+.front-rows { list-style: none; margin: 0 0 0.75rem; padding: 0; }
+.front-row { padding: 0.75rem 0; border-top: 1px solid var(--rule); }
+.front-row:first-child { border-top: 0; padding-top: 0.25rem; }
+.front-row .kicker { margin: 0 0 0.15rem; font-size: 11px; }
+.front-row .story-title { font-size: 18px; }
+.front-row .story-meta { display: block; margin: 0.15rem 0 0; }
+.front-slots { margin: 0 0 0.6rem; font-size: 14px; line-height: 1.6; }
+.front-slots dt { margin-top: 0.4rem; font-size: 12px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); }
+html:lang(zh-Hans) .front-slots dt { letter-spacing: 0.02em; }
+.front-slots dt:first-child { margin-top: 0; }
+.front-slots dd { margin: 0; }
+.front-slots a { font-weight: 600; text-decoration: none; }
+.front-slots a:hover, .front-slots a:focus-visible { text-decoration: underline; }
+.front + .signup { margin-top: 2.5rem; }
+
+/* Movers: ruled rows (name, grey ticker, the move; the reason in grey under them) or a ruled table.
+   No logos, no pills; "No clear news" in grey italics. */
+.movers-col { list-style: none; margin: 0; padding: 0; font-size: 14px; }
+.mover-row { padding: 0.55rem 0; border-top: 1px solid var(--rule); }
+.mover-row:first-child { border-top: 0; padding-top: 0.15rem; }
+.mover-head { display: flex; justify-content: space-between; align-items: baseline; gap: 0.75rem; margin: 0; max-width: none; line-height: 1.35; }
+.mover-co { min-width: 0; }
+.mover-name { font-weight: 700; }
+.mover-ticker { margin-left: 0.15em; font-weight: 400; }
+.mover-move { flex: none; display: flex; gap: 0.6rem; font-variant-numeric: tabular-nums; }
+.mover-price { color: var(--muted); }
+.mover-why { margin: 0.15rem 0 0; max-width: none; font-size: 13px; line-height: 1.4; }
+.mover-why a { color: inherit; text-decoration: none; }
+.mover-why a:hover, .mover-why a:focus-visible { text-decoration: underline; }
+.movers-table td.r { white-space: nowrap; }
+
 /* Post: one 680px reading column, the verified-numbers tag, and the markdown body. */
 .col-read { max-width: 680px; margin: 0 auto; }
 .post-head h1 { font-size: 32px; margin: 0.25rem 0 0.5rem; }
@@ -267,6 +314,18 @@ html:lang(zh-Hans) .partners-strip .partners-label { font-variant-caps: normal; 
   .story-row .story-title { font-size: 18px; }
   .cover { height: 200px; }
   .cover-lead { height: 220px; }
+  /* Front page: one column; the side column's sections join the grid so movers follow the lead. */
+  .front { grid-template-columns: minmax(0, 1fr); grid-template-rows: none; }
+  .front-side { display: contents; }
+  .front-lead, .front-earnings, .front-recent, .front-movers, .front-reporting { grid-column: 1; grid-row: auto; min-width: 0; }
+  .front-lead { order: 1; }
+  .front-movers { order: 2; }
+  .front-earnings { order: 3; }
+  .front-recent { order: 4; }
+  .front-reporting { order: 5; }
+  .front-side > section:first-child > .section-title { margin-top: 2rem; }
+  .front-lead .story-title { font-size: 28px; }
+  .front-checks { grid-template-columns: minmax(0, 1fr); gap: 1.25rem; }
   .ix:first-child { padding-left: 0; }
   .site-nav { gap: 0.15rem 0.9rem; }
   .author { flex-wrap: wrap; }

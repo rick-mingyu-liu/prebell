@@ -30,7 +30,10 @@
     "earningsChecks": "财报速评",
     "topMovers": "涨跌榜",
     "reporting": "{date}财报",
-    "recentSection": "近期"
+    "recentSection": "近期",
+    "beforeOpen": "盘前",
+    "afterClose": "盘后",
+    "timeTbd": "时间待定"
   },
   "post": {
     "permalink": "本文链接",
@@ -103,7 +106,11 @@
     "rut": "罗素2000"
   },
   "movers": {
-    "noNews": "暂无明确消息"
+    "noNews": "暂无明确消息",
+    "company": "公司",
+    "reason": "原因",
+    "last": "最新价",
+    "change": "涨跌幅"
   },
   "partners": {
     "brokers": "券商",
