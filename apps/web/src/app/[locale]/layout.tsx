@@ -42,7 +42,8 @@ function defaultDateline(locale: Locale): string {
 async function indexLine(): Promise<IndexLineView | null> {
   try {
     return await loadIndexLine(getDb());
-  } catch {
+  } catch (err) {
+    console.error("index line unavailable", err);
     return null;
   }
 }
@@ -68,7 +69,7 @@ export default async function LocaleLayout({ children, params }: LayoutProps<"/[
             <Disclaimer />
             <p className="footer-links">
               <Link href={`/${locale}/about`}>{t("about")}</Link>
-              <LangSwitch locale={locale} className="lang-switch" />
+              <LangSwitch locale={locale} />
             </p>
           </div>
         </footer>

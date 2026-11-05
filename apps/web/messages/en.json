@@ -138,7 +138,9 @@
       "earnings": "Earnings check"
     },
     "index": {
-      "asOf": "as of {time}"
+      "asOf": "as of {time}",
+      "up": "up",
+      "down": "down"
     }
   },
   "author": {

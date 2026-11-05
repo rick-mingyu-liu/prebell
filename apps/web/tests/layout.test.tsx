@@ -55,8 +55,8 @@ describe("paper shell", () => {
     const out = renderToStaticMarkup(<IndexLine line={recap} locale="en" />);
     expect(out).toContain("S&amp;P 500");
     expect(out).toContain("7,688.62");
-    expect(out).toContain('<span class="num up">▲1.58%</span>');
-    expect(out).toContain('<span class="num down">▼0.40%</span>');
+    expect(out).toContain('<span class="num up"><span aria-hidden="true">▲</span><span class="sr-only">up </span>1.58%</span>');
+    expect(out).toContain('<span class="num down"><span aria-hidden="true">▼</span><span class="sr-only">down </span>0.40%</span>');
     expect(out).toContain('<span class="num flat">0.00%</span>');
     expect(out).toContain("as of 4:41 PM ET");
   });
@@ -69,7 +69,7 @@ describe("paper shell", () => {
     const out = renderToStaticMarkup(<IndexLine line={futures} locale="en" />);
     expect(out).toContain("S&amp;P 500 futures");
     expect(out).toContain("7,650.25");
-    expect(out).toContain("▼1.14%");
+    expect(out).toContain("1.14%");
     const zh = renderToStaticMarkup(<IndexLine line={futures} locale="zh" />);
     expect(zh).toContain("标普500期货");
     expect(zh).toContain("美东");
@@ -89,6 +89,13 @@ describe("globals.css", () => {
     for (const hex of ["#faf8f3", "#1a1a1a", "#666", "#d9d5cc", "#222", "#15803d", "#b91c1c", "#8a1c1c", "#e8a317"]) {
       expect(css.toLowerCase()).toContain(hex);
     }
+  });
+
+  it("lets the index line scroll in place at every width and never clips its left end", () => {
+    const base = css.match(/^\.index-line \{[^}]*\}/m)?.[0] ?? "";
+    expect(base).toContain("overflow-x: auto");
+    expect(base).not.toContain("justify-content");
+    expect(css).toMatch(/\.ix:first-child \{ margin-left: auto; \}/);
   });
 
   it("uses no colour outside the palette, no shadows, and one mobile breakpoint at 720px", () => {

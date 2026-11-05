@@ -6,7 +6,7 @@ import LangSwitch from "./LangSwitch";
 /**
  * The paper's nameplate: the name in the serif with its other-language twin beside it in small grey
  * (the Chinese edition leads with 盘前铃), the dateline, and the navigation, under a double rule.
- * `dateline` is computed by the caller so a post page can show its own edition.
+ * `dateline` is computed by the caller.
  */
 export default function Masthead({ locale, dateline }: { locale: Locale; dateline: string }) {
   const t = translator(locale);

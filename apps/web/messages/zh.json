@@ -138,17 +138,19 @@
       "earnings": "财报速评"
     },
     "index": {
-      "asOf": "截至 {time}"
+      "asOf": "截至 {time}",
+      "up": "上涨",
+      "down": "下跌"
     }
   },
   "author": {
     "name": "Rick Liu",
-    "bio": "AI 与软件工程师，毕业于滑铁卢大学。打造盘前铃，是想让财报像分析师那样被读懂，却不需要分析师。",
+    "bio": "滑铁卢大学 AI 与软件工程师。做盘前铃，是为了像分析师一样读财报，但不需要分析师。",
     "website": "rickmingyuliu.com",
     "github": "GitHub",
     "linkedin": "LinkedIn",
     "allBriefs": "全部简报 →",
-    "heading": "幕后的人"
+    "heading": "关于作者"
   },
   "signup": {
     "heading": "订阅每周精选",

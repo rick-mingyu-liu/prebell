@@ -9,7 +9,8 @@ const ARROW = { up: "▲", down: "▼", flat: "" } as const;
 
 /**
  * One quiet line under the masthead: each index (or future) with its level and the day's move, then
- * the as-of time. The arrow carries the direction, so the percentage is shown unsigned. Renders
+ * the as-of time. The arrow carries the direction (and hidden text for screen readers), so the
+ * percentage is shown unsigned. Renders
  * nothing when the generator has not written a snapshot yet.
  */
 export default function IndexLine({ line, locale }: { line: IndexLineView | null; locale: Locale }) {
@@ -22,7 +23,12 @@ export default function IndexLine({ line, locale }: { line: IndexLineView | null
         <span className="ix" key={e.symbol}>
           {indexName(t, e.symbol)} {fmtPrice(e.last)}{" "}
           <span className={`num ${e.dir}`}>
-            {ARROW[e.dir]}
+            {e.dir !== "flat" && (
+              <>
+                <span aria-hidden="true">{ARROW[e.dir]}</span>
+                <span className="sr-only">{t(`paper.index.${e.dir}`)} </span>
+              </>
+            )}
             {fmtPrice(Math.abs(e.changePct))}%
           </span>
         </span>
