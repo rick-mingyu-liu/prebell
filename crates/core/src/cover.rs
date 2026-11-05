@@ -772,6 +772,8 @@ pub(crate) mod tests {
             watch_list: Field::Missing {
                 reason: "none".into(),
             },
+            themes: vec![],
+            theme_candidates: vec![],
             diagnostics: vec![],
         };
         serde_json::to_string(&f).unwrap()
@@ -803,6 +805,8 @@ pub(crate) mod tests {
                 reason: "none".into(),
             },
             reported: vec![],
+            themes: vec![],
+            theme_candidates: vec![],
             diagnostics: vec![],
         };
         let json = serde_json::to_string(&f).unwrap();

@@ -61,9 +61,17 @@ fn sorted(mut v: Vec<f64>) -> Vec<f64> {
 }
 
 /// Themes (at most `THEME_MAX`, best first) and breadth stats for the
-/// groups with at least two strong movers. One pass over the quotes; every
-/// sort is over a single group's few members.
+/// groups with at least two strong movers.
 pub fn detect(quotes: &[Quote], rules: &ThemeRules) -> (Vec<Theme>, Vec<ThemeStat>) {
+    let (mut themes, stats) = detect_all(quotes, rules);
+    themes.truncate(THEME_MAX);
+    (themes, stats)
+}
+
+/// As `detect`, with every theme found, best first, before the
+/// `THEME_MAX` cap (the build reports both counts). One pass over the
+/// quotes; every sort is over a single group's few members.
+pub fn detect_all(quotes: &[Quote], rules: &ThemeRules) -> (Vec<Theme>, Vec<ThemeStat>) {
     let mut groups: HashMap<&'static str, Vec<Entry<'_>>> = HashMap::new();
     for qt in quotes {
         let pct = qt.change_pct;
@@ -175,7 +183,7 @@ pub fn detect(quotes: &[Quote], rules: &ThemeRules) -> (Vec<Theme>, Vec<ThemeSta
             .then_with(|| b.1.cmp(&a.1))
             .then_with(|| a.2.cmp(b.2))
     });
-    let themes = ranked.into_iter().take(THEME_MAX).map(|r| r.3).collect();
+    let themes = ranked.into_iter().map(|r| r.3).collect();
 
     stats.sort_by(|a, b| {
         b.present

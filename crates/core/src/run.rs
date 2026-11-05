@@ -845,6 +845,8 @@ mod tests {
             watch_list: Field::Missing {
                 reason: "n/a".into(),
             },
+            themes: vec![],
+            theme_candidates: vec![],
             diagnostics: vec![],
         };
         let lines = c.cover_lines(&f);
@@ -969,7 +971,8 @@ mod tests {
              skipped=0; \
              movers liquid=0 gainers=0 losers=0; reasons proposed=0 kept=0 hedged=0; \
              search_err=3 llm_err=0 news_stale=0 news_noise=0; \
-             macro queries=3 hits=0 items=0; futures ok=0 err=4"
+             macro queries=3 hits=0 items=0; themes found=0 kept=0 searched=0; \
+             futures ok=0 err=4"
         );
         for t in ["2026-10-29T12:30:00Z", "2026-10-29T12:35:00Z"] {
             match tick(utc(t), &s, &m, &FakeNs, &l).await {

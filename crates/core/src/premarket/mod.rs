@@ -17,9 +17,10 @@ use serde_json::Value;
 use crate::anchor::verify_reason;
 use crate::budget::allows;
 use crate::clock::{et, previous_close};
-use crate::facts::{Field, Mover, NewsReason, PremarketFacts, Quote};
+use crate::facts::{Direction, Field, Mover, NewsReason, PremarketFacts, Quote, Theme};
 use crate::premarket::draft::reject_markup;
 use crate::providers::{LlmProvider, MarketData, NewsSearch, ProviderError, SearchHit};
+use crate::themes::{detect_all, PREMARKET_RULES, THEME_MAX};
 
 const FUTURES: [(&str, &str); 4] = [
     ("S&P 500 futures", "ES=F"),
@@ -44,6 +45,29 @@ const MACRO_HITS: usize = 5;
 /// Merged macro hits sent to the one extraction call.
 const MACRO_HITS_TOTAL: usize = 8;
 const MACRO_ITEMS: usize = 5;
+/// Fresh hits read for the top theme's one search.
+const THEME_HITS: usize = 3;
+/// Reasons a theme keeps, reused from movers or found by its search.
+const THEME_REASONS: usize = 2;
+/// The top theme's search: one search plus the extraction call it may feed.
+pub(crate) const THEME_SEARCH_COST: usize = 2;
+/// The macro step with all three queries: three searches and one
+/// extraction call.
+///
+/// The theme search runs before the macro step but is the first optional
+/// work to go, so it runs only while `used + THEME_SEARCH_COST +
+/// MACRO_FULL_COST <= BUDGET_SOFT`, i.e. `used + 2 + 4 <= 40`. After it
+/// (`used + 2`) and the first macro query (`+ 1`), the second query's guard
+/// asks `used + 3 + 2 <= 40` and the third's `used + 4 + 2 <= 40`: the same
+/// bound, so a theme search never costs the macro step a query. With
+/// `used` counted at the theme step: at 35 and 36 the theme search is
+/// dropped and all three queries still run (the third's guard at 36:
+/// 36 + 2 + 2 = 40); the third query goes at 37, the second at 38
+/// (`macro_items`). The recap passes a budget that already
+/// counts its mandatory after-hours step (+2), so there both bounds move
+/// down by 2: theme search while `used + 8 <= 40`, each later macro query
+/// while `used + 4 <= 40`.
+pub(crate) const MACRO_FULL_COST: usize = 4;
 const MAX_CONTENT_CHARS: usize = 6_000;
 /// News older than this (by its published date) is never a reason: a
 /// week-old article cannot explain this session's move. After a weekend or
@@ -101,6 +125,12 @@ pub(crate) struct Diag {
     pub(crate) macro_hits: usize,
     /// Macro items kept after verification.
     pub(crate) macro_items_kept: usize,
+    /// Themes that formed, before the `THEME_MAX` cap.
+    pub(crate) themes_found: usize,
+    /// Themes kept after the cap.
+    pub(crate) themes_kept: usize,
+    /// 1 when the top theme's search ran, else 0.
+    pub(crate) theme_searched: usize,
 }
 
 impl Diag {
@@ -152,6 +182,10 @@ impl Diag {
             format!(
                 "macro queries={} hits={} items={}",
                 self.macro_queries, self.macro_hits, self.macro_items_kept
+            ),
+            format!(
+                "themes found={} kept={} searched={}",
+                self.themes_found, self.themes_kept, self.theme_searched
             ),
             format!("{head} ok={} err={}", self.futures_ok, self.futures_err),
         ]);
@@ -470,6 +504,90 @@ pub(crate) async fn macro_items(
     }
 }
 
+/// Added to the theme prompt: what counts as a reason for a group's move.
+const THEME_RULE: &str = "A reason must be a specific event that explains why this group moved together this session: \
+     industry data, a member's earnings or guidance, a deal, or policy or macro news that touches the industry. \
+     Trailing performance, momentum, technical levels and valuation commentary are not reasons. \
+     If that is all the articles offer, return {\"reasons\":[]}. \
+     `summary_en` states the cause as a fact in one clause, never hedged.";
+
+/// Reasons for `themes`, best first. Every theme reuses the reasons of its
+/// listed members that are among `movers` (already fetched, no cost): at
+/// most `THEME_REASONS`, one per url, in member order. Only the top theme,
+/// when it still has none, gets one search and one extraction call, and
+/// only while they and the full macro step after them fit the budget (see
+/// `MACRO_FULL_COST`). `session` ends the LLM's task ("in premarket
+/// trading").
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn theme_reasons(
+    ns: &dyn NewsSearch,
+    llm: &dyn LlmProvider,
+    themes: &mut [Theme],
+    movers: &[&Mover],
+    session: &str,
+    now: DateTime<Utc>,
+    d: &mut Diag,
+    budget: &dyn Fn() -> usize,
+) {
+    for t in themes.iter_mut() {
+        for m in &t.members {
+            let Some(mover) = movers.iter().find(|mv| mv.quote.symbol == m.ticker) else {
+                continue;
+            };
+            for r in &mover.reasons {
+                if t.reasons.len() < THEME_REASONS && !t.reasons.iter().any(|k| k.url == r.url) {
+                    t.reasons.push(r.clone());
+                }
+            }
+        }
+    }
+    let Some(top) = themes.first_mut() else {
+        return;
+    };
+    if !top.reasons.is_empty() || !allows(budget(), THEME_SEARCH_COST + MACRO_FULL_COST) {
+        return;
+    }
+    d.theme_searched = 1;
+    let (word, dir) = match top.direction {
+        Direction::Up => ("rally", "up"),
+        Direction::Down => ("fall", "down"),
+    };
+    let query = format!("{} stocks {word} today", top.group);
+    let Ok(hits) = fresh_news(ns, &query, THEME_HITS, now, d).await else {
+        d.search_err += 1;
+        return;
+    };
+    let system = format!(
+        "{} {THEME_RULE}",
+        system_prompt(
+            &format!("explain why a group of US stocks in one industry moved together {session}"),
+            THEME_REASONS,
+        )
+    );
+    let members = top
+        .members
+        .iter()
+        .map(|m| format!("{} {:+.2}%", m.ticker, m.change_pct))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let header = format!(
+        "Theme: {}\nDirection: {dir}\nMembers: {members}\n{}",
+        top.group,
+        as_of(now)
+    );
+    top.reasons = extract(
+        llm,
+        &system,
+        &articles_prompt(&header, &hits),
+        &hits,
+        THEME_REASONS,
+        false,
+        d,
+    )
+    .await
+    .unwrap_or_default();
+}
+
 /// Universe quotes passing the price/volume filters, with `symbol` set to the universe ticker.
 async fn liquid_quotes(md: &dyn MarketData, now: DateTime<Utc>, d: &mut Diag) -> Vec<Quote> {
     let tickers = universe();
@@ -522,6 +640,11 @@ pub async fn build_facts(
     }
 
     let quotes = liquid_quotes(md, now, &mut d).await;
+    // Every liquid quote, not only the ten movers, feeds the themes.
+    let (mut themes, theme_candidates) = detect_all(&quotes, &PREMARKET_RULES);
+    d.themes_found = themes.len();
+    themes.truncate(THEME_MAX);
+    d.themes_kept = themes.len();
     let mut up: Vec<Quote> = quotes
         .iter()
         .filter(|q| q.change_pct > 0.0)
@@ -544,6 +667,18 @@ pub async fn build_facts(
     for q in down {
         losers.push(to_mover(ns, llm, q, now, &mut d).await);
     }
+    let movers: Vec<&Mover> = gainers.iter().chain(&losers).collect();
+    theme_reasons(
+        ns,
+        llm,
+        &mut themes,
+        &movers,
+        "in premarket trading",
+        now,
+        &mut d,
+        budget,
+    )
+    .await;
     let macro_items = macro_items(
         ns,
         llm,
@@ -568,6 +703,8 @@ pub async fn build_facts(
         watch_list: Field::Missing {
             reason: "not available in v1".into(),
         },
+        themes,
+        theme_candidates,
         diagnostics: d.lines(),
     }
 }
@@ -1564,6 +1701,7 @@ mod tests {
                 "reasons proposed=0 kept=0 hedged=0".to_string(),
                 "search_err=3 llm_err=0 news_stale=0 news_noise=0".to_string(),
                 "macro queries=3 hits=0 items=0".to_string(),
+                "themes found=0 kept=0 searched=0".to_string(),
                 "futures ok=4 err=0".to_string(),
             ]
         );
@@ -1605,7 +1743,8 @@ mod tests {
             "search_err=5 llm_err=0 news_stale=0 news_noise=0"
         );
         assert_eq!(f.diagnostics[4], "macro queries=3 hits=0 items=0");
-        assert_eq!(f.diagnostics[5], "futures ok=0 err=4");
+        assert_eq!(f.diagnostics[5], "themes found=0 kept=0 searched=0");
+        assert_eq!(f.diagnostics[6], "futures ok=0 err=4");
     }
 
     #[tokio::test]
@@ -1753,7 +1892,8 @@ mod tests {
             "search_err=0 llm_err=0 news_stale=0 news_noise=0"
         );
         assert_eq!(f.diagnostics[4], "macro queries=3 hits=8 items=5");
-        assert_eq!(f.diagnostics[5], "futures ok=4 err=0");
+        assert_eq!(f.diagnostics[5], "themes found=0 kept=0 searched=0");
+        assert_eq!(f.diagnostics[6], "futures ok=4 err=0");
     }
 
     #[tokio::test]
@@ -1801,5 +1941,247 @@ mod tests {
         assert!(sys.contains("at most 5 reasons"), "{sys}");
         // The two unregistered queries fail; the items come from the first.
         assert_eq!(f.diagnostics[4], "macro queries=3 hits=1 items=5");
+    }
+
+    /// Four memory names down 4% to 6%: one "Memory & storage" theme, and
+    /// the four losers among the movers.
+    fn memory_down() -> Vec<Quote> {
+        vec![
+            q("MU", 100.0, -6.0, None),
+            q("SNDK", 100.0, -5.5, None),
+            q("WDC", 100.0, -5.0, None),
+            q("STX", 100.0, -4.0, None),
+        ]
+    }
+    const MEMORY_Q: &str = "Memory & storage stocks fall today";
+    const MEMORY_SRC: &str =
+        "Memory chip stocks slid after a report showed DRAM contract prices fell in October.";
+    const MEMORY_QUOTE: &str =
+        "Memory chip stocks slid after a report showed DRAM contract prices fell";
+    fn memory_reason() -> Result<Value, ProviderError> {
+        reasons(
+            "https://n.test/memory",
+            MEMORY_QUOTE,
+            "A report showed DRAM contract prices fell.",
+        )
+    }
+    fn queries(n: &RecNs, q: &str) -> usize {
+        n.1.borrow().iter().filter(|x| *x == q).count()
+    }
+
+    #[tokio::test]
+    async fn themes_reuse_reasons_of_top_movers() {
+        // MU and SNDK cite the same article; WDC its own. The theme keeps
+        // two reasons, one per url, and searches nothing.
+        let shared =
+            "Micron and Sandisk shares fell after DRAM contract prices dropped in October.";
+        let wdc = "Western Digital shares fell after the company cut its hard drive outlook.";
+        let n = RecNs(
+            ns(vec![
+                (
+                    "Micron Technology (MU) stock",
+                    Ok(vec![hit("https://n.test/dram", shared)]),
+                ),
+                (
+                    "Sandisk (SNDK) stock",
+                    Ok(vec![hit("https://n.test/dram", shared)]),
+                ),
+                (
+                    "Western Digital (WDC) stock",
+                    Ok(vec![hit("https://n.test/wdc", wdc)]),
+                ),
+            ]),
+            RefCell::new(vec![]),
+        );
+        let dram = || {
+            reasons(
+                "https://n.test/dram",
+                "Micron and Sandisk shares fell after DRAM contract prices dropped",
+                "DRAM contract prices dropped.",
+            )
+        };
+        let l = llm(vec![
+            ("Ticker: MU", dram()),
+            ("Ticker: SNDK", dram()),
+            (
+                "Ticker: WDC",
+                reasons(
+                    "https://n.test/wdc",
+                    "Western Digital shares fell after the company cut its hard drive outlook",
+                    "Western Digital cut its hard drive outlook.",
+                ),
+            ),
+        ]);
+        let f = build_facts(&md(&memory_down()), &n, &l, date(), now(), &|| 0).await;
+        assert_eq!(f.themes.len(), 1);
+        let t = &f.themes[0];
+        assert_eq!(t.group, "Memory & storage");
+        let urls: Vec<&str> = t.reasons.iter().map(|r| r.url.as_str()).collect();
+        assert_eq!(urls, ["https://n.test/dram", "https://n.test/wdc"]);
+        assert_eq!(queries(&n, MEMORY_Q), 0);
+        assert!(l
+            .prompts
+            .borrow()
+            .iter()
+            .all(|(_, u)| !u.contains("Theme:")));
+        assert_eq!(f.diagnostics[5], "themes found=1 kept=1 searched=0");
+        // Every group with two strong movers is a candidate.
+        assert_eq!(f.theme_candidates.len(), 1);
+        assert_eq!(f.theme_candidates[0].down, 4);
+    }
+
+    #[tokio::test]
+    async fn top_theme_without_mover_reason_searches_once() {
+        let n = RecNs(
+            ns(vec![(
+                MEMORY_Q,
+                Ok(vec![dated("https://n.test/memory", MEMORY_SRC, 3)]),
+            )]),
+            RefCell::new(vec![]),
+        );
+        let l = llm(vec![("Theme: Memory & storage", memory_reason())]);
+        let f = build_facts(&md(&memory_down()), &n, &l, date(), now(), &|| 0).await;
+        assert_eq!(queries(&n, MEMORY_Q), 1);
+        let t = &f.themes[0];
+        assert_eq!(t.reasons.len(), 1);
+        assert_eq!(t.reasons[0].quote, MEMORY_QUOTE);
+        // One extraction call, asking for at most two reasons for the group.
+        let p = l.prompts.borrow();
+        let theme_p: Vec<_> = p.iter().filter(|(_, u)| u.contains("Theme:")).collect();
+        assert_eq!(theme_p.len(), 1);
+        let (sys, user) = theme_p[0];
+        assert!(sys.contains("at most 2 reasons"), "{sys}");
+        assert!(user.contains("Direction: down"), "{user}");
+        assert!(user.contains("MU -6.00%"), "{user}");
+        assert!(user.contains("As of: 2026-10-29 08:45 ET"), "{user}");
+        assert_eq!(f.diagnostics[5], "themes found=1 kept=1 searched=1");
+        // The theme search runs before the macro searches.
+        let asked = n.1.borrow();
+        let at = |q: &str| asked.iter().position(|x| x == q).unwrap();
+        assert!(at(MEMORY_Q) < at(PREMARKET_MACRO_QUERIES[0]), "{asked:?}");
+    }
+
+    #[tokio::test]
+    async fn only_the_top_theme_searches() {
+        // Memory: four members, median -5.25 (rank 21). Airlines: three
+        // members at +3.0 (rank 9). Neither has a mover reason.
+        let mut stocks = memory_down();
+        stocks.extend([
+            q("DAL", 60.0, 3.0, None),
+            q("LUV", 30.0, 3.0, None),
+            q("UAL", 90.0, 3.0, None),
+        ]);
+        let n = RecNs(ns(vec![]), RefCell::new(vec![]));
+        let f = build_facts(&md(&stocks), &n, &llm(vec![]), date(), now(), &|| 0).await;
+        let groups: Vec<&str> = f.themes.iter().map(|t| t.group.as_str()).collect();
+        assert_eq!(groups, ["Memory & storage", "Airlines"]);
+        assert_eq!(queries(&n, MEMORY_Q), 1);
+        assert!(
+            !n.1.borrow().iter().any(|x| x.starts_with("Airlines")),
+            "{:?}",
+            n.1.borrow()
+        );
+        assert_eq!(f.diagnostics[5], "themes found=2 kept=2 searched=1");
+    }
+
+    #[tokio::test]
+    async fn themes_found_counts_before_the_cap() {
+        // Four themes form; three are kept.
+        let mut stocks = memory_down();
+        stocks.extend(
+            [
+                ("NVDA", 3.0),
+                ("AMD", 3.0),
+                ("AVGO", 3.0),
+                ("DAL", 5.0),
+                ("LUV", 5.0),
+                ("UAL", 5.0),
+                ("DHI", -3.0),
+                ("LEN", -3.0),
+                ("PHM", -3.0),
+            ]
+            .map(|(s, p)| q(s, 100.0, p, None)),
+        );
+        let f = build_facts(
+            &md(&stocks),
+            &ns(vec![]),
+            &llm(vec![]),
+            date(),
+            now(),
+            &|| 0,
+        )
+        .await;
+        assert_eq!(f.themes.len(), crate::themes::THEME_MAX);
+        assert_eq!(f.diagnostics[5], "themes found=4 kept=3 searched=1");
+    }
+
+    #[tokio::test]
+    async fn theme_search_is_skipped_when_budget_is_tight() {
+        // A constant count: 34 + 6 fits, 35 + 6 does not; the macro
+        // queries still all fit at 35.
+        for (used, searched) in [(34, 1), (35, 0)] {
+            let n = RecNs(
+                ns(vec![(
+                    MEMORY_Q,
+                    Ok(vec![dated("https://n.test/memory", MEMORY_SRC, 3)]),
+                )]),
+                RefCell::new(vec![]),
+            );
+            let f = build_facts(
+                &md(&memory_down()),
+                &n,
+                &llm(vec![]),
+                date(),
+                now(),
+                &|| used,
+            )
+            .await;
+            assert_eq!(queries(&n, MEMORY_Q), searched, "used={used}");
+            assert_eq!(
+                f.diagnostics[5],
+                format!("themes found=1 kept=1 searched={searched}")
+            );
+            assert!(
+                f.diagnostics[4].starts_with("macro queries=3 "),
+                "used={used}"
+            );
+        }
+
+        // Counting every search and LLM call: the theme search is the first
+        // optional work to go, while all three macro queries still run, and
+        // the facts stage never passes BUDGET_SOFT.
+        for (base, searched) in [(30, 1), (31, 0)] {
+            let mut items: Vec<(&str, Result<Vec<SearchHit>, ProviderError>)> = vec![(
+                MEMORY_Q,
+                Ok(vec![dated("https://n.test/memory", MEMORY_SRC, 3)]),
+            )];
+            for (i, mq) in PREMARKET_MACRO_QUERIES.iter().enumerate() {
+                let u = format!("https://n.test/macro{i}");
+                items.push((mq, Ok(vec![dated(&u, "Futures slid overnight.", 2)])));
+            }
+            let n = RecNs(ns(items), RefCell::new(vec![]));
+            let l = llm(vec![("Theme: Memory & storage", memory_reason())]);
+            let used = || base + n.1.borrow().len() + l.prompts.borrow().len();
+            let f = build_facts(&md(&memory_down()), &n, &l, date(), now(), &used).await;
+            assert_eq!(queries(&n, MEMORY_Q), searched, "base={base}");
+            assert!(
+                f.diagnostics[4].starts_with("macro queries=3 "),
+                "base={base}"
+            );
+            assert!(
+                used() <= crate::budget::BUDGET_SOFT,
+                "base={base}: {}",
+                used()
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn theme_line_follows_the_macro_line() {
+        let f = build_facts(&md(&[]), &ns(vec![]), &llm(vec![]), date(), now(), &|| 0).await;
+        assert!(f.diagnostics[4].starts_with("macro queries="));
+        assert_eq!(f.diagnostics[5], "themes found=0 kept=0 searched=0");
+        assert!(f.diagnostics[6].starts_with("futures "));
+        assert!(f.themes.is_empty() && f.theme_candidates.is_empty());
     }
 }

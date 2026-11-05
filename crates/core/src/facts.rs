@@ -95,6 +95,14 @@ pub struct PremarketFacts {
     pub losers: Vec<Mover>,
     pub macro_items: Field<Vec<NewsReason>>,
     pub watch_list: Field<Vec<String>>,
+    /// Industry groups moving together, best first. Absent in facts stored
+    /// before themes existed.
+    #[serde(default)]
+    pub themes: Vec<Theme>,
+    /// Breadth of every group with two strong movers, for tuning the theme
+    /// thresholds. Never sent to the LLM.
+    #[serde(default)]
+    pub theme_candidates: Vec<ThemeStat>,
     /// Short counters from the build ("quotes ok=480 http429=0 ..."), for
     /// logs and `last_error`. Never sent to the LLM.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -146,6 +154,18 @@ fn push_reason(out: &mut Vec<f64>, r: &NewsReason) {
     out.extend(quote_numbers(&r.quote));
 }
 
+/// Each theme's member moves and median, computed in code so the draft may
+/// cite them, and the numbers in its reasons' quotes.
+pub(crate) fn push_themes(out: &mut Vec<f64>, themes: &[Theme]) {
+    for t in themes {
+        out.push(t.median_pct);
+        out.extend(t.members.iter().map(|m| m.change_pct));
+        for r in &t.reasons {
+            push_reason(out, r);
+        }
+    }
+}
+
 /// Every number a draft may cite: quote fields, numbers inside source quotes,
 /// and the trading year and its neighbours ("full-year 2026 guidance").
 pub fn numbers_in_facts(f: &PremarketFacts) -> Vec<f64> {
@@ -167,6 +187,7 @@ pub fn numbers_in_facts(f: &PremarketFacts) -> Vec<f64> {
             push_reason(&mut out, r);
         }
     }
+    push_themes(&mut out, &f.themes);
     out
 }
 
@@ -217,6 +238,8 @@ mod tests {
             watch_list: Field::Missing {
                 reason: "none".into(),
             },
+            themes: vec![],
+            theme_candidates: vec![],
             diagnostics: vec![],
         }
     }
@@ -300,5 +323,63 @@ mod tests {
     #[test]
     fn macro_quote_numbers_collected() {
         assert!(numbers_in_facts(&facts()).contains(&3.1));
+    }
+
+    fn theme() -> Theme {
+        Theme {
+            group: "Memory & storage".into(),
+            group_zh: "存储".into(),
+            direction: Direction::Down,
+            members: vec![
+                ThemeMember {
+                    ticker: "MU".into(),
+                    name: "Micron Technology".into(),
+                    change_pct: -6.12,
+                },
+                ThemeMember {
+                    ticker: "WDC".into(),
+                    name: "Western Digital".into(),
+                    change_pct: -4.37,
+                },
+            ],
+            more: 0,
+            median_pct: -5.25,
+            reasons: vec![reason("memory prices fell 7% in October")],
+        }
+    }
+
+    #[test]
+    fn numbers_in_facts_include_theme_moves_and_medians() {
+        let mut f = facts();
+        f.themes = vec![theme()];
+        let n = numbers_in_facts(&f);
+        for v in [-6.12, -4.37, -5.25, 7.0] {
+            assert!(n.contains(&v), "{v} missing from {n:?}");
+        }
+        assert!(numbers::check("Micron fell 6.12%", Lang::En, &n).is_ok());
+        assert!(numbers::check("a median drop of 5.25%", Lang::En, &n).is_ok());
+    }
+
+    #[test]
+    fn facts_without_theme_fields_deserialize() {
+        let mut f = facts();
+        f.themes = vec![theme()];
+        f.theme_candidates = vec![ThemeStat {
+            group: "Memory & storage".into(),
+            present: 4,
+            up: 0,
+            down: 4,
+            median_up: None,
+            median_down: Some(-5.25),
+        }];
+        let s = serde_json::to_string(&f).unwrap();
+        assert_eq!(serde_json::from_str::<PremarketFacts>(&s).unwrap(), f);
+        // Facts stored before themes existed still parse, with none.
+        let mut v: serde_json::Value = serde_json::to_value(&f).unwrap();
+        let o = v.as_object_mut().unwrap();
+        o.remove("themes");
+        o.remove("theme_candidates");
+        let old: PremarketFacts = serde_json::from_value(v).unwrap();
+        assert!(old.themes.is_empty() && old.theme_candidates.is_empty());
     }
 }

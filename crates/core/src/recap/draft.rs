@@ -194,9 +194,11 @@ pub async fn write(
     f: &RecapFacts,
     lang: Lang,
 ) -> Result<(Draft, String), Vec<String>> {
-    // Diagnostics are operational counters, not facts the recap may cite.
+    // Diagnostics and the theme tuning stats are operational counters, not
+    // facts the recap may cite.
     let for_llm = RecapFacts {
         diagnostics: vec![],
+        theme_candidates: vec![],
         ..f.clone()
     };
     let facts_json = serde_json::to_string_pretty(&for_llm)
@@ -324,6 +326,8 @@ mod tests {
                 reason: "empty result".into(),
             },
             reported: vec![],
+            themes: vec![],
+            theme_candidates: vec![],
             diagnostics: vec![],
         }
     }

@@ -494,9 +494,11 @@ pub async fn write(
     f: &PremarketFacts,
     lang: Lang,
 ) -> Result<(Draft, String), Vec<String>> {
-    // Diagnostics are operational counters, not facts the brief may cite.
+    // Diagnostics and the theme tuning stats are operational counters, not
+    // facts the brief may cite.
     let for_llm = PremarketFacts {
         diagnostics: vec![],
+        theme_candidates: vec![],
         ..f.clone()
     };
     let facts_json = serde_json::to_string_pretty(&for_llm)
@@ -633,6 +635,8 @@ mod tests {
             watch_list: Field::Missing {
                 reason: "not available in v1".into(),
             },
+            themes: vec![],
+            theme_candidates: vec![],
             diagnostics: vec![],
         }
     }
