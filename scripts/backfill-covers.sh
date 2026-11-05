@@ -3,6 +3,7 @@
 # write them as UPDATE statements to backfill-covers.sql. Reads D1 and R2 only;
 # it never runs the SQL. Run from the repo root.
 set -euo pipefail
+command -v jq >/dev/null || { echo "jq is required" >&2; exit 1; }
 
 OUT=backfill-covers.sql
 BUCKET=prebell-facts
@@ -21,6 +22,7 @@ cd crates/generator
   >"$TMP/rows.json"
 cd ../..
 
+jq -e -r '.[0].results[] | [.id, .content_type, .facts_r2_key, .lang] | @tsv' "$TMP/rows.json" >"$TMP/rows.tsv"
 rows=0 written=0 skipped=0
 mkdir "$TMP/lines"   # one file per facts key: its cover lines JSON, or "ERR: reason"
 
@@ -51,7 +53,7 @@ while IFS=$'\t' read -r id kind key lang; do
     "UPDATE post_translations SET cover_line1 = '"'"'\(.[$l][0] | q)'"'"', cover_line2 = '"'"'\(.[$l][1] | q)'"'"' WHERE post_id = \($id) AND lang = '"'"'\($l)'"'"';"
   ' <<<"$lines" >>"$OUT"
   written=$((written + 1))
-done < <(jq -r '.[0].results[] | [.id, .content_type, .facts_r2_key, .lang] | @tsv' "$TMP/rows.json")
+done <"$TMP/rows.tsv"
 
 echo "rows without cover lines: $rows; UPDATE statements written: $written; skipped: $skipped"
 echo "SQL written to $OUT (not executed). To apply it:"

@@ -121,7 +121,8 @@ describe("globals.css", () => {
     expect(css).toMatch(/\.cover-flat \{[^}]*background: var\(--cover-flat\);[^}]*color: var\(--ink\);/);
     expect(css).toMatch(/\.cover-flat \.cover-shade \{ display: none; \}/);
     expect(css).toMatch(/\.cover-flat \.cover-stat \{[^}]*color: var\(--ink\);/);
-    expect(css).toMatch(/\.cover-flat \.cover-bar \{[^}]*var\(--cover-bar\)/);
+    expect(css).toMatch(/\.cover-flat \.cover-tag \{[^}]*border: 1px solid var\(--muted\)/);
+    expect(css).not.toMatch(/\.cover-flat \.cover-bar/);
   });
 
   it("lets the index line scroll in place at every width and never clips its left end", () => {

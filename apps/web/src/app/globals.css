@@ -104,9 +104,8 @@ html:lang(zh-Hans) .kicker { letter-spacing: 0.04em; }
 .cover-bar { display: block; width: 44px; height: 3px; margin-top: 8px; background: var(--cover-bar); }
 .cover-flat { background: var(--cover-flat); color: var(--ink); }
 .cover-flat .cover-shade { display: none; }
-.cover-flat .cover-tag { border: 1px solid var(--rule); }
+.cover-flat .cover-tag { border: 1px solid var(--muted); }
 .cover-flat .cover-stat { color: var(--ink); }
-.cover-flat .cover-bar { background: var(--cover-bar); }
 .cover-small .cover-tag { top: 8px; left: 8px; padding: 2px 6px; font-size: 11px; }
 .cover-small .cover-in { padding: 8px; }
 .cover-small .cover-bar { margin-top: 5px; }
