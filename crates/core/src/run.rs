@@ -432,8 +432,11 @@ async fn publish<C: Content>(
         return Ok(TickOutcome::Nothing);
     }
     let slug = c.slug(date);
-    let (cover_key, outcome) = store_graphic(store, &slug, c.cover_graphic(facts)).await;
+    let (cover_key, outcome, cover_err) = store_graphic(store, &slug, c.cover_graphic(facts)).await;
     (hooks.log)(&format!("cover={outcome}"));
+    if let Some(e) = cover_err {
+        (hooks.log)(&format!("cover write failed: {e}"));
+    }
     let facts_key = c.facts_key(date);
     let json = serde_json::to_string(facts).map_err(|e| format!("facts json: {e}"))?;
     store.put_facts(&facts_key, &json).await?;
@@ -1677,8 +1680,20 @@ mod tests {
         // The lines and the snapshot do not depend on the cover graphic.
         assert!(lines_of(&s.inner, "en")[1].is_some());
         assert!(s.inner.kv.borrow().contains_key("index_line"));
-        assert_eq!(logs.borrow().len(), 2, "{:?}", logs.borrow());
-        assert_eq!(logs.borrow()[1], "cover=err", "{:?}", logs.borrow());
+        // The write error reaches the log on its own line, never the run or the facts.
+        assert_eq!(
+            logs.borrow()[1..],
+            ["cover=err", "cover write failed: r2: put_bytes failed"],
+            "{:?}",
+            logs.borrow()
+        );
+        assert_eq!(s.inner.runs.borrow()[NOV4_KEY].last_error, None);
+        assert!(s
+            .inner
+            .facts
+            .borrow()
+            .values()
+            .all(|j| !j.contains("put_bytes")));
     }
 
     #[tokio::test]

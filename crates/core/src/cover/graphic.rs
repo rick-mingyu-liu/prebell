@@ -9,7 +9,7 @@
 use std::fmt::Write;
 
 use super::{fmt_eps, fmt_short_usd, fmt_signed_pct};
-use crate::earnings::charts::{series, MIN_BARS};
+use crate::earnings::charts::{series, Bar, Series, MIN_BARS};
 use crate::earnings::facts::{numbers_in_facts, EarningsFacts};
 use crate::facts::Mover;
 use crate::numbers::{check, Lang};
@@ -212,28 +212,37 @@ pub fn brief_graphic(movers: &[CoverMover], session: Session) -> Option<String> 
 const MAX_SLOTS: usize = 8;
 
 /// The earnings cover: the earnings chart's revenue series (else its
-/// diluted EPS series) as bars on one zero baseline, earlier quarters grey
-/// and the last slot (this release's 8-K bar when there is one, else the
-/// latest quarter) in ink with its value above it, or below it for a loss.
-/// None when neither series has `MIN_BARS` bars or the value label fails
-/// the number check, so the post keeps the flat tile.
+/// diluted EPS series) as bars on one zero baseline, in grey. When the last
+/// slot is this release's 8-K bar it is drawn in ink with its value above
+/// it, or below it for a loss; with no release bar every bar is grey and no
+/// value is labelled, so the cover never shows a figure the lines do not.
+/// None when neither series has `MIN_BARS` bars in its window or the value
+/// label fails the number check, so the post keeps the flat tile.
 pub fn earnings_graphic(f: &EarningsFacts) -> Option<String> {
     earnings_graphic_checked(f, &numbers_in_facts(f))
 }
 
 /// [`earnings_graphic`] against an explicit list of allowed numbers.
 fn earnings_graphic_checked(f: &EarningsFacts, allowed: &[f64]) -> Option<String> {
-    let s = series(f)
-        .into_iter()
-        .find(|s| s.slots.iter().flatten().count() >= MIN_BARS)?;
-    // The last slots, starting on a bar rather than a gap.
-    let mut slots = &s.slots[s.slots.len().saturating_sub(MAX_SLOTS)..];
+    earnings_svg(&series(f), allowed)
+}
+
+/// A series' last `MAX_SLOTS` slots, starting on a bar rather than a gap.
+fn window(slots: &[Option<Bar>]) -> &[Option<Bar>] {
+    let mut slots = &slots[slots.len().saturating_sub(MAX_SLOTS)..];
     while let [None, rest @ ..] = slots {
         slots = rest;
     }
-    if slots.iter().flatten().count() < MIN_BARS {
-        return None;
-    }
+    slots
+}
+
+/// The earnings cover drawn from the first series with `MIN_BARS` bars in
+/// its window.
+fn earnings_svg(all: &[Series], allowed: &[f64]) -> Option<String> {
+    let (s, slots) = all.iter().find_map(|s| {
+        let w = window(&s.slots);
+        (w.iter().flatten().count() >= MIN_BARS).then_some((s, w))
+    })?;
     let Some(Some(last)) = slots.last() else {
         return None;
     };
@@ -241,7 +250,14 @@ fn earnings_graphic_checked(f: &EarningsFacts, allowed: &[f64]) -> Option<String
         "revenue" => (fmt_short_usd(last.value), "REVENUE"),
         _ => (fmt_eps(last.value), "DILUTED EPS"),
     };
-    check(&value, Lang::En, allowed).ok()?;
+    // The ink bar and its value only for this release's own bar, which `series` puts last.
+    let value = match s.release {
+        Some(_) => {
+            check(&value, Lang::En, allowed).ok()?;
+            Some(value)
+        }
+        None => None,
+    };
 
     const WIDTH: f64 = 640.0;
     // Room above for the value label and below for the period label.
@@ -287,8 +303,9 @@ fn earnings_graphic_checked(f: &EarningsFacts, allowed: &[f64]) -> Option<String
         } else {
             (zero, zero + h)
         };
-        let is_last = i == n - 1;
-        rect(&mut out, x, top, bar_w, h, if is_last { INK } else { GREY });
+        let ink = value.as_ref().filter(|_| i == n - 1);
+        let fill = if ink.is_some() { INK } else { GREY };
+        rect(&mut out, x, top, bar_w, h, fill);
         let below = bottom + GAP + LABEL_SIZE * 0.8;
         if i == 0 {
             label(
@@ -300,9 +317,9 @@ fn earnings_graphic_checked(f: &EarningsFacts, allowed: &[f64]) -> Option<String
                 &b.label,
             );
         }
-        if is_last {
+        if let Some(value) = ink {
             let ly = if b.value >= 0.0 { top - GAP } else { below };
-            label(&mut out, centred(cx, &value), ly, "middle", 700, &value);
+            label(&mut out, centred(cx, value), ly, "middle", 700, value);
         }
     }
     Some(caption_and_close(
@@ -724,6 +741,71 @@ mod tests {
         // The value label is under the hanging ink bar.
         let value = texts(&svg).into_iter().find(|t| t.2 == "−$0.25").unwrap();
         assert!(value.1 > by_x[2].1 + by_x[2].3, "{value:?}");
+    }
+
+    #[test]
+    fn earnings_graphic_without_a_release_has_no_ink_bar() {
+        // A full-year-only release: no verified quarter, so no 8-K bar in either series.
+        let mut f = facts();
+        if let Field::Value(p) = &mut f.fiscal_period {
+            p.quarter = None;
+        }
+        assert!(series(&f).iter().all(|s| s.release.is_none()));
+        let svg = earnings_graphic(&f).unwrap();
+        assert_in_frame(&svg);
+        let bs = earnings_bars(&svg);
+        assert_eq!(bs.len(), 2, "{bs:?}");
+        assert!(bs.iter().all(|b| b.4 == GREY), "{bs:?}");
+        assert!(rects(&svg).iter().all(|r| r.4 != INK), "{svg}");
+        assert!(texts(&svg).iter().all(|t| !t.2.contains('$')), "{svg}");
+        assert!(svg.contains(">2026-03<") && svg.contains(">REVENUE, LAST 2 QUARTERS<"));
+    }
+
+    fn bar(label: &str, value: f64) -> Option<Bar> {
+        Some(Bar {
+            label: label.into(),
+            value,
+        })
+    }
+
+    #[test]
+    fn earnings_graphic_falls_back_to_eps_when_the_revenue_window_is_short() {
+        // Revenue has two bars, but only one in its last eight slots. `bars()` caps a gap at three
+        // slots, so this is built by hand.
+        let mut revenue = vec![bar("2024-03", 90e9)];
+        revenue.extend(std::iter::repeat_with(|| None).take(7));
+        revenue.push(bar("2026-06", 100e9));
+        let all = [
+            Series {
+                name: "revenue",
+                slots: revenue,
+                release: None,
+            },
+            Series {
+                name: "eps",
+                slots: vec![bar("2026-03", 1.5), bar("8-K", 1.85)],
+                release: Some(1.85),
+            },
+        ];
+        let svg = earnings_svg(&all, &[1.85]).unwrap();
+        assert_in_frame(&svg);
+        assert!(svg.contains(">DILUTED EPS, LAST 2 QUARTERS<") && svg.contains(">$1.85<"));
+        assert!(!svg.contains("REVENUE"));
+        // With no EPS series to fall back on, the short revenue window draws nothing.
+        assert_eq!(earnings_svg(&all[..1], &[]), None);
+    }
+
+    #[test]
+    fn earnings_graphic_caption_counts_slots_including_gaps() {
+        let mut f = facts();
+        if let Field::Value(t) = &mut f.trend {
+            // 2026-03 is missing: slots 2025-12, gap, 2026-06, release.
+            t.revenue = vec![qp("2025-12-27", 95e9), qp("2026-06-27", 100e9)];
+        }
+        let svg = earnings_graphic(&f).unwrap();
+        assert_in_frame(&svg);
+        assert_eq!(earnings_bars(&svg).len(), 3);
+        assert!(svg.contains(">REVENUE, LAST 4 QUARTERS<"), "{svg}");
     }
 
     #[test]

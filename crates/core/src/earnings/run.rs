@@ -635,8 +635,12 @@ async fn build(
     }
     // A failed cover write leaves the post on the flat tile; it never blocks
     // publishing.
-    let (cover_key, outcome) = store_graphic(store, &post_slug, earnings_graphic(&facts)).await;
+    let (cover_key, outcome, cover_err) =
+        store_graphic(store, &post_slug, earnings_graphic(&facts)).await;
     log(&format!("cover={outcome}"));
+    if let Some(e) = cover_err {
+        log(&format!("cover write failed: {e}"));
+    }
     let post_id = store
         .upsert_post(&PostRow {
             id: None,
@@ -875,6 +879,8 @@ mod tests {
         pages: RefCell<HashMap<usize, Result<String, ProviderError>>>,
         page_calls: RefCell<Vec<usize>>,
         no_exhibit: Cell<bool>,
+        /// No XBRL concepts: the facts carry no quarterly trend.
+        no_trend: Cell<bool>,
     }
     #[async_trait(?Send)]
     impl Filings for FakeFilings {
@@ -901,6 +907,9 @@ mod tests {
             _: u64,
             tag: &str,
         ) -> Result<Option<Concept>, ProviderError> {
+            if self.no_trend.get() {
+                return Ok(None);
+            }
             Ok(aapl_concept(tag))
         }
     }
@@ -1916,6 +1925,28 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn earnings_build_publishes_without_cover_when_the_facts_give_no_graphic() {
+        let (base, es, fl) = detected().await;
+        fl.no_trend.set(true);
+        let l = llm(true, true);
+        let logs = RefCell::new(Vec::<String>::new());
+        let log = |m: &str| logs.borrow_mut().push(m.to_string());
+        let t = poll_time() + Duration::minutes(1);
+        let o = build_tick(t, &es, base.as_ref(), &fl, &l, &log)
+            .await
+            .unwrap();
+        assert_eq!(o[0].1, TickOutcome::Published);
+        assert_eq!(earnings_graphic(&stored_facts(&base)), None);
+        assert_eq!(base.posts.borrow()[0].cover_key, None);
+        assert!(base
+            .bytes
+            .borrow()
+            .keys()
+            .all(|k| !k.starts_with("covers/")));
+        assert_eq!(*logs.borrow(), ["cover=none"]);
+    }
+
+    #[tokio::test]
     async fn earnings_build_publishes_when_the_cover_write_fails() {
         let (base, es, fl) = detected().await;
         base.fail_put_bytes.set(true);
@@ -1930,6 +1961,16 @@ mod tests {
         assert_eq!(base.posts.borrow()[0].cover_key, None);
         assert!(base.bytes.borrow().is_empty());
         assert_eq!(lines_of(&base, "en"), stored_lines(&base).en.map(Some));
-        assert_eq!(*logs.borrow(), ["cover=err"]);
+        // The write error reaches the log on its own line, never the run or the facts.
+        assert_eq!(
+            *logs.borrow(),
+            ["cover=err", "cover write failed: r2: put_bytes failed"]
+        );
+        assert!(base.runs.borrow().values().all(|r| r.last_error.is_none()));
+        assert!(base
+            .facts
+            .borrow()
+            .values()
+            .all(|j| !j.contains("put_bytes")));
     }
 }

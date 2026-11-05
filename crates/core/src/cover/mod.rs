@@ -259,21 +259,22 @@ pub fn graphic_for_facts(content_type: &str, facts_json: &str) -> Result<Option<
 }
 
 /// The cover step of a build: writes `svg` as `covers/{slug}.svg`. Returns
-/// the stored key, or `None`, and the outcome for the diagnostics line: `ok`,
+/// the stored key, or `None`; the outcome for the diagnostics line: `ok`,
 /// `err` (the write failed) or `none` (the facts give no graphic; the post
-/// keeps the flat tile). Never fails the build.
+/// keeps the flat tile); and on `err` the store's error text, for a log
+/// line of its own (never the run's `last_error`). Never fails the build.
 pub async fn store_graphic(
     store: &dyn Store,
     slug: &str,
     svg: Option<String>,
-) -> (Option<String>, &'static str) {
+) -> (Option<String>, &'static str, Option<String>) {
     let Some(svg) = svg else {
-        return (None, "none");
+        return (None, "none", None);
     };
     let key = format!("covers/{slug}.svg");
     match store.put_bytes(&key, svg.as_bytes(), "image/svg+xml").await {
-        Ok(()) => (Some(key), "ok"),
-        Err(_) => (None, "err"),
+        Ok(()) => (Some(key), "ok", None),
+        Err(e) => (None, "err", Some(e)),
     }
 }
 
@@ -329,17 +330,17 @@ pub(crate) mod tests {
         let s = MemStore::default();
         assert_eq!(
             store_graphic(&s, "recap-2026-11-04", Some("<svg/>".into())).await,
-            (Some("covers/recap-2026-11-04.svg".to_string()), "ok")
+            (Some("covers/recap-2026-11-04.svg".to_string()), "ok", None)
         );
         assert_eq!(
             s.bytes.borrow()["covers/recap-2026-11-04.svg"],
             (b"<svg/>".to_vec(), "image/svg+xml".to_string())
         );
-        assert_eq!(store_graphic(&s, "p", None).await, (None, "none"));
+        assert_eq!(store_graphic(&s, "p", None).await, (None, "none", None));
         s.fail_put_bytes.set(true);
         assert_eq!(
             store_graphic(&s, "q", Some("<svg/>".into())).await,
-            (None, "err")
+            (None, "err", Some("r2: put_bytes failed".to_string()))
         );
         assert_eq!(s.bytes.borrow().len(), 1);
     }
