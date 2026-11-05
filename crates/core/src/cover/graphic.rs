@@ -1,6 +1,5 @@
 //! The cover graphic of a published post: an SVG chart of the story's own
 //! figures on paper, written by string formatting.
-
 //!
 //! Every graphic shares one frame: a 640×360 viewBox on paper, the chart in
 //! the lower 58% with 24 px clear at both sides (the upper 42% is left for
@@ -9,13 +8,17 @@
 
 use std::fmt::Write;
 
-use super::fmt_signed_pct;
+use super::{fmt_eps, fmt_short_usd, fmt_signed_pct};
+use crate::earnings::charts::{series, MIN_BARS};
+use crate::earnings::facts::{numbers_in_facts, EarningsFacts};
 use crate::facts::Mover;
+use crate::numbers::{check, Lang};
 
 const PAPER: &str = "#faf8f3";
 const INK: &str = "#1a1a1a";
 const UP: &str = "#15803d";
 const DOWN: &str = "#b91c1c";
+const GREY: &str = "#d9d5cc";
 const CAPTION: &str = "#666";
 
 /// Side margin kept clear of every mark and label.
@@ -166,7 +169,7 @@ pub fn brief_graphic(movers: &[CoverMover], session: Session) -> Option<String> 
     // The largest move gets one length on both sides, short enough that the
     // longest value label still ends inside the margin.
     let longest = rows.iter().map(|(_, v)| label_width(v)).fold(0.0, f64::max);
-    let full = BAR_MAX.min(AXIS_X - MARGIN - GAP - longest);
+    let full = BAR_MAX.min(AXIS_X - MARGIN - GAP - longest).max(1.0);
     let max_abs = rows
         .iter()
         .map(|(m, _)| m.change_pct.abs())
@@ -205,10 +208,115 @@ pub fn brief_graphic(movers: &[CoverMover], session: Session) -> Option<String> 
     Some(caption_and_close(out, caption))
 }
 
+/// Most slots the earnings cover draws, gaps included; older ones drop off.
+const MAX_SLOTS: usize = 8;
+
+/// The earnings cover: the earnings chart's revenue series (else its
+/// diluted EPS series) as bars on one zero baseline, earlier quarters grey
+/// and the last slot (this release's 8-K bar when there is one, else the
+/// latest quarter) in ink with its value above it, or below it for a loss.
+/// None when neither series has `MIN_BARS` bars or the value label fails
+/// the number check, so the post keeps the flat tile.
+pub fn earnings_graphic(f: &EarningsFacts) -> Option<String> {
+    earnings_graphic_checked(f, &numbers_in_facts(f))
+}
+
+/// [`earnings_graphic`] against an explicit list of allowed numbers.
+fn earnings_graphic_checked(f: &EarningsFacts, allowed: &[f64]) -> Option<String> {
+    let s = series(f)
+        .into_iter()
+        .find(|s| s.slots.iter().flatten().count() >= MIN_BARS)?;
+    // The last slots, starting on a bar rather than a gap.
+    let mut slots = &s.slots[s.slots.len().saturating_sub(MAX_SLOTS)..];
+    while let [None, rest @ ..] = slots {
+        slots = rest;
+    }
+    if slots.iter().flatten().count() < MIN_BARS {
+        return None;
+    }
+    let Some(Some(last)) = slots.last() else {
+        return None;
+    };
+    let (value, what) = match s.name {
+        "revenue" => (fmt_short_usd(last.value), "REVENUE"),
+        _ => (fmt_eps(last.value), "DILUTED EPS"),
+    };
+    check(&value, Lang::En, allowed).ok()?;
+
+    const WIDTH: f64 = 640.0;
+    // Room above for the value label and below for the period label.
+    const PLOT_TOP: f64 = 180.0;
+    const PLOT_BOTTOM: f64 = 300.0;
+    /// Widest slot (bar plus gap), so a short series is not a wall of fat bars.
+    const SLOT_MAX: f64 = 96.0;
+    const BAR_SHARE: f64 = 0.7;
+    let n = slots.len();
+    let values = || slots.iter().flatten().map(|b| b.value);
+    let lo = values().fold(0.0, f64::min);
+    let mut hi = values().fold(0.0, f64::max);
+    if hi == lo {
+        // An all-zero series: a unit span keeps the baseline at the bottom.
+        hi = 1.0;
+    }
+    let y = |v: f64| PLOT_TOP + (hi - v) / (hi - lo) * (PLOT_BOTTOM - PLOT_TOP);
+    let zero = y(0.0);
+    let slot = ((WIDTH - 2.0 * MARGIN) / n as f64).min(SLOT_MAX);
+    let left = (WIDTH - slot * n as f64) / 2.0;
+    let bar_w = slot * BAR_SHARE;
+    // A label centred on `cx`, moved in when it would cross a margin.
+    let centred = |cx: f64, s: &str| {
+        let half = label_width(s) / 2.0;
+        cx.min(WIDTH - MARGIN - half).max(MARGIN + half)
+    };
+
+    let mut out = open_svg();
+    write!(
+        out,
+        r#"<line x1="{left:.1}" y1="{zero:.1}" x2="{:.1}" y2="{zero:.1}" stroke="{INK}" stroke-width="1"/>"#,
+        left + slot * n as f64
+    )
+    .unwrap();
+    for (i, b) in slots.iter().enumerate() {
+        let Some(b) = b else { continue };
+        let x = left + i as f64 * slot + (slot - bar_w) / 2.0;
+        let cx = x + bar_w / 2.0;
+        // A floor of one unit keeps a zero quarter visible as a stub.
+        let h = (y(b.value) - zero).abs().max(1.0);
+        let (top, bottom) = if b.value >= 0.0 {
+            (zero - h, zero)
+        } else {
+            (zero, zero + h)
+        };
+        let is_last = i == n - 1;
+        rect(&mut out, x, top, bar_w, h, if is_last { INK } else { GREY });
+        let below = bottom + GAP + LABEL_SIZE * 0.8;
+        if i == 0 {
+            label(
+                &mut out,
+                centred(cx, &b.label),
+                below,
+                "middle",
+                500,
+                &b.label,
+            );
+        }
+        if is_last {
+            let ly = if b.value >= 0.0 { top - GAP } else { below };
+            label(&mut out, centred(cx, &value), ly, "middle", 700, &value);
+        }
+    }
+    Some(caption_and_close(
+        out,
+        &format!("{what}, LAST {n} QUARTERS"),
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::facts::Quote;
+    use crate::earnings::facts::tests::{facts, fig};
+    use crate::earnings::facts::{QuarterPoint, Trend, Unit};
+    use crate::facts::{Field, Quote};
     use regex::Regex;
 
     const UP: &str = "#15803d";
@@ -401,11 +509,31 @@ mod tests {
         .unwrap();
         let up = text_x(&svg, "+1234.56%");
         assert!(up <= 526.0, "{up}");
+        // The far end of each start/end-anchored value label, at 10 px a character.
+        assert!(
+            up + 10.0 * "+1234.56%".chars().count() as f64 <= 616.0,
+            "{up}"
+        );
         let down = text_x(&svg, "−987.65%");
         assert!(down >= 114.0, "{down}");
+        assert!(
+            down - 10.0 * "−987.65%".chars().count() as f64 >= 24.0,
+            "{down}"
+        );
         let end = svg.find(">−987.65%</text>").unwrap();
         let element = &svg[svg[..end].rfind("<text").unwrap()..end];
         assert!(element.contains(r#"text-anchor="end""#), "{element}");
+    }
+
+    #[test]
+    fn brief_graphic_never_draws_a_negative_width() {
+        // A label longer than the room beside the axis leaves no bar length;
+        // the bar is still a one-unit stub, never a negative width.
+        let svg = brief_graphic(&[m("HUGE", 1e30), m("SMALL", 1.0)], Session::Recap).unwrap();
+        for b in bars(&svg) {
+            assert!(b.2 >= 1.0, "{b:?}");
+        }
+        assert!(!svg.contains("NaN") && !svg.contains("inf"));
     }
 
     #[test]
@@ -432,5 +560,190 @@ mod tests {
             cover_movers(&[mover("MOS", 17.37)], &[mover("FIS", -23.67)]),
             vec![m("MOS", 17.37), m("FIS", -23.67)]
         );
+    }
+
+    const INK: &str = "#1a1a1a";
+    const GREY: &str = "#d9d5cc";
+
+    fn qp(end: &str, value: f64) -> QuarterPoint {
+        QuarterPoint {
+            period_end: end.parse().unwrap(),
+            value,
+            form: "10-Q".into(),
+            filed: "2026-08-01".parse().unwrap(),
+        }
+    }
+
+    /// The earnings cover's bars: grey, and the one in ink.
+    fn earnings_bars(svg: &str) -> Vec<(f64, f64, f64, f64, String)> {
+        rects(svg)
+            .into_iter()
+            .filter(|r| r.4 == GREY || r.4 == INK)
+            .collect()
+    }
+
+    /// The shared frame: root, paper, closing tag, and every mark and label
+    /// inside the chart area and the side margins (centred labels measured
+    /// at 10 px a character).
+    fn assert_in_frame(svg: &str) {
+        assert!(svg.starts_with(r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 360" width="640" height="360" font-family="Inter, system-ui, sans-serif">"#));
+        assert!(
+            svg.contains(r##"<rect x="0" y="0" width="640" height="360" fill="#faf8f3"/>"##)
+                && svg.ends_with("</svg>")
+        );
+        for r in rects(svg).iter().filter(|r| r.4 != PAPER) {
+            assert!(r.0 >= 24.0 && r.0 + r.2 <= 616.0, "{r:?}");
+            assert!(r.1 >= 151.2 && r.1 + r.3 <= 360.0, "{r:?}");
+            assert!(r.2 > 0.0 && r.3 > 0.0, "{r:?}");
+        }
+        for t in texts(svg) {
+            assert!(t.1 >= 151.2 && t.1 <= 360.0, "{t:?}");
+            if !t.2.contains("QUARTERS") {
+                let half = 5.0 * t.2.chars().count() as f64;
+                assert!(t.0 - half >= 24.0 && t.0 + half <= 616.0, "{t:?}");
+            }
+        }
+        for gone in ["gradient", "opacity", "filter", "NaN", "inf"] {
+            assert!(!svg.contains(gone), "{gone} in {svg}");
+        }
+    }
+
+    #[test]
+    fn earnings_graphic_draws_revenue_with_the_release_in_ink() {
+        let svg = earnings_graphic(&facts()).unwrap();
+        assert_in_frame(&svg);
+        // 2026-03 and 2026-06 grey, the release in ink, rightmost.
+        assert_eq!(rects(&svg).iter().filter(|r| r.4 == GREY).count(), 2);
+        assert_eq!(rects(&svg).iter().filter(|r| r.4 == INK).count(), 1);
+        let bs = earnings_bars(&svg);
+        let ink = bs.iter().find(|b| b.4 == INK).unwrap();
+        assert!(bs.iter().all(|b| b.0 <= ink.0), "{bs:?}");
+        assert!(
+            svg.contains(">$102.5B<")
+                && svg.contains(">2026-03<")
+                && svg.contains(">REVENUE, LAST 3 QUARTERS<")
+        );
+        assert!(!svg.contains("8-K") && !svg.contains(">2026-06<"));
+        // The value label is centred over the ink bar, above it.
+        let ts = texts(&svg);
+        let value = ts.iter().find(|t| t.2 == "$102.5B").unwrap();
+        assert!((value.0 - (ink.0 + ink.2 / 2.0)).abs() <= 0.1, "{value:?}");
+        assert!(value.1 < ink.1, "{value:?} {ink:?}");
+    }
+
+    #[test]
+    fn earnings_graphic_falls_back_to_diluted_eps() {
+        let mut f = facts();
+        f.metrics.revenue = Field::Missing { reason: "x".into() };
+        if let Field::Value(t) = &mut f.trend {
+            t.revenue.truncate(1);
+        }
+        let svg = earnings_graphic(&f).unwrap();
+        assert_in_frame(&svg);
+        assert!(svg.contains(">DILUTED EPS, LAST 3 QUARTERS<") && svg.contains(">$1.85<"));
+        assert!(!svg.contains("REVENUE"));
+    }
+
+    #[test]
+    fn earnings_graphic_none_when_both_series_are_short() {
+        let mut f = facts();
+        f.trend = Field::Value(Trend::default());
+        assert_eq!(earnings_graphic(&f), None);
+        f.trend = Field::Missing { reason: "x".into() };
+        assert_eq!(earnings_graphic(&f), None);
+    }
+
+    #[test]
+    fn earnings_graphic_none_when_the_label_fails_the_check() {
+        let f = facts();
+        assert_eq!(earnings_graphic_checked(&f, &[]), None);
+        let checked = earnings_graphic_checked(&f, &numbers_in_facts(&f));
+        assert!(checked.is_some());
+        assert_eq!(checked, earnings_graphic(&f));
+    }
+
+    #[test]
+    fn earnings_graphic_keeps_the_last_eight_slots_and_starts_on_a_bar() {
+        let mut f = facts();
+        if let Field::Value(t) = &mut f.trend {
+            // A gap after 2024-09, then six quarters, then the release: 9 slots.
+            t.revenue = [
+                "2024-09-28",
+                "2025-03-29",
+                "2025-06-28",
+                "2025-09-27",
+                "2025-12-27",
+                "2026-03-28",
+                "2026-06-27",
+            ]
+            .iter()
+            .map(|d| qp(d, 100e9))
+            .collect();
+        }
+        let svg = earnings_graphic(&f).unwrap();
+        assert_in_frame(&svg);
+        let bs = earnings_bars(&svg);
+        assert_eq!(bs.len(), 7);
+        assert!(svg.contains(">REVENUE, LAST 7 QUARTERS<"));
+        assert!(svg.contains(">2025-03<") && !svg.contains(">2024-09<"));
+        assert!(!svg.contains("8-K"));
+        // The period label sits under the leftmost bar.
+        let first = bs.iter().min_by(|a, b| a.0.total_cmp(&b.0)).unwrap();
+        let x = text_x(&svg, "2025-03");
+        assert!(
+            (x - (first.0 + first.2 / 2.0)).abs() <= 0.1,
+            "{x} {first:?}"
+        );
+    }
+
+    #[test]
+    fn earnings_graphic_draws_negative_eps_below_the_baseline() {
+        let mut f = facts();
+        f.metrics.revenue = Field::Missing { reason: "x".into() };
+        if let Field::Value(t) = &mut f.trend {
+            t.revenue.clear();
+            t.eps_diluted = vec![qp("2026-03-28", -0.40), qp("2026-06-27", -0.31)];
+        }
+        f.metrics.eps_gaap = fig(
+            -0.25,
+            Unit::UsdPerShare,
+            "$(0.25)",
+            "diluted loss per share of $(0.25)",
+        );
+        let svg = earnings_graphic(&f).unwrap();
+        assert_in_frame(&svg);
+        let bs = earnings_bars(&svg);
+        assert_eq!(bs.len(), 3);
+        // All three hang from one baseline; the deepest loss is the longest.
+        assert!(bs.iter().all(|b| (b.1 - bs[0].1).abs() <= 0.1), "{bs:?}");
+        let mut by_x = bs.clone();
+        by_x.sort_by(|a, b| a.0.total_cmp(&b.0));
+        assert!(by_x[0].3 > by_x[1].3 && by_x[1].3 > by_x[2].3, "{by_x:?}");
+        assert_eq!(by_x[2].4, INK);
+        assert!(svg.contains(">−$0.25<") && svg.contains(">DILUTED EPS, LAST 3 QUARTERS<"));
+        // The value label is under the hanging ink bar.
+        let value = texts(&svg).into_iter().find(|t| t.2 == "−$0.25").unwrap();
+        assert!(value.1 > by_x[2].1 + by_x[2].3, "{value:?}");
+    }
+
+    #[test]
+    fn earnings_graphic_with_an_all_zero_series_has_no_nan() {
+        let mut f = facts();
+        f.metrics.revenue = Field::Missing { reason: "x".into() };
+        if let Field::Value(t) = &mut f.trend {
+            t.revenue.clear();
+            t.eps_diluted = vec![qp("2026-03-28", 0.0), qp("2026-06-27", 0.0)];
+        }
+        f.metrics.eps_gaap = fig(
+            0.0,
+            Unit::UsdPerShare,
+            "$0.00",
+            "diluted earnings per share of $0.00",
+        );
+        let svg = earnings_graphic(&f).unwrap();
+        assert_in_frame(&svg);
+        assert!(!svg.contains("NaN") && !svg.contains("inf"));
+        assert!(svg.contains(">$0.00<"));
+        assert_eq!(earnings_bars(&svg).len(), 3);
     }
 }

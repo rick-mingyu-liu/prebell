@@ -16,7 +16,7 @@ use crate::recap::RecapFacts;
 use crate::store::Store;
 
 pub mod graphic;
-pub use graphic::{brief_graphic, cover_movers, CoverMover, Session};
+pub use graphic::{brief_graphic, cover_movers, earnings_graphic, CoverMover, Session};
 
 /// The `kv` key the front page reads the latest index snapshot from.
 pub const INDEX_LINE_KEY: &str = "index_line";
@@ -244,6 +244,33 @@ pub fn lines_for_facts(content_type: &str, facts_json: &str) -> Result<CoverLine
             Ok(brief_lines(&f.indexes, &f.gainers, &f.losers, false))
         }
         "earnings" => Ok(earnings_lines(&parse_facts::<EarningsFacts>(
+            content_type,
+            facts_json,
+        )?)),
+        other => Err(format!("unknown content type: {other}")),
+    }
+}
+
+/// The cover graphic of a stored post, recomputed from its facts JSON: the
+/// SVG, or `None` when the facts give no graphic (the post keeps the flat
+/// tile). Same `content_type` values and errors as `lines_for_facts`.
+pub fn graphic_for_facts(content_type: &str, facts_json: &str) -> Result<Option<String>, String> {
+    match content_type {
+        "premarket" => {
+            let f: PremarketFacts = parse_facts(content_type, facts_json)?;
+            Ok(brief_graphic(
+                &cover_movers(&f.gainers, &f.losers),
+                Session::Premarket,
+            ))
+        }
+        "recap" => {
+            let f: RecapFacts = parse_facts(content_type, facts_json)?;
+            Ok(brief_graphic(
+                &cover_movers(&f.gainers, &f.losers),
+                Session::Recap,
+            ))
+        }
+        "earnings" => Ok(earnings_graphic(&parse_facts::<EarningsFacts>(
             content_type,
             facts_json,
         )?)),
@@ -809,8 +836,7 @@ pub(crate) mod tests {
         assert_eq!(l.zh[0], "标普500期货 −1.14%");
     }
 
-    #[test]
-    fn lines_for_facts_recap_uses_index_labels() {
+    fn recap_json() -> String {
         let f = crate::recap::RecapFacts {
             trading_date: "2026-10-29".parse().unwrap(),
             as_of_utc: "2026-10-29T20:45:00Z".parse().unwrap(),
@@ -832,8 +858,12 @@ pub(crate) mod tests {
             theme_candidates: vec![],
             diagnostics: vec![],
         };
-        let json = serde_json::to_string(&f).unwrap();
-        let l = lines_for_facts("recap", &json).unwrap();
+        serde_json::to_string(&f).unwrap()
+    }
+
+    #[test]
+    fn lines_for_facts_recap_uses_index_labels() {
+        let l = lines_for_facts("recap", &recap_json()).unwrap();
         assert_eq!(l.en, ["Dow −1.50%", "NVDA +3.08%"]);
         assert_eq!(l.zh[0], "道指 −1.50%");
     }
@@ -862,6 +892,40 @@ pub(crate) mod tests {
         assert!(e.contains("recap"), "{e}");
         assert!(lines_for_facts("premarket", "{}").is_err());
         assert!(lines_for_facts("earnings", &premarket_json()).is_err());
+    }
+
+    #[test]
+    fn graphic_for_facts_matches_the_renderers() {
+        let p: PremarketFacts = serde_json::from_str(&premarket_json()).unwrap();
+        let premarket = graphic_for_facts("premarket", &premarket_json()).unwrap();
+        assert_eq!(
+            premarket,
+            brief_graphic(&cover_movers(&p.gainers, &p.losers), Session::Premarket)
+        );
+        assert!(premarket.unwrap().contains(">BIGGEST PREMARKET MOVES<"));
+        let r: RecapFacts = serde_json::from_str(&recap_json()).unwrap();
+        let recap = graphic_for_facts("recap", &recap_json()).unwrap();
+        assert_eq!(
+            recap,
+            brief_graphic(&cover_movers(&r.gainers, &r.losers), Session::Recap)
+        );
+        assert!(recap.unwrap().contains(">BIGGEST MOVES AT THE CLOSE<"));
+        let f = facts();
+        let json = serde_json::to_string(&f).unwrap();
+        assert_eq!(
+            graphic_for_facts("earnings", &json),
+            Ok(earnings_graphic(&f))
+        );
+        assert!(earnings_graphic(&f).is_some());
+    }
+
+    #[test]
+    fn graphic_for_facts_rejects_unknown_kinds_and_bad_json() {
+        let e = graphic_for_facts("weekly", "{}").unwrap_err();
+        assert!(e.contains("weekly"), "{e}");
+        let e = graphic_for_facts("recap", "not json").unwrap_err();
+        assert!(e.contains("recap"), "{e}");
+        assert!(graphic_for_facts("earnings", &premarket_json()).is_err());
     }
 
     #[test]

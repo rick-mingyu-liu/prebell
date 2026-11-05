@@ -336,6 +336,42 @@ mod tests {
     }
 
     #[test]
+    fn series_leaves_an_empty_slot_for_a_missing_quarter() {
+        let qp = |end: &str, v: f64| QuarterPoint {
+            period_end: end.parse().unwrap(),
+            value: v,
+            form: "10-Q".into(),
+            filed: "2026-08-01".parse().unwrap(),
+        };
+        // The 2025-12 quarter is missing between 2025-09 and 2026-03.
+        let mut f = facts();
+        if let Field::Value(t) = &mut f.trend {
+            t.revenue = vec![
+                qp("2025-09-27", 98.0e9),
+                qp("2026-03-28", 100.4e9),
+                qp("2026-06-27", 99.8e9),
+            ];
+        }
+        let rev = &series(&f)[0];
+        let labels: Vec<Option<&str>> = rev
+            .slots
+            .iter()
+            .map(|s| s.as_ref().map(|b| b.label.as_str()))
+            .collect();
+        assert_eq!(
+            labels,
+            [
+                Some("2025-09"),
+                None,
+                Some("2026-03"),
+                Some("2026-06"),
+                Some("8-K")
+            ]
+        );
+        assert_eq!(rev.release, Some(102.5e9));
+    }
+
+    #[test]
     fn full_year_release_is_not_a_quarter_bar() {
         // A full-year-only release (no quarter): its revenue is a year's.
         let mut f = facts();
