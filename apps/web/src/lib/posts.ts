@@ -1,5 +1,7 @@
 /** Read-only queries over the generator's D1 tables (migrations/0001_init.sql). */
 
+import { COVER_KEY } from "./covers";
+
 export type Lang = "en" | "zh";
 
 /** Content types the site lists and filters by; `posts.content_type` values. */
@@ -95,10 +97,14 @@ export interface CoverRow {
   ticker: string | null;
 }
 
+/**
+ * A row's cover fields. The key is kept only when it is one the covers route serves (`COVER_KEY`), so
+ * the page never links an image that would 404; a missing first line (null or absent) means no lines.
+ */
 export function toCover(r: CoverRow): PostCover {
   return {
-    coverKey: r.cover_key,
-    coverLines: r.cover_line1 === null ? null : [r.cover_line1, r.cover_line2 ?? ""],
+    coverKey: r.cover_key != null && COVER_KEY.test(r.cover_key) ? r.cover_key : null,
+    coverLines: r.cover_line1 == null ? null : [r.cover_line1, r.cover_line2 ?? ""],
     ticker: r.ticker,
   };
 }

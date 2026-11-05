@@ -105,10 +105,10 @@ function Slot({ label, entries, locale, t }: { label: string; entries: CalendarE
 /**
  * The front page: on the left the lead story, the earnings-check covers and the recent list; on the right
  * a ruled column of top movers and who reports next. Below 721px it stacks lead, movers, earnings, recent,
- * reporting (CSS order). The weekly-digest signup and the partner strip close the page. No client JS
- * beyond those two islands.
+ * reporting (CSS order). The weekly-digest signup (only when `signup`, i.e. the Buttondown key is set)
+ * and the partner strip close the page. No client JS beyond those two islands.
  */
-export default function HomeView({ data, locale }: { data: HomeData; locale: Locale }) {
+export default function HomeView({ data, locale, signup }: { data: HomeData; locale: Locale; signup: boolean }) {
   const { lead, leadFacts, earnings, recent, reporting } = data;
   const t = translator(locale);
   const movers = leadFacts
@@ -196,7 +196,7 @@ export default function HomeView({ data, locale }: { data: HomeData; locale: Loc
           )}
         </aside>
       </div>
-      <SignupForm source="home" locale={locale} />
+      {signup && <SignupForm source="home" locale={locale} />}
       <PartnersStrip locale={locale} />
     </>
   );

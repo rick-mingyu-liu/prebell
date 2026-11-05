@@ -111,7 +111,7 @@
   },
   "partners": {
     "from": "From our partners",
-    "affiliateNote": "Affiliate links · not investment advice"
+    "disclosure": "Affiliate links: PreBell may earn a reward if you sign up. Not investment advice."
   },
   "termpocket": {
     "copy": "From the PreBell team. Plan your goals and habits with Pocky, your AI assistant.",
@@ -133,7 +133,8 @@
     "dateline": {
       "premarket": "Before the bell",
       "recap": "After the close",
-      "earnings": "Earnings check"
+      "earnings": "Earnings check",
+      "weekend": "Weekend edition"
     },
     "index": {
       "asOf": "as of {time}",
@@ -162,6 +163,7 @@
     "submit": "Subscribe",
     "sending": "Subscribing…",
     "success": "Check your inbox to confirm.",
+    "already": "You're already on the list.",
     "error": "Something went wrong. Please try again.",
     "invalid": "Enter a valid email address.",
     "manage": "Already subscribed? Manage preferences"

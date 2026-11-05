@@ -1,11 +1,28 @@
-import { statSync } from "node:fs";
+import { existsSync, statSync } from "node:fs";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
+import nextConfig from "../next.config";
 import AuthorBlock from "../src/components/AuthorBlock";
 import { hasAuthorPhoto } from "../src/lib/author";
 
+// next.config starts the Cloudflare dev proxy on import; the test only reads its env.
+vi.mock("@opennextjs/cloudflare", () => ({ initOpenNextCloudflareForDev: () => {} }));
+
 const photo = new URL("../public/author.jpg", import.meta.url);
+
+/** AuthorBlock rendered against a stubbed `hasAuthorPhoto`, so both branches are tested whether or not the file ships. */
+async function renderWithPhotoFlag(flag: boolean): Promise<string> {
+  vi.resetModules();
+  vi.doMock("../src/lib/author", () => ({ hasAuthorPhoto: flag }));
+  try {
+    const { default: Block } = await import("../src/components/AuthorBlock");
+    return renderToStaticMarkup(createElement(Block, { locale: "en" }));
+  } finally {
+    vi.doUnmock("../src/lib/author");
+    vi.resetModules();
+  }
+}
 
 describe("AuthorBlock", () => {
   it("renders name, bio, three links and the archive link in both locales", () => {
@@ -28,28 +45,26 @@ describe("AuthorBlock", () => {
     expect(zh).toContain('href="https://github.com/rick-mingyu-liu"');
   });
 
-  it("shows the photo only when public/author.jpg exists", () => {
-    const out = renderToStaticMarkup(createElement(AuthorBlock, { locale: "en" }));
-    expect(hasAuthorPhoto).toBe(true);
+  it("shows the photo when the build says it was shipped", async () => {
+    const out = await renderWithPhotoFlag(true);
     expect(out).toContain('<img class="author-photo" src="/author.jpg"');
   });
 
   it("renders no image when the photo was not shipped", async () => {
-    vi.resetModules();
-    vi.doMock("../src/lib/author", () => ({ hasAuthorPhoto: false }));
-    try {
-      const { default: NoPhoto } = await import("../src/components/AuthorBlock");
-      const out = renderToStaticMarkup(createElement(NoPhoto, { locale: "en" }));
-      expect(out).not.toContain("<img");
-      expect(out).toContain("Rick Liu");
-      expect(out).toContain('href="/en/archive"');
-    } finally {
-      vi.doUnmock("../src/lib/author");
-      vi.resetModules();
-    }
+    const out = await renderWithPhotoFlag(false);
+    expect(out).not.toContain("<img");
+    expect(out).toContain("Rick Liu");
+    expect(out).toContain('href="/en/archive"');
   });
 
-  it("public/author.jpg exists and is under 60 KB", () => {
-    expect(statSync(photo).size).toBeLessThan(60 * 1024);
+  it("decides the photo flag from public/author.jpg, at build time and in tests alike", () => {
+    const shipped = existsSync(photo);
+    expect(nextConfig.env?.HAS_AUTHOR_PHOTO).toBe(shipped ? "1" : "0");
+    expect(hasAuthorPhoto).toBe(shipped);
+  });
+
+  it("keeps a shipped photo under 60 KB", () => {
+    // No photo ships until Rick supplies one; once he does, it must stay small.
+    if (existsSync(photo)) expect(statSync(photo).size).toBeLessThan(60 * 1024);
   });
 });

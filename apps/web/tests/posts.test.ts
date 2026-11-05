@@ -9,6 +9,7 @@ import {
   PAGE_SIZE,
   parseContentType,
   resolvePost,
+  toCover,
   type D1Like,
 } from "../src/lib/posts";
 import { memoryD1 } from "./d1";
@@ -393,5 +394,26 @@ VALUES (11,'zh','published','中文 AMGN','摘要','# 中文','安进超预期',
       slug: "zzz",
     });
     expect(adj.prev).toMatchObject(none);
+  });
+});
+
+describe("toCover", () => {
+  const row = { cover_key: "covers/amgn-q3-fy2026-earnings.png", cover_line1: "Rev +8%", cover_line2: null, ticker: "AMGN" };
+
+  it("passes a generator-written cover key through", () => {
+    expect(toCover(row)).toEqual({ coverKey: "covers/amgn-q3-fy2026-earnings.png", coverLines: ["Rev +8%", ""], ticker: "AMGN" });
+    expect(toCover({ ...row, cover_key: "covers/recap-2026-10-29.jpg" }).coverKey).toBe("covers/recap-2026-10-29.jpg");
+  });
+
+  it("drops a cover key the covers route would not serve", () => {
+    for (const bad of ["charts/x.png", "covers/../facts.json", "covers/AMGN.png", "covers/x.gif", "covers/x.png?x=1", "", "/covers/x.png"])
+      expect(toCover({ ...row, cover_key: bad }).coverKey, bad).toBeNull();
+    expect(toCover({ ...row, cover_key: null }).coverKey).toBeNull();
+  });
+
+  it("treats a missing first line, null or undefined, as no cover lines", () => {
+    expect(toCover({ ...row, cover_line1: null }).coverLines).toBeNull();
+    // A driver that leaves the column out entirely yields undefined, not null.
+    expect(toCover({ ...row, cover_line1: undefined as unknown as null }).coverLines).toBeNull();
   });
 });

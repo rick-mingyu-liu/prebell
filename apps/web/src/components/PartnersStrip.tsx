@@ -13,7 +13,7 @@ export default function PartnersStrip({ locale }: { locale: Locale }) {
     <aside className="partners-strip" aria-label={t("partners.from")}>
       <span className="partners-label">{t("partners.from")}</span>
       <PartnerLinks />
-      <p className="partners-note">{t("partners.affiliateNote")}</p>
+      <p className="partners-note">{t("partners.disclosure")}</p>
     </aside>
   );
 }

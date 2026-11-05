@@ -1,26 +1,16 @@
-import { getCloudflareContext } from "@opennextjs/cloudflare";
+import { buttondownKey } from "../../../lib/signup";
 import { subscribe, validEmail } from "../../../lib/subscribe";
 
 const SOURCES = ["post", "home", "about"];
 const LANGS = ["en", "zh"];
 const HEADERS = { "Cache-Control": "private, no-store" };
 
-const reply = (body: { ok: boolean }, status: number) => Response.json(body, { status, headers: HEADERS });
-
-/** The Buttondown key from the Worker secrets, or null when unset or there is no Cloudflare context. */
-function apiKey(): string | null {
-  try {
-    const key = (getCloudflareContext().env as { BUTTONDOWN_API_KEY?: unknown }).BUTTONDOWN_API_KEY;
-    return typeof key === "string" && key ? key : null;
-  } catch {
-    return null;
-  }
-}
+const reply = (body: { ok: boolean; already?: true }, status: number) => Response.json(body, { status, headers: HEADERS });
 
 /**
  * Weekly-digest signup. 400 for a malformed request or a filled honeypot (`website`), 503 until the
- * key is configured, 502 when Buttondown fails. Already-subscribed is a success. Responses carry no
- * upstream text.
+ * key is configured, 502 when Buttondown fails. Already-subscribed is a success flagged
+ * `already: true`, so the form can say so. Responses carry no upstream text.
  */
 export async function POST(req: Request) {
   let body: unknown;
@@ -42,9 +32,10 @@ export async function POST(req: Request) {
   )
     return reply({ ok: false }, 400);
 
-  const key = apiKey();
+  const key = buttondownKey();
   if (!key) return reply({ ok: false }, 503);
 
   const result = await subscribe(key, email.trim(), ["prebell", `lang:${lang}`, `source:${source}`]);
-  return result === "error" ? reply({ ok: false }, 502) : reply({ ok: true }, 200);
+  if (result === "error") return reply({ ok: false }, 502);
+  return reply(result === "already" ? { ok: true, already: true } : { ok: true }, 200);
 }

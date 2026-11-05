@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { prerender } from "react-dom/static";
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { Locale } from "../src/i18n/routing";
 import { TERMPOCKET_URL } from "../src/lib/partners";
 import { translator } from "../src/lib/translator";
@@ -18,6 +18,10 @@ vi.mock("next-intl/server", () => ({
   },
 }));
 
+// The signup shows only once the Buttondown key is set; each test picks the Worker env.
+const cf = vi.hoisted(() => ({ env: { BUTTONDOWN_API_KEY: "KEY" } as Record<string, unknown> }));
+vi.mock("@opennextjs/cloudflare", () => ({ getCloudflareContext: () => ({ env: cf.env }) }));
+
 const { default: About } = await import("../src/app/[locale]/about/page");
 
 // The page ends with the async Disclaimer server component, which only a streaming renderer can resolve.
@@ -32,6 +36,10 @@ const at = (out: string, needle: string) => {
 };
 
 describe("About page", () => {
+  beforeEach(() => {
+    cf.env = { BUTTONDOWN_API_KEY: "KEY" };
+  });
+
   it("about page renders the author block, the TermPocket line and the signup", async () => {
     const out = await render("en");
     const order = [
@@ -53,6 +61,15 @@ describe("About page", () => {
     // The signup is the About one.
     expect(out).toContain("Get the weekly digest");
     expect(out).toContain("Content on this site is generated automatically");
+  });
+
+  it("leaves the signup out without the Buttondown key", async () => {
+    cf.env = {};
+    const out = await render("en");
+    expect(out).not.toContain('class="signup"');
+    expect(out).not.toContain("Get the weekly digest");
+    expect(out).toContain('class="author"');
+    expect(out).toContain('class="disclaimer"');
   });
 
   it("renders in Chinese", async () => {

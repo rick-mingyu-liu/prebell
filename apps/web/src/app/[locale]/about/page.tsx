@@ -6,6 +6,7 @@ import SignupForm from "@/components/SignupForm";
 import type { Locale } from "@/i18n/routing";
 import { TERMPOCKET_URL } from "@/lib/partners";
 import { pairedAlternates } from "@/lib/seo";
+import { signupEnabled } from "@/lib/signup";
 
 export async function generateMetadata({ params }: PageProps<"/[locale]/about">): Promise<Metadata> {
   const { locale } = await params;
@@ -32,7 +33,7 @@ export default async function About({ params }: PageProps<"/[locale]/about">) {
           {t("termpocket.cta")}
         </a>
       </p>
-      <SignupForm source="about" locale={locale} />
+      {signupEnabled() && <SignupForm source="about" locale={locale} />}
       <Disclaimer />
     </article>
   );

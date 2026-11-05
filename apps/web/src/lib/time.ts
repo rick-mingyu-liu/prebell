@@ -1,3 +1,4 @@
+import { todayEt } from "./earnings";
 import type { Lang } from "./posts";
 
 const TZ = "America/New_York";
@@ -40,6 +41,17 @@ export function editionAt(now: Date = new Date()): "premarket" | "recap" {
   return Number(etHour.format(now)) < 16 ? "premarket" : "recap";
 }
 
+const etWeekday = new Intl.DateTimeFormat("en-US", { timeZone: TZ, weekday: "short" });
+
+/**
+ * Which dateline the masthead shows at `now`: on a weekday the edition of the moment, on Saturday
+ * and Sunday (US Eastern) the weekend edition, since no brief runs until Monday.
+ */
+export function datelineAt(now: Date = new Date()): "premarket" | "recap" | "weekend" {
+  const day = etWeekday.format(now);
+  return day === "Sat" || day === "Sun" ? "weekend" : editionAt(now);
+}
+
 const enTime = new Intl.DateTimeFormat("en-US", { timeZone: TZ, timeStyle: "short" });
 const zhTime = new Intl.DateTimeFormat("zh-CN", { timeZone: TZ, hour: "numeric", minute: "2-digit", hour12: true });
 
@@ -70,4 +82,17 @@ export function formatMonthDay(date: string, lang: Lang): string {
   const d = new Date(`${date}T12:00:00Z`);
   if (Number.isNaN(d.getTime())) return date;
   return (lang === "en" ? enMonthDay : zhMonthDay).format(d);
+}
+
+/**
+ * A UTC ISO timestamp as an as-of label: the Eastern time of day when it falls on today's Eastern
+ * date ("4:46 PM ET"), with the month and day in front otherwise ("Nov 4, 4:46 PM ET" /
+ * "11月4日 下午4:46（美东）"), so a stale snapshot never reads as today's.
+ */
+export function formatEtDateTime(iso: string | null | undefined, lang: Lang, now: Date = new Date()): string {
+  const time = formatEtTime(iso, lang);
+  if (!time) return "";
+  const day = todayEt(new Date(iso!));
+  if (day === todayEt(now)) return time;
+  return lang === "en" ? `${formatMonthDay(day, lang)}, ${time}` : `${formatMonthDay(day, lang)} ${time}`;
 }

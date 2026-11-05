@@ -112,8 +112,11 @@ describe("POST /api/subscribe", () => {
     expect(await res.json()).toEqual({ ok: true });
     expect(res.headers.get("Cache-Control")).toBe("private, no-store");
     expect(JSON.parse(f.mock.calls[0][1]?.body as string).tags).toEqual(["prebell", "lang:zh", "source:post"]);
+    // An address already on the list is a success too, flagged so the form can say so.
     vi.stubGlobal("fetch", vi.fn(() => reply(400, { detail: "already subscribed" })));
-    expect(await (await post(good)).json()).toEqual({ ok: true });
+    const again = await post(good);
+    expect(again.status).toBe(200);
+    expect(await again.json()).toEqual({ ok: true, already: true });
     expect(errors).not.toHaveBeenCalled();
   });
 

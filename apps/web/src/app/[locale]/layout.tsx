@@ -12,7 +12,7 @@ import { todayEt } from "@/lib/earnings";
 import { inter, newsreader } from "@/lib/fonts";
 import { type IndexLineView, loadIndexLine } from "@/lib/indexline";
 import { siteOrigin } from "@/lib/seo";
-import { editionAt, formatDate } from "@/lib/time";
+import { datelineAt, formatDate } from "@/lib/time";
 import { translator } from "@/lib/translator";
 import { htmlLang, routing, type Locale } from "@/i18n/routing";
 import "../globals.css";
@@ -31,10 +31,10 @@ export async function generateMetadata({ params }: LayoutProps<"/[locale]">): Pr
   };
 }
 
-/** "Wednesday, November 4, 2026 · After the close": today's ET date and the edition of the moment. */
+/** "Wednesday, November 4, 2026 · After the close": today's ET date and the edition of the moment ("Weekend edition" on Saturday and Sunday). */
 function defaultDateline(locale: Locale): string {
   const t = translator(locale);
-  const edition = t(`paper.dateline.${editionAt()}`);
+  const edition = t(`paper.dateline.${datelineAt()}`);
   return `${formatDate(todayEt(), locale, "full")} · ${edition}`;
 }
 

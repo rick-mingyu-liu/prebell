@@ -5,7 +5,33 @@ import { signup as signupEn } from "../../messages/en.json";
 import { signup as signupZh } from "../../messages/zh.json";
 import type { Locale } from "../i18n/routing";
 
-type Status = "idle" | "loading" | "done" | "error" | "invalid";
+type Status = "idle" | "loading" | "done" | "already" | "error" | "invalid";
+type SignupMessages = typeof signupEn;
+
+/** The form's state after /api/subscribe answers: a 200 is done (or already, when the route says so). */
+export async function statusOf(res: Response): Promise<Status> {
+  if (!res.ok) return res.status === 400 ? "invalid" : "error";
+  const body: unknown = await res.json().catch(() => null);
+  return typeof body === "object" && body !== null && (body as { already?: unknown }).already === true
+    ? "already"
+    : "done";
+}
+
+/** The inline line under the form for `status`, or null while idle or sending. */
+export function messageFor(status: Status, m: SignupMessages): string | null {
+  switch (status) {
+    case "done":
+      return m.success;
+    case "already":
+      return m.already;
+    case "error":
+      return m.error;
+    case "invalid":
+      return m.invalid;
+    default:
+      return null;
+  }
+}
 
 /**
  * Weekly-digest signup: email field, Subscribe button and an inline result. Posts JSON to
@@ -28,19 +54,20 @@ export default function SignupForm({ source, locale }: { source: "post" | "home"
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ email, source, lang: locale, website: String(data.get("website") ?? "") }),
       });
-      setStatus(res.ok ? "done" : res.status === 400 ? "invalid" : "error");
+      setStatus(await statusOf(res));
     } catch {
       setStatus("error");
     }
   }
 
-  const message = status === "done" ? m.success : status === "error" ? m.error : status === "invalid" ? m.invalid : null;
+  const message = messageFor(status, m);
+  const settled = status === "done" || status === "already";
 
   return (
     <section className="signup">
       <h2 className="signup-title">{m.heading}</h2>
       <p className="signup-copy">{m.copy}</p>
-      {status !== "done" && (
+      {!settled && (
         <form className="signup-form" onSubmit={onSubmit} noValidate>
           <label className="sr-only" htmlFor={`signup-email-${source}`}>
             {m.emailLabel}
@@ -60,7 +87,7 @@ export default function SignupForm({ source, locale }: { source: "post" | "home"
         </form>
       )}
       {message && (
-        <p className={status === "done" ? "signup-msg" : "signup-msg err"} role={status === "done" ? "status" : "alert"}>
+        <p className={settled ? "signup-msg" : "signup-msg err"} role={settled ? "status" : "alert"}>
           {message}
         </p>
       )}

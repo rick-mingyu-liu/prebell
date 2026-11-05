@@ -111,7 +111,7 @@
   },
   "partners": {
     "from": "合作伙伴",
-    "affiliateNote": "推广链接 · 不构成投资建议"
+    "disclosure": "推广链接：通过链接注册，PreBell 可能获得奖励。不构成投资建议。"
   },
   "termpocket": {
     "copy": "来自 PreBell 团队。用 AI 助手 Pocky 规划你的目标与习惯。",
@@ -133,7 +133,8 @@
     "dateline": {
       "premarket": "盘前",
       "recap": "收盘后",
-      "earnings": "财报速评"
+      "earnings": "财报速评",
+      "weekend": "周末版"
     },
     "index": {
       "asOf": "截至 {time}",
@@ -162,6 +163,7 @@
     "submit": "订阅",
     "sending": "正在订阅…",
     "success": "请查收邮件并确认订阅。",
+    "already": "你已经在订阅名单上了。",
     "error": "出了点问题，请稍后再试。",
     "invalid": "请输入有效的邮箱地址。",
     "manage": "已经订阅？管理订阅偏好"

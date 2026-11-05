@@ -71,8 +71,8 @@ const data = (over: Partial<HomeData> = {}): HomeData => ({
   ...over,
 });
 
-const render = (over: Partial<HomeData> = {}, locale: Locale = "en") =>
-  renderToStaticMarkup(<HomeView data={data(over)} locale={locale} />);
+const render = (over: Partial<HomeData> = {}, locale: Locale = "en", signup = true) =>
+  renderToStaticMarkup(<HomeView data={data(over)} locale={locale} signup={signup} />);
 
 /** Where each section opens in the markup, in document order. */
 const at = (out: string, cls: string) => {
@@ -135,6 +135,14 @@ describe("HomeView front page", () => {
     // The weekly-digest signup and the partner strip close the page.
     expect(out.indexOf('class="signup"')).toBeGreaterThan(offsets[offsets.length - 1]);
     expect(out.indexOf('class="partners-strip"')).toBeGreaterThan(out.indexOf('class="signup"'));
+  });
+
+  it("leaves the signup out until the Buttondown key is set, keeping the partner strip", () => {
+    const out = render({}, "en", false);
+    expect(out).not.toContain('class="signup"');
+    expect(out).not.toContain("Get the weekly digest");
+    expect(out).toContain('class="partners-strip"');
+    expect(render({}, "en", true)).toContain('id="signup-email-home"');
   });
 
   it('renders "No clear news" quietly in the movers column', () => {

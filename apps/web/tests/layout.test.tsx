@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { renderToStaticMarkup } from "react-dom/server";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { IndexLineView } from "../src/lib/indexline";
 
 // The language link reads the router; the shell test only needs to know it is in the nav.
@@ -27,6 +27,15 @@ const futures: IndexLineView = {
 };
 
 describe("paper shell", () => {
+  // The as-of label compares the snapshot's Eastern day with today's: pin today to the snapshots' day.
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-11-04T22:00:00Z")); // Wed Nov 4, 5:00 PM EST
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
   it("renders masthead, dateline, nav and index line in order", () => {
     const out =
       renderToStaticMarkup(<Masthead locale="en" dateline="Wednesday, November 4, 2026 · After the close" />) +
@@ -59,6 +68,21 @@ describe("paper shell", () => {
     expect(out).toContain('<span class="num down"><span aria-hidden="true">▼</span><span class="sr-only">down </span>0.40%</span>');
     expect(out).toContain('<span class="num flat">0.00%</span>');
     expect(out).toContain("as of 4:41 PM ET");
+  });
+
+  it("shows only the as-of time for a snapshot from today, in both locales", () => {
+    const en = renderToStaticMarkup(<IndexLine line={recap} locale="en" />);
+    expect(en).toContain('<time class="ix ix-asof" dateTime="2026-11-04T21:41:00Z">as of 4:41 PM ET</time>');
+    const zh = renderToStaticMarkup(<IndexLine line={recap} locale="zh" />);
+    expect(zh).toContain(">截至 下午4:41（美东）</time>");
+  });
+
+  it("adds the date to the as-of time for a snapshot from an earlier day, in both locales", () => {
+    vi.setSystemTime(new Date("2026-11-05T14:00:00Z")); // Thu Nov 5, 9:00 AM EST, before the next snapshot
+    const en = renderToStaticMarkup(<IndexLine line={recap} locale="en" />);
+    expect(en).toContain(">as of Nov 4, 4:41 PM ET</time>");
+    const zh = renderToStaticMarkup(<IndexLine line={recap} locale="zh" />);
+    expect(zh).toContain(">截至 11月4日 下午4:41（美东）</time>");
   });
 
   it("omits the index line without a snapshot", () => {

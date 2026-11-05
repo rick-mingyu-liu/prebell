@@ -1,5 +1,15 @@
 import { describe, expect, it } from "vitest";
-import { editionAt, formatDate, formatDayShort, formatEt, formatEtTime, formatMonthDay } from "../src/lib/time";
+import { translator } from "../src/lib/translator";
+import {
+  datelineAt,
+  editionAt,
+  formatDate,
+  formatDayShort,
+  formatEt,
+  formatEtDateTime,
+  formatEtTime,
+  formatMonthDay,
+} from "../src/lib/time";
 
 describe("formatEt", () => {
   it("formats in US Eastern for both languages", () => {
@@ -63,5 +73,54 @@ describe("editionAt", () => {
     expect(editionAt(new Date("2026-11-05T04:30:00Z"))).toBe("recap"); // 11:30 PM ET
     expect(editionAt(new Date("2026-06-04T19:59:00Z"))).toBe("premarket"); // 3:59 PM EDT
     expect(editionAt(new Date("2026-06-04T20:00:00Z"))).toBe("recap"); // 4:00 PM EDT
+  });
+});
+
+describe("datelineAt", () => {
+  it("follows the edition on weekdays, in EST and EDT", () => {
+    expect(datelineAt(new Date("2026-11-04T12:00:00Z"))).toBe("premarket"); // Wed 7:00 AM EST
+    expect(datelineAt(new Date("2026-11-04T21:00:00Z"))).toBe("recap"); // Wed 4:00 PM EST
+    expect(datelineAt(new Date("2026-06-05T19:59:00Z"))).toBe("premarket"); // Fri 3:59 PM EDT
+    expect(datelineAt(new Date("2026-06-05T20:00:00Z"))).toBe("recap"); // Fri 4:00 PM EDT
+  });
+
+  it("is the weekend edition all Saturday and Sunday in Eastern time", () => {
+    expect(datelineAt(new Date("2026-11-07T12:00:00Z"))).toBe("weekend"); // Sat 7:00 AM EST
+    expect(datelineAt(new Date("2026-11-07T21:30:00Z"))).toBe("weekend"); // Sat 4:30 PM EST
+    expect(datelineAt(new Date("2026-11-09T04:30:00Z"))).toBe("weekend"); // Sun 11:30 PM EST
+    // Friday evening in New York is already Saturday in UTC: still Friday's recap.
+    expect(datelineAt(new Date("2026-11-07T02:00:00Z"))).toBe("recap"); // Fri 9:00 PM EST
+    // Monday early morning in UTC is still Sunday in New York.
+    expect(datelineAt(new Date("2026-11-09T03:00:00Z"))).toBe("weekend"); // Sun 10:00 PM EST
+    expect(datelineAt(new Date("2026-11-09T05:00:00Z"))).toBe("premarket"); // Mon 12:00 AM EST
+  });
+
+  it("has a label for every dateline in both locales", () => {
+    expect(translator("en")("paper.dateline.weekend")).toBe("Weekend edition");
+    expect(translator("zh")("paper.dateline.weekend")).toBe("周末版");
+  });
+});
+
+describe("formatEtDateTime", () => {
+  const now = new Date("2026-11-05T15:00:00Z"); // Thu Nov 5, 10:00 AM EST
+
+  it("shows only the time when the timestamp is today in Eastern time", () => {
+    expect(formatEtDateTime("2026-11-05T13:30:00Z", "en", now)).toBe("8:30 AM ET");
+    expect(formatEtDateTime("2026-11-05T13:30:00Z", "zh", now)).toBe("上午8:30（美东）");
+  });
+
+  it("adds the month and day when the timestamp is an earlier Eastern day", () => {
+    expect(formatEtDateTime("2026-11-04T21:46:00Z", "en", now)).toBe("Nov 4, 4:46 PM ET");
+    expect(formatEtDateTime("2026-11-04T21:46:00Z", "zh", now)).toBe("11月4日 下午4:46（美东）");
+  });
+
+  it("uses the Eastern calendar day, not the UTC one", () => {
+    // 11:30 PM EST on Nov 4 is Nov 5 in UTC, but still yesterday in New York.
+    expect(formatEtDateTime("2026-11-05T04:30:00Z", "en", now)).toBe("Nov 4, 11:30 PM ET");
+  });
+
+  it("returns empty for a missing or bad timestamp", () => {
+    expect(formatEtDateTime(null, "en", now)).toBe("");
+    expect(formatEtDateTime("nope", "zh", now)).toBe("");
   });
 });

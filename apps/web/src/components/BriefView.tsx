@@ -18,6 +18,8 @@ import { splitTail, trimHead, trimStory } from "../lib/trim";
 export interface BriefViewProps {
   data: BriefData;
   locale: Locale;
+  /** Whether to show the weekly-digest signup: only once the Buttondown key is set. */
+  signup: boolean;
 }
 
 /**
@@ -25,9 +27,9 @@ export interface BriefViewProps {
  * then the body. A brief with facts leads with its summary and the movers table, and its body loses
  * the tables the facts replace; without facts, and for an earnings check, the body keeps its tables
  * (the key-figure table exactly as written) and an earnings check adds its charts. Then the sources,
- * the post's own disclaimer, the author, the signup, a brief's neighbours and the partner strip.
+ * the post's own disclaimer, the author, the signup (when enabled), a brief's neighbours and the partner strip.
  */
-export default function BriefView({ data, locale }: BriefViewProps) {
+export default function BriefView({ data, locale, signup }: BriefViewProps) {
   const { post, facts, adjacent, charts } = data;
   const t = translator(locale);
   const kind = briefKind(post.contentType);
@@ -103,7 +105,7 @@ export default function BriefView({ data, locale }: BriefViewProps) {
       {story?.disclaimer && <p className="story-disclaimer">{story.disclaimer}</p>}
 
       <AuthorBlock locale={locale} />
-      <SignupForm source="post" locale={locale} />
+      {signup && <SignupForm source="post" locale={locale} />}
       {(adjacent.prev || adjacent.next) && (
         <nav className="adjacent" aria-label={t("brief.adjacent")}>
           {adjacent.prev && (

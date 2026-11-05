@@ -52,8 +52,8 @@ const data = (over: Partial<BriefData> = {}): BriefData => ({
   ...over,
 });
 
-const render = (over: Partial<BriefData> = {}, locale: "en" | "zh" = "en") =>
-  renderToStaticMarkup(<BriefView data={data(over)} locale={locale} />);
+const render = (over: Partial<BriefData> = {}, locale: "en" | "zh" = "en", signup = true) =>
+  renderToStaticMarkup(<BriefView data={data(over)} locale={locale} signup={signup} />);
 
 /** Position of `needle` in `out`, failing the test when it is absent. */
 const at = (out: string, needle: string | RegExp) => {
@@ -268,6 +268,14 @@ describe("BriefView", () => {
     expect(out).toContain('role="status"');
     expect(out).not.toContain("story-meta");
     expect(out).not.toContain('class="charts"');
+  });
+
+  it("leaves the signup out until the Buttondown key is set, keeping the author block", () => {
+    const out = render({}, "en", false);
+    expect(out).not.toContain('class="signup"');
+    expect(out).not.toContain('id="signup-email-post"');
+    expect(out).toContain('class="author"');
+    expect(out).toContain('class="adjacent"');
   });
 
   it("drops the adjacent links when there are no neighbours", () => {

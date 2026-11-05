@@ -162,7 +162,7 @@ describe("PartnersStrip", () => {
     const out = renderToStaticMarkup(createElement(PartnersStrip, { locale: "en" }));
     expect(out).toContain('<aside class="partners-strip"');
     expect(out).toContain("From our partners");
-    expect(out).toContain("Affiliate links · not investment advice");
+    expect(out).toContain('<p class="partners-note">Affiliate links: PreBell may earn a reward if you sign up. Not investment advice.</p>');
     for (const host of PARTNER_HOSTS) expect(out).not.toContain(host);
     expect(out).not.toContain("/logos/partners/");
   });
@@ -170,7 +170,7 @@ describe("PartnersStrip", () => {
   it("uses the Chinese copy on ZH pages", () => {
     const out = renderToStaticMarkup(createElement(PartnersStrip, { locale: "zh" }));
     expect(out).toContain("合作伙伴");
-    expect(out).toContain("推广链接 · 不构成投资建议");
+    expect(out).toContain("推广链接：通过链接注册，PreBell 可能获得奖励。不构成投资建议。");
   });
 
   it("lists the partner names as plain sponsored links, no logos, no group headings", () => {
