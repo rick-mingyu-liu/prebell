@@ -1,6 +1,7 @@
 pub mod anchor;
 pub mod claude;
 pub mod clock;
+pub mod cover;
 pub mod deepseek;
 pub mod earnings;
 pub mod edgar;

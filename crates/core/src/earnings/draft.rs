@@ -111,7 +111,7 @@ fn trim_dec(v: f64, max: usize) -> String {
 }
 
 /// A figure value for the key-figures table.
-pub(crate) fn fmt_value(v: f64, unit: Unit, lang: Lang) -> String {
+pub fn fmt_value(v: f64, unit: Unit, lang: Lang) -> String {
     let sign = if v < 0.0 { "-" } else { "" };
     let a = v.abs();
     match (unit, lang) {

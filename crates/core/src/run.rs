@@ -9,6 +9,7 @@ use serde::de::DeserializeOwned;
 use serde::Serialize;
 
 use crate::clock::{decide, et, premarket_window, trading_day, DayKind, SlotDecision, Window};
+use crate::cover::{brief_lines, brief_scene_subject, index_snapshot, CoverLines, IndexSnapshot};
 use crate::facts::{missing_required, Field, NewsReason, PremarketFacts};
 use crate::numbers::Lang;
 use crate::premarket::build_facts;
@@ -44,6 +45,12 @@ pub trait Content {
     fn sources(&self, f: &Self::Facts) -> Vec<NewsReason>;
     /// Build counters carried in the facts, for the log and `last_error`.
     fn diagnostics(&self, f: &Self::Facts) -> Vec<String>;
+    /// The two lines printed on the post's cover.
+    fn cover_lines(&self, f: &Self::Facts) -> CoverLines;
+    /// The market snapshot the front page's index line is built from.
+    fn index_snapshot(&self, f: &Self::Facts) -> IndexSnapshot;
+    /// What the cover's generated background shows.
+    fn scene_subject(&self, f: &Self::Facts) -> String;
 
     fn run_key(&self, date: NaiveDate) -> String {
         format!("{}:{}", self.content_type(), date.format("%Y-%m-%d"))
@@ -101,6 +108,15 @@ impl Content for Premarket<'_> {
     }
     fn diagnostics(&self, f: &PremarketFacts) -> Vec<String> {
         f.diagnostics.clone()
+    }
+    fn cover_lines(&self, f: &PremarketFacts) -> CoverLines {
+        brief_lines(&f.futures, &f.gainers, &f.losers, true)
+    }
+    fn index_snapshot(&self, f: &PremarketFacts) -> IndexSnapshot {
+        index_snapshot("premarket", f.as_of_utc, &f.futures)
+    }
+    fn scene_subject(&self, f: &PremarketFacts) -> String {
+        brief_scene_subject(f.trading_date)
     }
 }
 /// A `building` run younger than this is assumed to be in flight. A build
@@ -713,6 +729,53 @@ mod tests {
         s.translations.borrow()[&(1, lang.to_string())]
             .status
             .clone()
+    }
+
+    #[test]
+    fn premarket_cover_and_snapshot_come_from_the_futures() {
+        let (md, llm) = (md(true), llm(true, true));
+        let c = Premarket {
+            md: &md,
+            ns: &FakeNs,
+            llm: &llm,
+        };
+        let f = PremarketFacts {
+            trading_date: "2026-10-29".parse().unwrap(),
+            as_of_utc: utc("2026-10-29T12:30:09Z"),
+            futures: vec![
+                (
+                    "S&P 500 futures".into(),
+                    Field::Value(q("ES=F", 5800.0, -1.14)),
+                ),
+                (
+                    "Nasdaq 100 futures".into(),
+                    Field::Missing {
+                        reason: "HTTP 429".into(),
+                    },
+                ),
+            ],
+            gainers: vec![crate::facts::Mover {
+                quote: q("AAPL", 230.0, 8.0),
+                name: "Apple".into(),
+                reasons: vec![],
+            }],
+            losers: vec![],
+            macro_items: Field::Missing {
+                reason: "n/a".into(),
+            },
+            watch_list: Field::Missing {
+                reason: "n/a".into(),
+            },
+            diagnostics: vec![],
+        };
+        let lines = c.cover_lines(&f);
+        assert_eq!(lines.en, ["S&P futures −1.14%", "AAPL +8.00%"]);
+        assert_eq!(lines.zh[0], "标普500期货 −1.14%");
+        let snap = c.index_snapshot(&f);
+        assert_eq!(snap.kind, "premarket");
+        assert_eq!(snap.as_of_utc, "2026-10-29T12:30:09Z");
+        assert_eq!(snap.entries.len(), 1);
+        assert_eq!(c.scene_subject(&f), "a newsroom desk with printed pages");
     }
 
     #[test]

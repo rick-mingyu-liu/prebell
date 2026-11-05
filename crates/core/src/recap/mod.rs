@@ -8,6 +8,7 @@ use chrono::{DateTime, Datelike, Duration, NaiveDate, NaiveTime, Timelike, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::clock::{et, recap_window, trading_day, DayKind, Window};
+use crate::cover::{brief_lines, brief_scene_subject, index_snapshot, CoverLines, IndexSnapshot};
 use crate::earnings::facts::EarningsFacts;
 use crate::facts::{quote_numbers, Field, Mover, NewsReason, Quote};
 use crate::numbers::Lang;
@@ -460,6 +461,15 @@ impl Content for Recap<'_> {
     }
     fn diagnostics(&self, f: &RecapFacts) -> Vec<String> {
         f.diagnostics.clone()
+    }
+    fn cover_lines(&self, f: &RecapFacts) -> CoverLines {
+        brief_lines(&f.indexes, &f.gainers, &f.losers, false)
+    }
+    fn index_snapshot(&self, f: &RecapFacts) -> IndexSnapshot {
+        index_snapshot("recap", f.as_of_utc, &f.indexes)
+    }
+    fn scene_subject(&self, f: &RecapFacts) -> String {
+        brief_scene_subject(f.trading_date)
     }
     async fn write(&self, f: &RecapFacts, lang: Lang) -> Result<(Draft, String), Vec<String>> {
         draft::write(self.llm, f, lang).await
@@ -1742,6 +1752,44 @@ mod run_tests {
             "{out:?}"
         );
         assert!(s.posts.borrow().is_empty());
+    }
+
+    #[test]
+    fn recap_cover_and_snapshot_come_from_the_index_closes() {
+        let (md, llm, store) = (md(true), llm(true, true), MemStore::default());
+        let c = Recap {
+            md: &md,
+            ns: &FakeNs,
+            llm: &llm,
+            store: &store,
+        };
+        let f = RecapFacts {
+            trading_date: "2026-10-29".parse().unwrap(),
+            as_of_utc: utc("2026-10-29T20:45:00Z"),
+            early_close: false,
+            indexes: vec![
+                ("S&P 500".into(), Field::Value(q("^GSPC", 5850.12, 0.51))),
+                ("Dow Jones".into(), Field::Value(q("^DJI", 43000.0, -1.2))),
+            ],
+            gainers: vec![],
+            losers: vec![Mover {
+                quote: q("FIS", 60.0, -23.67),
+                name: "Fidelity National".into(),
+                reasons: vec![],
+            }],
+            after_hours: Field::Missing {
+                reason: "n/a".into(),
+            },
+            reported: vec![],
+            diagnostics: vec![],
+        };
+        let lines = c.cover_lines(&f);
+        assert_eq!(lines.en, ["Dow −1.20%", "FIS −23.67%"]);
+        assert_eq!(lines.zh[0], "道指 −1.20%");
+        let snap = c.index_snapshot(&f);
+        assert_eq!(snap.kind, "recap");
+        assert_eq!(snap.entries.len(), 2);
+        assert_eq!(c.scene_subject(&f), "a newsroom desk with printed pages");
     }
 
     #[tokio::test]
