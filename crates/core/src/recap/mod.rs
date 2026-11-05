@@ -1816,7 +1816,7 @@ mod run_tests {
         assert_eq!(snap.entries.len(), 2);
         assert_eq!(
             c.scene_subject(&f),
-            "a suspension bridge over a calm river at first light"
+            "a highway interchange at night seen from above"
         );
     }
 
