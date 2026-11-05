@@ -21,7 +21,7 @@ export default function Cover({ coverKey, lines, tag, size, alt }: CoverProps) {
       <div className="cover-shade"></div>
       <div className="cover-in">
         <span className="cover-tag">
-          {tag.kind === "label" ? tag.text : logo ? <img src={logo} alt={tag.ticker} /> : tag.ticker}
+          {tag.kind === "label" ? tag.text : logo ? <img src={logo} alt={tag.ticker} loading="lazy" /> : tag.ticker}
         </span>
         {stat && (
           <>

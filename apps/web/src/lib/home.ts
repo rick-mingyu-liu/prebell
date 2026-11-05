@@ -18,7 +18,7 @@ export interface HomeData {
   earnings: PostListItem[];
   /** Other briefs and older checks, newest published first, at most `RECENT_SHOWN`. */
   recent: PostListItem[];
-  /** The next calendar day with reports, from today for a premarket lead and from tomorrow otherwise. */
+  /** The next calendar day with reports, from today for a premarket lead and from the day after a recap's date. */
   reporting: StripDay | null;
 }
 
@@ -26,6 +26,16 @@ export interface HomeData {
 function pickLead(premarket: PostHead | null, recap: PostHead | null): PostHead | null {
   if (!premarket || !recap) return premarket ?? recap;
   return (recap.publishedAt ?? "") > (premarket.publishedAt ?? "") ? recap : premarket;
+}
+
+/**
+ * The first day the reporting block may show: today under a premarket lead, else the day after the lead's
+ * trading date. That is today while yesterday's recap still leads overnight, and never a day before today.
+ */
+function reportingFrom(lead: PostHead | null, today: string): string {
+  if (!lead || lead.contentType === "premarket") return today;
+  const next = addDays(lead.tradingDate, 1);
+  return next > today ? next : today;
 }
 
 const newestFirst = (a: PostListItem, b: PostListItem) => (b.publishedAt ?? "").localeCompare(a.publishedAt ?? "");
@@ -46,14 +56,15 @@ export async function loadHome(
   const [premarket, recap, briefs, checks] = await Promise.all([
     getLatestPost(db, lang, "premarket"),
     getLatestPost(db, lang, "recap"),
-    listRecentBriefs(db, lang, RECENT_SHOWN),
+    // One extra: the list may include the lead, which recent leaves out.
+    listRecentBriefs(db, lang, RECENT_SHOWN + 1),
     listLatestEarnings(db, lang, EARNINGS_SHOWN + RECENT_SHOWN),
   ]);
   const lead = pickLead(premarket, recap);
   const kind = lead?.contentType === "recap" ? "recap" : "premarket";
   const [leadFacts, reporting] = await Promise.all([
     lead ? loadFacts(bucket, lead.factsKey, kind, onError && ((e) => onError(e, lead.factsKey))) : null,
-    stripDay(db, lead?.contentType === "premarket" ? today : addDays(today, 1), { exact: false, lang }),
+    stripDay(db, reportingFrom(lead, today), { exact: false, lang }),
   ]);
   const recent = [...briefs.filter((p) => p.slug !== lead?.slug), ...checks.slice(EARNINGS_SHOWN)]
     .sort(newestFirst)

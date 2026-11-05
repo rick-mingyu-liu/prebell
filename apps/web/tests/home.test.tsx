@@ -84,8 +84,7 @@ const at = (out: string, cls: string) => {
 describe("HomeView front page", () => {
   it("renders lead, earnings row, recent list, movers column and reporting block in order", () => {
     const out = render();
-    // React hoists image preloads ahead of the markup; the page itself opens with the grid.
-    expect(out.replace(/^(<link [^>]*>)*/, "").startsWith('<div class="front">')).toBe(true);
+    expect(out.startsWith('<div class="front">')).toBe(true);
     const order = ["front-lead", "front-earnings", "front-recent", "front-side", "front-movers", "front-reporting"];
     const offsets = order.map((c) => at(out, c));
     expect([...offsets].sort((a, b) => a - b)).toEqual(offsets);
@@ -94,7 +93,7 @@ describe("HomeView front page", () => {
     expect(out).toContain("Before the bell");
     expect(out).toContain('class="cover cover-lead"');
     expect(out).toContain('src="/covers/premarket-2026-10-30.png"');
-    expect(out).toContain(">Fri, Oct 30 · Premarket brief</span>");
+    expect(out).toContain(">Oct 30 · Premarket</span>");
     expect(out).toContain("S&amp;P futures −1.14%");
     expect(out).toMatch(/<h1[^>]*><a href="\/en\/p\/premarket-2026-10-30">Futures slide as Intel sinks<\/a><\/h1>/);
     expect(out).toContain("Stock futures are lower before the open.");
@@ -104,7 +103,7 @@ describe("HomeView front page", () => {
     // Earnings checks: a small cover with the company logo, a serif headline linking to the check.
     expect(out).toContain('<h2 class="section-title">Earnings checks</h2>');
     expect(out).toContain('class="cover cover-small"');
-    expect(out).toContain('<img src="/logos/companies/AAPL.svg" alt="AAPL"/>');
+    expect(out).toContain('<img src="/logos/companies/AAPL.svg" alt="AAPL" loading="lazy"/>');
     expect(out).toContain('href="/en/p/aapl-2026-10-29-earnings"');
     expect(out).toContain("Apple Q4: revenue up 8%");
 
@@ -159,9 +158,11 @@ describe("HomeView front page", () => {
     expect(render({ earnings: [] }, "zh")).toContain("暂无财报速评。");
   });
 
-  it("labels a check without a ticker with the title's first word", () => {
+  it("labels a check without a ticker as an earnings check", () => {
     const out = render({ earnings: [item({ ticker: null, title: "Amgen: revenue up 8%" })] });
-    expect(out).toContain('<span class="cover-tag">Amgen</span>');
+    expect(out).toContain('<span class="cover-tag">Earnings check</span>');
+    const zh = render({ earnings: [item({ ticker: null, title: "安进：营收增长8%" })] }, "zh");
+    expect(zh).toContain('<span class="cover-tag">财报速评</span>');
   });
 
   it("names the recap edition in the kicker, the cover label and the link", () => {
@@ -170,8 +171,9 @@ describe("HomeView front page", () => {
       leadFacts: null,
     });
     expect(out).toContain("After the close");
-    expect(out).toContain(">Fri, Oct 30 · After-close recap</span>");
+    expect(out).toContain(">Oct 30 · Recap</span>");
     expect(out).toContain("Read the full recap →");
+    expect(render({ lead: lead({ contentType: "recap" }) }, "zh")).toContain(">10月30日 · 收盘回顾</span>");
     expect(out).toContain('href="/en/p/recap-2026-10-30"');
   });
 
@@ -217,7 +219,7 @@ describe("HomeView ZH", () => {
   it("omits the English reasons and uses Chinese labels", () => {
     const out = render({}, "zh");
     expect(out).toContain("盘前");
-    expect(out).toContain(">10月30日 周五 · 盘前简报</span>");
+    expect(out).toContain(">10月30日 · 盘前</span>");
     expect(out).toContain("<h2 class=\"section-title\">涨跌榜</h2>");
     expect(out).toContain(">INTC</span>");
     expect(out).not.toContain("Shares surged");

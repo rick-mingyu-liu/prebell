@@ -62,3 +62,12 @@ export function formatDayShort(date: string, lang: Lang): string {
   if (Number.isNaN(d.getTime())) return date;
   return lang === "en" ? enDay.format(d) : `${zhMonthDay.format(d)} ${zhWeekday.format(d)}`;
 }
+
+const enMonthDay = new Intl.DateTimeFormat("en-US", { timeZone: "UTC", month: "short", day: "numeric" });
+
+/** A trading date as month and day only: "Nov 4" / "11月4日". */
+export function formatMonthDay(date: string, lang: Lang): string {
+  const d = new Date(`${date}T12:00:00Z`);
+  if (Number.isNaN(d.getTime())) return date;
+  return (lang === "en" ? enMonthDay : zhMonthDay).format(d);
+}

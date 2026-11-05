@@ -25,7 +25,9 @@ describe("Cover", () => {
     expect(out).toContain('<img class="cover-bg" src="/covers/aapl-q4.png" alt="" loading="lazy"/>');
     expect(out).toContain('<div class="cover-shade"></div>');
     expect(out).toContain('<div class="cover-in">');
-    expect(out).toMatch(new RegExp(`<span class="cover-tag"><img src="${logo}"`));
+    expect(out).toContain(`<span class="cover-tag"><img src="${logo}" alt="AAPL" loading="lazy"/></span>`);
+    // A lazy image is not hoisted into a preload link.
+    expect(out).not.toContain("<link");
     expect(out).toContain('<p class="cover-stat">Revenue $94.9B<br/>Beat by 2.1%</p>');
     expect(out).toContain('<span class="cover-bar"></span>');
   });

@@ -148,6 +148,10 @@
       "asOf": "as of {time}",
       "up": "up",
       "down": "down"
+    },
+    "edition": {
+      "premarket": "Premarket",
+      "recap": "Recap"
     }
   },
   "author": {

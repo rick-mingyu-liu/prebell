@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { editionAt, formatDate, formatDayShort, formatEt, formatEtTime } from "../src/lib/time";
+import { editionAt, formatDate, formatDayShort, formatEt, formatEtTime, formatMonthDay } from "../src/lib/time";
 
 describe("formatEt", () => {
   it("formats in US Eastern for both languages", () => {
@@ -36,6 +36,14 @@ describe("formatDayShort", () => {
   });
   it("returns a bad date unchanged", () => {
     expect(formatDayShort("nope", "en")).toBe("nope");
+  });
+});
+
+describe("formatMonthDay", () => {
+  it("is the month and day without the weekday or year", () => {
+    expect(formatMonthDay("2026-11-04", "en")).toBe("Nov 4");
+    expect(formatMonthDay("2026-11-04", "zh")).toBe("11月4日");
+    expect(formatMonthDay("nope", "en")).toBe("nope");
   });
 });
 

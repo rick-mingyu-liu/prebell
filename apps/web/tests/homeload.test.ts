@@ -110,7 +110,7 @@ describe("loadHome", () => {
     expect(errors).toEqual(["premarket/2026-10-30.json"]);
   });
 
-  it("reporting comes from tomorrow for a recap lead and today for a premarket lead", async () => {
+  it("reporting comes from the day after a recap lead's date and today for a premarket lead", async () => {
     const calendar = cal("KO", "2026-10-30", "bmo") + cal("AAPL", "2026-11-02", "amc") + cal("MCD", "2026-11-02", "bmo");
 
     const premarket = await loadHome(memoryD1(seed + calendar), fakeR2().bucket, "en", TODAY);
@@ -125,6 +125,22 @@ describe("loadHome", () => {
 
     const quiet = await loadHome(memoryD1(seed), fakeR2().bucket, "en", TODAY);
     expect(quiet.reporting).toBeNull();
+  });
+
+  it("reporting starts today while yesterday's recap still leads, and never before today", async () => {
+    const calendar = cal("KO", "2026-10-30", "bmo") + cal("AAPL", "2026-11-02", "amc");
+
+    // Past ET midnight, before the premarket publishes: the lead is yesterday's recap.
+    const overnight = post(2, "recap", "2026-10-29", "2026-10-29T20:45:00Z", "recap/2026-10-29.json");
+    const early = await loadHome(memoryD1(overnight + calendar), fakeR2().bucket, "en", TODAY);
+    expect(early.lead?.slug).toBe("recap-2026-10-29");
+    expect(early.reporting?.date).toBe("2026-10-30");
+    expect(early.reporting?.bmo.map((e) => e.ticker)).toEqual(["KO"]);
+
+    // A stale recap (the generator stopped for a week) still counts from today, not from its date.
+    const stale = post(2, "recap", "2026-10-20", "2026-10-20T20:45:00Z", null) + cal("OLD", "2026-10-21", "amc");
+    const late = await loadHome(memoryD1(stale + calendar), fakeR2().bucket, "en", TODAY);
+    expect(late.reporting?.date).toBe("2026-10-30");
   });
 
   it("recent excludes the lead and is capped at eight", async () => {
@@ -156,5 +172,18 @@ describe("loadHome", () => {
       "meta-2026-10-26-earnings",
       "recap-2026-10-26",
     ]);
+  });
+
+  it("fills recent from briefs alone when there are no older checks", async () => {
+    let sql = post(1, "premarket", "2026-10-30", "2026-10-30T13:20:43Z", null);
+    let id = 10;
+    for (let day = 25; day <= 29; day++) {
+      sql += post(id++, "premarket", `2026-10-${day}`, `2026-10-${day}T12:30:00Z`, null);
+      sql += post(id++, "recap", `2026-10-${day}`, `2026-10-${day}T20:45:00Z`, null);
+    }
+    const home = await loadHome(memoryD1(sql), fakeR2().bucket, "en", TODAY);
+    expect(home.recent).toHaveLength(8);
+    expect(home.recent.map((p) => p.slug)).not.toContain("premarket-2026-10-30");
+    expect(home.recent.at(-1)?.slug).toBe("premarket-2026-10-26");
   });
 });

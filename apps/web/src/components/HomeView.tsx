@@ -9,7 +9,7 @@ import type { CalendarEntry } from "../lib/earnings";
 import type { HomeData } from "../lib/home";
 import { pendingTitle, typeLabel } from "../lib/labels";
 import type { PostListItem } from "../lib/posts";
-import { formatDate, formatDayShort } from "../lib/time";
+import { formatDate, formatMonthDay } from "../lib/time";
 import { translator } from "../lib/translator";
 
 /** Movers shown per side in the column (the brief shows them all). */
@@ -34,7 +34,7 @@ function Lead({ lead, locale, t }: { lead: NonNullable<HomeData["lead"]>; locale
         coverKey={lead.coverKey}
         // A pending translation may carry stale lines; show the scene and label only.
         lines={pending ? null : lead.coverLines}
-        tag={{ kind: "label", text: `${formatDayShort(lead.tradingDate, locale)} · ${typeLabel(t, lead.contentType)}` }}
+        tag={{ kind: "label", text: `${formatMonthDay(lead.tradingDate, locale)} · ${t(`paper.edition.${edition}`)}` }}
         size="lead"
         alt={title}
       />
@@ -58,12 +58,12 @@ function Lead({ lead, locale, t }: { lead: NonNullable<HomeData["lead"]>; locale
   );
 }
 
-/** One earnings check: a small cover tagged with the company logo, and its serif headline. */
-function Check({ post, locale }: { post: PostListItem; locale: Locale }) {
+/** One earnings check: a small cover tagged with the company logo (or "Earnings check"), and its serif headline. */
+function Check({ post, locale, t }: { post: PostListItem; locale: Locale; t: T }) {
   const title = post.title || post.slug;
   const tag = post.ticker
     ? ({ kind: "logo", ticker: post.ticker } as const)
-    : ({ kind: "label", text: title.split(/[\s:：]/)[0] || title } as const);
+    : ({ kind: "label", text: typeLabel(t, "earnings") } as const);
   return (
     <li className="front-check">
       <Cover coverKey={post.coverKey} lines={post.coverLines} tag={tag} size="small" alt={title} />
@@ -132,7 +132,7 @@ export default function HomeView({ data, locale }: { data: HomeData; locale: Loc
             <>
               <ul className="front-checks">
                 {earnings.map((e) => (
-                  <Check key={e.slug} post={e} locale={locale} />
+                  <Check key={e.slug} post={e} locale={locale} t={t} />
                 ))}
               </ul>
               <Link className="more" href={`/${locale}/archive?type=earnings`}>
