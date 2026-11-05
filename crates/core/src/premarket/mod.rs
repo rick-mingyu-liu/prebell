@@ -447,6 +447,8 @@ pub async fn build_facts(
     llm: &dyn LlmProvider,
     trading_date: NaiveDate,
     now: DateTime<Utc>,
+    // Read by the optional searches added after this change.
+    #[allow(unused_variables)] budget: &dyn Fn() -> usize,
 ) -> PremarketFacts {
     let mut d = Diag::default();
     let mut futures = Vec::with_capacity(FUTURES.len());
@@ -678,7 +680,7 @@ mod tests {
             "AAPL",
             reasons(URL, QUOTE, "Apple rose 8% on record iPhone sales."),
         )]);
-        let f = build_facts(&m, &n, &l, date(), now()).await;
+        let f = build_facts(&m, &n, &l, date(), now(), &|| 0).await;
         assert_eq!(f.trading_date, date());
         assert_eq!(f.as_of_utc, now());
         assert_eq!(f.gainers.len(), 1);
@@ -703,7 +705,7 @@ mod tests {
         let m = md(&[q("AAPL", 230.0, 8.0, Some(2_000_000))]);
         let n = ns(vec![(AAPL_Q, Ok(vec![dated(URL, ARTICLE, 24 * 7)]))]);
         let l = llm(vec![("AAPL", reasons(URL, QUOTE, "Apple rose."))]);
-        let f = build_facts(&m, &n, &l, date(), now()).await;
+        let f = build_facts(&m, &n, &l, date(), now(), &|| 0).await;
         assert_eq!(f.gainers[0].reasons, vec![]);
         // Nothing fresh to read, so the mover costs no LLM call.
         assert!(l.prompts.borrow().iter().all(|(_, u)| !u.contains("AAPL")));
@@ -724,7 +726,7 @@ mod tests {
             )]),
         )]);
         let l = llm(vec![]);
-        let f = build_facts(&md(&[]), &n, &l, date(), now()).await;
+        let f = build_facts(&md(&[]), &n, &l, date(), now(), &|| 0).await;
         assert_eq!(
             f.macro_items,
             Field::Missing {
@@ -739,7 +741,7 @@ mod tests {
         let m = md(&[q("AAPL", 230.0, 8.0, Some(2_000_000))]);
         let n = ns(vec![(AAPL_Q, Ok(vec![dated(URL, ARTICLE, 10)]))]);
         let l = llm(vec![("AAPL", reasons(URL, QUOTE, "Apple rose."))]);
-        let f = build_facts(&m, &n, &l, date(), now()).await;
+        let f = build_facts(&m, &n, &l, date(), now(), &|| 0).await;
         assert_eq!(f.gainers[0].reasons.len(), 1);
         let (_, user) = &l.prompts.borrow()[0];
         assert!(user.contains("published: 2026-10-29 02:45 UTC"), "{user}");
@@ -872,7 +874,7 @@ mod tests {
             ),
             ("Ticker: ARM", Ok(json!({"reasons": []}))),
         ]);
-        let f = build_facts(&m, &n, &l, date(), now()).await;
+        let f = build_facts(&m, &n, &l, date(), now(), &|| 0).await;
         let by = |t: &str| f.losers.iter().find(|m| m.quote.symbol == t).unwrap();
         assert_eq!(by("INTC").reasons.len(), 1);
         assert_eq!(by("ARM").reasons, vec![]);
@@ -1142,7 +1144,7 @@ mod tests {
             let m = md(&[q("AAPL", 230.0, 8.0, Some(2_000_000))]);
             let n = ns(vec![(AAPL_Q, Ok(vec![hit(URL, ARTICLE)]))]);
             let l = llm(vec![("AAPL", reasons(URL, QUOTE, summary))]);
-            let f = build_facts(&m, &n, &l, date(), now()).await;
+            let f = build_facts(&m, &n, &l, date(), now(), &|| 0).await;
             assert_eq!(f.gainers[0].reasons.len(), usize::from(kept), "{summary}");
             let hedged = if kept { 0 } else { 1 };
             assert_eq!(
@@ -1169,7 +1171,7 @@ mod tests {
                 "Futures rose as yields fell, which may help stocks at the open.",
             ),
         )]);
-        let f = build_facts(&md(&[]), &n, &l, date(), now()).await;
+        let f = build_facts(&md(&[]), &n, &l, date(), now(), &|| 0).await;
         assert!(
             matches!(&f.macro_items, Field::Value(v) if v.len() == 1),
             "{:?}",
@@ -1204,7 +1206,7 @@ mod tests {
             let m = md(&[q("AAPL", 230.0, 8.0, Some(2_000_000))]);
             let n = ns(vec![(AAPL_Q, Ok(vec![hit(URL, ARTICLE)]))]);
             let l = llm(vec![("AAPL", reasons(URL, QUOTE, summary))]);
-            let f = build_facts(&m, &n, &l, date(), now()).await;
+            let f = build_facts(&m, &n, &l, date(), now(), &|| 0).await;
             assert_eq!(f.gainers[0].reasons, vec![], "should drop: {summary:?}");
         }
     }
@@ -1235,7 +1237,7 @@ mod tests {
                 "Buyback.",
             ),
         )]);
-        let f = build_facts(&m, &n, &l, date(), now()).await;
+        let f = build_facts(&m, &n, &l, date(), now(), &|| 0).await;
         assert_eq!(f.gainers.len(), 1);
         assert_eq!(f.gainers[0].reasons, vec![]);
     }
@@ -1250,7 +1252,7 @@ mod tests {
                 json!({"reasons": [{"url": URL, "title": "Apple to be acquired, sources say", "quote": QUOTE, "summary_en": "Apple rose."}]}),
             ),
         )]);
-        let f = build_facts(&m, &n, &l, date(), now()).await;
+        let f = build_facts(&m, &n, &l, date(), now(), &|| 0).await;
         assert_eq!(f.gainers[0].reasons.len(), 1);
         assert_eq!(f.gainers[0].reasons[0].title, "Title");
         assert_eq!(f.gainers[0].reasons[0].url, URL);
@@ -1264,7 +1266,7 @@ mod tests {
             "AAPL",
             reasons("https://elsewhere.test/x", QUOTE, "Apple rose."),
         )]);
-        let f = build_facts(&m, &n, &l, date(), now()).await;
+        let f = build_facts(&m, &n, &l, date(), now(), &|| 0).await;
         assert_eq!(f.gainers[0].reasons, vec![]);
     }
 
@@ -1276,7 +1278,7 @@ mod tests {
         ]);
         let n = ns(vec![(AAPL_Q, Ok(vec![hit(URL, ARTICLE)]))]);
         let l = llm(vec![("AAPL", Err(ProviderError::Http(500)))]);
-        let f = build_facts(&m, &n, &l, date(), now()).await;
+        let f = build_facts(&m, &n, &l, date(), now(), &|| 0).await;
         assert_eq!(f.gainers.len(), 1);
         assert_eq!(f.gainers[0].quote.symbol, "AAPL");
         assert_eq!(f.gainers[0].reasons, vec![]);
@@ -1291,7 +1293,7 @@ mod tests {
             q("F", 3.10, 40.0, Some(5_000_000)),
             q("AAPL", 230.0, 2.0, Some(2_000_000)),
         ]);
-        let f = build_facts(&m, &ns(vec![]), &llm(vec![]), date(), now()).await;
+        let f = build_facts(&m, &ns(vec![]), &llm(vec![]), date(), now(), &|| 0).await;
         assert_eq!(
             f.gainers
                 .iter()
@@ -1309,7 +1311,7 @@ mod tests {
             q("NVDA", 180.0, 1.0, Some(50_000)),
             q("F", 4.99, 30.0, None),
         ]);
-        let f = build_facts(&m, &ns(vec![]), &llm(vec![]), date(), now()).await;
+        let f = build_facts(&m, &ns(vec![]), &llm(vec![]), date(), now(), &|| 0).await;
         assert_eq!(
             f.gainers
                 .iter()
@@ -1327,7 +1329,15 @@ mod tests {
             .map(|(i, s)| q(s, 100.0, -(i as f64 + 1.0), Some(100_000)))
             .chain([q("NFLX", 100.0, 0.0, Some(100_000))])
             .collect();
-        let f = build_facts(&md(&stocks), &ns(vec![]), &llm(vec![]), date(), now()).await;
+        let f = build_facts(
+            &md(&stocks),
+            &ns(vec![]),
+            &llm(vec![]),
+            date(),
+            now(),
+            &|| 0,
+        )
+        .await;
         assert!(f.gainers.is_empty());
         let pcts: Vec<f64> = f.losers.iter().map(|m| m.quote.change_pct).collect();
         assert_eq!(pcts, vec![-7.0, -6.0, -5.0, -4.0, -3.0]);
@@ -1341,7 +1351,15 @@ mod tests {
             .enumerate()
             .map(|(i, s)| q(s, 100.0, i as f64 + 1.0, Some(100_000)))
             .collect();
-        let f = build_facts(&md(&stocks), &ns(vec![]), &llm(vec![]), date(), now()).await;
+        let f = build_facts(
+            &md(&stocks),
+            &ns(vec![]),
+            &llm(vec![]),
+            date(),
+            now(),
+            &|| 0,
+        )
+        .await;
         let syms: Vec<&str> = f.gainers.iter().map(|m| m.quote.symbol.as_str()).collect();
         assert_eq!(syms, vec!["TSLA", "META", "AMZN", "NVDA", "MSFT"]);
         assert!(f.losers.is_empty());
@@ -1350,7 +1368,7 @@ mod tests {
     #[tokio::test]
     async fn class_shares_map_back_to_universe_ticker() {
         let m = md(&[q("BRK-B", 480.0, 5.5, Some(300_000))]);
-        let f = build_facts(&m, &ns(vec![]), &llm(vec![]), date(), now()).await;
+        let f = build_facts(&m, &ns(vec![]), &llm(vec![]), date(), now(), &|| 0).await;
         assert_eq!(f.gainers[0].quote.symbol, "BRK.B");
         assert_eq!(f.gainers[0].name, "Berkshire Hathaway");
     }
@@ -1359,7 +1377,7 @@ mod tests {
     async fn all_futures_429_are_missing_and_gate() {
         let mut m = md(&[]);
         m.futures = None;
-        let f = build_facts(&m, &ns(vec![]), &llm(vec![]), date(), now()).await;
+        let f = build_facts(&m, &ns(vec![]), &llm(vec![]), date(), now(), &|| 0).await;
         let labels: Vec<&str> = f.futures.iter().map(|(l, _)| l.as_str()).collect();
         assert_eq!(
             labels,
@@ -1383,7 +1401,7 @@ mod tests {
 
     #[tokio::test]
     async fn futures_use_expected_symbols() {
-        let f = build_facts(&md(&[]), &ns(vec![]), &llm(vec![]), date(), now()).await;
+        let f = build_facts(&md(&[]), &ns(vec![]), &llm(vec![]), date(), now(), &|| 0).await;
         let syms: Vec<String> = f
             .futures
             .iter()
@@ -1410,7 +1428,7 @@ mod tests {
                 {"url": "https://news.test/macro", "title": "T", "quote": "Oil prices surged on supply worries overnight", "summary_en": "Oil up."}
             ]})),
         )]);
-        let f = build_facts(&md(&[]), &n, &l, date(), now()).await;
+        let f = build_facts(&md(&[]), &n, &l, date(), now(), &|| 0).await;
         match f.macro_items {
             Field::Value(v) => {
                 assert_eq!(v.len(), 1);
@@ -1422,7 +1440,7 @@ mod tests {
 
     #[tokio::test]
     async fn macro_search_error_is_missing() {
-        let f = build_facts(&md(&[]), &ns(vec![]), &llm(vec![]), date(), now()).await;
+        let f = build_facts(&md(&[]), &ns(vec![]), &llm(vec![]), date(), now(), &|| 0).await;
         assert_eq!(
             f.macro_items,
             Field::Missing {
@@ -1446,6 +1464,7 @@ mod tests {
             &llm(vec![("overnight", Err(ProviderError::Http(503)))]),
             date(),
             now(),
+            &|| 0,
         )
         .await;
         assert_eq!(
@@ -1454,7 +1473,7 @@ mod tests {
                 reason: ProviderError::Http(503).to_string()
             }
         );
-        let f = build_facts(&md(&[]), &n, &llm(vec![]), date(), now()).await;
+        let f = build_facts(&md(&[]), &n, &llm(vec![]), date(), now(), &|| 0).await;
         assert_eq!(f.macro_items, Field::Value(vec![]));
     }
 
@@ -1466,7 +1485,7 @@ mod tests {
     async fn all_429_batch_counts_http429_per_symbol() {
         let mut m = md(&[]);
         m.all_err = Some(ProviderError::Http(429));
-        let f = build_facts(&m, &ns(vec![]), &llm(vec![]), date(), now()).await;
+        let f = build_facts(&m, &ns(vec![]), &llm(vec![]), date(), now(), &|| 0).await;
         let n = n_universe();
         assert!(n > 500, "{n}");
         assert_eq!(
@@ -1504,7 +1523,7 @@ mod tests {
         .into_iter()
         .map(|(k, v)| (k.to_string(), v))
         .collect();
-        let f = build_facts(&m, &ns(vec![]), &llm(vec![]), date(), now()).await;
+        let f = build_facts(&m, &ns(vec![]), &llm(vec![]), date(), now(), &|| 0).await;
         let other = n_universe() - 3 - 8;
         assert_eq!(
             f.diagnostics[0],
@@ -1542,7 +1561,7 @@ mod tests {
             ),
             ("MSFT", Err(ProviderError::Http(500))),
         ]);
-        let f = build_facts(&m, &n, &l, date(), now()).await;
+        let f = build_facts(&m, &n, &l, date(), now(), &|| 0).await;
         assert_eq!(f.diagnostics[2], "reasons proposed=2 kept=1 hedged=0");
         assert_eq!(
             f.diagnostics[3],
@@ -1554,7 +1573,7 @@ mod tests {
     async fn market_data_diagnostics_follow_the_quote_counts() {
         let mut m = md(&[]);
         m.diag = vec!["yahoo_session=crumb_http429 refreshes=0".into()];
-        let f = build_facts(&m, &ns(vec![]), &llm(vec![]), date(), now()).await;
+        let f = build_facts(&m, &ns(vec![]), &llm(vec![]), date(), now(), &|| 0).await;
         assert!(f.diagnostics[0].starts_with("quotes "));
         assert_eq!(f.diagnostics[1], "yahoo_session=crumb_http429 refreshes=0");
         assert!(f.diagnostics[2].starts_with("movers "));

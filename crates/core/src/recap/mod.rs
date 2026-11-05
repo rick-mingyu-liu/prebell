@@ -331,6 +331,8 @@ pub async fn build_facts(
     store: &dyn Store,
     trading_date: NaiveDate,
     now: DateTime<Utc>,
+    // Read by the optional searches added after this change.
+    #[allow(unused_variables)] budget: &dyn Fn() -> usize,
 ) -> RecapFacts {
     let mut d = Diag::default();
     // Four chart requests, one per index, kept apart from the batched v7
@@ -453,8 +455,13 @@ impl Content for Recap<'_> {
     fn zh_retry_due(&self, t: NaiveTime) -> bool {
         t.minute() == 0
     }
-    async fn build_facts(&self, date: NaiveDate, now: DateTime<Utc>) -> RecapFacts {
-        build_facts(self.md, self.ns, self.llm, self.store, date, now).await
+    async fn build_facts(
+        &self,
+        date: NaiveDate,
+        now: DateTime<Utc>,
+        budget: &dyn Fn() -> usize,
+    ) -> RecapFacts {
+        build_facts(self.md, self.ns, self.llm, self.store, date, now, budget).await
     }
     fn missing_required(&self, f: &RecapFacts) -> Vec<&'static str> {
         missing_required(f)
@@ -519,6 +526,7 @@ pub async fn tick_with_log(
     let hooks = Hooks {
         log,
         extra: &Vec::new,
+        budget: &|| 0,
         cover: &crate::cover::NoCover,
     };
     tick_with_hooks(now, store, md, ns, llm, &hooks).await
@@ -710,6 +718,7 @@ mod tests {
             &MemStore::default(),
             date(),
             now(),
+            &|| 0,
         )
         .await;
         assert_eq!(f.trading_date, date());
@@ -744,6 +753,7 @@ mod tests {
             &MemStore::default(),
             date(),
             now(),
+            &|| 0,
         )
         .await;
         // The four index closes are single requests (chart); only the
@@ -765,6 +775,7 @@ mod tests {
             &MemStore::default(),
             date(),
             now(),
+            &|| 0,
         )
         .await;
         let n = universe().len();
@@ -801,6 +812,7 @@ mod tests {
             &MemStore::default(),
             date(),
             now(),
+            &|| 0,
         )
         .await;
         assert!(
@@ -816,7 +828,16 @@ mod tests {
         let mut m = md(&[q("NVDA", 182.35, 3.08, Some(210_000_000))]);
         m.indexes.remove("^RUT");
         let l = llm(vec![]);
-        let f = build_facts(&m, &ns(vec![]), &l, &MemStore::default(), date(), now()).await;
+        let f = build_facts(
+            &m,
+            &ns(vec![]),
+            &l,
+            &MemStore::default(),
+            date(),
+            now(),
+            &|| 0,
+        )
+        .await;
         // No movers or news work while the required section is missing.
         assert!(f.gainers.is_empty() && l.prompts.borrow().is_empty());
         assert_eq!(m.sessions.borrow().len(), 4);
@@ -850,6 +871,7 @@ mod tests {
             &MemStore::default(),
             date(),
             now(),
+            &|| 0,
         )
         .await;
         assert_eq!(syms(&f.gainers), ["TSLA", "META", "AMZN", "NVDA", "MSFT"]);
@@ -886,7 +908,16 @@ mod tests {
                 ),
             ),
         ]);
-        let f = build_facts(&md(&stocks), &n, &l, &MemStore::default(), date(), now()).await;
+        let f = build_facts(
+            &md(&stocks),
+            &n,
+            &l,
+            &MemStore::default(),
+            date(),
+            now(),
+            &|| 0,
+        )
+        .await;
         assert_eq!(f.gainers[0].reasons.len(), 1);
         assert_eq!(f.gainers[0].reasons[0].quote, QUOTE);
         assert_eq!(f.losers[0].reasons, vec![]);
@@ -911,7 +942,16 @@ mod tests {
         };
         let n = ns(vec![(NVDA_Q, Ok(vec![stale]))]);
         let l = llm(vec![("NVDA", reasons(URL, QUOTE, "Nvidia rose."))]);
-        let f = build_facts(&md(&stocks), &n, &l, &MemStore::default(), date(), now()).await;
+        let f = build_facts(
+            &md(&stocks),
+            &n,
+            &l,
+            &MemStore::default(),
+            date(),
+            now(),
+            &|| 0,
+        )
+        .await;
         assert_eq!(f.gainers[0].reasons, vec![]);
         assert!(l.prompts.borrow().iter().all(|(_, u)| !u.contains("NVDA")));
         assert!(
@@ -923,7 +963,16 @@ mod tests {
         );
 
         let n = ns(vec![(NVDA_Q, Ok(vec![hit(URL, ARTICLE)]))]);
-        let f = build_facts(&md(&stocks), &n, &l, &MemStore::default(), date(), now()).await;
+        let f = build_facts(
+            &md(&stocks),
+            &n,
+            &l,
+            &MemStore::default(),
+            date(),
+            now(),
+            &|| 0,
+        )
+        .await;
         assert_eq!(f.gainers[0].reasons.len(), 1);
         let p = l.prompts.borrow();
         let (sys, _) = p.iter().find(|(_, u)| u.contains("NVDA")).unwrap();
@@ -941,7 +990,7 @@ mod tests {
                 {"url": "https://news.test/ah", "title": "T", "quote": "Apple will report results after the bell tonight", "summary_en": "Apple reports."}
             ]})),
         )]);
-        let f = build_facts(&md(&[]), &n, &l, &MemStore::default(), date(), now()).await;
+        let f = build_facts(&md(&[]), &n, &l, &MemStore::default(), date(), now(), &|| 0).await;
         match &f.after_hours {
             Field::Value(v) => {
                 assert_eq!(v.len(), 1);
@@ -1032,7 +1081,7 @@ mod tests {
                 {"url": "https://news.test/ah", "title": "T", "quote": "Intel and Amazon are scheduled to report quarterly results after the bell", "summary_en": "Intel and Amazon report after the close."}
             ]})),
         )]);
-        let f = build_facts(&md(&[]), &n, &l, &s, date(), now()).await;
+        let f = build_facts(&md(&[]), &n, &l, &s, date(), now(), &|| 0).await;
         assert_eq!(
             f.reported,
             vec![Reported {
@@ -1114,7 +1163,7 @@ mod tests {
                 {"url": "https://news.test/ah", "title": "T", "quote": "Amazon is scheduled to report quarterly results after the bell", "summary_en": "Amazon reports now after the bell."}
             ]})),
         )]);
-        let f = build_facts(&md(&[]), &n, &l, &s, date(), now()).await;
+        let f = build_facts(&md(&[]), &n, &l, &s, date(), now(), &|| 0).await;
         assert_eq!(f.reported.len(), 2);
         match &f.after_hours {
             Field::Value(v) => {
@@ -1144,7 +1193,16 @@ mod tests {
             "2026-10-29T20:10:00Z",
         );
         *s.fail_facts_key.borrow_mut() = Some("earnings/aapl-q4-fy2026-earnings.json".into());
-        let f = build_facts(&md(&[]), &ns(vec![]), &llm(vec![]), &s, date(), now()).await;
+        let f = build_facts(
+            &md(&[]),
+            &ns(vec![]),
+            &llm(vec![]),
+            &s,
+            date(),
+            now(),
+            &|| 0,
+        )
+        .await;
         let tickers: Vec<&str> = f.reported.iter().map(|r| r.ticker.as_str()).collect();
         assert_eq!(tickers, ["INTC"]);
         assert_eq!(f.diagnostics.last().unwrap(), "reported=1 reported_err=1");
@@ -1162,7 +1220,16 @@ mod tests {
             "2026-10-29T20:30:41Z",
         );
         s.fail_posts_on.set(true);
-        let f = build_facts(&md(&[]), &ns(vec![]), &llm(vec![]), &s, date(), now()).await;
+        let f = build_facts(
+            &md(&[]),
+            &ns(vec![]),
+            &llm(vec![]),
+            &s,
+            date(),
+            now(),
+            &|| 0,
+        )
+        .await;
         assert!(f.reported.is_empty());
         assert_eq!(f.diagnostics.last().unwrap(), "reported=0 reported_err=1");
         assert!(missing_required(&f).is_empty());
@@ -1171,7 +1238,16 @@ mod tests {
     #[tokio::test]
     async fn facts_stored_before_reported_existed_still_load() {
         let s = MemStore::default();
-        let f = build_facts(&md(&[]), &ns(vec![]), &llm(vec![]), &s, date(), now()).await;
+        let f = build_facts(
+            &md(&[]),
+            &ns(vec![]),
+            &llm(vec![]),
+            &s,
+            date(),
+            now(),
+            &|| 0,
+        )
+        .await;
         let mut v = serde_json::to_value(&f).unwrap();
         v.as_object_mut().unwrap().remove("reported");
         let back: RecapFacts = serde_json::from_value(v).unwrap();
@@ -1206,6 +1282,7 @@ mod tests {
             &MemStore::default(),
             date(),
             now(),
+            &|| 0,
         )
         .await;
         assert_eq!(
@@ -1223,6 +1300,7 @@ mod tests {
             &MemStore::default(),
             date(),
             now(),
+            &|| 0,
         )
         .await;
         assert_eq!(
@@ -1236,7 +1314,7 @@ mod tests {
             "after the US market close",
             Err(ProviderError::Http(503)),
         )]);
-        let f = build_facts(&md(&[]), &n, &l, &MemStore::default(), date(), now()).await;
+        let f = build_facts(&md(&[]), &n, &l, &MemStore::default(), date(), now(), &|| 0).await;
         assert_eq!(
             f.after_hours,
             Field::Missing {
@@ -1257,6 +1335,7 @@ mod tests {
             &MemStore::default(),
             d,
             now(),
+            &|| 0,
         )
         .await;
         assert!(f.early_close);
@@ -1280,6 +1359,7 @@ mod tests {
             &MemStore::default(),
             date(),
             now(),
+            &|| 0,
         )
         .await;
         f.gainers[0].reasons = vec![reason("Nvidia shares rose 3% on a $5 billion deal")];
@@ -1519,6 +1599,7 @@ mod run_tests {
         let hooks = crate::run::Hooks {
             log: &|_| {},
             extra: &extra,
+            budget: &|| 0,
             cover: &crate::cover::NoCover,
         };
         let out = tick_with_hooks(utc("2026-10-29T20:45:00Z"), &s, &m, &FakeNs, &l, &hooks).await;

@@ -1,4 +1,5 @@
 pub mod anchor;
+pub mod budget;
 pub mod claude;
 pub mod clock;
 pub mod cover;
