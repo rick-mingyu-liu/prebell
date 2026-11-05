@@ -13,10 +13,10 @@ use crate::cover::{
     brief_lines, brief_scene_subject, index_snapshot, make_scene, CoverLines, CoverMaker,
     IndexSnapshot, INDEX_LINE_KEY,
 };
-use crate::facts::{missing_required, Field, NewsReason, PremarketFacts};
+use crate::facts::{missing_required, NewsReason, PremarketFacts};
 use crate::numbers::Lang;
 use crate::premarket::build_facts;
-use crate::premarket::draft::{write, Draft, TEMPLATE_ID};
+use crate::premarket::draft::{source_reasons, write, Draft, TEMPLATE_ID};
 use crate::providers::{LlmProvider, MarketData, NewsSearch};
 use crate::store::{PostRow, RunRow, Store, TranslationRow};
 
@@ -564,20 +564,11 @@ fn translation_zh(
     }
 }
 
-/// Every kept reason (gainers, losers, macro), first occurrence per url.
+/// Every kept reason (gainers, losers, macro, themes), first occurrence per
+/// url: the same list the page's sources section shows.
 fn sources(f: &PremarketFacts) -> Vec<NewsReason> {
-    let macro_items = match &f.macro_items {
-        Field::Value(v) => v.as_slice(),
-        Field::Missing { .. } => &[],
-    };
     let mut out: Vec<NewsReason> = Vec::new();
-    for r in f
-        .gainers
-        .iter()
-        .chain(&f.losers)
-        .flat_map(|m| &m.reasons)
-        .chain(macro_items)
-    {
+    for r in source_reasons(f) {
         if !out.iter().any(|o| o.url == r.url) {
             out.push(r.clone());
         }
@@ -665,8 +656,8 @@ mod tests {
     use super::*;
     use crate::cover::tests::{FakeCover, PNG};
     use crate::cover::NoCover;
-    use crate::facts::NewsReason;
     use crate::facts::Quote;
+    use crate::facts::{Field, NewsReason};
     use crate::providers::{ProviderError, SearchHit};
     use crate::store::{MemStore, PostRow, RunRow, TranslationRow};
     use async_trait::async_trait;
@@ -784,9 +775,9 @@ mod tests {
     fn draft_reply(zh: bool, ok: bool) -> Value {
         // The built facts have no watch list, so there is no watch section.
         let heads: [&str; 3] = if zh {
-            ["期货", "盘前异动", "宏观与隔夜"]
+            ["期货", "宏观与隔夜", "盘前异动"]
         } else {
-            ["Futures", "Biggest premarket movers", "Macro & overnight"]
+            ["Futures", "Macro & overnight", "Biggest premarket movers"]
         };
         // 7.5% is not in the facts, so a bad reply fails the number check.
         let body = if ok {

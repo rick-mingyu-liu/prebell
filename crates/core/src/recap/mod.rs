@@ -555,20 +555,11 @@ impl Content for Recap<'_> {
     async fn write(&self, f: &RecapFacts, lang: Lang) -> Result<(Draft, String), Vec<String>> {
         draft::write(self.llm, f, lang).await
     }
-    /// Every kept reason (movers, then after-hours), first occurrence per url.
+    /// Every kept reason (movers, macro, themes, after-hours), first
+    /// occurrence per url: the same list the page's sources section shows.
     fn sources(&self, f: &RecapFacts) -> Vec<NewsReason> {
-        let after_hours = match &f.after_hours {
-            Field::Value(v) => v.as_slice(),
-            Field::Missing { .. } => &[],
-        };
         let mut out: Vec<NewsReason> = Vec::new();
-        for r in f
-            .gainers
-            .iter()
-            .chain(&f.losers)
-            .flat_map(|m| &m.reasons)
-            .chain(after_hours)
-        {
+        for r in draft::sources(f) {
             if !out.iter().any(|o| o.url == r.url) {
                 out.push(r.clone());
             }

@@ -5,8 +5,8 @@
 use crate::facts::{Field, Mover, NewsReason};
 use crate::numbers::{check, Lang};
 use crate::premarket::draft::{
-    blank_names, cell, fmt_num, fmt_pct, na, no_news, render_sources, without_link_targets,
-    write_with, Draft,
+    blank_names, cell, fmt_num, fmt_pct, na, no_news, render_sources, render_themes, section,
+    without_link_targets, write_with, Draft, MOVERS, THEMES,
 };
 use crate::providers::LlmProvider;
 use crate::recap::{numbers_in_facts, RecapFacts, Reported};
@@ -19,28 +19,43 @@ pub const DISCLAIMER_ZH: &str = "本回顾根据公开数据自动生成，仅�
 const PROMPT_EN: &str = include_str!("../../prompts/recap_v1_en.md");
 const PROMPT_ZH: &str = include_str!("../../prompts/recap_v1_zh.md");
 
-/// Every section heading the recap can have, in order.
-pub fn headings(lang: Lang) -> [&'static str; 3] {
+/// Every section heading the recap can have, in order, matching the
+/// premarket brief's: the story (macro, themes) before the single names.
+pub fn headings(lang: Lang) -> [&'static str; 5] {
     match lang {
         Lang::En => [
             "Index closes",
+            "Macro & after the close",
+            "Themes",
             "Notable movers",
             "After-hours earnings to watch",
         ],
-        Lang::Zh => ["指数收盘", "个股异动", "盘后财报关注"],
+        Lang::Zh => [
+            "指数收盘",
+            "宏观与盘后",
+            "板块动向",
+            "个股异动",
+            "盘后财报关注",
+        ],
     }
 }
 
-/// The headings these facts call for: the after-hours section only when
-/// there is something to say in it.
+/// The headings these facts call for: closes and movers always; macro,
+/// themes and after-hours only when there is something to say in them.
 fn wanted(f: &RecapFacts, lang: Lang) -> Vec<&'static str> {
-    let [closes, movers, after] = headings(lang);
+    let [closes, macro_heading, themes, movers, after] = headings(lang);
+    let macro_news = matches!(&f.macro_items, Field::Value(v) if !v.is_empty());
     let ahead = matches!(&f.after_hours, Field::Value(v) if !v.is_empty());
-    if ahead || !f.reported.is_empty() {
-        vec![closes, movers, after]
-    } else {
-        vec![closes, movers]
-    }
+    [
+        (closes, true),
+        (macro_heading, macro_news),
+        (themes, !f.themes.is_empty()),
+        (movers, true),
+        (after, ahead || !f.reported.is_empty()),
+    ]
+    .into_iter()
+    .filter_map(|(h, on)| on.then_some(h))
+    .collect()
 }
 
 /// The code-rendered end of the after-hours section, linking each earnings
@@ -104,8 +119,10 @@ fn mover_row(m: &Mover, lang: Lang) -> String {
     row
 }
 
-/// Everything above the sources list: title, summary, early-close note,
-/// code-rendered tables and the LLM sections.
+/// Everything above the sources list: title, summary, early-close note, the
+/// index table, then the sections in order (the themes list heads "Themes",
+/// the movers table heads the movers section, the reported line ends the
+/// after-hours section).
 fn render_body(d: &Draft, f: &RecapFacts) -> String {
     let lang = d.lang;
     let mut out = format!("# {}\n\n{}\n\n", d.title, d.summary);
@@ -132,43 +149,59 @@ fn render_body(d: &Draft, f: &RecapFacts) -> String {
     }
     out.push('\n');
 
-    let movers: Vec<&Mover> = f.gainers.iter().chain(&f.losers).collect();
-    if !movers.is_empty() {
-        out.push_str(match lang {
+    let mut movers = String::new();
+    let listed: Vec<&Mover> = f.gainers.iter().chain(&f.losers).collect();
+    if !listed.is_empty() {
+        movers.push_str(match lang {
             Lang::En => "| Ticker | Company | Close | Change | Why |\n|---|---|---:|---:|---|\n",
             Lang::Zh => "| 代码 | 公司 | 收盘价 | 涨跌 |\n|---|---|---:|---:|\n",
         });
-        for m in movers {
-            out.push_str(&mover_row(m, lang));
-            out.push('\n');
+        for m in listed {
+            movers.push_str(&mover_row(m, lang));
+            movers.push('\n');
         }
-        out.push('\n');
     }
 
-    let after = headings(lang)[2];
+    let heads = headings(lang);
+    let after = heads[4];
+    let themes = render_themes(&f.themes, lang);
     let reported = reported_line(&f.reported, lang);
     for (heading, body) in &d.sections {
         let body = body.trim();
-        let text = match &reported {
-            Some(line) if heading == after && body.is_empty() => line.clone(),
-            Some(line) if heading == after => format!("{body}\n\n{line}"),
-            _ => body.to_string(),
+        let (code, text) = if *heading == heads[THEMES] {
+            (Some(themes.as_str()), body.to_string())
+        } else if *heading == heads[MOVERS] {
+            (Some(movers.as_str()), body.to_string())
+        } else {
+            let text = match &reported {
+                Some(line) if *heading == after && body.is_empty() => line.clone(),
+                Some(line) if *heading == after => format!("{body}\n\n{line}"),
+                _ => body.to_string(),
+            };
+            (None, text)
         };
-        out.push_str(&format!("## {heading}\n\n{text}\n\n"));
+        out.push_str(&section(heading, code, &text));
     }
     out
 }
 
-fn sources(f: &RecapFacts) -> impl Iterator<Item = &NewsReason> {
-    let after_hours = match &f.after_hours {
-        Field::Value(items) => items.as_slice(),
-        Field::Missing { .. } => &[],
-    };
+/// Every reason the recap cites (movers, macro, themes, after-hours), in that
+/// order and possibly repeated; the sources list and the stored sources
+/// dedupe it.
+pub(crate) fn sources(f: &RecapFacts) -> impl Iterator<Item = &NewsReason> {
+    fn items(field: &Field<Vec<NewsReason>>) -> &[NewsReason] {
+        match field {
+            Field::Value(items) => items.as_slice(),
+            Field::Missing { .. } => &[],
+        }
+    }
     f.gainers
         .iter()
         .chain(&f.losers)
         .flat_map(|m| &m.reasons)
-        .chain(after_hours)
+        .chain(items(&f.macro_items))
+        .chain(f.themes.iter().flat_map(|t| &t.reasons))
+        .chain(items(&f.after_hours))
 }
 
 /// The full article: body, sources and disclaimer.
@@ -204,12 +237,24 @@ pub async fn write(
     let facts_json = serde_json::to_string_pretty(&for_llm)
         .map_err(|e| vec![format!("draft: facts json: {e}")])?;
     let mut allowed = numbers_in_facts(f);
+    // "and 12 more": counts up to 10 are exempt already.
+    allowed.extend(
+        f.themes
+            .iter()
+            .filter(|t| t.more > 10)
+            .map(|t| t.more as f64),
+    );
     let names: Vec<&str> = f
         .gainers
         .iter()
         .chain(&f.losers)
         .map(|m| m.name.as_str())
         .chain(f.reported.iter().map(|r| r.company.as_str()))
+        .chain(f.themes.iter().flat_map(|t| {
+            [t.group.as_str(), t.group_zh.as_str()]
+                .into_iter()
+                .chain(t.members.iter().map(|m| m.name.as_str()))
+        }))
         .collect();
     let (d, md) = write_with(
         llm,
@@ -233,9 +278,10 @@ pub async fn write(
     Ok((d, md))
 }
 
-/// The table cells exactly as printed. `format!` rounds ties half-to-even on
-/// the binary value while the checker rounds half away from zero, so a fact
-/// like 2230.125 prints as "2,230.12"; the printed value is still the fact.
+/// The table cells and theme-list figures exactly as printed. `format!`
+/// rounds ties half-to-even on the binary value while the checker rounds
+/// half away from zero, so a fact like 2230.125 prints as "2,230.12"; the
+/// printed value is still the fact.
 fn table_values(f: &RecapFacts) -> Vec<f64> {
     let quotes = f
         .indexes
@@ -244,9 +290,15 @@ fn table_values(f: &RecapFacts) -> Vec<f64> {
             Field::Value(q) => Some(q),
             Field::Missing { .. } => None,
         })
-        .chain(f.gainers.iter().chain(&f.losers).map(|m| &m.quote));
+        .chain(f.gainers.iter().chain(&f.losers).map(|m| &m.quote))
+        .flat_map(|q| [q.last, q.change_pct]);
+    let themes = f
+        .themes
+        .iter()
+        .flat_map(|t| std::iter::once(t.median_pct).chain(t.members.iter().map(|m| m.change_pct)));
     quotes
-        .flat_map(|q| [format!("{:.2}", q.last), format!("{:.2}", q.change_pct)])
+        .chain(themes)
+        .map(|v| format!("{v:.2}"))
         .filter_map(|s| s.parse().ok())
         .collect()
 }
@@ -255,6 +307,7 @@ fn table_values(f: &RecapFacts) -> Vec<f64> {
 mod tests {
     use super::*;
     use crate::facts::{Field, Mover, NewsReason, Quote};
+    use crate::premarket::draft::{render_themes, tests::two_themes};
     use crate::providers::{LlmProvider, ProviderError};
     use crate::recap::Reported;
     use async_trait::async_trait;
@@ -363,8 +416,9 @@ mod tests {
     async fn clean_en_draft_renders_tables() {
         let l = llm(vec![clean(Lang::En)]);
         let (d, md) = write(&l, &facts(), Lang::En).await.unwrap();
-        // No after-hours news and nothing reported: the reply's third
-        // section is dropped unread, and no "n/a" section is printed.
+        // No macro news, no themes, no after-hours news and nothing
+        // reported: those sections of the reply are dropped unread, and no
+        // "n/a" section is printed.
         assert_eq!(d.sections.len(), 2);
         assert!(!md.contains("After-hours") && !md.contains("n/a"), "{md}");
         let (sys, user) = l.prompts.borrow()[0].clone();
@@ -473,7 +527,7 @@ mod tests {
             ),
         ] {
             let mut v = clean(lang).unwrap();
-            v["sections"][2]["markdown"] = json!("");
+            v["sections"][4]["markdown"] = json!("");
             let (d, md) = write(&llm(vec![Ok(v)]), &f, lang).await.unwrap();
             assert_eq!(d.sections[2].1, "");
             assert!(md.contains(want), "{md}");
@@ -649,5 +703,121 @@ mod tests {
         let bad = || reply(Lang::En, "3M fell; Apple rose 9%.");
         let l = llm(vec![bad(), bad()]);
         assert_eq!(write(&l, &f, Lang::En).await.unwrap_err(), vec!["9%"]);
+    }
+
+    #[test]
+    fn headings_put_macro_then_themes_then_movers() {
+        let mut f = facts();
+        f.macro_items = Field::Value(vec![reason("https://news.test/m", "Yields rise")]);
+        f.themes = two_themes();
+        f.reported = vec![apple()];
+        assert_eq!(
+            wanted(&f, Lang::En),
+            [
+                "Index closes",
+                "Macro & after the close",
+                "Themes",
+                "Notable movers",
+                "After-hours earnings to watch"
+            ]
+        );
+        assert_eq!(
+            wanted(&f, Lang::Zh),
+            [
+                "指数收盘",
+                "宏观与盘后",
+                "板块动向",
+                "个股异动",
+                "盘后财报关注"
+            ]
+        );
+        assert_eq!(wanted(&f, Lang::Zh), headings(Lang::Zh));
+        // Each optional section comes and goes on its own facts.
+        f.macro_items = Field::Value(vec![]);
+        f.reported = vec![];
+        assert_eq!(
+            wanted(&f, Lang::En),
+            ["Index closes", "Themes", "Notable movers"]
+        );
+        f.themes = vec![];
+        assert_eq!(wanted(&f, Lang::En), ["Index closes", "Notable movers"]);
+    }
+
+    #[tokio::test]
+    async fn recap_with_themes_passes_rendered_number_check() {
+        let mut f = facts();
+        f.themes = two_themes();
+        f.themes[1].more = 12;
+        // A member name with digits, as in the movers table.
+        f.themes[1].members[1].name = "Phillips 66".into();
+        // A half-way move prints as "+2.62%", which only the printed values
+        // back (the checker rounds 2.625 away from zero).
+        f.themes[0].members[1].change_pct = 2.625;
+        f.macro_items = Field::Value(vec![reason("https://news.test/m", "Yields rise")]);
+        for lang in [Lang::En, Lang::Zh] {
+            let mut v = reply(lang, "Quiet.").unwrap();
+            v["sections"][2]["markdown"] = json!(match lang {
+                Lang::En => "Chips rose; NVDA gained 3.03%. Phillips 66 slipped 3.90% with memory names, and 12 more fell.",
+                Lang::Zh => "芯片股上涨，NVDA涨3.03%。存储股走低，MU跌4.12%。",
+            });
+            let (d, md) = write(&llm(vec![Ok(v)]), &f, lang).await.unwrap();
+            assert_eq!(d.sections.len(), 4);
+            let list = render_themes(&f.themes, lang);
+            assert!(
+                list.contains("MU −4.12%") && list.contains("AMD +2.62%"),
+                "{list}"
+            );
+            assert!(
+                list.contains(match lang {
+                    Lang::En => "and 12 more",
+                    Lang::Zh => "另有 12 只",
+                }),
+                "{list}"
+            );
+            let themes = headings(lang)[2];
+            assert!(md.contains(&format!("## {themes}\n\n{list}\n\n")), "{md}");
+            // The macro section comes before the themes and its sources are cited.
+            let macro_h = headings(lang)[1];
+            assert!(md.find(&format!("## {macro_h}")) < md.find(&format!("## {themes}")));
+            assert!(
+                md.contains("(https://news.test/m)") && md.contains("(https://news.test/chips)")
+            );
+        }
+        // A group label's digits are blanked like a company name's.
+        f.themes[0].group = "Semis 2.0".into();
+        let ok = write(&llm(vec![reply(Lang::En, "Quiet.")]), &f, Lang::En).await;
+        assert!(ok.is_ok(), "{ok:?}");
+    }
+
+    #[test]
+    fn recap_sources_include_macro_and_theme_reasons() {
+        let mut f = facts();
+        f.macro_items = Field::Value(vec![reason("https://news.test/m", "Yields rise")]);
+        f.themes = two_themes();
+        let urls: Vec<&str> = sources(&f).map(|r| r.url.as_str()).collect();
+        assert_eq!(
+            urls,
+            [
+                "https://news.test/nvda",
+                "https://news.test/m",
+                "https://news.test/chips"
+            ]
+        );
+    }
+
+    #[test]
+    fn prompts_describe_the_themes_section() {
+        assert!(
+            PROMPT_EN.contains("one short paragraph per theme in the listed order; cite only the listed moves; a theme without a reason gets one sentence stating the move; do not repeat the list line")
+                && PROMPT_EN.contains("\"Themes\" exists only when `themes` is not empty")
+                && PROMPT_EN.contains("\"Macro & after the close\" exists only when `macro_items` has items"),
+            "{PROMPT_EN}"
+        );
+        assert!(
+            PROMPT_ZH.contains("每个主题写一小段，按列出的顺序；只引用列出的涨跌幅；没有原因的主题用一句话说明涨跌即可；不要重复列表那一行")
+                && PROMPT_ZH.contains("只有 `themes` 不为空时才有“板块动向”")
+                && PROMPT_ZH.contains("只有 `macro_items` 有条目时才有“宏观与盘后”"),
+            "{PROMPT_ZH}"
+        );
     }
 }
