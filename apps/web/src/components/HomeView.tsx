@@ -111,6 +111,8 @@ function Slot({ label, entries, locale, t }: { label: string; entries: CalendarE
 /** One theme: the group, its median move, and the first few tickers; the whole row links to the lead post. */
 function Theme({ theme, href, locale, t }: { theme: ThemeView; href: string; locale: Locale; t: T }) {
   const shown = theme.members.slice(0, THEME_TICKERS);
+  // The generator's `more` counts members past the ones it lists; the ones listed but not shown here count too.
+  const more = theme.more + (theme.members.length - shown.length);
   return (
     <div className="theme-row">
       <Link className="theme-link" href={href}>
@@ -128,7 +130,7 @@ function Theme({ theme, href, locale, t }: { theme: ThemeView; href: string; loc
               {m.symbol} <span className="num">{fmtPct(m.changePct)}</span>
             </span>
           ))}
-          {theme.more > 0 && <span className="theme-more">{t("home.themesMore", { n: theme.more })}</span>}
+          {more > 0 && <span className="theme-more">{t("home.themesMore", { n: more })}</span>}
         </span>
       </Link>
     </div>

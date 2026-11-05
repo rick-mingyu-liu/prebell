@@ -180,10 +180,10 @@ describe("HomeView front page", () => {
       expect(at(out, "front-themes")).toBeLessThan(at(out, "front-reporting"));
       expect(out).toContain('class="num down"><span aria-hidden="true">▼</span><span class="sr-only">down </span>−4.10%');
       expect(out).toContain('class="num up"><span aria-hidden="true">▲</span><span class="sr-only">up </span>+1.50%');
-      // First three tickers with their moves, the rest counted.
+      // First three tickers with their moves; the fourth listed one and the generator's "more" 2 are counted.
       for (const s of ["MU", "SNDK", "WDC"]) expect(out).toContain(`${s} <span class="num">`);
       expect(out).not.toContain("STX");
-      expect(out).toContain('class="theme-more">+2<');
+      expect(out).toContain('class="theme-more">+3<');
       expect(out).toContain("−6.01%");
       // The whole row links to the lead post.
       expect(out).toContain('<a class="theme-link" href="/en/p/premarket-2026-10-30">');

@@ -143,10 +143,19 @@ describe("parseFacts themes", () => {
       theme({ median_pct: null }),
       theme({ members: "MU" }),
       theme({ members: [{ ticker: "MU" }] }),
+      theme({ members: [{ ticker: "MU", change_pct: "-4.1" }] }),
+      theme({ members: [{ ticker: "  ", change_pct: -1 }] }),
+      theme({ members: [] }),
       null,
     ];
     const v = parseFacts("premarket", { ...premarket(), themes: [bad[0], theme(), ...bad.slice(1)] })!;
     expect(v.themes.map((t) => t.group)).toEqual(["Memory & storage"]);
+  });
+
+  it("reads the member symbol from ticker first, then symbol", () => {
+    const m = [{ ticker: "MU", symbol: "XX", change_pct: -1 }, { symbol: "SNDK", change_pct: -2 }];
+    const v = parseFacts("premarket", { ...premarket(), themes: [theme({ members: m })] })!;
+    expect(v.themes[0].members.map((x) => x.symbol)).toEqual(["MU", "SNDK"]);
   });
 
   it("treats a non-array themes field as none, without failing the facts", () => {

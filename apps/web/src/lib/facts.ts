@@ -143,8 +143,11 @@ function themeView(v: unknown): ThemeView {
   const direction = t.direction === "Up" ? "up" : t.direction === "Down" ? "down" : fail("direction");
   const members = arr(t.members, "members").map((m) => {
     const o = obj(m, "member");
-    return { symbol: str(o.symbol ?? o.ticker, "ticker"), changePct: finite(o.change_pct, "change_pct") };
+    const symbol = str(o.ticker ?? o.symbol, "ticker").trim();
+    if (!symbol) fail("ticker");
+    return { symbol, changePct: finite(o.change_pct, "change_pct") };
   });
+  if (members.length === 0) fail("members");
   const more = typeof t.more === "number" && Number.isInteger(t.more) && t.more > 0 ? t.more : 0;
   const zh = typeof t.group_zh === "string" ? t.group_zh.trim() : "";
   return { group, groupZh: zh || group, direction, medianPct: finite(t.median_pct, "median_pct"), members, more };
