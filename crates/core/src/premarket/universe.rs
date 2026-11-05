@@ -56,4 +56,19 @@ mod tests {
         assert_eq!(company_name("AAPL"), Some("Apple"));
         assert_eq!(company_name("ZZZZ"), None);
     }
+
+    #[test]
+    fn universe_contains_recent_additions() {
+        let u = universe();
+        for t in ["SNDK", "VRT", "CRWV"] {
+            assert!(u.contains(&t.to_string()), "{t} missing from the universe");
+        }
+        assert_eq!(company_name("SNDK"), Some("Sandisk"));
+    }
+
+    #[test]
+    fn universe_is_at_most_550() {
+        let n = universe().len();
+        assert!(n <= 550, "{n}");
+    }
 }
