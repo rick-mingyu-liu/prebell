@@ -16,7 +16,7 @@ const FC_URL: &str = "https://fc.yahoo.com";
 const CRUMB_URL: &str = "https://query1.finance.yahoo.com/v1/test/getcrumb";
 const QUOTE_URL: &str = "https://query1.finance.yahoo.com/v7/finance/quote";
 /// Symbols per v7 quote request. Requests are sent one after another.
-const QUOTE_BATCH: usize = 50;
+pub(crate) const QUOTE_BATCH: usize = 50;
 /// Largest v7 quote body read (50 symbols are ~150 KB).
 const MAX_QUOTE_BYTES: usize = 1024 * 1024;
 /// `preMarketPrice - preMarketChange` may differ from `regularMarketPrice` by

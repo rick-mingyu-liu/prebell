@@ -2179,10 +2179,12 @@ mod tests {
     #[tokio::test]
     async fn premarket_theme_search_runs_at_nominal_usage() {
         // Nominal usage when the theme step starts: cookie 1 + crumb 1 +
-        // 11 v7 batches + 4 futures + 8 mover searches + 8 extractions = 33.
-        // The theme search (2) and the full macro step after it (4) fit:
+        // the v7 batches (universe size / `QUOTE_BATCH`, rounded up: 11) +
+        // 4 futures + 8 mover searches + 8 extractions = 33. The theme
+        // search (2) and the full macro step after it (4) fit:
         // 33 + 2 + 4 = 39 <= BUDGET_SOFT (40).
-        let used = 1 + 1 + 11 + 4 + 2 * 2 * MOVERS_PER_SIDE;
+        let batches = universe().len().div_ceil(crate::yahoo::QUOTE_BATCH);
+        let used = 1 + 1 + batches + 4 + 2 * 2 * MOVERS_PER_SIDE;
         assert_eq!(used, 33);
         assert!(allows(used, THEME_SEARCH_COST + MACRO_FULL_COST));
         let n = RecNs(

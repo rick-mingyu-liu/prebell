@@ -1764,12 +1764,14 @@ mod tests {
     #[tokio::test]
     async fn recap_theme_search_is_skipped_at_nominal_usage() {
         // Nominal usage when the theme step starts: 4 index charts + cookie 1
-        // + crumb 1 + 11 v7 batches + 8 mover searches + 8 extractions = 33.
-        // With the after-hours step (2) reserved, the theme search (2) and
-        // the full macro step after it (4) do not fit: 33 + 2 + 2 + 4 = 41 >
-        // BUDGET_SOFT (40). The recap's macro step (3 searches + 1
-        // extraction, 4 more, so 37 in all) and after hours still run.
-        let used = 4 + 1 + 1 + 11 + 2 * 2 * MOVERS_PER_SIDE;
+        // + crumb 1 + the v7 batches (universe size / `QUOTE_BATCH`, rounded
+        // up: 11) + 8 mover searches + 8 extractions = 33. With the
+        // after-hours step (2) reserved, the theme search (2) and the full
+        // macro step after it (4) do not fit: 33 + 2 + 2 + 4 = 41 >
+        // BUDGET_SOFT (40). The recap's macro step (all 3 queries) and the
+        // after-hours search still run.
+        let batches = universe().len().div_ceil(crate::yahoo::QUOTE_BATCH);
+        let used = 4 + 1 + 1 + batches + 2 * 2 * MOVERS_PER_SIDE;
         assert_eq!(used, 33);
         assert!(!crate::budget::allows(
             used + AFTER_HOURS_COST,
@@ -1796,6 +1798,17 @@ mod tests {
         assert!(f
             .diagnostics
             .contains(&"themes found=1 kept=1 searched=0".to_string()));
+        for mq in RECAP_MACRO_QUERIES {
+            assert_eq!(asked(&n, mq), 1, "{mq}");
+        }
+        assert!(
+            f.diagnostics
+                .iter()
+                .any(|l| l.starts_with("macro queries=3 ")),
+            "{:?}",
+            f.diagnostics
+        );
+        assert_eq!(asked(&n, AH_Q), 1);
     }
 
     #[tokio::test]
