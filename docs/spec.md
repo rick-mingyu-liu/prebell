@@ -22,7 +22,7 @@ What defines it:
 1. **Premarket brief** (the headline product), weekdays ~8:30 AM ET. Sections in this order, macro first because the order follows the story:
    - "Futures" / "期货": index futures (ES, NQ, YM, RTY) and their changes;
    - "Macro & overnight" / "宏观与隔夜": up to five overnight macro and market news items;
-   - "Themes" / "板块动向": industry groups whose members moved together, each as a code-rendered list line ("**Memory & storage** ▼ median −4.10%: MU −4.12%, WDC −3.90%, and 2 more") and a short paragraph;
+   - "Themes" / "板块动向": industry groups whose members moved together, each as a code-rendered list line ("**Semiconductors** ▼ median −4.20%: NVDA −5.20%, AMD −4.80%, AVGO −4.50%, MRVL −4.30%, ON −4.10%, MCHP −3.90%, and 2 more", with up to six members listed before the count) and a short paragraph;
    - "Biggest premarket movers" / "盘前异动": top premarket gainers and losers among liquid US stocks, each with the news behind the move;
    - "What to watch" / "今日关注": a short list (scheduled data releases, earnings before the open).
 2. **After-close recap**, weekdays ~4:45 PM ET: "Index closes" / "指数收盘", "Macro & after the close" / "宏观与盘后", "Themes" / "板块动向" (same list line and paragraphs), "Notable movers" / "个股异动" with reasons, "After-hours earnings to watch" / "盘后财报关注". Shorter than the premarket brief. (Kept by default; owner hasn't objected.)
