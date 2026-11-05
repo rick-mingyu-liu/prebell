@@ -1,8 +1,10 @@
 -- Preview data for apps/web (local D1 only). Re-runnable.
 -- Apply: cd crates/generator && pnpm exec wrangler d1 execute prebell --local --file ../../db/seed-preview.sql
---   premarket-2026-10-27: EN published + ZH published (hreflang pair)
+--   premarket-2026-10-27: EN published + ZH published (hreflang pair), cover lines set, no scene (cover_key NULL)
 --   premarket-2026-10-28: EN published + ZH pending (ZH page shows the pending notice, noindex)
+--   kv index_line: a recap snapshot for the masthead's index line
 -- Facts JSON for these briefs: bash db/load-preview-facts.sh (local R2, premarket/{date}.json)
+-- Needs migrations 0001-0006 applied locally first: pnpm exec wrangler d1 migrations apply prebell --local
 
 DELETE FROM sources WHERE post_id IN (SELECT id FROM posts WHERE run_key IN ('premarket:2026-10-27','premarket:2026-10-28'));
 DELETE FROM post_translations WHERE post_id IN (SELECT id FROM posts WHERE run_key IN ('premarket:2026-10-27','premarket:2026-10-28'));
@@ -17,7 +19,7 @@ INSERT INTO posts (run_key, content_type, template_id, trading_date, slug, facts
   ('premarket:2026-10-27', 'premarket', 'premarket:v1', '2026-10-27', 'premarket-2026-10-27', 'premarket/2026-10-27.json', '2026-10-27T12:34:00Z'),
   ('premarket:2026-10-28', 'premarket', 'premarket:v1', '2026-10-28', 'premarket-2026-10-28', 'premarket/2026-10-28.json', '2026-10-28T12:36:00Z');
 
-INSERT INTO post_translations (post_id, lang, status, title, summary, body_md, updated_at)
+INSERT INTO post_translations (post_id, lang, status, title, summary, body_md, cover_line1, cover_line2, updated_at)
 SELECT id, 'en', 'published',
   'Futures edge up; Apple jumps 6% on services beat',
   'Stock futures are slightly higher ahead of the open as Apple rallies after earnings and Treasury yields ease.',
@@ -61,10 +63,10 @@ Consumer confidence data at 10:00 AM ET, and earnings from Microsoft and Meta af
 - [PayPal checkout growth slows](https://news.example.com/paypal-q3)
 
 This brief is generated automatically from public data for information only. It is not investment advice.
-', '2026-10-27T12:34:00Z'
+', 'Apple +6.1% premarket', 'Nasdaq futures +0.7%', '2026-10-27T12:34:00Z'
 FROM posts WHERE run_key = 'premarket:2026-10-27';
 
-INSERT INTO post_translations (post_id, lang, status, title, summary, body_md, updated_at)
+INSERT INTO post_translations (post_id, lang, status, title, summary, body_md, cover_line1, cover_line2, updated_at)
 SELECT id, 'zh', 'published',
   '期货小幅走高；苹果服务业务超预期大涨6%',
   '开盘前股指期货小幅走高，苹果财报后大涨，美债收益率回落。',
@@ -108,7 +110,7 @@ SELECT id, 'zh', 'published',
 - [PayPal checkout growth slows](https://news.example.com/paypal-q3)
 
 本简报根据公开数据自动生成，仅供参考，不构成投资建议。
-', '2026-10-27T12:40:00Z'
+', '苹果盘前涨6.1%', '纳指期货涨0.7%', '2026-10-27T12:40:00Z'
 FROM posts WHERE run_key = 'premarket:2026-10-27';
 
 INSERT INTO post_translations (post_id, lang, status, title, summary, body_md, updated_at)
@@ -166,3 +168,6 @@ UNION ALL SELECT id, 'https://news.example.com/amd-outlook', 'AMD raises data-ce
 UNION ALL SELECT id, 'https://news.example.com/paypal-q3', 'PayPal checkout growth slows', 'Branded checkout growth slowed.' FROM posts WHERE run_key = 'premarket:2026-10-27'
 UNION ALL SELECT id, 'https://news.example.com/visa-q4', 'Visa payments volume beats', 'Payments volume beat estimates.' FROM posts WHERE run_key = 'premarket:2026-10-28'
 UNION ALL SELECT id, 'https://news.example.com/nxp-guide', 'NXP guides below estimates', 'Fourth-quarter guidance was below estimates.' FROM posts WHERE run_key = 'premarket:2026-10-28';
+
+INSERT OR REPLACE INTO kv (key, value, updated_at) VALUES
+  ('index_line', '{"kind":"recap","as_of_utc":"2026-11-04T21:41:00Z","entries":[{"symbol":"^GSPC","last":7688.62,"change_pct":1.58},{"symbol":"^NDX","last":28437.17,"change_pct":0.91},{"symbol":"^DJI","last":53356.12,"change_pct":3.03},{"symbol":"^RUT","last":2856.95,"change_pct":1.58}]}', '2026-11-04T21:41:00Z');
