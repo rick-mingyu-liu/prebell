@@ -149,6 +149,22 @@ describe("globals.css", () => {
     expect(css).not.toContain("cover-shade");
   });
 
+  it("gives article and lead covers the graphic's shape, so the chart stays in the lower band under the lines", () => {
+    const [desk, phone] = css.split(/@media \(max-width: 720px\) \{/);
+    const rule = /^\s*\.cover-article, \.cover-lead \{ height: auto; aspect-ratio: ([\d /]+); \}/m;
+    expect(desk.match(rule)?.[1]).toBe("16 / 9");
+    expect(phone.match(rule)?.[1]).toBe("3 / 2");
+    // The phone rule must come after the generic phone `.cover { height }`, or that height wins.
+    expect(phone.indexOf(".cover-article, .cover-lead {")).toBeGreaterThan(phone.indexOf(".cover { height:"));
+    // No fixed height on the two big covers anywhere else.
+    expect(css).not.toMatch(/^\s*\.cover-(article|lead) \{ height: \d/m);
+  });
+
+  it("shows only the tag on a small cover with a graphic; the flat tile keeps its lines", () => {
+    expect(css).toMatch(/^\.cover-small:not\(\.cover-flat\) \.cover-stat, \.cover-small:not\(\.cover-flat\) \.cover-bar \{ display: none; \}/m);
+    expect(css).not.toMatch(/^\.cover-small \.cover-(stat|bar) \{[^}]*display: none/m);
+  });
+
   it("lets the index line scroll in place at every width and never clips its left end", () => {
     const base = css.match(/^\.index-line \{[^}]*\}/m)?.[0] ?? "";
     expect(base).toContain("overflow-x: auto");

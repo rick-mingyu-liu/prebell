@@ -44,7 +44,8 @@ describe("PostList", () => {
     expect(flat).not.toContain("cover-bg");
     expect(flat).not.toContain("cover-stat");
     expect(flat).toContain('<span class="cover-tag">Oct 29 · Recap</span>');
-    // A post with a scene and lines shows both, and the company logo as its tag.
+    // A post with a scene and lines renders both, and the company logo as its tag. The lines stay in the
+    // markup; the small-cover CSS hides them so only the tag and the chart show (see layout.test.tsx).
     expect(scene).toContain('src="/covers/aapl-2026-10-29-earnings.png"');
     expect(scene).toContain("Rev +8%");
     expect(scene).toContain('alt="AAPL"');
