@@ -7,7 +7,9 @@ use base64::Engine;
 use prebell_core::cover::CoverMaker;
 use prebell_core::jobs::redact;
 use prebell_core::providers::Http;
-use serde_json::{json, Value};
+use serde::Deserialize;
+use serde_json::json;
+use std::borrow::Cow;
 
 /// The longest API message passed on to the log.
 const MAX_MESSAGE: usize = 200;
@@ -53,32 +55,69 @@ impl<H: Http> CoverMaker for WorkersAiCover<'_, H> {
     }
 }
 
+/// The parts of a Workers AI response body the maker reads. The strings
+/// borrow from the body when they hold no JSON escapes, so the (large) base64
+/// image is decoded straight from the response text instead of being copied
+/// into a `serde_json::Value` tree first.
+#[derive(Deserialize)]
+struct AiResponse<'a> {
+    #[serde(default)]
+    success: bool,
+    #[serde(borrow, default)]
+    result: Option<AiImage<'a>>,
+    #[serde(borrow, default)]
+    errors: Option<Vec<ApiError<'a>>>,
+}
+
+#[derive(Deserialize)]
+struct AiImage<'a> {
+    #[serde(borrow, default)]
+    image: Option<Cow<'a, str>>,
+}
+
+#[derive(Deserialize)]
+struct ApiError<'a> {
+    #[serde(borrow, default)]
+    message: Option<Cow<'a, str>>,
+}
+
+impl AiResponse<'_> {
+    /// `errors[0].message`, cut to a log-sized line.
+    fn error_line(&self) -> Option<String> {
+        let msg = self.errors.as_ref()?.first()?.message.as_deref()?.trim();
+        (!msg.is_empty()).then(|| {
+            let cut: String = msg.chars().take(MAX_MESSAGE).collect();
+            format!("workers ai: {cut}")
+        })
+    }
+}
+
 /// `errors[0].message` of a Workers AI response body, cut to a log-sized line.
 fn api_error(body: &str) -> Option<String> {
-    let v: Value = serde_json::from_str(body).ok()?;
-    let msg = v.pointer("/errors/0/message")?.as_str()?.trim();
-    (!msg.is_empty()).then(|| {
-        let cut: String = msg.chars().take(MAX_MESSAGE).collect();
-        format!("workers ai: {cut}")
-    })
+    serde_json::from_str::<AiResponse>(body).ok()?.error_line()
 }
 
 /// The image bytes of a success body
 /// (`{"success":true,"result":{"image":"<base64>"}}`). Anything else is an
 /// error carrying the API's own message when there is one.
 pub fn parse_image(body: &str) -> Result<Vec<u8>, String> {
-    let v: Value =
-        serde_json::from_str(body).map_err(|_| "workers ai: response is not JSON".to_string())?;
-    let image = if v.get("success").and_then(Value::as_bool) == Some(true) {
-        v.pointer("/result/image").and_then(Value::as_str)
-    } else {
-        None
-    };
-    let Some(image) = image else {
-        return Err(api_error(body).unwrap_or_else(|| "workers ai: response has no image".into()));
+    let resp: AiResponse = serde_json::from_str(body).map_err(|e| {
+        if e.is_syntax() || e.is_eof() {
+            "workers ai: response is not JSON".to_string()
+        } else {
+            "workers ai: response has no image".to_string()
+        }
+    })?;
+    let image = match (&resp.result, resp.success) {
+        (Some(AiImage { image: Some(image) }), true) => image,
+        _ => {
+            return Err(resp
+                .error_line()
+                .unwrap_or_else(|| "workers ai: response has no image".into()))
+        }
     };
     let bytes = STANDARD
-        .decode(image)
+        .decode(image.as_bytes())
         .map_err(|_| "workers ai: image is not valid base64".to_string())?;
     if bytes.is_empty() {
         return Err("workers ai: image is empty".into());
@@ -99,7 +138,19 @@ mod tests {
         let ok = r#"{"success":true,"result":{"image":"iVBORw0KGgo="},"errors":[],"messages":[]}"#;
         assert_eq!(parse_image(ok).unwrap(), PNG_MAGIC);
         let quota = r#"{"success":false,"errors":[{"code":3036,"message":"quota"}]}"#;
-        assert!(parse_image(quota).unwrap_err().contains("quota"));
+        assert_eq!(parse_image(quota).unwrap_err(), "workers ai: quota");
+        // A JSON-escaped slash still decodes (the string is then owned, not borrowed).
+        let escaped = r#"{"success":true,"result":{"image":"\/\/\/\/"}}"#;
+        assert_eq!(parse_image(escaped).unwrap(), [0xff, 0xff, 0xff]);
+        // The API message is cut to a log-sized line.
+        let long = format!(
+            r#"{{"success":false,"errors":[{{"message":"{}"}}]}}"#,
+            "x".repeat(500)
+        );
+        assert_eq!(
+            parse_image(&long).unwrap_err().len(),
+            "workers ai: ".len() + MAX_MESSAGE
+        );
     }
 
     #[test]
@@ -111,6 +162,12 @@ mod tests {
             r#"{"success":true,"result":{"image":"!!!"}}"#,
             r#"{"success":true,"result":{"image":""}}"#,
             r#"{"success":false,"errors":[]}"#,
+            r#"{"success":false,"errors":null,"result":null}"#,
+            r#"{"success":false,"errors":[{"code":1}]}"#,
+            r#"{"success":false,"result":{"image":"iVBORw0KGgo="}}"#,
+            r#"{"success":"yes","result":{"image":"iVBORw0KGgo="}}"#,
+            r#"{"success":true,"result":{}}"#,
+            r#"[1,2]"#,
         ] {
             let e = parse_image(body).unwrap_err();
             assert!(e.starts_with("workers ai"), "{body}: {e}");

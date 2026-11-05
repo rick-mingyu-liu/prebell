@@ -156,7 +156,8 @@ pub async fn tick(
     tick_with_log(now, store, md, ns, llm, &|_| {}).await
 }
 
-/// `tick`, passing the build's diagnostics line to `log` once when it builds.
+/// `tick`, passing the build's diagnostics line to `log` once when it builds
+/// (and the scene outcome, `cover=ok|skip|err`, when it gets that far).
 pub async fn tick_with_log(
     now: DateTime<Utc>,
     store: &dyn Store,
@@ -187,8 +188,9 @@ pub async fn tick_with_hooks(
 
 /// What the caller adds to a tick.
 pub struct Hooks<'a> {
-    /// Receives the build's diagnostics line, once when it builds, and a
-    /// failed index-line write.
+    /// Receives the build's diagnostics line, once when the facts are built
+    /// (before the drafts), then `cover=ok|skip|err` after the scene step,
+    /// and a failed index-line write.
     pub log: &'a dyn Fn(&str),
     /// Lines appended to the build's diagnostics (log and `last_error`, not
     /// the stored facts), read when the facts are built, e.g. the Worker's
@@ -373,13 +375,15 @@ async fn build<C: Content>(
     let facts = c.build_facts(date, now).await;
     let mut lines = c.diagnostics(&facts);
     lines.extend((hooks.extra)());
-    let out = publish(now, store, c, hooks, date, row, &facts, &mut lines).await;
+    // Logged now, before the drafts, so the line survives a build that dies
+    // in them (CPU or subrequest limits).
     (hooks.log)(&format!("diagnostics: {}", lines.join("; ")));
-    out
+    publish(now, store, c, hooks, date, row, &facts, &lines).await
 }
 
 /// The rest of `build` once the facts are in: gate, drafts, scene, rows.
-/// Appends the scene outcome to `lines`, which the caller then logs.
+/// `lines` (the diagnostics) go into `last_error` when the gate fails; the
+/// scene outcome is logged on its own line.
 #[allow(clippy::too_many_arguments)]
 async fn publish<C: Content>(
     now: DateTime<Utc>,
@@ -389,7 +393,7 @@ async fn publish<C: Content>(
     date: NaiveDate,
     mut row: RunRow,
     facts: &C::Facts,
-    lines: &mut Vec<String>,
+    lines: &[String],
 ) -> Result<TickOutcome, String> {
     let ts = iso(now);
     let missing = c.missing_required(facts);
@@ -415,7 +419,7 @@ async fn publish<C: Content>(
     }
     let slug = c.slug(date);
     let (cover_key, outcome) = make_scene(store, hooks.cover, &slug, &c.scene_subject(facts)).await;
-    lines.push(format!("cover={outcome}"));
+    (hooks.log)(&format!("cover={outcome}"));
     let facts_key = c.facts_key(date);
     let json = serde_json::to_string(facts).map_err(|e| format!("facts json: {e}"))?;
     store.put_facts(&facts_key, &json).await?;
@@ -834,7 +838,10 @@ mod tests {
         assert_eq!(snap.kind, "premarket");
         assert_eq!(snap.as_of_utc, "2026-10-29T12:30:09Z");
         assert_eq!(snap.entries.len(), 1);
-        assert_eq!(c.scene_subject(&f), "a newsroom desk with printed pages");
+        assert_eq!(
+            c.scene_subject(&f),
+            "a suspension bridge over a calm river at first light"
+        );
     }
 
     #[test]
@@ -1020,18 +1027,68 @@ mod tests {
             TickOutcome::Published
         );
         {
+            // The facts line, then the scene outcome on its own line.
             let logs = logs.borrow();
-            assert_eq!(logs.len(), 1, "{logs:?}");
+            assert_eq!(logs.len(), 2, "{logs:?}");
             assert!(logs[0].starts_with("diagnostics: quotes ok=1 "), "{logs:?}");
             assert!(
                 logs[0].contains("; movers liquid=1 gainers=1 losers=0"),
                 "{logs:?}"
             );
-            assert!(logs[0].ends_with("; cover=skip"), "{logs:?}");
+            assert!(!logs[0].contains("cover="), "{logs:?}");
+            assert_eq!(logs[1], "cover=skip");
         }
         // No build, no diagnostics line.
         tick_with_log(now, &s, &m, &FakeNs, &l, &log).await;
-        assert_eq!(logs.borrow().len(), 1);
+        assert_eq!(logs.borrow().len(), 2);
+        // The scene outcome is not part of the stored facts.
+        assert!(!s.facts.borrow()["premarket/2026-10-29.json"].contains("cover="));
+    }
+
+    /// An LLM that records what had been logged when the first draft was asked for.
+    struct DraftSpy<'a> {
+        inner: FakeLlm,
+        logs: &'a std::cell::RefCell<Vec<String>>,
+        at_draft: std::cell::RefCell<Option<Vec<String>>>,
+    }
+    #[async_trait(?Send)]
+    impl LlmProvider for DraftSpy<'_> {
+        async fn complete_json(&self, system: &str, user: &str) -> Result<Value, ProviderError> {
+            if system.starts_with("You write the US premarket") && self.at_draft.borrow().is_none()
+            {
+                *self.at_draft.borrow_mut() = Some(self.logs.borrow().clone());
+            }
+            self.inner.complete_json(system, user).await
+        }
+    }
+
+    #[tokio::test]
+    async fn diagnostics_are_logged_before_the_drafts_and_cover_after_the_scene() {
+        let s = MemStore::default();
+        let m = md(true);
+        let logs = std::cell::RefCell::new(Vec::<String>::new());
+        let spy = DraftSpy {
+            inner: llm(true, true),
+            logs: &logs,
+            at_draft: std::cell::RefCell::new(None),
+        };
+        let log = |m: &str| logs.borrow_mut().push(m.to_string());
+        let extra = || vec!["subrequests=7".to_string()];
+        let hooks = Hooks {
+            log: &log,
+            extra: &extra,
+            cover: &NoCover,
+        };
+        let out = tick_with_hooks(utc("2026-10-29T12:30:00Z"), &s, &m, &FakeNs, &spy, &hooks).await;
+        assert_eq!(out, TickOutcome::Published);
+        let at_draft = spy.at_draft.borrow().clone().expect("no draft was written");
+        assert_eq!(at_draft.len(), 1, "{at_draft:?}");
+        assert!(at_draft[0].starts_with("diagnostics: "), "{at_draft:?}");
+        assert!(at_draft[0].ends_with("; subrequests=7"), "{at_draft:?}");
+        assert_eq!(
+            *logs.borrow(),
+            [at_draft[0].clone(), "cover=skip".to_string()]
+        );
     }
 
     #[tokio::test]
@@ -1525,8 +1582,9 @@ mod tests {
         assert_eq!(snap.entries.len(), 4);
 
         let logs = logs.borrow();
-        assert_eq!(logs.len(), 1, "{logs:?}");
-        assert!(logs[0].ends_with("; cover=ok"), "{logs:?}");
+        assert_eq!(logs.len(), 2, "{logs:?}");
+        assert!(logs[0].starts_with("diagnostics: "), "{logs:?}");
+        assert_eq!(logs[1], "cover=ok");
     }
 
     #[tokio::test]
@@ -1558,11 +1616,8 @@ mod tests {
             // The lines and the snapshot do not depend on the scene.
             assert!(lines_of(&s.inner, "en")[1].is_some());
             assert!(s.inner.kv.borrow().contains_key("index_line"));
-            assert!(
-                logs.borrow()[0].ends_with(&format!("; {want}")),
-                "{:?}",
-                logs.borrow()
-            );
+            assert_eq!(logs.borrow().len(), 2, "{:?}", logs.borrow());
+            assert_eq!(logs.borrow()[1], want, "{:?}", logs.borrow());
         }
     }
 

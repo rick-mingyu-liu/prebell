@@ -1540,8 +1540,9 @@ mod run_tests {
             TickOutcome::Published
         );
         {
+            // The facts line, then the scene outcome on its own line.
             let logs = logs.borrow();
-            assert_eq!(logs.len(), 1, "{logs:?}");
+            assert_eq!(logs.len(), 2, "{logs:?}");
             let n = crate::premarket::universe().len();
             assert!(
                 logs[0].starts_with(&format!(
@@ -1557,13 +1558,14 @@ mod run_tests {
                 "{logs:?}"
             );
             assert!(
-                logs[0].ends_with("; indexes ok=4 err=0; reported=0 reported_err=0; cover=skip"),
+                logs[0].ends_with("; indexes ok=4 err=0; reported=0 reported_err=0"),
                 "{logs:?}"
             );
+            assert_eq!(logs[1], "cover=skip");
         }
         // No build, no diagnostics line.
         tick_with_log(now, &s, &m, &FakeNs, &l, &log).await;
-        assert_eq!(logs.borrow().len(), 1);
+        assert_eq!(logs.borrow().len(), 2);
         // Diagnostics are stored with the facts.
         let facts: RecapFacts =
             serde_json::from_str(&s.facts.borrow()["recap/2026-10-29.json"]).unwrap();
@@ -1812,7 +1814,10 @@ mod run_tests {
         let snap = c.index_snapshot(&f);
         assert_eq!(snap.kind, "recap");
         assert_eq!(snap.entries.len(), 2);
-        assert_eq!(c.scene_subject(&f), "a newsroom desk with printed pages");
+        assert_eq!(
+            c.scene_subject(&f),
+            "a suspension bridge over a calm river at first light"
+        );
     }
 
     #[tokio::test]
