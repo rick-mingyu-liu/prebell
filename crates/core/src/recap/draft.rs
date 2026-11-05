@@ -6,7 +6,7 @@ use crate::facts::{Field, Mover, NewsReason};
 use crate::numbers::{check, Lang};
 use crate::premarket::draft::{
     blank_names, cell, fmt_num, fmt_pct, na, no_news, render_sources, render_themes, section,
-    without_link_targets, write_with, Draft, MOVERS, THEMES,
+    theme_names, without_link_targets, write_with, Draft, MOVERS, THEMES,
 };
 use crate::providers::LlmProvider;
 use crate::recap::{numbers_in_facts, RecapFacts, Reported};
@@ -250,11 +250,7 @@ pub async fn write(
         .chain(&f.losers)
         .map(|m| m.name.as_str())
         .chain(f.reported.iter().map(|r| r.company.as_str()))
-        .chain(f.themes.iter().flat_map(|t| {
-            [t.group.as_str(), t.group_zh.as_str()]
-                .into_iter()
-                .chain(t.members.iter().map(|m| m.name.as_str()))
-        }))
+        .chain(theme_names(&f.themes))
         .collect();
     let (d, md) = write_with(
         llm,
@@ -808,14 +804,15 @@ mod tests {
     #[test]
     fn prompts_describe_the_themes_section() {
         assert!(
-            PROMPT_EN.contains("one short paragraph per theme in the listed order; cite only the listed moves; a theme without a reason gets one sentence stating the move; do not repeat the list line")
+            PROMPT_EN.contains("one short paragraph per theme in the listed order; cite only the listed moves; a theme without a reason gets one sentence stating the move and gives no cause; do not repeat the list line")
                 && PROMPT_EN.contains("\"Themes\" exists only when `themes` is not empty")
                 && PROMPT_EN.contains("\"Macro & after the close\" exists only when `macro_items` has items"),
             "{PROMPT_EN}"
         );
         assert!(
-            PROMPT_ZH.contains("每个主题写一小段，按列出的顺序；只引用列出的涨跌幅；没有原因的主题用一句话说明涨跌即可；不要重复列表那一行")
+            PROMPT_ZH.contains("每个主题写一小段，按列出的顺序；只引用列出的涨跌幅；没有原因的主题用一句话说明涨跌，不写原因；不要重复列表那一行")
                 && PROMPT_ZH.contains("只有 `themes` 不为空时才有“板块动向”")
+                && PROMPT_ZH.contains("`themes` 列出成分股同向大幅波动的行业板块")
                 && PROMPT_ZH.contains("只有 `macro_items` 有条目时才有“宏观与盘后”"),
             "{PROMPT_ZH}"
         );

@@ -222,6 +222,20 @@ fn one_line_text(s: &str) -> String {
     s.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
+/// Theme labels and member names, whose digits ("Phillips 66") are not
+/// figures. Theme members are not limited to the movers, so the prose may
+/// name companies the movers tables do not.
+pub(crate) fn theme_names(themes: &[Theme]) -> Vec<&str> {
+    themes
+        .iter()
+        .flat_map(|t| {
+            [t.group.as_str(), t.group_zh.as_str()]
+                .into_iter()
+                .chain(t.members.iter().map(|m| m.name.as_str()))
+        })
+        .collect()
+}
+
 /// One `## heading` section: code's block (themes list or movers table)
 /// first when there is one, then the LLM body.
 pub(crate) fn section(heading: &str, code: Option<&str>, body: &str) -> String {
@@ -606,7 +620,7 @@ pub async fn write(
         prompt(lang),
         &facts_json,
         &numbers_in_facts(f),
-        &[],
+        &theme_names(&f.themes),
         &headings(
             lang,
             has_items(&f.macro_items),
@@ -1648,14 +1662,38 @@ pub(crate) mod tests {
     #[test]
     fn prompts_describe_the_themes_section() {
         assert!(
-            PROMPT_EN.contains("one short paragraph per theme in the listed order; cite only the listed moves; a theme without a reason gets one sentence stating the move; do not repeat the list line")
+            PROMPT_EN.contains("one short paragraph per theme in the listed order; cite only the listed moves; a theme without a reason gets one sentence stating the move and gives no cause; do not repeat the list line")
                 && PROMPT_EN.contains("\"Themes\" exists only when `themes` is not empty"),
             "{PROMPT_EN}"
         );
         assert!(
-            PROMPT_ZH.contains("每个主题写一小段，按列出的顺序；只引用列出的涨跌幅；没有原因的主题用一句话说明涨跌即可；不要重复列表那一行")
-                && PROMPT_ZH.contains("只有 `themes` 不为空时才有“板块动向”"),
+            PROMPT_ZH.contains("每个主题写一小段，按列出的顺序；只引用列出的涨跌幅；没有原因的主题用一句话说明涨跌，不写原因；不要重复列表那一行")
+                && PROMPT_ZH.contains("只有 `themes` 不为空时才有“板块动向”")
+                && PROMPT_ZH.contains("`themes` 列出成分股同向大幅波动的行业板块"),
             "{PROMPT_ZH}"
         );
+    }
+
+    #[tokio::test]
+    async fn premarket_theme_member_names_with_digits_pass_the_check() {
+        let mut f = facts();
+        f.themes = two_themes();
+        f.themes[1].members[1].name = "Phillips 66".into();
+        f.themes[1].group = "Semis 2.0".into();
+        let mut v = reply_with(&headings(Lang::En, false, true, false), "Quiet.").unwrap();
+        v["sections"][1]["markdown"] =
+            json!("Semis 2.0 names fell; Phillips 66 slipped 3.90% with Micron.");
+        let l = llm(vec![Ok(v)]);
+        let (d, _) = write(&l, &f, Lang::En).await.unwrap();
+        assert_eq!(l.prompts.borrow().len(), 1);
+        assert!(d.sections[1].1.contains("Phillips 66"));
+        // The names' digits back nothing else.
+        let mut v = reply_with(&headings(Lang::En, false, true, false), "Quiet.").unwrap();
+        v["sections"][1]["markdown"] = json!("Phillips 66 slipped 66%.");
+        let bad = || Ok(v.clone());
+        let err = write(&llm(vec![bad(), bad()]), &f, Lang::En)
+            .await
+            .unwrap_err();
+        assert_eq!(err, vec!["66%"]);
     }
 }
