@@ -6,4 +6,5 @@ interface CloudflareEnv {
   ASSETS: { fetch(request: Request): Promise<Response> };
   SITE_URL?: string;
   CF_BEACON_TOKEN?: string;
+  BUTTONDOWN_API_KEY?: string;
 }

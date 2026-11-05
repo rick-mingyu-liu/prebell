@@ -23,6 +23,9 @@ const post = (over: Partial<PostView> = {}): PostView => ({
   sources: [],
   hasOtherLang: true,
   factsKey: "premarket/2026-10-30.json",
+  coverKey: null,
+  coverLines: null,
+  ticker: null,
   ...over,
 });
 
@@ -45,6 +48,9 @@ const check: PostListItem = {
   publishedAt: "2026-10-29T21:00:00Z",
   title: "Apple Q4: revenue up 8%",
   summary: "Services carried the quarter.",
+  coverKey: null,
+  coverLines: null,
+  ticker: "AAPL",
 };
 
 const props = (over: Partial<HomeViewProps> = {}): HomeViewProps => ({

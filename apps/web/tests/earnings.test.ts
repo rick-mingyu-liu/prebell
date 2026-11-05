@@ -131,6 +131,33 @@ INSERT INTO post_translations (post_id, lang, status, title, summary, body_md, u
   });
 });
 
+describe("cover fields in lists", () => {
+  it("latest earnings carry ticker and cover fields", async () => {
+    const ts = "2026-10-30T21:00:00Z";
+    const db = memoryD1(
+      seed +
+        `UPDATE posts SET cover_key = 'covers/aapl-2026-10-30-earnings.png' WHERE id = 1;
+UPDATE post_translations SET cover_line1 = 'Apple beats', cover_line2 = 'on services' WHERE post_id = 1 AND lang = 'en';
+INSERT INTO runs VALUES ('premarket:2026-10-31','premarket','2026-10-31','published',1,NULL,'${ts}','${ts}');
+INSERT INTO posts (id, run_key, content_type, template_id, trading_date, slug, facts_r2_key, published_at)
+VALUES (9,'premarket:2026-10-31','premarket','premarket:v1','2026-10-31','premarket-2026-10-31',NULL,'${ts}');
+INSERT INTO post_translations (post_id, lang, status, title, summary, body_md, updated_at) VALUES (9,'en','published','EN pm','s','# x','${ts}');`,
+    );
+    const [aapl] = await listLatestEarnings(db, "en", 5);
+    expect(aapl).toMatchObject({
+      slug: "aapl-2026-10-30-earnings",
+      ticker: "AAPL",
+      coverKey: "covers/aapl-2026-10-30-earnings.png",
+      coverLines: ["Apple beats", "on services"],
+    });
+    const [msft] = (await listLatestEarnings(db, "en", 5)).filter((p) => p.ticker === "MSFT");
+    expect(msft).toMatchObject({ coverKey: null, coverLines: null });
+    expect((await listTickerPosts(db, "AAPL", "en"))[0]).toMatchObject({ ticker: "AAPL" });
+    const [brief] = await listRecentBriefs(db, "en", 1);
+    expect(brief).toMatchObject({ slug: "premarket-2026-10-31", ticker: null, coverKey: null, coverLines: null });
+  });
+});
+
 describe("charts", () => {
   it("maps keys to same-site paths and drops anything else", async () => {
     const charts = await getPostCharts(memoryD1(seed), "aapl-2026-10-30-earnings", "zh");

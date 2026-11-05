@@ -25,6 +25,9 @@ const post = (over: Partial<PostView> = {}): PostView => ({
   sources: sourcesEn,
   hasOtherLang: true,
   factsKey: "premarket/2026-10-30.json",
+  coverKey: null,
+  coverLines: null,
+  ticker: null,
   ...over,
 });
 
@@ -35,6 +38,9 @@ const item = (slug: string, contentType: string, tradingDate: string): PostListI
   publishedAt: `${tradingDate}T12:00:00Z`,
   title: slug,
   summary: "",
+  coverKey: null,
+  coverLines: null,
+  ticker: null,
 });
 
 const strip: StripDay = {

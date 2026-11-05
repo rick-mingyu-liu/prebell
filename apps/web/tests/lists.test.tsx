@@ -12,6 +12,9 @@ const post: PostListItem = {
   title: "Stocks slip into the close",
   summary: "Tech led the drop.",
   publishedAt: null,
+  coverKey: null,
+  coverLines: null,
+  ticker: null,
 };
 
 describe("PostList", () => {
