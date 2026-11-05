@@ -40,7 +40,8 @@
     "published": "发布于 {time}",
     "pendingTitle": "{type} {date}",
     "pending": "中文版稍后推出",
-    "readEnglish": "阅读英文版"
+    "readEnglish": "阅读英文版",
+    "sources": "来源"
   },
   "archive": {
     "title": "归档",
@@ -92,7 +93,8 @@
     "dates": "财报日期",
     "readCheck": "阅读速评",
     "charts": "图表（GAAP）",
-    "chartsNote": "图表为美国证监会文件中的 GAAP 数据；标为 8-K 的最后一栏为本次公布数据。空缺表示公司未单独公布该季度数据。"
+    "chartsNote": "图表为美国证监会文件中的 GAAP 数据；标为 8-K 的最后一栏为本次公布数据。空缺表示公司未单独公布该季度数据。",
+    "checkedFiling": "✓ 每个数字均出自申报文件"
   },
   "index": {
     "es": "标普500期货",
@@ -110,7 +112,8 @@
     "company": "公司",
     "reason": "原因",
     "last": "最新价",
-    "change": "涨跌幅"
+    "change": "涨跌幅",
+    "close": "收盘价"
   },
   "partners": {
     "brokers": "券商",
@@ -132,7 +135,8 @@
     "movers": "涨跌榜",
     "adjacent": "更多简报",
     "prev": "上一篇",
-    "next": "下一篇"
+    "next": "下一篇",
+    "kickerEarnings": "财报速评 · {ticker}"
   },
   "paper": {
     "masthead": {

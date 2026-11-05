@@ -40,7 +40,8 @@
     "published": "Published {time}",
     "pendingTitle": "{type}, {date}",
     "pending": "The Chinese version is coming soon.",
-    "readEnglish": "Read the English version"
+    "readEnglish": "Read the English version",
+    "sources": "Sources"
   },
   "archive": {
     "title": "Archive",
@@ -92,7 +93,8 @@
     "dates": "Report dates",
     "readCheck": "Read the check",
     "charts": "Charts (GAAP)",
-    "chartsNote": "Charts show GAAP figures from SEC filings; the last bar marked 8-K is this release. A gap means the company did not report that quarter separately."
+    "chartsNote": "Charts show GAAP figures from SEC filings; the last bar marked 8-K is this release. A gap means the company did not report that quarter separately.",
+    "checkedFiling": "✓ Every figure traced to the filing"
   },
   "index": {
     "es": "S&P 500 futures",
@@ -110,7 +112,8 @@
     "company": "Company",
     "reason": "Reason",
     "last": "Last",
-    "change": "Change"
+    "change": "Change",
+    "close": "Close"
   },
   "partners": {
     "brokers": "Brokers",
@@ -132,7 +135,8 @@
     "movers": "Top movers",
     "adjacent": "More briefs",
     "prev": "Previous",
-    "next": "Next"
+    "next": "Next",
+    "kickerEarnings": "Earnings check · {ticker}"
   },
   "paper": {
     "masthead": {

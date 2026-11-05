@@ -9,8 +9,10 @@ export interface MoversTableProps {
   locale: Locale;
   /** `column`: ruled rows for the front page's side column. `table`: the brief's ruled table. */
   variant: "column" | "table";
-  /** Show the last price before the change. */
+  /** Show the price before the change. */
   showPrice?: boolean;
+  /** The price column's heading: the last trade (premarket) or the close (recap). */
+  priceLabel?: "last" | "close";
 }
 
 /** The reason in grey, linked to its source when that is an http(s) URL; "No clear news" in grey italics without one. */
@@ -30,7 +32,7 @@ const pct = (m: MoverView) => <span className={`num ${m.quote.dir}`}>{fmtPct(m.q
  * Movers as ruled rows or a ruled table: company name, ticker in grey, the move in the number colours and
  * the one-line reason. Reasons are English-only, so ZH pages show no reason line or column. No logos, no pills.
  */
-export default function MoversTable({ movers, locale, variant, showPrice = false }: MoversTableProps) {
+export default function MoversTable({ movers, locale, variant, showPrice = false, priceLabel = "last" }: MoversTableProps) {
   if (movers.length === 0) return null;
   const t = translator(locale);
   const reasons = locale === "en";
@@ -66,7 +68,7 @@ export default function MoversTable({ movers, locale, variant, showPrice = false
             {reasons && <th scope="col">{t("movers.reason")}</th>}
             {showPrice && (
               <th scope="col" className="r">
-                {t("movers.last")}
+                {t(`movers.${priceLabel}`)}
               </th>
             )}
             <th scope="col" className="r">

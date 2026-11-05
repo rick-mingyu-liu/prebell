@@ -171,20 +171,34 @@ html:lang(zh-Hans) .front-slots dt { letter-spacing: 0.02em; }
 .mover-why a:hover, .mover-why a:focus-visible { text-decoration: underline; }
 .movers-table td.r { white-space: nowrap; }
 
-/* Post: one 680px reading column, the verified-numbers tag, and the markdown body. */
-.col-read { max-width: 680px; margin: 0 auto; }
-.post-head h1 { font-size: 32px; margin: 0.25rem 0 0.5rem; }
-.post-meta { margin: 0 0 1rem; color: var(--muted); font-size: 12.5px; display: flex; flex-wrap: wrap; gap: 0.25rem 0.75rem; align-items: center; }
+/* Article: the post page's one 680px reading column. Kicker, serif headline, the meta line with the
+   verified-numbers tag, cover, then the body (a 17px lede, 16px after), the sources, the post's own
+   disclaimer in italics and the previous/next briefs as plain ruled links. */
+.story { max-width: 680px; margin: 0 auto; }
+.story .story-kicker { margin-bottom: 0.5rem; }
+.story .story-title { margin: 0 0 0.75rem; font-size: 32px; line-height: 1.12; letter-spacing: -0.01em; }
+.story .story-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 0.25rem 0.75rem; margin: 0 0 1rem; }
 .checked { display: inline-block; padding: 0.05rem 0.5rem; border: 1px solid var(--up); background: color-mix(in srgb, var(--up) 8%, var(--paper)); color: var(--ink); font-weight: 600; }
-.post-body { font-size: 17px; line-height: 1.7; }
-.post-body > h2:first-child { margin-top: 1.25rem; }
-.post-body h2 { border-top: 1px solid var(--rule); padding-top: 1rem; }
+.story-body { margin-top: 1.25rem; font-size: 16px; line-height: 1.7; }
+.story-body p { max-width: none; }
+.story-lede { margin: 0 0 1rem; font-size: 17px; line-height: 1.7; }
+.story-body h2 { font-size: 20px; margin: 1.75rem 0 0.5rem; }
+.story-body h3 { font-size: 18px; margin: 1.5rem 0 0.4rem; }
+.story-movers h2 { margin-top: 1.5rem; }
+.post-body { font-size: 16px; line-height: 1.7; }
 .post-body p { max-width: none; }
 .post-body blockquote { margin: 1rem 0; padding-left: 1rem; border-left: 2px solid var(--rule-strong); color: var(--muted); }
 .post-body img, .charts img { display: block; width: 100%; height: auto; max-width: 640px; }
 .charts figure { margin: 1.5rem 0; }
 .charts img { filter: grayscale(1); } /* the generator's blue bars read as ink grey, old posts and new */
-.charts figcaption { color: var(--muted); font-size: 12.5px; margin-top: 0.25rem; }
+.charts figcaption { margin-top: 0.25rem; }
+.sources { margin-top: 2rem; padding-top: 0.75rem; border-top: 1px solid var(--rule); }
+.sources h2 { margin: 0 0 0.25rem; font-family: var(--sans); font-size: 12px; font-weight: 600; letter-spacing: 0.07em; text-transform: uppercase; color: var(--muted); }
+html:lang(zh-Hans) .sources h2 { letter-spacing: 0.04em; }
+.sources .post-body { color: var(--muted); font-size: 13px; line-height: 1.8; }
+.sources ul { margin: 0; padding-left: 1.1rem; }
+.sources a { color: var(--muted); }
+.story-disclaimer { margin: 1rem 0 0; color: var(--muted); font-size: 13px; font-style: italic; }
 .disclaimer { color: var(--muted); font-size: 13px; font-style: italic; }
 .adjacent { display: flex; justify-content: space-between; gap: 1rem; margin-top: 2rem; padding-top: 1rem; border-top: 1px solid var(--rule); }
 .adjacent a { font-family: var(--serif); font-size: 16px; font-weight: 700; text-decoration: none; }
@@ -230,35 +244,14 @@ html:lang(zh-Hans) .partners-strip .partners-label { font-variant-caps: normal; 
 .footer-links { display: flex; gap: 1rem; font-size: 13px; }
 .footer-links a { color: var(--muted); }
 
-/* Blocks the pages still render until their redesign tasks replace them: rows, labels, movers,
-   brief numbers, lists, calendar, filters, notices, not-found. Ruled and flat, in the same tokens. */
+/* Blocks the pages still render until their redesign tasks replace them: rows, labels, lists,
+   calendar, filters, notices, not-found. Ruled and flat, in the same tokens. */
 .row { display: flex; justify-content: space-between; align-items: center; gap: 0.75rem; padding: 0.6rem 0; border-bottom: 1px solid var(--rule); }
 .lbl { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); margin: 0.25rem 0 0.4rem; }
-.big { font-size: 34px; font-weight: 700; font-variant-numeric: tabular-nums; letter-spacing: -0.03em; line-height: 1.15; }
-.chart-slot { height: 56px; margin: 0.4rem 0; }
-.chart-slot:empty { display: none; }
 .row-end { display: flex; gap: 0.75rem; align-items: baseline; }
 .tlogo { width: 18px; height: 18px; flex: none; }
-.movers { list-style: none; margin: 0; padding: 0; }
-.mover-main { min-width: 0; }
-.mover-main > div:first-child { line-height: 1.35; }
-.mover-main b { font-weight: 700; }
-.why { font-size: 13px; color: var(--muted); line-height: 1.4; padding-left: calc(18px + 0.45rem); }
-.movers .tlogo { margin-right: 0.45rem; vertical-align: -4px; }
-.mover-end { display: flex; align-items: center; gap: 0.75rem; flex: none; }
 .more { font-weight: 600; font-size: 14px; text-decoration: none; }
 .more:hover, .more:focus-visible { text-decoration: underline; }
-.crumb { font-size: 12px; color: var(--muted); margin: 0 0 0.25rem; }
-.crumb a { color: var(--muted); text-decoration: none; }
-.crumb a:hover, .crumb a:focus-visible { color: var(--ink); text-decoration: underline; }
-.brief-main { min-width: 0; }
-.brief-main .brief-meta { display: flex; flex-wrap: wrap; gap: 0.15rem 0.75rem; margin: 0; font-size: 12.5px; }
-.numbers-page { display: grid; grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr); gap: 0.75rem 1.25rem; align-items: start; margin-top: 1rem; }
-.index-rows { display: flex; flex-direction: column; font-size: 13px; }
-.brief-movers { margin-top: 1.5rem; }
-.brief-movers .lbl { margin: 0 0 0.25rem; }
-.brief-title { font-size: 26px; margin: 1.75rem 0 0.5rem; }
-.brief-sum { font-size: 16px; line-height: 1.55; color: var(--muted); margin: 0 0 0.5rem; }
 .page-main { min-width: 0; }
 .page-main h1 { font-size: 32px; }
 .prose { max-width: 680px; }
@@ -280,6 +273,7 @@ html:lang(zh-Hans) .partners-strip .partners-label { font-variant-caps: normal; 
 .post-main > a { font-family: var(--serif); font-size: 18px; font-weight: 700; line-height: 1.3; text-decoration: none; }
 .post-main > a:hover, .post-main > a:focus-visible { text-decoration: underline; }
 .post-main p { margin: 0.2rem 0 0; color: var(--muted); font-size: 14px; line-height: 1.45; }
+.post-meta { margin: 0 0 1rem; color: var(--muted); font-size: 12.5px; display: flex; flex-wrap: wrap; gap: 0.25rem 0.75rem; align-items: center; }
 .post-main .post-meta { display: block; margin: 0; }
 .date-list .row { gap: 0.25rem 1rem; flex-wrap: wrap; }
 .date-list .row-end { align-items: center; }
@@ -306,7 +300,7 @@ html:lang(zh-Hans) .partners-strip .partners-label { font-variant-caps: normal; 
 
 /* Phones: the one breakpoint. Smaller type, stacked rows, and the index line scrolls in place. */
 @media (max-width: 720px) {
-  h1, .post-head h1, .page-main h1 { font-size: 26px; }
+  h1, .page-main h1, .story .story-title { font-size: 26px; }
   .masthead-name { font-size: 28px; }
   .story-lead .story-title { font-size: 28px; }
   .story-row { grid-template-columns: 120px minmax(0, 1fr); gap: 0 12px; }
@@ -332,13 +326,7 @@ html:lang(zh-Hans) .partners-strip .partners-label { font-variant-caps: normal; 
   .author-all { margin-left: 0; align-self: auto; flex-basis: 100%; }
   .signup-form { max-width: none; }
   .partners-strip .partners-note { margin-left: 0; flex-basis: 100%; }
-  .numbers-page { grid-template-columns: minmax(0, 1fr); }
   .cal-day { grid-template-columns: minmax(0, 1fr); }
   .post-row { flex-direction: column; align-items: stretch; gap: 0.3rem; }
   .post-row .tag { order: -1; }
-  /* Ticker and name beside the price and move, the reason under both at full width. */
-  .movers .row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 0.2rem 0.75rem; }
-  .movers .mover-main { display: contents; }
-  .movers .mover-end { grid-column: 2; grid-row: 1; }
-  .movers .why { grid-column: 1 / -1; }
 }

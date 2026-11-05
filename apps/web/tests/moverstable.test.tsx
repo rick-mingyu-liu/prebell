@@ -84,6 +84,13 @@ describe("MoversTable table", () => {
     expect(out).not.toMatch(/class="[^"]*\b(pill|tlogo)\b/);
   });
 
+  it("heads the price column Close for a recap", () => {
+    const en = renderToStaticMarkup(<MoversTable movers={[mover()]} locale="en" variant="table" showPrice priceLabel="close" />);
+    expect(en).toMatch(/<th[^>]*>Close<\/th>/);
+    const zh = renderToStaticMarkup(<MoversTable movers={[mover()]} locale="zh" variant="table" showPrice priceLabel="close" />);
+    expect(zh).toMatch(/<th[^>]*>收盘价<\/th>/);
+  });
+
   it("drops the reason column on ZH and the price column without showPrice", () => {
     const out = renderToStaticMarkup(<MoversTable movers={[mover()]} locale="zh" variant="table" />);
     expect(out).toMatch(/<th[^>]*>公司<\/th><th[^>]*>涨跌幅<\/th><\/tr>/);
