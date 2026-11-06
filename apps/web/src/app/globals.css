@@ -325,8 +325,9 @@ html:lang(zh-Hans) .cal-title .kicker { letter-spacing: 0.04em; }
 .cal-share-msg:empty { display: none; }
 .cal-share-url { user-select: all; color: var(--ink); overflow-wrap: anywhere; }
 
-/* Day chips: the phone's way to jump between columns; hidden where the whole board shows. */
-.cal-chips { display: flex; gap: 6px; margin: 0 0 0.75rem; }
+/* Day chips: the phone's way to jump between columns, held at the top of the screen while the board scrolls
+   by (a jump lands the column just under them); hidden where the whole board shows. */
+.cal-chips { position: sticky; top: 0; z-index: 2; display: flex; gap: 6px; margin: 0 0 0.35rem; padding: 6px 0; background: var(--paper); }
 .cal-chip-day { flex: 1 1 0; min-width: 0; padding: 0.3rem 0; border: 1px solid var(--rule); background: var(--card); color: var(--ink); font-size: 13px; font-weight: 600; line-height: 1.3; text-align: center; text-decoration: none; white-space: nowrap; }
 .cal-chip-day .num { font-weight: 400; color: var(--muted); }
 .cal-chip-day[aria-current] { border-color: var(--ink); background: var(--ink); color: var(--paper); }
@@ -334,7 +335,7 @@ html:lang(zh-Hans) .cal-title .kicker { letter-spacing: 0.04em; }
 
 /* The board. Each column is its own container, so its two lists stack when the column is narrow. */
 .cal-board { position: relative; display: flex; align-items: flex-start; gap: 10px; margin: 0 -16px; padding: 2px 16px 12px; overflow-x: auto; overscroll-behavior-x: contain; scroll-snap-type: x mandatory; scroll-padding-inline: 16px; scrollbar-width: thin; }
-.cal-col { container: col / inline-size; flex: 0 0 calc(100% - 26px); min-width: 0; scroll-snap-align: start; scroll-margin-top: 1rem; padding: 0 10px 12px; border: 1px solid var(--rule); background: color-mix(in srgb, var(--cover-flat) 45%, var(--paper)); }
+.cal-col { container: col / inline-size; flex: 0 0 calc(100% - 26px); min-width: 0; scroll-snap-align: start; scroll-margin-top: 3.5rem; padding: 0 10px 12px; border: 1px solid var(--rule); background: color-mix(in srgb, var(--cover-flat) 45%, var(--paper)); }
 .cal-col.is-today { border-color: var(--ink); border-top: 3px solid var(--cover-bar); background: var(--paper); scroll-initial-target: nearest; }
 .cal-date { display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; margin: 0 -10px 10px; padding: 0.7rem 10px 0.5rem; border-bottom: 1px solid var(--rule-strong); font-size: 18px; line-height: 1.2; }
 .is-past .cal-date { color: var(--muted); font-weight: 600; border-bottom-color: var(--rule); }
@@ -401,6 +402,8 @@ h3.cal-slot .num { margin-left: auto; color: var(--ink); font-variant-caps: norm
 @media (min-width: 1000px) {
   .cal-page { width: var(--board); margin-inline: calc((100% - var(--board)) / 2); }
   .cal-chips { display: none; }
+  /* The board is not a scroller here, so the start-at-today target would scroll the whole page instead. */
+  .cal-col.is-today { scroll-initial-target: none; }
   .cal-board { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); align-items: stretch; margin: 0; padding: 0; overflow: visible; scroll-snap-type: none; }
 }
 

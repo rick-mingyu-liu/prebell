@@ -8,7 +8,7 @@ import { getDb } from "@/lib/db";
 import { addDays, INDEXED_WEEKS, isDate, listCalendarWeek, todayEt, weekStart } from "@/lib/earnings";
 import { listEvents } from "@/lib/events";
 import { pairedAlternates, shareMetadata } from "@/lib/seo";
-import { formatMonthDay } from "@/lib/time";
+import { formatDate } from "@/lib/time";
 
 function monday(raw: string | string[] | undefined): string {
   const v = Array.isArray(raw) ? raw[0] : raw;
@@ -50,9 +50,11 @@ export default async function EarningsCalendar({ params, searchParams }: PagePro
   ]);
   const today = todayEt();
   const href = (d: string) => `/${locale}/earnings?week=${d}`;
-  const companies = days.reduce((n, d) => n + d.entries.length, 0);
+  // Companies, not rows: a ticker with two dates in one week counts once.
+  const companies = new Set(days.flatMap((d) => d.entries.map((e) => e.ticker))).size;
   const eventCount = Object.values(events).reduce((n, e) => n + e.length, 0);
-  const title = t("boardTitle", { date: formatMonthDay(start, locale) });
+  // With the year: the week links go on forever, and a shared "Week of Dec 28" would be ambiguous.
+  const title = t("boardTitle", { date: formatDate(start, locale) });
 
   return (
     <div className="cal-page">

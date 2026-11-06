@@ -2,7 +2,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { Locale } from "../src/i18n/routing";
 import { translator } from "../src/lib/translator";
-import { todayEt, weekStart } from "../src/lib/earnings";
+import { addDays, todayEt, weekStart } from "../src/lib/earnings";
 import { memoryD1 } from "./d1";
 
 // The pages read D1 through getDb() and messages through next-intl/server; both are swapped for
@@ -89,7 +89,7 @@ describe("list pages are one paper column", () => {
 
   it("heads the board with the week, its count, the week arrows, the way back and a share button", async () => {
     const out = renderToStaticMarkup(await pages[1][1]());
-    expect(out).toContain('<h1 class="cal-title"><span class="kicker">Market calendar</span>Week of Oct 26</h1>');
+    expect(out).toContain('<h1 class="cal-title"><span class="kicker">Market calendar</span>Week of Oct 26, 2026</h1>');
     // Two companies, no events that week: the events count is left out.
     expect(out).toContain('<p class="cal-count">2 companies</p>');
     expect(out).toContain('<nav class="cal-weeks" aria-label="Weeks">');
@@ -107,13 +107,15 @@ describe("list pages are one paper column", () => {
     expect(out).not.toContain("is-today");
   });
 
-  it("the current week has no way back, counts events, and marks today", async () => {
+  it("the current week has no way back, counts companies once and events, and marks today", async () => {
     const today = todayEt();
     const monday = weekStart(today);
     env.db = memoryD1(
       `${seed}
       INSERT INTO earnings_calendar (ticker, report_date, time_slot, status, source, first_seen_at, checked_at, updated_at)
         VALUES ('AMD','${monday}','amc','confirmed','yahoo','2026-10-01','2026-10-29','2026-10-29');
+      INSERT INTO earnings_calendar (ticker, report_date, time_slot, status, source, first_seen_at, checked_at, updated_at)
+        VALUES ('AMD','${addDays(monday, 1)}','bmo','unconfirmed','yahoo','2026-10-01','2026-10-29','2026-10-29');
       INSERT INTO macro_events (id, series, ref_period, variant, starts_at, et_date, tier, status, proof_url, release_url, moved_from, missing_count, first_seen_at, checked_at, updated_at)
         VALUES ('bls:cpi:x','cpi','2026-10',NULL,'${monday}T13:30:00Z','${monday}',1,'confirmed','https://www.bls.gov/schedule/news_release/cpi.htm',NULL,NULL,0,'x','x','x');`,
     );
@@ -127,7 +129,7 @@ describe("list pages are one paper column", () => {
 
   it("the Chinese calendar heads the board in Chinese", async () => {
     const out = renderToStaticMarkup(await EarningsCalendar(props({ locale: "zh" }, { week: "2026-10-26" })));
-    expect(out).toContain('<h1 class="cal-title"><span class="kicker">市场日历</span>10月26日当周</h1>');
+    expect(out).toContain('<h1 class="cal-title"><span class="kicker">市场日历</span>2026年10月26日当周</h1>');
     expect(out).toContain('<p class="cal-count">本周 2 家公司</p>');
     expect(out).toContain('<span class="sr-only">上一周</span>');
     expect(out).toContain(">回到本周</a>");

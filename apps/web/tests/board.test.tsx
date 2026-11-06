@@ -8,8 +8,10 @@ vi.mock("../src/lib/logos.generated", () => ({
     WIDE: "/logos/companies/WIDE.svg",
     SQ: "/logos/companies/SQ.png",
     EDGE: "/logos/companies/EDGE.png",
+    SMALLW: "/logos/companies/SMALLW.png",
+    TINY: "/logos/companies/TINY.png",
   },
-  COMPANY_LOGO_SIZES: { WIDE: [128, 32], EDGE: [86, 48] },
+  COMPANY_LOGO_SIZES: { WIDE: [128, 32], EDGE: [86, 48], SMALLW: [51, 22], TINY: [17, 19] },
 }));
 
 const { default: CalendarWeek, WIDE_LOGO, wordmarkHeight } = await import("../src/components/CalendarWeek");
@@ -39,7 +41,12 @@ describe("logos with sizes", () => {
 describe("calendar cards with wide logos", () => {
   const out = renderToStaticMarkup(
     <CalendarWeek
-      days={[{ date: "2026-11-02", entries: [entry("WIDE", "Wide Corp"), entry("SQ", "Square Inc"), entry("EDGE", null)] }]}
+      days={[
+        {
+          date: "2026-11-02",
+          entries: [entry("WIDE", "Wide Corp"), entry("SQ", "Square Inc"), entry("EDGE", null), entry("SMALLW", "Small Wordmark"), entry("TINY", "Tiny Icon")],
+        },
+      ]}
       locale="en"
     />,
   );
@@ -57,6 +64,13 @@ describe("calendar cards with wide logos", () => {
     expect(wordmarkHeight(128 / 32)).toBe(22);
     expect(wordmarkHeight(5)).toBe(20);
     expect(wordmarkHeight(20)).toBe(16);
+  });
+
+  it("never draws a logo above its natural size", () => {
+    // 51x22 would get 29px from the even-weight rule; it stays at its own 22px.
+    expect(card("SMALLW")).toContain('width="51" height="22" style="height:22px"');
+    // A 17x19 icon keeps its size instead of filling the 28px box; full-size icons need no style.
+    expect(card("TINY")).toContain('class="cal-logo-icon" src="/logos/companies/TINY.png" alt="" width="17" height="19" style="width:17px;height:19px"');
   });
 
   it("keeps a square or near-square logo as an icon beside the ticker and name", () => {

@@ -19,8 +19,10 @@ export const WIDE_LOGO = 1.8;
  * stubby one does not shout (2:1 and wider up to 30px tall, 5:1 20px), never under 16px. The card's width caps it too.
  */
 export const wordmarkHeight = (ratio: number) => Math.round(Math.min(30, Math.max(16, Math.sqrt(2000 / ratio))));
-/** Logos loaded eagerly: the first card of each day's before-open and after-close lists, the board's top row. */
+/** Logos loaded eagerly: the first cards of the before-open and after-close lists of the day the board opens on. */
 export const EAGER_PER_SLOT = 1;
+/** An icon's box; a smaller image keeps its own size, so no logo is drawn above its natural size. */
+const ICON = 28;
 
 type T = ReturnType<typeof translator>;
 
@@ -61,18 +63,13 @@ export default function CalendarWeek({
     unknown: t("earnings.timeUnknown"),
   };
   const lists = new Map(days.map((d) => [d.date, slotLists(d.entries)]));
-  // The top card of each timed list is on the first screen of the board; the rest load lazily.
-  const eager = new Set(
-    days.flatMap((d) =>
-      HALVES.flatMap((slot) =>
-        lists
-          .get(d.date)!
-          [slot].filter((e) => companyLogoInfo(e.ticker))
-          .slice(0, EAGER_PER_SLOT),
-      ),
-    ),
-  );
   const hasToday = days.some((d) => d.date === today);
+  // The phone opens on today's column (else Monday): the top logos there are on the first screen. The rest
+  // load lazily, which on a desktop, where the whole week shows, still means at once.
+  const start = lists.get(hasToday ? today : days[0]?.date) ?? null;
+  const eager = new Set(
+    start ? HALVES.flatMap((slot) => start[slot].filter((e) => companyLogoInfo(e.ticker)).slice(0, EAGER_PER_SLOT)) : [],
+  );
 
   return (
     <div className="cal-week">
@@ -199,6 +196,14 @@ function Cards({ entries, locale, t, eager }: { entries: CalendarEntry[]; locale
         const name = e.name ?? e.ticker;
         const ratio = logo ? logo.width / logo.height : 0;
         const wide = ratio >= WIDE_LOGO;
+        // Never above the natural size: a wordmark no taller than its own height, an icon no bigger than itself.
+        const size = !logo
+          ? undefined
+          : wide
+            ? { height: Math.min(wordmarkHeight(ratio), logo.height) }
+            : Math.max(logo.width, logo.height) < ICON
+              ? { width: logo.width, height: logo.height }
+              : undefined;
         const kind = logo ? (wide ? "wide" : "icon") : "text";
         const img = logo && (
           <img
@@ -207,7 +212,7 @@ function Cards({ entries, locale, t, eager }: { entries: CalendarEntry[]; locale
             alt={wide ? name : ""}
             width={logo.width}
             height={logo.height}
-            style={wide ? { height: wordmarkHeight(ratio) } : undefined}
+            style={size}
             loading={eager.has(e) ? "eager" : "lazy"}
             decoding="async"
           />

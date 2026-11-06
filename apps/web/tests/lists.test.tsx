@@ -235,23 +235,24 @@ describe("CalendarWeek", () => {
     expect(zh).toContain("<summary>展开其余3家</summary>");
   });
 
-  it("loads the top logo of each timed list eagerly and the rest lazily", () => {
+  it("loads the top logos of the day the board opens on eagerly and the rest lazily", () => {
     const tickers = ["AAPL", "ABBV", "ABT", "ACN", "AMD", "BA"];
-    const out = renderToStaticMarkup(
-      <CalendarWeek
-        days={[
-          { date: "2026-11-02", entries: [...tickers.map((t) => entry(t, "bmo", "confirmed")), entry("CAT", "amc", "confirmed")] },
-          { date: "2026-11-03", entries: [entry("AVGO", "bmo", "confirmed"), entry("F", "bmo", "confirmed")] },
-        ]}
-        locale="en"
-      />,
-    );
-    const imgs = out.match(/<img [^>]*>/g)!;
-    expect(imgs).toHaveLength(tickers.length + 2);
-    const eager = imgs.filter((i) => i.includes('loading="eager"'));
-    // Monday's before-open and after-close tops, and Tuesday's first logo (AVGO has none, so F).
-    expect(eager).toHaveLength(3 * EAGER_PER_SLOT);
-    expect(eager.map((i) => i.match(/companies\/(\w+)\./)![1])).toEqual(["AAPL", "CAT", "F"]);
+    const week: CalendarDay[] = [
+      { date: "2026-11-02", entries: [...tickers.map((t) => entry(t, "bmo", "confirmed")), entry("CAT", "amc", "confirmed")] },
+      { date: "2026-11-03", entries: [entry("AVGO", "bmo", "confirmed"), entry("F", "bmo", "confirmed"), entry("GE", "amc", "confirmed")] },
+    ];
+    const eagerOf = (html: string) =>
+      html
+        .match(/<img [^>]*>/g)!
+        .filter((i) => i.includes('loading="eager"'))
+        .map((i) => i.match(/companies\/(\w+)\./)![1]);
+    // Today is Tuesday: its before-open top (AVGO has no logo, so F) and after-close top.
+    const tue = renderToStaticMarkup(<CalendarWeek days={week} locale="en" today="2026-11-03" />);
+    expect(tue.match(/<img [^>]*>/g)).toHaveLength(tickers.length + 3);
+    expect(eagerOf(tue)).toEqual(["F", "GE"]);
+    expect(eagerOf(tue)).toHaveLength(2 * EAGER_PER_SLOT);
+    // No today in the week: the board opens on Monday.
+    expect(eagerOf(renderToStaticMarkup(<CalendarWeek days={week} locale="en" today="2026-11-20" />))).toEqual(["AAPL", "CAT"]);
   });
 
   it("uses Chinese labels on ZH pages", () => {

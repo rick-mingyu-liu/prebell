@@ -31,6 +31,8 @@ export default function ShareButton({
   const [status, setStatus] = useState<{ ok: boolean; url: string } | null>(null);
 
   async function share() {
+    // Clear the last result first, so a repeat is announced again and an old "copied" never lingers.
+    setStatus(null);
     const url = new URL(path, location.origin).href;
     if (typeof navigator.share === "function") {
       try {
