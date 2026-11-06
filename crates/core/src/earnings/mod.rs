@@ -14,4 +14,4 @@ pub mod store;
 pub mod watchlist;
 pub mod xbrl;
 
-pub use watchlist::{by_cik, cik10, find, in_window, watchlist, Filer, WatchEntry};
+pub use watchlist::{by_cik, cik10, find, in_window, watchlist, Filer, Tier, WatchEntry};

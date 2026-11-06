@@ -1,0 +1,185 @@
+# Hand-checked inputs to scripts/build-watchlist.mjs, which writes watchlist.tsv.
+# Edit this file (never watchlist.tsv) and rerun the script.
+#
+# Columns (tab-separated; `-` or empty = derive):
+#   ticker   display form (BRK.B). Tickers not in universe.txt are extra
+#            companies (the hand-picked foreign ones) and need a name and tier.
+#   tier     full (earnings write-ups: the S&P 100 rows below), calendar
+#            (calendar only), drop (left off: the second share class of a CIK),
+#            or - (full when the market-cap snapshot is $100B or more).
+#   name     display name; default: universe.txt's name.
+#   domains  the company's own web domains (comma-separated; subdomains
+#            match), used to accept its date announcement as calendar proof.
+#            Required for full-tier rows.
+#
+# S&P 100 as of 2026-10 (the builder's knowledge, every CIK checked against
+# company_tickers.json on 2026-10-29), names and domains from the pre-2026-11-06
+# hand-written watchlist.
+AAPL	full	Apple	apple.com
+ABBV	full	AbbVie	abbvie.com
+ABT	full	Abbott Laboratories	abbott.com
+ACN	full	Accenture	accenture.com
+ADBE	full	Adobe	adobe.com
+AIG	full	American International Group	aig.com
+AMD	full	Advanced Micro Devices	amd.com
+AMGN	full	Amgen	amgen.com
+AMT	full	American Tower	americantower.com
+AMZN	full	Amazon	amazon.com,aboutamazon.com
+AVGO	full	Broadcom	broadcom.com
+AXP	full	American Express	americanexpress.com
+BA	full	Boeing	boeing.com
+BAC	full	Bank of America	bankofamerica.com
+BNY	full	BNY	bny.com,bnymellon.com
+BKNG	full	Booking Holdings	bookingholdings.com
+BLK	full	BlackRock	blackrock.com
+BMY	full	Bristol-Myers Squibb	bms.com
+BRK.B	full	Berkshire Hathaway	berkshirehathaway.com
+C	full	Citigroup	citigroup.com,citi.com
+CAT	full	Caterpillar	caterpillar.com
+CHTR	full	Charter Communications	charter.com
+CL	full	Colgate-Palmolive	colgatepalmolive.com
+CMCSA	full	Comcast	cmcsa.com,comcastcorporation.com
+COF	full	Capital One	capitalone.com
+COP	full	ConocoPhillips	conocophillips.com
+COST	full	Costco	costco.com
+CRM	full	Salesforce	salesforce.com
+CSCO	full	Cisco	cisco.com
+CVS	full	CVS Health	cvshealth.com
+CVX	full	Chevron	chevron.com
+DE	full	Deere	deere.com,johndeere.com
+DHR	full	Danaher	danaher.com
+DIS	full	Walt Disney	thewaltdisneycompany.com,disney.com
+DUK	full	Duke Energy	duke-energy.com
+EMR	full	Emerson Electric	emerson.com
+F	full	Ford Motor	ford.com
+FDX	full	FedEx	fedex.com
+GD	full	General Dynamics	gd.com
+GE	full	GE Aerospace	ge.com,geaerospace.com
+GILD	full	Gilead Sciences	gilead.com
+GM	full	General Motors	gm.com
+GOOGL	full	Alphabet	abc.xyz
+GS	full	Goldman Sachs	goldmansachs.com
+HD	full	Home Depot	homedepot.com
+HON	full	Honeywell	honeywell.com
+IBM	full	IBM	ibm.com
+INTC	full	Intel	intel.com
+INTU	full	Intuit	intuit.com
+ISRG	full	Intuitive Surgical	intuitive.com
+JNJ	full	Johnson & Johnson	jnj.com
+JPM	full	JPMorgan Chase	jpmorganchase.com
+KO	full	Coca-Cola	coca-colacompany.com
+LIN	full	Linde	linde.com
+LLY	full	Eli Lilly	lilly.com
+LMT	full	Lockheed Martin	lockheedmartin.com
+LOW	full	Lowe's	lowes.com
+MA	full	Mastercard	mastercard.com
+MCD	full	McDonald's	mcdonalds.com
+MDLZ	full	Mondelez International	mondelezinternational.com
+MDT	full	Medtronic	medtronic.com
+MET	full	MetLife	metlife.com
+META	full	Meta Platforms	meta.com,atmeta.com,fb.com
+MMM	full	3M	3m.com
+MO	full	Altria	altria.com
+MRK	full	Merck	merck.com
+MS	full	Morgan Stanley	morganstanley.com
+MSFT	full	Microsoft	microsoft.com
+NEE	full	NextEra Energy	nexteraenergy.com
+NFLX	full	Netflix	netflix.com
+NKE	full	Nike	nike.com
+NOW	full	ServiceNow	servicenow.com
+NVDA	full	Nvidia	nvidia.com
+ORCL	full	Oracle	oracle.com
+PEP	full	PepsiCo	pepsico.com
+PFE	full	Pfizer	pfizer.com
+PG	full	Procter & Gamble	pg.com,pginvestor.com
+PLTR	full	Palantir Technologies	palantir.com
+PM	full	Philip Morris International	pmi.com
+PYPL	full	PayPal	paypal.com,paypal-corp.com
+QCOM	full	Qualcomm	qualcomm.com
+RTX	full	RTX	rtx.com
+SBUX	full	Starbucks	starbucks.com
+SCHW	full	Charles Schwab	aboutschwab.com,schwab.com
+SO	full	Southern Company	southerncompany.com
+SPG	full	Simon Property Group	simon.com
+T	full	AT&T	att.com
+TGT	full	Target	target.com
+TMO	full	Thermo Fisher Scientific	thermofisher.com
+TMUS	full	T-Mobile US	t-mobile.com
+TSLA	full	Tesla	tesla.com
+TXN	full	Texas Instruments	ti.com
+UBER	full	Uber Technologies	uber.com
+UNH	full	UnitedHealth Group	unitedhealthgroup.com
+UNP	full	Union Pacific	up.com
+UPS	full	United Parcel Service	ups.com
+USB	full	U.S. Bancorp	usbank.com
+V	full	Visa	visa.com
+VZ	full	Verizon	verizon.com
+WFC	full	Wells Fargo	wellsfargo.com
+WMT	full	Walmart	walmart.com
+XOM	full	ExxonMobil	exxonmobil.com,corporate.exxonmobil.com
+ASML	calendar	ASML Holding	asml.com
+BCS	calendar	Barclays	home.barclays
+NVO	calendar	Novo Nordisk	novonordisk.com
+SAN	calendar	Banco Santander	santander.com
+SAP	calendar	SAP	sap.com
+TM	calendar	Toyota Motor	global.toyota,toyota-global.com
+TSM	calendar	Taiwan Semiconductor Manufacturing	tsmc.com
+
+# One row per CIK: the other share class is dropped.
+GOOG	drop	-	-
+FOX	drop	-	-
+NWS	drop	-	-
+
+# Hand-picked large foreign companies outside both indexes, calendar only
+# (Rick, 2026-11-06, "~15 hand-picked"; the seven above are on it too).
+ENB	calendar	Enbridge	enbridge.com
+SONY	calendar	Sony Group	sony.com
+RACE	calendar	Ferrari	ferrari.com
+RYAAY	calendar	Ryanair	ryanair.com,ryanairgroup.com
+SU	calendar	Suncor Energy	suncor.com
+CNQ	calendar	Canadian Natural Resources	cnrl.com
+TRP	calendar	TC Energy	tcenergy.com
+MFC	calendar	Manulife	manulife.com
+BN	calendar	Brookfield	bn.brookfield.com,brookfield.com
+ITUB	calendar	Itaú Unibanco	itau.com.br
+TEVA	calendar	Teva Pharmaceutical	tevapharm.com
+
+# Domains for the companies the $100B line adds to the write-up tier
+# (Wikidata P856 suggestions, checked by hand on 2026-11-06).
+ABNB	-	-	airbnb.com
+ADI	-	-	analog.com
+ADP	-	-	adp.com
+AMAT	-	-	appliedmaterials.com
+ANET	-	-	arista.com
+APH	-	-	amphenol.com
+APP	-	-	applovin.com
+CB	-	-	chubb.com
+CME	-	-	cmegroup.com
+CRWD	-	-	crowdstrike.com
+DELL	-	-	delltechnologies.com,dell.com
+ETN	-	-	eaton.com
+GEV	-	-	gevernova.com
+HCA	-	-	hcahealthcare.com
+KLAC	-	-	kla.com
+LRCX	-	-	lamresearch.com
+MAR	-	-	marriott.com
+MCK	-	-	mckesson.com
+MNST	-	-	monsterbevcorp.com
+MPC	-	-	marathonpetroleum.com
+MRVL	-	-	marvell.com
+MU	-	-	micron.com
+NEM	-	-	newmont.com
+PANW	-	-	paloaltonetworks.com
+PGR	-	-	progressive.com
+PH	-	-	parker.com
+PLD	-	-	prologis.com
+SHOP	-	-	shopify.com
+SNDK	-	-	sandisk.com
+SPCX	-	-	spacex.com
+SPGI	-	-	spglobal.com
+STX	-	-	seagate.com
+SYK	-	-	stryker.com
+TJX	-	-	tjx.com
+VRTX	-	-	vrtx.com
+WELL	-	-	welltower.com
+WMB	-	-	williams.com
