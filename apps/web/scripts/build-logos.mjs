@@ -66,6 +66,7 @@ const COMPANIES = {
   DE: "johndeere",
   F: "ford",
   FDX: "fedex",
+  BIDU: "baidu", // the paw, Baidu's own mark
   GE: "generalelectric", // the GE monogram, used by GE Aerospace
   GM: "generalmotors",
   GOOGL: "google", // Alphabet trades as Google
@@ -95,6 +96,7 @@ const COMPANIES = {
   UPS: "ups",
   V: "visa",
   VZ: "verizon",
+  WB: "sinaweibo", // Weibo Corp. trades on its consumer brand
   WFC: "wellsfargo",
 };
 
@@ -117,8 +119,6 @@ const NO_SITE_ICON = {
  * in review): no Commons file is used; simple-icons, then the site icon, then a text tile.
  */
 const NO_COMMONS = {
-  BIDU: "Commons only has a generic icon-set paw, not Baidu's own file",
-  BILI: "Commons names Bilibili Gaming, an esports team",
   BKNG: "its Commons logo is a cramped stacked lockup; the simple-icons glyph reads better",
   "BRK.B": "its Commons logo is Berkshire Hathaway Energy, a subsidiary",
   BRO: "Commons search finds Brown Bears Athletics",
@@ -135,6 +135,24 @@ const NO_COMMONS = {
   PRU: "Commons names Prudential do Brasil",
   TRI: "Commons names the Thomson Reuters Foundation, a charity",
   UNH: "its Commons logo is UnitedHealthcare, a subsidiary",
+};
+
+/** Company homepages to try for a site icon, ahead of the watchlist domains and Wikidata's website (rows without domains). */
+const SITES = {
+  BEKE: ["https://investors.ke.com/", "https://www.ke.com/"],
+  BZ: ["https://www.zhipin.com/", "https://ir.zhipin.com/"],
+  FUTU: ["https://www.futuholdings.com/"],
+  GDS: ["https://www.gds-services.com/"],
+  HTHT: ["https://ir.hworld.com/", "https://www.hworld.com/"],
+  LU: ["https://www.lufaxholding.com/"],
+  NTES: ["https://ir.netease.com/", "https://www.netease.com/"],
+  QFIN: ["https://ir.qifu.tech/", "https://www.qifu.tech/"],
+  TIGR: ["https://www.itigerup.com/", "https://www.itiger.com/"],
+  TME: ["https://www.tencentmusic.com/"],
+  VIPS: ["https://ir.vip.com/", "https://www.vip.com/"],
+  WB: ["https://ir.weibo.com/", "https://weibo.com/"],
+  YMM: ["https://www.amanbang.com/", "https://ir.fulltruckalliance.com/"],
+  YUMC: ["https://www.yumchina.com/"],
 };
 
 /** Wikidata items for tickers whose watchlist CIK has no Wikidata match (new holding companies, foreign issuers). */
@@ -157,6 +175,12 @@ const COMMONS = {
   LUV: "Southwest Airlines logo 2014.svg", // its Wikidata logo is the 1971 one
   TPR: "Tapestry logo.svg", // its Wikidata logo is Coach, one of its brands
   TT: "TraneTechnologieslogo.svg", // its Wikidata logo is Ingersoll Rand, the old name
+  // Chinese companies listed in the US: the wordmark readers know, where Wikidata names something else.
+  BILI: "Bilibili 2023.svg", // Wikidata names Bilibili Gaming, an esports team
+  HSAI: "Hesai Technology.svg",
+  PDD: "Pinduoduologo.png",
+  TCOM: "Trip.com Group logo.svg",
+  YMM: "Manbang logo.svg", // Full Truck Alliance's platform brand (Yunmanman, Huochebang)
 };
 
 /** Commons files tried when the company's Wikidata logo is missing, not free or unusable (before simple-icons). */
@@ -561,7 +585,7 @@ const watchRows = readFileSync(WATCHLIST, "utf8")
     return { ticker, cik, name, domains: domains.split(",").filter(Boolean), tier };
   });
 const tickers = watchRows.map((w) => w.ticker);
-for (const t of [...Object.keys(COMPANIES), ...Object.keys(SKIP), ...Object.keys(NO_SITE_ICON), ...Object.keys(NO_COMMONS), ...Object.keys(COMMONS), ...Object.keys(WIKIDATA), ...Object.keys(COMMONS_FALLBACK)])
+for (const t of [...Object.keys(COMPANIES), ...Object.keys(SKIP), ...Object.keys(NO_SITE_ICON), ...Object.keys(SITES), ...Object.keys(NO_COMMONS), ...Object.keys(COMMONS), ...Object.keys(WIKIDATA), ...Object.keys(COMMONS_FALLBACK)])
   if (!tickers.includes(t)) console.warn(`  ${t} is in a mapping but not on the watchlist (ignored)`);
 
 // Built here, moved into public/logos and src/lib at the very end.
@@ -655,7 +679,7 @@ for (const w of todo) {
   if (!pick && !noCommons && !COMMONS[w.ticker]) for (const name of c.icons) if ((pick = await fromCommons("P8972", name))) break;
   if (!pick && !noCommons && !COMMONS[w.ticker]) pick = await fromSearch(w);
   if (!pick && !(w.ticker in NO_SITE_ICON)) {
-    const site = await siteIcon([...new Set([...w.domains.map((d) => `https://${d}/`), ...c.sites])]);
+    const site = await siteIcon([...new Set([...(SITES[w.ticker] ?? []), ...w.domains.map((d) => `https://${d}/`), ...c.sites])]);
     if (site) pick = { kind: "site", ...site };
     else notes.push("no site icon (none linked, blocked, or under 48px)");
   }
