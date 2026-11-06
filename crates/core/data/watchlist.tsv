@@ -58,6 +58,7 @@ ARE	1035443	domestic	Alexandria Real Estate Equities		ALEXANDRIA REAL ESTATE EQU
 ARES	1176948	domestic	Ares Management		Ares Management Corp	calendar
 ARM	1973239	foreign	Arm Holdings		ARM HOLDINGS PLC /UK	calendar
 ASML	937966	foreign	ASML Holding	asml.com	ASML HOLDING NV	calendar
+ATAT	1853717	foreign	Atour		Atour Lifestyle Holdings Ltd	calendar
 ATO	731802	domestic	Atmos Energy		ATMOS ENERGY CORP	calendar
 AVGO	1730168	domestic	Broadcom	broadcom.com	Broadcom Inc.	full
 AVY	8818	domestic	Avery Dennison		Avery Dennison Corp	calendar
@@ -66,6 +67,7 @@ AXON	1069183	domestic	Axon Enterprise		AXON ENTERPRISE, INC.	calendar
 AXP	4962	domestic	American Express	americanexpress.com	AMERICAN EXPRESS CO	full
 AZO	866787	domestic	AutoZone		AUTOZONE INC	calendar
 BA	12927	domestic	Boeing	boeing.com	BOEING CO	full
+BABA	1577552	foreign	Alibaba		Alibaba Group Holding Ltd	calendar
 BAC	70858	domestic	Bank of America	bankofamerica.com	BANK OF AMERICA CORP /DE/	full
 BALL	9389	domestic	Ball Corporation		BALL Corp	calendar
 BAX	10456	domestic	Baxter International		BAXTER INTERNATIONAL INC	calendar
@@ -73,10 +75,13 @@ BBY	764478	domestic	Best Buy		BEST BUY CO INC	calendar
 BCS	312069	foreign	Barclays	home.barclays	BARCLAYS PLC	calendar
 BDX	10795	domestic	Becton Dickinson		BECTON DICKINSON & CO	calendar
 BE	1664703	domestic	Bloom Energy		Bloom Energy Corp	calendar
+BEKE	1809587	foreign	KE Holdings		KE Holdings Inc.	calendar
 BEN	38777	domestic	Franklin Resources		FRANKLIN TEMPLETON INC	calendar
 BF.B	14693	domestic	Brown-Forman		BROWN FORMAN CORP	calendar
 BG	1996862	domestic	Bunge Global		Bunge Global SA	calendar
+BIDU	1329099	foreign	Baidu		Baidu, Inc.	calendar
 BIIB	875045	domestic	Biogen		BIOGEN INC.	calendar
+BILI	1723690	foreign	Bilibili		Bilibili Inc.	calendar
 BKNG	1075531	domestic	Booking Holdings	bookingholdings.com	Booking Holdings Inc.	full
 BKR	1701605	domestic	Baker Hughes		Baker Hughes Co	calendar
 BLK	2012383	domestic	BlackRock	blackrock.com	BlackRock, Inc.	full
@@ -89,6 +94,7 @@ BRO	79282	domestic	Brown & Brown		BROWN & BROWN, INC.	calendar
 BSX	885725	domestic	Boston Scientific		BOSTON SCIENTIFIC CORP	calendar
 BX	1393818	domestic	Blackstone		Blackstone Inc.	calendar
 BXP	1037540	domestic	BXP		BXP, Inc.	calendar
+BZ	1842827	foreign	Kanzhun (BOSS Zhipin)		Kanzhun Ltd	calendar
 C	831001	domestic	Citigroup	citigroup.com,citi.com	CITIGROUP INC	full
 CAH	721371	domestic	Cardinal Health		CARDINAL HEALTH INC	calendar
 CARR	1783180	domestic	Carrier Global		CARRIER GLOBAL Corp	calendar
@@ -173,6 +179,7 @@ EBAY	1065088	domestic	eBay		EBAY INC	calendar
 ECHO	1415404	domestic	EchoStar		EchoStar CORP	calendar
 ECL	31462	domestic	Ecolab		ECOLAB INC.	calendar
 ED	1047862	domestic	Consolidated Edison		CONSOLIDATED EDISON INC	calendar
+EDU	1372920	foreign	New Oriental		New Oriental Education & Technology Group Inc.	calendar
 EFX	33185	domestic	Equifax		EQUIFAX INC	calendar
 EG	1095073	domestic	Everest Group		EVEREST GROUP, LTD.	calendar
 EIX	827052	domestic	Edison International		EDISON INTERNATIONAL	calendar
@@ -218,8 +225,10 @@ FRT	34903	domestic	Federal Realty Investment Trust		FEDERAL REALTY INVESTMENT TR
 FSLR	1274494	domestic	First Solar		FIRST SOLAR, INC.	calendar
 FTNT	1262039	domestic	Fortinet		Fortinet, Inc.	calendar
 FTV	1659166	domestic	Fortive		Fortive Corp	calendar
+FUTU	1754581	foreign	Futu		Futu Holdings Ltd	calendar
 GD	40533	domestic	General Dynamics	gd.com	GENERAL DYNAMICS CORP	full
 GDDY	1609711	domestic	GoDaddy		GoDaddy Inc.	calendar
+GDS	1526125	foreign	GDS Holdings		GDS Holdings Ltd	calendar
 GE	40545	domestic	GE Aerospace	ge.com,geaerospace.com	GENERAL ELECTRIC CO	full
 GEHC	1932393	domestic	GE HealthCare		GE HealthCare Technologies Inc.	calendar
 GEN	849399	domestic	Gen Digital		Gen Digital Inc.	calendar
@@ -250,9 +259,11 @@ HOOD	1783879	domestic	Robinhood Markets		Robinhood Markets, Inc.	calendar
 HPE	1645590	domestic	Hewlett Packard Enterprise		Hewlett Packard Enterprise Co	calendar
 HPQ	47217	domestic	HP Inc.		HP INC	calendar
 HRL	48465	domestic	Hormel Foods		HORMEL FOODS CORP /DE/	calendar
+HSAI	1861737	foreign	Hesai		Hesai Group	calendar
 HSIC	1000228	domestic	Henry Schein		HENRY SCHEIN INC	calendar
 HST	1070750	domestic	Host Hotels & Resorts		HOST HOTELS & RESORTS, INC.	calendar
 HSY	47111	domestic	Hershey		HERSHEY CO	calendar
+HTHT	1483994	foreign	H World		H World Group Ltd	calendar
 HUBB	48898	domestic	Hubbell		HUBBELL INC	calendar
 HUM	49071	domestic	Humana		HUMANA INC	calendar
 HWM	4281	domestic	Howmet Aerospace		Howmet Aerospace Inc.	calendar
@@ -268,6 +279,7 @@ INTC	50863	domestic	Intel	intel.com	INTEL CORP	full
 INTU	896878	domestic	Intuit	intuit.com	INTUIT INC.	full
 INVH	1687229	domestic	Invitation Homes		Invitation Homes Inc.	calendar
 IP	51434	domestic	International Paper		INTERNATIONAL PAPER CO /NEW/	calendar
+IQ	1722608	foreign	iQIYI		iQIYI, Inc.	calendar
 IQV	1478242	domestic	IQVIA		IQVIA HOLDINGS INC.	calendar
 IR	1699150	domestic	Ingersoll Rand		Ingersoll Rand Inc.	calendar
 IRM	1020569	domestic	Iron Mountain		IRON MOUNTAIN INC	calendar
@@ -280,6 +292,7 @@ J	52988	domestic	Jacobs Solutions		JACOBS SOLUTIONS INC.	calendar
 JBHT	728535	domestic	J.B. Hunt		HUNT J B TRANSPORT SERVICES INC	calendar
 JBL	898293	domestic	Jabil		JABIL INC	calendar
 JCI	833444	domestic	Johnson Controls		Johnson Controls International plc	calendar
+JD	1549802	foreign	JD.com		JD.com, Inc.	calendar
 JKHY	779152	domestic	Jack Henry & Associates		JACK HENRY & ASSOCIATES INC	calendar
 JNJ	200406	domestic	Johnson & Johnson	jnj.com	JOHNSON & JOHNSON	full
 JPM	19617	domestic	JPMorgan Chase	jpmorganchase.com	JPMORGAN CHASE & CO	full
@@ -299,6 +312,7 @@ LDOS	1336920	domestic	Leidos		Leidos Holdings, Inc.	calendar
 LEN	920760	domestic	Lennar		LENNAR CORP /NEW/	calendar
 LH	920148	domestic	Labcorp		LABCORP HOLDINGS INC.	calendar
 LHX	202058	domestic	L3Harris		L3HARRIS TECHNOLOGIES, INC. /DE/	calendar
+LI	1791706	foreign	Li Auto		Li Auto Inc.	calendar
 LII	1069202	domestic	Lennox International		LENNOX INTERNATIONAL INC	calendar
 LIN	1707925	domestic	Linde	linde.com	LINDE PLC	full
 LITE	1633978	domestic	Lumentum		Lumentum Holdings Inc.	calendar
@@ -307,6 +321,7 @@ LMT	936468	domestic	Lockheed Martin	lockheedmartin.com	LOCKHEED MARTIN CORP	full
 LNT	352541	domestic	Alliant Energy		ALLIANT ENERGY CORP	calendar
 LOW	60667	domestic	Lowe's	lowes.com	LOWES COMPANIES INC	full
 LRCX	707549	domestic	Lam Research	lamresearch.com	LAM RESEARCH CORP	full
+LU	1816007	foreign	Lufax		Lufax Holding Ltd	calendar
 LULU	1397187	domestic	Lululemon Athletica		lululemon athletica inc.	calendar
 LUV	92380	domestic	Southwest Airlines		SOUTHWEST AIRLINES CO	calendar
 LVS	1300514	domestic	Las Vegas Sands		LAS VEGAS SANDS CORP	calendar
@@ -330,6 +345,7 @@ MGM	789570	domestic	MGM Resorts		MGM Resorts International	calendar
 MKC	63754	domestic	McCormick		MCCORMICK & CO INC	calendar
 MLM	916076	domestic	Martin Marietta Materials		MARTIN MARIETTA MATERIALS INC	calendar
 MMM	66740	domestic	3M	3m.com	3M CO	full
+MNSO	1815846	foreign	MINISO		MINISO Group Holding Ltd	calendar
 MNST	865752	domestic	Monster Beverage	monsterbevcorp.com	Monster Beverage Corp	full
 MO	764180	domestic	Altria	altria.com	ALTRIA GROUP, INC.	full
 MOS	1285785	domestic	Mosaic		MOSAIC CO	calendar
@@ -355,12 +371,14 @@ NEE	753308	domestic	NextEra Energy	nexteraenergy.com	NEXTERA ENERGY INC	full
 NEM	1164727	domestic	Newmont	newmont.com	NEWMONT Corp /DE/	full
 NFLX	1065280	domestic	Netflix	netflix.com	NETFLIX INC	full
 NI	1111711	domestic	NiSource		NISOURCE INC.	calendar
+NIO	1736541	foreign	NIO		NIO Inc.	calendar
 NKE	320187	domestic	Nike	nike.com	NIKE, Inc.	full
 NOC	1133421	domestic	Northrop Grumman		NORTHROP GRUMMAN CORP /DE/	calendar
 NOW	1373715	domestic	ServiceNow	servicenow.com	ServiceNow, Inc.	full
 NRG	1013871	domestic	NRG Energy		NRG ENERGY, INC.	calendar
 NSC	702165	domestic	Norfolk Southern		NORFOLK SOUTHERN CORP	calendar
 NTAP	1002047	domestic	NetApp		NetApp, Inc.	calendar
+NTES	1110646	foreign	NetEase		NetEase, Inc.	calendar
 NTRS	73124	domestic	Northern Trust		NORTHERN TRUST CORP	calendar
 NUE	73309	domestic	Nucor		NUCOR CORP	calendar
 NVDA	1045810	domestic	Nvidia	nvidia.com	NVIDIA CORP	full
@@ -410,6 +428,7 @@ PWR	1050915	domestic	Quanta Services		QUANTA SERVICES, INC.	calendar
 PYPL	1633917	domestic	PayPal	paypal.com,paypal-corp.com	PayPal Holdings, Inc.	full
 Q	2058873	domestic	Qnity Electronics		Qnity Electronics, Inc.	calendar
 QCOM	804328	domestic	Qualcomm	qualcomm.com	QUALCOMM INC/DE	full
+QFIN	1741530	foreign	Qfin		Qfin Holdings, Inc.	calendar
 RACE	1648416	foreign	Ferrari	ferrari.com	Ferrari N.V.	calendar
 RCL	884887	domestic	Royal Caribbean Group		ROYAL CARIBBEAN CRUISES LTD	calendar
 RDDT	1713445	domestic	Reddit		Reddit, Inc.	calendar
@@ -462,6 +481,8 @@ SYF	1601712	domestic	Synchrony Financial		Synchrony Financial	calendar
 SYK	310764	domestic	Stryker	stryker.com	STRYKER CORP	full
 SYY	96021	domestic	Sysco		SYSCO CORP	calendar
 T	732717	domestic	AT&T	att.com	AT&T INC.	full
+TAL	1499620	foreign	TAL Education		TAL Education Group	calendar
+TCOM	1269238	foreign	Trip.com		Trip.com Group Ltd	calendar
 TDG	1260221	domestic	TransDigm Group		TransDigm Group INC	calendar
 TDY	1094285	domestic	Teledyne Technologies		TELEDYNE TECHNOLOGIES INC	calendar
 TECH	842023	domestic	Bio-Techne		BIO-TECHNE Corp	calendar
@@ -470,9 +491,11 @@ TER	97210	domestic	Teradyne		TERADYNE, INC	calendar
 TEVA	818686	domestic	Teva Pharmaceutical	tevapharm.com	TEVA PHARMACEUTICAL INDUSTRIES LTD	calendar
 TFC	92230	domestic	Truist Financial		TRUIST FINANCIAL CORP	calendar
 TGT	27419	domestic	Target	target.com	TARGET CORP	full
+TIGR	1756699	foreign	UP Fintech (Tiger Brokers)		UP Fintech Holding Ltd	calendar
 TJX	109198	domestic	TJX Companies	tjx.com	TJX COMPANIES INC /DE/	full
 TKO	1973266	domestic	TKO Group Holdings		TKO Group Holdings, Inc.	calendar
 TM	1094517	foreign	Toyota Motor	global.toyota,toyota-global.com	TOYOTA MOTOR CORP/	calendar
+TME	1744676	foreign	Tencent Music		Tencent Music Entertainment Group	calendar
 TMO	97745	domestic	Thermo Fisher Scientific	thermofisher.com	THERMO FISHER SCIENTIFIC INC.	full
 TMUS	1283699	domestic	T-Mobile US	t-mobile.com	T-Mobile US, Inc.	full
 TPL	1811074	domestic	Texas Pacific Land		Texas Pacific Land Corp	calendar
@@ -506,6 +529,7 @@ USB	36104	domestic	U.S. Bancorp	usbank.com	US BANCORP \DE\	full
 V	1403161	domestic	Visa	visa.com	VISA INC.	full
 VEEV	1393052	domestic	Veeva Systems		VEEVA SYSTEMS INC	calendar
 VICI	1705696	domestic	Vici Properties		VICI PROPERTIES INC.	calendar
+VIPS	1529192	foreign	Vipshop		Vipshop Holdings Ltd	calendar
 VLO	1035002	domestic	Valero Energy		VALERO ENERGY CORP/TX	calendar
 VLTO	1967680	domestic	Veralto		Veralto Corp	calendar
 VMC	1396009	domestic	Vulcan Materials		Vulcan Materials CO	calendar
@@ -521,6 +545,7 @@ VYLR	2128626	domestic	Vylor		Vylor Inc.	calendar
 VZ	732712	domestic	Verizon	verizon.com	VERIZON COMMUNICATIONS INC	full
 WAB	943452	domestic	Wabtec		WESTINGHOUSE AIR BRAKE TECHNOLOGIES CORP	calendar
 WAT	1000697	domestic	Waters Corporation		WATERS CORP /DE/	calendar
+WB	1595761	foreign	Weibo		WEIBO Corp	calendar
 WDAY	1327811	domestic	Workday		Workday, Inc.	calendar
 WDC	106040	domestic	Western Digital		WESTERN DIGITAL CORP	calendar
 WEC	783325	domestic	WEC Energy Group		WEC ENERGY GROUP, INC.	calendar
@@ -537,9 +562,13 @@ WY	106535	domestic	Weyerhaeuser		WEYERHAEUSER CO	calendar
 WYNN	1174922	domestic	Wynn Resorts		WYNN RESORTS LTD	calendar
 XEL	72903	domestic	Xcel Energy		XCEL ENERGY INC	calendar
 XOM	2115436	domestic	ExxonMobil	exxonmobil.com,corporate.exxonmobil.com	ExxonMobil Holdings Corp	full
+XPEV	1810997	foreign	XPeng		XPENG INC.	calendar
 XYL	1524472	domestic	Xylem		Xylem Inc.	calendar
 XYZ	1512673	domestic	Block		Block, Inc.	calendar
+YMM	1838413	foreign	Full Truck Alliance		Full Truck Alliance Co. Ltd.	calendar
 YUM	1041061	domestic	Yum! Brands		YUM BRANDS INC	calendar
+YUMC	1673358	domestic	Yum China		Yum China Holdings, Inc.	calendar
 ZBH	1136869	domestic	Zimmer Biomet		ZIMMER BIOMET HOLDINGS, INC.	calendar
 ZBRA	877212	domestic	Zebra Technologies		ZEBRA TECHNOLOGIES CORP	calendar
+ZTO	1677250	foreign	ZTO Express		ZTO Express (Cayman) Inc.	calendar
 ZTS	1555280	domestic	Zoetis		Zoetis Inc.	calendar
