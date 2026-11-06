@@ -54,10 +54,10 @@ const recap = item({
 
 const reporting: StripDay = {
   date: "2026-11-02",
-  bmo: [{ ticker: "KO", date: "2026-11-02", slot: "bmo", status: "confirmed", postSlug: null }],
+  bmo: [{ ticker: "KO", date: "2026-11-02", slot: "bmo", status: "confirmed", postSlug: null, name: null, writeUps: true, filingUrl: null }],
   amc: [
-    { ticker: "AAPL", date: "2026-11-02", slot: "amc", status: "confirmed", postSlug: null },
-    { ticker: "BRK.B", date: "2026-11-02", slot: "amc", status: "unconfirmed", postSlug: null },
+    { ticker: "AAPL", date: "2026-11-02", slot: "amc", status: "confirmed", postSlug: null, name: null, writeUps: true, filingUrl: null },
+    { ticker: "BRK.B", date: "2026-11-02", slot: "amc", status: "unconfirmed", postSlug: null, name: null, writeUps: true, filingUrl: null },
   ],
   unknown: [],
 };

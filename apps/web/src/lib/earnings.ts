@@ -1,5 +1,6 @@
 /** Read-only queries over the earnings tables (migrations/0003_earnings.sql). */
 
+import { COMPANIES } from "./companies.generated";
 import { COVER_COLUMNS, JOIN_FILING, toCover, type CoverRow, type D1Like, type Lang, type PostListItem } from "./posts";
 
 export type Slot = "bmo" | "amc" | "unknown";
@@ -7,11 +8,17 @@ export type CalendarStatus = "unconfirmed" | "confirmed" | "reported";
 
 export interface CalendarEntry {
   ticker: string;
+  /** The watchlist's display name (English in both languages), or null for a ticker no longer on it. */
+  name: string | null;
+  /** The company gets earnings checks (the write-up tier); the rest are calendar only. */
+  writeUps: boolean;
   date: string;
   slot: Slot;
   status: CalendarStatus;
   /** The earnings post for a reported entry, when its English text is published. */
   postSlug: string | null;
+  /** The 8-K that reported it (EDGAR's filing index), for a reported entry. */
+  filingUrl: string | null;
 }
 
 export interface CalendarDay {
@@ -27,6 +34,8 @@ export interface PostChart {
 
 const DATE = /^\d{4}-\d{2}-\d{2}$/;
 const TICKER = /^[A-Z][A-Z0-9.-]{0,9}$/;
+/** The only proof links shown: EDGAR filing indexes the generator writes for reported rows. */
+const FILING_URL = /^https:\/\/www\.sec\.gov\/Archives\/edgar\/data\/\d+\/\d{18}\/\d{10}-\d{2}-\d{6}-index\.htm$/;
 /** R2 keys the generator writes: charts/earnings/{TICKER}/{accession}/{name}.svg */
 const CHART_KEY = /^earnings\/[A-Z0-9-]{1,10}\/\d{10}-\d{2}-\d{6}\/(revenue|eps)\.svg$/;
 
@@ -66,17 +75,32 @@ interface CalRow {
   report_date: string;
   time_slot: string;
   status: string;
+  proof_url: string | null;
   post_slug: string | null;
 }
 
+const CAL_COLUMNS = "c.ticker, c.report_date, c.time_slot, c.status, c.proof_url, x.slug AS post_slug";
+
 // Earnings posts the post page shows in `lang` (a pending ZH page shows the
-// "coming soon" notice), by ticker and ET date. Binds `lang` once.
-const POSTS_BY_TICKER_DATE = `SELECT f.ticker, p.trading_date, MIN(p.slug) AS slug
-  FROM earnings_filings f
-  JOIN posts p ON p.run_key = f.run_key
-  JOIN post_translations en ON en.post_id = p.id AND en.lang = 'en' AND en.status = 'published'
-  JOIN post_translations t ON t.post_id = p.id AND t.lang = ?
+// "coming soon" notice), by ticker and ET date, for a range of ET dates (binds
+// `lang`, then the first and last date) or one ticker (binds `lang`, then the
+// ticker). CROSS JOIN pins the join order so SQLite starts from the date or
+// ticker index instead of reading every published translation.
+const POSTS_BETWEEN = `SELECT f.ticker, p.trading_date, MIN(p.slug) AS slug
+  FROM posts p
+  CROSS JOIN post_translations en ON en.post_id = p.id AND en.lang = 'en' AND en.status = 'published'
+  CROSS JOIN post_translations t ON t.post_id = p.id AND t.lang = ?
     AND (t.status = 'published' OR (t.lang = 'zh' AND t.status = 'pending'))
+  CROSS JOIN earnings_filings f ON f.run_key = p.run_key
+  WHERE p.trading_date BETWEEN ? AND ?
+  GROUP BY f.ticker, p.trading_date`;
+const POSTS_FOR_TICKER = `SELECT f.ticker, p.trading_date, MIN(p.slug) AS slug
+  FROM earnings_filings f
+  CROSS JOIN posts p ON p.run_key = f.run_key
+  CROSS JOIN post_translations en ON en.post_id = p.id AND en.lang = 'en' AND en.status = 'published'
+  CROSS JOIN post_translations t ON t.post_id = p.id AND t.lang = ?
+    AND (t.status = 'published' OR (t.lang = 'zh' AND t.status = 'pending'))
+  WHERE f.ticker = ?
   GROUP BY f.ticker, p.trading_date`;
 
 // The same rows for one ET date (binds `lang`, then the date). CROSS JOIN pins the join order so
@@ -90,30 +114,40 @@ const POSTS_ON_DATE = `SELECT f.ticker, p.trading_date, MIN(p.slug) AS slug
   WHERE p.trading_date = ?
   GROUP BY f.ticker, p.trading_date`;
 
-const toEntry = (r: CalRow): CalendarEntry => ({
-  ticker: r.ticker,
-  date: r.report_date,
-  slot: r.time_slot === "bmo" || r.time_slot === "amc" ? r.time_slot : "unknown",
-  status: r.status as CalendarStatus,
-  postSlug: r.post_slug,
-});
+const toEntry = (r: CalRow): CalendarEntry => {
+  const company = COMPANIES[r.ticker];
+  return {
+    ticker: r.ticker,
+    name: company?.[0] ?? null,
+    writeUps: company?.[1] ?? false,
+    date: r.report_date,
+    slot: r.time_slot === "bmo" || r.time_slot === "amc" ? r.time_slot : "unknown",
+    status: r.status as CalendarStatus,
+    postSlug: r.post_slug,
+    filingUrl: r.status === "reported" && r.proof_url && FILING_URL.test(r.proof_url) ? r.proof_url : null,
+  };
+};
+
+/** Write-up companies first, the rest after; the query's order (slot, ticker) otherwise. */
+const writeUpsFirst = (entries: CalendarEntry[]): CalendarEntry[] =>
+  [...entries].sort((a, b) => Number(b.writeUps) - Number(a.writeUps));
 
 /** Monday-Friday of the week starting `monday`; quarantined dates are not shown. */
 export async function listCalendarWeek(db: D1Like, monday: string, lang: Lang): Promise<CalendarDay[]> {
   const friday = addDays(monday, 4);
   const { results } = await db
     .prepare(
-      `SELECT c.ticker, c.report_date, c.time_slot, c.status, x.slug AS post_slug
+      `SELECT ${CAL_COLUMNS}
        FROM earnings_calendar c
-       LEFT JOIN (${POSTS_BY_TICKER_DATE}) x ON x.ticker = c.ticker AND x.trading_date = c.report_date
+       LEFT JOIN (${POSTS_BETWEEN}) x ON x.ticker = c.ticker AND x.trading_date = c.report_date
        WHERE c.report_date BETWEEN ? AND ? AND c.status IN ('unconfirmed','confirmed','reported')
        ORDER BY c.report_date, CASE c.time_slot WHEN 'bmo' THEN 0 WHEN 'amc' THEN 1 ELSE 2 END, c.ticker`,
     )
-    .bind(lang, monday, friday)
+    .bind(lang, monday, friday, monday, friday)
     .all<CalRow>();
   return [0, 1, 2, 3, 4].map((i) => {
     const date = addDays(monday, i);
-    return { date, entries: results.filter((r) => r.report_date === date).map(toEntry) };
+    return { date, entries: writeUpsFirst(results.filter((r) => r.report_date === date).map(toEntry)) };
   });
 }
 
@@ -150,7 +184,7 @@ export async function stripDay(
   if (!date) return null;
   const { results } = await db
     .prepare(
-      `SELECT c.ticker, c.report_date, c.time_slot, c.status, x.slug AS post_slug
+      `SELECT ${CAL_COLUMNS}
        FROM earnings_calendar c
        LEFT JOIN (${POSTS_ON_DATE}) x ON x.ticker = c.ticker AND x.trading_date = c.report_date
        WHERE c.report_date = ? AND c.status IN ('unconfirmed','confirmed','reported')
@@ -158,7 +192,7 @@ export async function stripDay(
     )
     .bind(opts.lang, date, date)
     .all<CalRow>();
-  const entries = results.map(toEntry);
+  const entries = writeUpsFirst(results.map(toEntry));
   return {
     date,
     bmo: entries.filter((e) => e.slot === "bmo"),
@@ -171,13 +205,13 @@ export async function stripDay(
 export async function listTickerCalendar(db: D1Like, ticker: string, lang: Lang): Promise<CalendarEntry[]> {
   const { results } = await db
     .prepare(
-      `SELECT c.ticker, c.report_date, c.time_slot, c.status, x.slug AS post_slug
+      `SELECT ${CAL_COLUMNS}
        FROM earnings_calendar c
-       LEFT JOIN (${POSTS_BY_TICKER_DATE}) x ON x.ticker = c.ticker AND x.trading_date = c.report_date
+       LEFT JOIN (${POSTS_FOR_TICKER}) x ON x.ticker = c.ticker AND x.trading_date = c.report_date
        WHERE c.ticker = ? AND c.status IN ('unconfirmed','confirmed','reported')
        ORDER BY c.report_date DESC LIMIT 12`,
     )
-    .bind(lang, ticker)
+    .bind(lang, ticker, ticker)
     .all<CalRow>();
   return results.map(toEntry);
 }
@@ -253,6 +287,26 @@ export async function tickerKnown(db: D1Like, ticker: string): Promise<boolean> 
     .bind(ticker, ticker)
     .first<{ hit: number }>();
   return row !== null;
+}
+
+/** True when the ticker has an earnings check whose English text is published (else its page is noindex). */
+export async function tickerHasCheck(db: D1Like, ticker: string): Promise<boolean> {
+  const row = await db
+    .prepare(
+      `SELECT 1 AS hit WHERE EXISTS (
+         SELECT 1 FROM earnings_filings f
+         JOIN posts p ON p.run_key = f.run_key
+         JOIN post_translations en ON en.post_id = p.id AND en.lang = 'en' AND en.status = 'published'
+         WHERE f.ticker = ?)`,
+    )
+    .bind(ticker)
+    .first<{ hit: number }>();
+  return row !== null;
+}
+
+/** The watchlist's display name for a ticker, or null. */
+export function companyName(ticker: string): string | null {
+  return COMPANIES[ticker]?.[0] ?? null;
 }
 
 /** A post's charts, with the alt text in `lang`. */

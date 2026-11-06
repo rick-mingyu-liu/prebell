@@ -1,4 +1,4 @@
-// Regenerates the bundled logos. Sources, in order of preference per watchlist ticker:
+// Regenerates the bundled logos. Sources, in order of preference per write-up watchlist ticker:
 //   1. the pinned `simple-icons` devDependency (CC0 glyphs)             -> companies/{TICKER}.svg
 //   2. Wikidata (the SEC CIK in watchlist.tsv -> item -> P8972 small logo, else P154 logo) ->
 //      Wikimedia Commons, freely licensed files only                    -> companies/{TICKER}.png
@@ -460,14 +460,18 @@ const icon = (slug) => {
 // ---------------------------------------------------------------------------------------------
 // Build.
 
-const watchlist = readFileSync(WATCHLIST, "utf8")
+// Logos show on earnings-check covers, so only write-up ("full" tier) companies get one, plus any ticker
+// the committed manifest already has (the calendar-only rows from before the tiers).
+const kept = existsSync(MANIFEST) ? Object.keys(JSON.parse(readFileSync(MANIFEST, "utf8").match(/= (\{[\s\S]*\});/)[1])) : [];
+const watchRows = readFileSync(WATCHLIST, "utf8")
   .split("\n")
   .filter((l) => l.trim() && !l.startsWith("#"))
   .map((l) => {
-    const [ticker, cik, , name, domains = ""] = l.split("\t").map((s) => s.trim());
-    return { ticker, cik, name, domains: domains.split(",").filter(Boolean) };
+    const [ticker, cik, , name, domains = "", , tier] = l.split("\t").map((s) => s.trim());
+    return { ticker, cik, name, domains: domains.split(",").filter(Boolean), tier };
   });
-const tickers = watchlist.map((w) => w.ticker);
+const tickers = watchRows.map((w) => w.ticker);
+const watchlist = watchRows.filter((w) => w.tier === "full" || kept.includes(w.ticker) || w.ticker in COMPANIES || w.ticker in SKIP);
 for (const t of [...Object.keys(COMPANIES), ...Object.keys(SKIP), ...Object.keys(WIKIDATA)])
   if (!tickers.includes(t)) throw new Error(`${t} is not on the watchlist`);
 

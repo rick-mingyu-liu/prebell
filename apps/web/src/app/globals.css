@@ -307,7 +307,7 @@ html:lang(zh-Hans) .filters { font-variant-caps: normal; }
 .cal-day { display: grid; grid-template-columns: 8rem minmax(0, 1fr); gap: 0.4rem 1.5rem; padding: 1rem 0; border-bottom: 1px solid var(--rule); }
 .cal-date { font-size: 16px; margin: 0; }
 .cal-none { margin: 0; }
-.cal-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(10.5rem, 1fr)); gap: 0.4rem 1rem; min-width: 0; }
+.cal-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(12rem, 1fr)); gap: 0.4rem 1rem; min-width: 0; }
 .cal-entry { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0 0.5rem; font-size: 14px; }
 .cal-ticker { font-weight: 700; text-decoration: none; }
 .cal-ticker:hover, .cal-ticker:focus-visible { text-decoration: underline; }
@@ -315,6 +315,13 @@ html:lang(zh-Hans) .filters { font-variant-caps: normal; }
 .cal-slot { color: var(--muted); font-size: 12px; font-variant-caps: all-small-caps; letter-spacing: 0.08em; }
 html:lang(zh-Hans) .cal-slot { font-variant-caps: normal; letter-spacing: 0.02em; }
 .cal-read { flex-basis: 100%; font-size: 12px; font-weight: 600; }
+.cal-slots { display: grid; gap: 0.75rem; min-width: 0; }
+h3.cal-slot { margin: 0 0 0.3rem; font-weight: 600; }
+.cal-name { min-width: 0; overflow: hidden; color: var(--muted); font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+.cal-more { margin-top: 0.4rem; }
+.cal-more > summary { cursor: pointer; color: var(--muted); font-size: 13px; }
+.cal-more > summary:hover, .cal-more > summary:focus-visible { color: var(--ink); }
+.cal-more[open] > summary { margin-bottom: 0.4rem; }
 
 /* Not found: a kicker, the serif title and the way back, centred under the masthead. */
 .notfound { max-width: 680px; margin: 0 auto; padding: 3rem 0 2rem; text-align: center; }

@@ -10,6 +10,7 @@ import {
   listTickerPosts,
   normalizeTicker,
   stripDay,
+  tickerHasCheck,
   tickerKnown,
   todayEt,
   weekStart,
@@ -94,6 +95,68 @@ describe("listCalendarWeek", () => {
     const days = await listCalendarWeek(db, "2026-10-26", "zh");
     expect(days[2].entries[0].postSlug).toBe("msft-2026-10-28-earnings");
     expect(days[3].entries.map((e) => [e.ticker, e.postSlug])).toEqual([["NVDA", null]]);
+  });
+});
+
+describe("calendar rows at S&P 500 size", () => {
+  const SEC = "https://www.sec.gov/Archives/edgar/data/1090872/000109087226000041/0001090872-26-000041-index.htm";
+  const row = (ticker: string, status: string, source: string, proof: string | null) =>
+    `INSERT INTO earnings_calendar VALUES ('${ticker}','2026-11-02','bmo','${status}','${source}',${proof ? `'${proof}'` : "NULL"},NULL,NULL,'t','t',NULL,'t');\n`;
+  const db = () =>
+    memoryD1(
+      row("A", "reported", "edgar", SEC) +
+        row("ACGL", "reported", "edgar", "https://evil.test/0001090872-26-000041-index.htm") +
+        row("MCK", "unconfirmed", "yahoo", null) +
+        row("ZZZQ", "confirmed", "ir", SEC),
+    );
+
+  it("names each company, puts write-up companies first and links calendar-only reports to the 8-K", async () => {
+    const days = await listCalendarWeek(db(), "2026-11-02", "en");
+    expect(days[0].entries.map((e) => [e.ticker, e.name, e.writeUps, e.filingUrl])).toEqual([
+      ["MCK", "McKesson", true, null],
+      ["A", "Agilent Technologies", false, SEC],
+      // Only EDGAR filing indexes are linked.
+      ["ACGL", "Arch Capital Group", false, null],
+      // A ticker off the watchlist keeps its row, without a name; only reported rows link a filing.
+      ["ZZZQ", null, false, null],
+    ]);
+    const strip = await stripDay(db(), "2026-11-02", { exact: true, lang: "zh" });
+    expect(strip?.bmo.map((e) => e.ticker)).toEqual(["MCK", "A", "ACGL", "ZZZQ"]);
+    expect(strip?.bmo[1].name).toBe("Agilent Technologies"); // English names on ZH pages (v1)
+  });
+
+  it("the week reads only that week's posts", async () => {
+    const base = memoryD1(seed);
+    const seen: { sql: string; args: unknown[] }[] = [];
+    const spy: D1Like = {
+      prepare(sql) {
+        const st = base.prepare(sql);
+        const bind = st.bind.bind(st);
+        st.bind = (...args) => {
+          seen.push({ sql, args });
+          return bind(...args);
+        };
+        return st;
+      },
+    };
+    await listCalendarWeek(spy, "2026-10-26", "en");
+    const q = seen[0];
+    expect(q.sql).toContain("WHERE p.trading_date BETWEEN ? AND ?");
+    expect(q.args).toEqual(["en", "2026-10-26", "2026-10-30", "2026-10-26", "2026-10-30"]);
+    const { results } = await base.prepare(`EXPLAIN QUERY PLAN ${q.sql}`).bind(...q.args).all<{ detail: string }>();
+    expect(results.map((r) => r.detail).join("\n")).toContain("idx_posts_trading_date");
+    // A ticker's dates read that ticker's filings only.
+    seen.length = 0;
+    await listTickerCalendar(spy, "AAPL", "en");
+    const plan = await base.prepare(`EXPLAIN QUERY PLAN ${seen[0].sql}`).bind(...seen[0].args).all<{ detail: string }>();
+    expect(plan.results.map((r) => r.detail).join("\n")).toContain("idx_earnings_filings_ticker");
+  });
+
+  it("knows which tickers have a check", async () => {
+    const d = memoryD1(seed + earnings(3, "NVDA", "0001045810-26-000010", "2026-10-29", "failed"));
+    expect(await tickerHasCheck(d, "AAPL")).toBe(true);
+    expect(await tickerHasCheck(d, "NVDA")).toBe(true);
+    expect(await tickerHasCheck(d, "XOM")).toBe(false);
   });
 });
 

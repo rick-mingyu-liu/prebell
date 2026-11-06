@@ -21,7 +21,7 @@ vi.mock("next-intl/server", () => ({
 
 const { default: Archive } = await import("../src/app/[locale]/archive/page");
 const { default: EarningsCalendar } = await import("../src/app/[locale]/earnings/page");
-const { default: TickerArchive } = await import("../src/app/[locale]/t/[ticker]/page");
+const { default: TickerArchive, generateMetadata: tickerMetadata } = await import("../src/app/[locale]/t/[ticker]/page");
 
 const seed = `
 INSERT INTO runs VALUES ('earnings:intc','earnings','2026-10-29','published',1,NULL,'2026-10-29T21:00:00Z','2026-10-29T21:00:00Z');
@@ -29,8 +29,11 @@ INSERT INTO posts (id, run_key, content_type, template_id, trading_date, slug, f
   VALUES (1,'earnings:intc','earnings','earnings:v1','2026-10-29','earnings-intc-2026-10-29',NULL,'2026-10-29T21:10:00Z');
 INSERT INTO post_translations (post_id, lang, status, title, summary, body_md, updated_at) VALUES (1,'en','published','Intel Q3','Sum','# Intel Q3','2026-10-29T21:10:00Z');
 INSERT INTO post_translations (post_id, lang, status, title, summary, body_md, updated_at) VALUES (1,'zh','published','英特尔 Q3','摘要','# 英特尔 Q3','2026-10-29T21:10:00Z');
+INSERT INTO earnings_filings VALUES ('0000050863-26-000041',50863,'INTC','8-K','2.02','2026-10-29','2026-10-29','2026-10-29T20:05:00Z','x.htm','earnings:intc','done','2026-10-29T20:06:00Z');
 INSERT INTO earnings_calendar (ticker, report_date, time_slot, status, source, first_seen_at, checked_at, updated_at)
   VALUES ('INTC','2026-10-29','amc','reported','edgar','2026-10-01','2026-10-29','2026-10-29');
+INSERT INTO earnings_calendar (ticker, report_date, time_slot, status, source, proof_url, first_seen_at, checked_at, updated_at)
+  VALUES ('A','2026-10-28','amc','reported','edgar','https://www.sec.gov/Archives/edgar/data/1090872/000109087226000041/0001090872-26-000041-index.htm','2026-10-01','2026-10-28','2026-10-28');
 `;
 
 const props = <P extends Record<string, string>>(params: P, search: Record<string, string> = {}) =>
@@ -81,5 +84,14 @@ describe("list pages are one paper column", () => {
     expect(out).toContain('<li class="date-row">');
     expect(out).toContain('<span class="num up" aria-hidden="true">✓</span>');
     expect(out).toContain("Reported");
+  });
+
+  it("a calendar-only company's page names it, links its SEC filing, and is not indexed until it has a check", async () => {
+    const out = renderToStaticMarkup(await TickerArchive(props({ locale: "en", ticker: "A" })));
+    expect(out).toContain('<p class="meta">Agilent Technologies</p>');
+    expect(out).toContain("No earnings checks yet.");
+    expect(out).toContain('aria-label="SEC filing: Oct 28, 2026">SEC filing ↗</a>');
+    expect((await tickerMetadata(props({ locale: "en", ticker: "A" }))).robots).toEqual({ index: false });
+    expect((await tickerMetadata(props({ locale: "zh", ticker: "INTC" }))).robots).toBeUndefined();
   });
 });
