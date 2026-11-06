@@ -1,7 +1,10 @@
 //! The single stored record both language drafts are written from, plus the
 //! publish gate and the number allow-list.
 
+use std::sync::OnceLock;
+
 use chrono::{DateTime, Datelike, NaiveDate, Utc};
+use regex::Regex;
 use serde::{Deserialize, Serialize};
 
 use crate::numbers::{self, Lang};
@@ -140,21 +143,94 @@ fn push_quote(out: &mut Vec<f64>, q: &Quote) {
 }
 
 /// Numbers a source quote allows, in base units. Without an explicit sign
-/// marker the quote carries no direction, so both signs are allowed.
+/// marker the quote carries no direction, so both signs are allowed. A
+/// range's first figure is allowed bare too ("2.32 to 2.36 million" allows
+/// 2.32 and 2.32 million); so are counts spelled out ("twelve months") and
+/// the size an industry unit implies ("13 MTPA" is 13 million tonnes, which
+/// a Chinese draft writes "1300万吨").
 pub(crate) fn quote_numbers(quote: &str) -> Vec<f64> {
+    static WORDS: OnceLock<Regex> = OnceLock::new();
+    static UNITS: OnceLock<Regex> = OnceLock::new();
     let mut out = Vec::new();
+    let mut push = |v: f64, signed: bool| {
+        out.push(v);
+        if !signed {
+            out.push(-v);
+        }
+    };
     // `Num.value` is already scaled to base units.
     for n in numbers::extract(quote, Lang::En) {
-        out.push(n.value);
-        if !n.signed {
-            out.push(-n.value);
+        push(n.value, n.signed);
+        if n.from_range {
+            push(n.value / n.multiplier, n.signed);
         }
+    }
+    let words = WORDS.get_or_init(|| {
+        Regex::new(r"(?i)\b(?:one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred)\b")
+            .expect("valid built-in regex")
+    });
+    for w in words.find_iter(quote) {
+        push(spelled(&w.as_str().to_ascii_lowercase()), true);
+    }
+    let units = UNITS.get_or_init(|| {
+        Regex::new(r"(\d+(?:\.\d+)?)\s?(MTPA|MMBOE|MMboe|MMBbl|MMbbl|MMBtu|MMbtu|MMcfe?|Bcfe?|MBOE|Mboe|MBbl|Mbbl|Mcfe?)\b")
+            .expect("valid built-in regex")
+    });
+    for c in units.captures_iter(quote) {
+        let Ok(v) = c[1].parse::<f64>() else {
+            continue;
+        };
+        let size = match &c[2] {
+            u if u.starts_with("MM") || u == "MTPA" => 1e6,
+            u if u.starts_with('B') => 1e9,
+            _ => 1e3,
+        };
+        push(v * size, false);
     }
     out
 }
 
-fn push_reason(out: &mut Vec<f64>, r: &NewsReason) {
+/// "twelve" -> 12.
+fn spelled(w: &str) -> f64 {
+    const ONES: [&str; 20] = [
+        "",
+        "one",
+        "two",
+        "three",
+        "four",
+        "five",
+        "six",
+        "seven",
+        "eight",
+        "nine",
+        "ten",
+        "eleven",
+        "twelve",
+        "thirteen",
+        "fourteen",
+        "fifteen",
+        "sixteen",
+        "seventeen",
+        "eighteen",
+        "nineteen",
+    ];
+    const TENS: [&str; 8] = [
+        "twenty", "thirty", "forty", "fifty", "sixty", "seventy", "eighty", "ninety",
+    ];
+    if let Some(i) = ONES.iter().position(|o| *o == w) {
+        return i as f64;
+    }
+    if let Some(i) = TENS.iter().position(|t| *t == w) {
+        return 20.0 + 10.0 * i as f64;
+    }
+    100.0
+}
+
+/// A reason's quote and its title (fetched with the article, never written
+/// by the model: "... Biggest Losses on Record, $2.9 Trillion").
+pub(crate) fn push_reason(out: &mut Vec<f64>, r: &NewsReason) {
     out.extend(quote_numbers(&r.quote));
+    out.extend(quote_numbers(&r.title));
 }
 
 /// Each theme's member moves and median, computed in code so the draft may
@@ -348,6 +424,41 @@ mod tests {
             more: 0,
             median_pct: -5.25,
             reasons: vec![reason("memory prices fell 7% in October")],
+        }
+    }
+
+    #[test]
+    fn a_reason_title_is_in_the_facts() {
+        // Recaps of 2026-11-05 and -06: the figures sit in the fetched
+        // headlines, not the quotes.
+        let mut n = Vec::new();
+        for title in [
+            "Stock Market Today: Nasdaq, S&P 500 Suffer Biggest Losses on Record, $2.9 Trillion — Live Updates",
+            "Tech stocks rebound after AI fears spark the worst rout in 19 months",
+        ] {
+            push_reason(
+                &mut n,
+                &NewsReason {
+                    url: "https://news.test/a".into(),
+                    title: title.into(),
+                    quote: "Stocks fell sharply in a broad-based selloff".into(),
+                    summary_en: String::new(),
+                },
+            );
+        }
+        for ok in [
+            "市值蒸发2.9万亿美元",
+            "a $2.9 trillion wipeout",
+            "19个月来最大跌幅",
+        ] {
+            assert_eq!(numbers::check(ok, Lang::Zh, &n), Ok(()), "{ok}");
+        }
+        for bad in [
+            "市值蒸发29万亿美元",
+            "a $2.8 trillion wipeout",
+            "18个月来最大跌幅",
+        ] {
+            assert!(numbers::check(bad, Lang::Zh, &n).is_err(), "{bad}");
         }
     }
 

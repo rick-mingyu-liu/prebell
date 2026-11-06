@@ -492,6 +492,7 @@ pub(crate) mod tests {
             amount: "$27.5 billion".into(),
             scale: 1.0,
             quote: "Net income was $27.5 billion for the quarter.".into(),
+            table_scale: None,
         });
         f.guidance = Field::Value(vec![]);
         f.highlights = Field::Missing {
@@ -678,6 +679,7 @@ pub(crate) mod tests {
             amount: "$25 million".into(),
             scale: 1.0,
             quote: "Net loss was $25 million in the quarter.".into(),
+            table_scale: None,
         });
         // The revenue quote is now a table row, so "up 8 percent" is gone.
         let mut r = reply(Lang::Zh, "营收1024.7亿美元，净亏损2500万美元。");

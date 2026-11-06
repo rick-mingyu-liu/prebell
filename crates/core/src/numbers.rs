@@ -17,6 +17,8 @@ pub enum Lang {
 /// "下跌1.17%" -> -1.17). `multiplier` is the unit scale applied (1 for plain
 /// numbers and percents); `signed` is true when an explicit sign marker
 /// (`+ - − ▲ ▼` or `上涨 下跌 涨 跌`) sits directly before the number.
+/// `from_range` marks a range's first figure that takes the unit written
+/// once after the second ("2.32 to 2.36 million", "$4.3 to $4.4 billion").
 #[derive(Debug, Clone, PartialEq)]
 pub struct Num {
     pub raw: String,
@@ -25,6 +27,7 @@ pub struct Num {
     pub is_percent: bool,
     pub multiplier: f64,
     pub signed: bool,
+    pub from_range: bool,
 }
 
 fn re(pattern: &str) -> Regex {
@@ -122,8 +125,14 @@ fn parse_unit(rest: &str, has_dollar: bool) -> (usize, f64, bool) {
             return (ws + word.len(), 1.0, true);
         }
     }
-    // zh multipliers, longest first.
-    for (unit, mult) in [("万亿", 1e12), ("亿", 1e8), ("万", 1e4)] {
+    // zh multipliers, longest first ("2.36百万桶" is 2.36 million barrels).
+    for (unit, mult) in [
+        ("万亿", 1e12),
+        ("千万", 1e7),
+        ("百万", 1e6),
+        ("亿", 1e8),
+        ("万", 1e4),
+    ] {
         if trimmed.starts_with(unit) {
             return (ws + unit.len(), mult, false);
         }
@@ -201,6 +210,7 @@ pub fn extract(text: &str, _lang: Lang) -> Vec<Num> {
         .collect();
 
     let mut out = Vec::new();
+    let mut spans: Vec<(usize, usize)> = Vec::new();
     for m in number_re().find_iter(text) {
         let (s, e) = (m.start(), m.end());
         if ignored.iter().any(|&(a, b)| s < b && a < e) {
@@ -272,9 +282,41 @@ pub fn extract(text: &str, _lang: Lang) -> Vec<Num> {
             is_percent,
             multiplier,
             signed: sign.is_some(),
+            from_range: false,
         });
+        spans.push((raw_start, end));
     }
+    range_units(text, &mut out, &spans);
     out
+}
+
+/// A range writes its unit once, after the second figure: "2.32 to 2.36
+/// million", "$4.3 to $4.4 billion", "232至236万". The first figure takes
+/// that unit when it has none of its own, is under 1,000 and is within a
+/// factor of ten of the second ("from 508,000 to 1.8 million" keeps its
+/// own units).
+fn range_units(text: &str, out: &mut [Num], spans: &[(usize, usize)]) {
+    static R: OnceLock<Regex> = OnceLock::new();
+    let between = R.get_or_init(|| re(r"^\s*(?:to|through|-|–|—|~|～|至|到)\s*$"));
+    for i in 1..out.len() {
+        let (a, b) = (&out[i - 1], &out[i]);
+        let (first, second) = (a.value.abs(), b.value.abs() / b.multiplier);
+        let range = a.multiplier == 1.0
+            && !a.is_percent
+            && b.multiplier != 1.0
+            && !b.is_percent
+            && first < 1000.0
+            && first > 0.0
+            && (0.1..=10.0).contains(&(first / second))
+            && between.is_match(&text[spans[i - 1].1..spans[i].0]);
+        if range {
+            let m = b.multiplier;
+            let a = &mut out[i - 1];
+            a.value *= m;
+            a.multiplier = m;
+            a.from_range = true;
+        }
+    }
 }
 
 /// A bare integer 0-10 with no unit, percent, decimals, sign or currency.
@@ -318,6 +360,39 @@ pub fn check(text: &str, lang: Lang, allowed: &[f64]) -> Result<(), Vec<String>>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_range_writes_its_unit_once() {
+        // Each figure as written and the multiplier it is read with.
+        let read = |t: &str| {
+            extract(t, Lang::En)
+                .iter()
+                .map(|n| {
+                    (
+                        (n.value / n.multiplier * 100.0).round() / 100.0,
+                        n.multiplier,
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            read("2.32 to 2.36 million barrels"),
+            [(2.32, 1e6), (2.36, 1e6)]
+        );
+        assert_eq!(read("$4.3 to $4.4 billion"), [(4.3, 1e9), (4.4, 1e9)]);
+        assert_eq!(read("$4.3 - $4.4 billion"), [(4.3, 1e9), (4.4, 1e9)]);
+        assert_eq!(read("232至236万桶"), [(232.0, 1e4), (236.0, 1e4)]);
+        assert_eq!(read("每日2.32至2.36百万桶"), [(2.32, 1e6), (2.36, 1e6)]);
+        // Not a range of one unit: its own magnitude, a rate, a list, a
+        // first figure far from the second.
+        assert_eq!(
+            read("from 508,000 to 1.8 million"),
+            [(508_000.0, 1.0), (1.8, 1e6)]
+        );
+        assert_eq!(read("grew 16% to 4.1 billion"), [(16.0, 1.0), (4.1, 1e9)]);
+        assert_eq!(read("rose 5 and 2.36 million"), [(5.0, 1.0), (2.36, 1e6)]);
+        assert_eq!(read("from 900 to 2.3 million"), [(900.0, 1.0), (2.3, 1e6)]);
+    }
 
     // Brief's exact cases.
     #[test]

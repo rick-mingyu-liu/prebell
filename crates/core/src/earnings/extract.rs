@@ -555,6 +555,8 @@ pub fn verify_figure(text: &str, metric: Metric, raw: &RawFigure) -> Result<Figu
         _ => {}
     }
     let scale = scale_of(&raw.scale).ok_or_else(|| format!("unknown scale {:?}", raw.scale))?;
+    // A per-share row's table scale, for its other cells (`Figure`).
+    let mut table_scale = None;
     let scale = match unit {
         Unit::Usd if n.multiplier == 1.0 => {
             // A bare table number: only a scale the document itself states,
@@ -626,6 +628,9 @@ pub fn verify_figure(text: &str, metric: Metric, raw: &RawFigure) -> Result<Figu
                 if in_row && !current_column(table.as_ref(), &quote, &cells, col) {
                     return Err(CURRENT_COLUMN.into());
                 }
+                if in_row {
+                    table_scale = table.as_ref().map(|t| t.scale);
+                }
                 // A lone per-share cell may be prose: only its group counts.
                 if let Some(e) = table
                     .as_ref()
@@ -664,6 +669,7 @@ pub fn verify_figure(text: &str, metric: Metric, raw: &RawFigure) -> Result<Figu
         amount,
         scale,
         quote,
+        table_scale,
     })
 }
 
@@ -1434,15 +1440,21 @@ fn period_from_headline(text: &str, v: &Value) -> Option<FiscalPeriod> {
 }
 
 /// Notes whose quote is in the exhibit and whose summary uses only the
-/// quote's numbers and no markup.
+/// quote's numbers and no markup, each with its table's scale when it
+/// quotes a table row (`row_scale`).
 fn verify_notes(text: &str, v: Option<&Value>) -> Vec<Note> {
+    let lines = Lines::new(text);
     v.and_then(Value::as_array)
         .into_iter()
         .flatten()
         .filter_map(|it| serde_json::from_value::<Note>(it.clone()).ok())
-        .map(|n| Note {
-            quote: collapse(&n.quote),
-            summary_en: collapse(&n.summary_en),
+        .map(|n| {
+            let quote = collapse(&n.quote);
+            Note {
+                scale: row_scale(&lines, &quote),
+                quote,
+                summary_en: collapse(&n.summary_en),
+            }
         })
         .filter(|n| !n.summary_en.is_empty())
         .filter(|n| reject_markup("summary_en", &n.summary_en).is_ok())
@@ -1457,6 +1469,26 @@ fn verify_notes(text: &str, v: Option<&Value>) -> Vec<Note> {
         })
         .take(MAX_NOTES)
         .collect()
+}
+
+/// The scale of the table `quote` is a whole row of: the quote is a whole
+/// line of the exhibit under a scale heading, with at least two cells and
+/// no size word ("Traditional Electric Operating Companies $2,272 $1,920
+/// $4,654 $3,994" under "(In millions)"). 1 otherwise.
+fn row_scale(lines: &Lines, quote: &str) -> f64 {
+    let Some(t) = Table::find(lines, quote) else {
+        return 1.0;
+    };
+    let i = lines.line_of(t.quote_at);
+    let whole_line = lines.starts[i] == t.quote_at && lines.line(i, usize::MAX) == quote;
+    let sized = extract_numbers(quote, Lang::En)
+        .iter()
+        .any(|n| n.multiplier != 1.0);
+    if whole_line && !sized && row_cells(quote).len() >= 2 {
+        t.scale
+    } else {
+        1.0
+    }
 }
 
 fn user_prompt(text: &str, company: &str, ticker: &str) -> String {
@@ -3228,6 +3260,43 @@ mod tests {
             let r = verify_figure(&t, Metric::EpsGaap, &raw(a, "units", false, row));
             assert!(r.is_err(), "{row}: {r:?}");
         }
+    }
+
+    #[test]
+    fn a_note_quoting_a_table_row_keeps_its_scale() {
+        // SO's highlights table, as html_to_text renders it.
+        let text = "Southern Company\nFinancial Highlights\n(In Millions Except Earnings Per Share)\nThree Months Ended September Year-To-Date September\nNet Income – As Reported 2026 2025 2026 2025\nTraditional Electric Operating Companies $2,272 $1,920 $4,654 $3,994\nSouthern Power 52 3 30 141\nSouthern Company today reported third-quarter earnings of $2.0 billion, or $1.77 per share.";
+        let v = json!([
+            {"quote": "Traditional Electric Operating Companies $2,272 $1,920 $4,654 $3,994", "summary_en": "Traditional Electric Operating Companies net income was $2,272 versus $1,920.", "scale": 7},
+            {"quote": "Southern Power 52 3 30 141", "summary_en": "Southern Power net income was 52 versus 3."},
+            {"quote": "Southern Company today reported third-quarter earnings of $2.0 billion, or $1.77 per share.", "summary_en": "Earnings were $2.0 billion, or $1.77 per share."},
+            // Part of a row is not the row.
+            {"quote": "Traditional Electric Operating Companies $2,272 $1,920", "summary_en": "Net income was $2,272 versus $1,920."}
+        ]);
+        let notes = verify_notes(text, Some(&v));
+        let scales: Vec<f64> = notes.iter().map(|n| n.scale).collect();
+        assert_eq!(scales, [1e6, 1e6, 1.0, 1.0]);
+        // The same row is still no company figure.
+        let q = "Traditional Electric Operating Companies $2,272 $1,920 $4,654 $3,994";
+        for m in [Metric::Revenue, Metric::NetIncome] {
+            assert!(
+                verify_figure(text, m, &raw("$2,272", "millions", false, q)).is_err(),
+                "{m:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_per_share_row_records_its_table_scale() {
+        let amd = "(In millions, except per share amounts)\nThree Months Ended\nSeptember 26, 2026 June 27, 2026 September 27, 2025\nNon-GAAP net income / earnings per share $3,471 $2.09 $2,760 $1.66 $1,965 $1.20";
+        let q = "Non-GAAP net income / earnings per share $3,471 $2.09 $2,760 $1.66 $1,965 $1.20";
+        let f = verify_figure(amd, Metric::EpsNonGaap, &raw("$2.09", "units", false, q)).unwrap();
+        assert_eq!(f.table_scale, Some(1e6));
+        // Prose has no table scale.
+        let t = "(In millions)\nNon-GAAP EPS grew 35% YoY to $0.88.";
+        let q = "Non-GAAP EPS grew 35% YoY to $0.88.";
+        let f = verify_figure(t, Metric::EpsNonGaap, &raw("$0.88", "units", false, q)).unwrap();
+        assert_eq!(f.table_scale, None);
     }
 
     #[test]

@@ -5,6 +5,7 @@ use chrono::{DateTime, Datelike, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::facts::{quote_numbers, Field};
+use crate::numbers::{self, Lang};
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Unit {
@@ -26,6 +27,12 @@ pub struct Figure {
     pub scale: f64,
     /// Verbatim exhibit text containing `amount`.
     pub quote: String,
+    /// For a per-share figure read from a table row, the table's scale
+    /// ("(In millions, except per share amounts)" -> 1e6): the row's
+    /// whole-number cells ("Non-GAAP net income / earnings per share $3,471
+    /// $2.09 ...") are amounts in it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub table_scale: Option<f64>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
@@ -172,6 +179,19 @@ impl Metrics {
 pub struct Note {
     pub quote: String,
     pub summary_en: String,
+    /// For a note quoting a table row, the table's scale ("(In millions)"
+    /// -> 1e6: "Traditional Electric Operating Companies $2,272 ..." is
+    /// $2,272 million); 1 for prose, and in facts stored before it was kept.
+    #[serde(default = "one", skip_serializing_if = "is_one")]
+    pub scale: f64,
+}
+
+fn one() -> f64 {
+    1.0
+}
+
+fn is_one(v: &f64) -> bool {
+    *v == 1.0
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -241,9 +261,41 @@ pub fn missing_required(f: &EarningsFacts) -> Vec<&'static str> {
 }
 
 fn push_quote(out: &mut Vec<f64>, quote: &str, scale: f64) {
+    if scale == 1.0 {
+        out.extend(quote_numbers(quote));
+        return;
+    }
     // A table quote's bare numbers mean `scale` dollars; the unscaled
-    // values would let a draft read "$27,466" as dollars.
-    out.extend(quote_numbers(quote).into_iter().map(|v| v * scale));
+    // values would let a draft read "$27,466" as dollars. A percentage
+    // ("Revenue $13,467 $14,766 10% 10%") or an amount with its own size
+    // word is not in the table's scale.
+    for n in numbers::extract(quote, Lang::En) {
+        let v = if n.multiplier == 1.0 && !n.is_percent {
+            n.value * scale
+        } else {
+            n.value
+        };
+        out.push(v);
+        if !n.signed {
+            out.push(-v);
+        }
+    }
+}
+
+/// The whole-number cells of a table row in `scale` ("$2,272", "52"), as
+/// amounts; a cell with decimals under 1,000 ("$1.77") is a per-share or
+/// ratio cell and not scaled.
+fn push_cells(out: &mut Vec<f64>, quote: &str, scale: f64) {
+    for n in numbers::extract(quote, Lang::En) {
+        let amount =
+            n.multiplier == 1.0 && !n.is_percent && (n.decimals == 0 || n.value.abs() >= 1000.0);
+        if amount {
+            out.push(n.value * scale);
+            if !n.signed {
+                out.push(-n.value * scale);
+            }
+        }
+    }
 }
 
 /// Every number an earnings post may cite: figure values, numbers inside
@@ -261,18 +313,27 @@ pub fn numbers_in_facts(f: &EarningsFacts) -> Vec<f64> {
         if let Some(fig) = f.metrics.value(m) {
             out.push(fig.value);
             push_quote(&mut out, &fig.quote, fig.scale);
+            if let Some(scale) = fig.table_scale {
+                push_cells(&mut out, &fig.quote, scale);
+            }
         }
     }
     for notes in [&f.guidance, &f.highlights] {
         if let Field::Value(ns) = notes {
             for n in ns {
                 push_quote(&mut out, &n.quote, 1.0);
+                if n.scale != 1.0 {
+                    push_cells(&mut out, &n.quote, n.scale);
+                }
             }
         }
     }
+    // The trend's values and the years its quarters fall in (the post's
+    // charts show them).
     if let Field::Value(t) = &f.trend {
         for p in t.revenue.iter().chain(&t.eps_diluted).chain(&t.net_income) {
             out.push(p.value);
+            out.push(f64::from(p.period_end.year()));
         }
     }
     out
@@ -290,6 +351,7 @@ pub(crate) mod tests {
             amount: amount.into(),
             scale: 1.0,
             quote: quote.into(),
+            table_scale: None,
         })
     }
 
@@ -341,6 +403,7 @@ pub(crate) mod tests {
             guidance: Field::Value(vec![Note {
                 quote: "the Company expects total revenue to grow 10 to 12 percent year over year".into(),
                 summary_en: "Apple expects revenue growth of 10 to 12 percent.".into(),
+                scale: 1.0,
             }]),
             highlights: Field::Missing { reason: "none".into() },
             trend: Field::Value(Trend {
@@ -405,12 +468,245 @@ pub(crate) mod tests {
             amount: "102,466".into(),
             scale: 1e6,
             quote: "Total net sales $102,466 $94,930".into(),
+            table_scale: None,
         });
         let n = numbers_in_facts(&f);
         assert_eq!(
             check("up from $94.93 billion a year ago", Lang::En, &n),
             Ok(())
         );
+    }
+
+    fn note(quote: &str, scale: f64) -> Note {
+        Note {
+            quote: quote.into(),
+            summary_en: String::new(),
+            scale,
+        }
+    }
+
+    fn table_fig(value: f64, unit: Unit, amount: &str, scale: f64, quote: &str) -> Field<Figure> {
+        Field::Value(Figure {
+            value,
+            unit,
+            amount: amount.into(),
+            scale,
+            quote: quote.into(),
+            table_scale: None,
+        })
+    }
+
+    /// Each draft numbers check from the LLM eval (2026-11-06): what the
+    /// models wrote from the bundle passes, a wrong digit, scale or rate
+    /// does not.
+    fn verdicts(f: &EarningsFacts, ok: &[(&str, Lang)], bad: &[(&str, Lang)]) {
+        let n = numbers_in_facts(f);
+        for (t, lang) in ok {
+            assert_eq!(check(t, *lang, &n), Ok(()), "{t}");
+        }
+        for (t, lang) in bad {
+            assert!(check(t, *lang, &n).is_err(), "{t}");
+        }
+    }
+
+    #[test]
+    fn rates_in_a_table_quote_are_not_in_its_scale() {
+        // UBER and QCOM: the growth column of a revenue row in millions.
+        let mut f = facts();
+        f.metrics.revenue = table_fig(
+            14.766e9,
+            Unit::Usd,
+            "$14,766",
+            1e6,
+            "Revenue $13,467 $14,766 10% 10%",
+        );
+        verdicts(
+            &f,
+            &[
+                ("Revenue rose 10% to $14.77 billion.", Lang::En),
+                ("营收增长10%。", Lang::Zh),
+            ],
+            &[
+                ("Revenue rose 13% to $14.77 billion.", Lang::En),
+                ("Revenue was $10 million higher.", Lang::En),
+            ],
+        );
+        f.metrics.revenue = table_fig(
+            10.322e9,
+            Unit::Usd,
+            "$10,322",
+            1e6,
+            "Revenues $10,322 $11,270 (8%) $10,442 $11,270 (7%)",
+        );
+        verdicts(
+            &f,
+            &[
+                ("Revenue fell 8% to $10.32 billion.", Lang::En),
+                ("营收同比下降8%。", Lang::Zh),
+            ],
+            &[
+                ("Revenue fell 9%.", Lang::En),
+                ("营收下降8000万美元。", Lang::Zh),
+            ],
+        );
+    }
+
+    #[test]
+    fn a_note_quoting_a_table_row_is_in_the_table_scale() {
+        // SO: the segment row a highlight quotes, from "(In Millions Except
+        // Earnings Per Share)".
+        let mut f = facts();
+        f.highlights = Field::Value(vec![
+            note(
+                "Traditional Electric Operating Companies $2,272 $1,920 $4,654 $3,994",
+                1e6,
+            ),
+            note("Southern Power 52 3 30 141", 1e6),
+        ]);
+        verdicts(
+            &f,
+            &[
+                ("Traditional electric operating companies earned $2,272 million, up from $1,920 million.", Lang::En),
+                ("They earned $2.27 billion; Southern Power $52 million against $3 million.", Lang::En),
+                ("传统电力运营公司净利润22.72亿美元，上年同期19.20亿美元；南方电力5200万美元，上年同期300万美元。", Lang::Zh),
+                ("南方电力0.52亿美元，前九个月46.54亿美元。", Lang::Zh),
+            ],
+            &[
+                ("They earned $2,722 million.", Lang::En),
+                ("They earned 2.272亿美元.", Lang::Zh),
+                ("They earned 227.2亿美元.", Lang::Zh),
+                ("Southern Power earned $52 billion.", Lang::En),
+            ],
+        );
+        // A note stored before the scale was kept is read as written: no
+        // scale is guessed.
+        f.highlights = Field::Value(vec![note(
+            "Traditional Electric Operating Companies $2,272 $1,920 $4,654 $3,994",
+            1.0,
+        )]);
+        verdicts(
+            &f,
+            &[],
+            &[
+                ("They earned $2,272 million.", Lang::En),
+                ("22.72亿美元", Lang::Zh),
+            ],
+        );
+        // EMR: a segment EBITA row with margins; the margin is a rate.
+        f.highlights = Field::Value(vec![note(
+            "Control Systems & Software $297 23.8% $99 $16 $412 33.1%",
+            1e6,
+        )]);
+        verdicts(
+            &f,
+            &[
+                ("Segment EBITA was $412 million, a 33.1% margin.", Lang::En),
+                ("分部EBITA为4.12亿美元，利润率33.1%。", Lang::Zh),
+            ],
+            &[
+                ("Segment EBITA was 41.2亿美元.", Lang::Zh),
+                ("a $33.1 million margin", Lang::En),
+                ("Segment EBITA was $421 million.", Lang::En),
+            ],
+        );
+        // Per-share cells of such a row stay per share.
+        f.highlights = Field::Value(vec![note("Diluted EPS $1.77 $1.55", 1e6)]);
+        verdicts(
+            &f,
+            &[("EPS was $1.77.", Lang::En)],
+            &[("$1.77 million", Lang::En)],
+        );
+    }
+
+    #[test]
+    fn a_per_share_row_keeps_its_amount_cells_in_the_table_scale() {
+        // AMD: non-GAAP net income and EPS alternate in one row.
+        let mut f = facts();
+        f.metrics.eps_non_gaap = Field::Value(Figure {
+            value: 2.09,
+            unit: Unit::UsdPerShare,
+            amount: "$2.09".into(),
+            scale: 1.0,
+            quote:
+                "Non-GAAP net income / earnings per share $3,471 $2.09 $2,760 $1.66 $1,965 $1.20"
+                    .into(),
+            table_scale: Some(1e6),
+        });
+        verdicts(
+            &f,
+            &[
+                (
+                    "Non-GAAP net income was $3,471 million, or $2.09 per share.",
+                    Lang::En,
+                ),
+                ("非GAAP净利润34.7亿美元，每股2.09美元。", Lang::Zh),
+                ("非GAAP净利润34.71亿美元。", Lang::Zh),
+            ],
+            &[
+                ("$2.09 million", Lang::En),
+                ("347.1亿美元", Lang::Zh),
+                ("$3,417 million", Lang::En),
+            ],
+        );
+    }
+
+    #[test]
+    fn a_range_writes_its_unit_once() {
+        // COP: a production range and an LNG capacity, in Chinese units.
+        let mut f = facts();
+        f.guidance = Field::Value(vec![
+            note("Fourth-quarter 2026 production is expected to be 2.32 to 2.36 million barrels of oil equivalent per day.", 1.0),
+            note("Operating Cash Flow $4.3B - $4.4B", 1.0),
+        ]);
+        f.highlights = Field::Value(vec![note(
+            "Expanded commercial LNG offtake portfolio to 13 MTPA.",
+            1.0,
+        )]);
+        verdicts(
+            &f,
+            &[
+                ("第四季度产量预计为每日232万至236万桶油当量。", Lang::Zh),
+                ("第四季度产量指引为每日2.32至2.36百万桶油当量。", Lang::Zh),
+                (
+                    "Production of 2.32 to 2.36 million barrels a day.",
+                    Lang::En,
+                ),
+                ("液化天然气承购组合扩大至每年1300万吨。", Lang::Zh),
+                ("The LNG portfolio reached 13 MTPA.", Lang::En),
+                ("Operating cash flow of $4.3 to $4.4 billion.", Lang::En),
+            ],
+            &[
+                ("每日2320万桶", Lang::Zh),
+                ("每日233万桶", Lang::Zh),
+                ("每日2.32亿桶", Lang::Zh),
+                ("每日2.32至2.36千万桶", Lang::Zh),
+                ("每年130万吨", Lang::Zh),
+                ("Operating cash flow of $4.3 to $4.5 billion.", Lang::En),
+                ("Operating cash flow of $4.3 million.", Lang::En),
+            ],
+        );
+    }
+
+    #[test]
+    fn trend_years_and_spelled_counts_are_in_the_facts() {
+        let mut f = facts();
+        f.highlights = Field::Value(vec![note(
+            "Mobile lines increased by 1.8 million over the last twelve months.",
+            1.0,
+        )]);
+        let n = numbers_in_facts(&f);
+        assert_eq!(check("过去12个月增加180万", Lang::Zh, &n), Ok(()));
+        assert!(check("过去13个月", Lang::Zh, &n).is_err());
+        assert!(check("增加190万", Lang::Zh, &n).is_err());
+        // The trend's quarters are years the post's charts show, so it may
+        // name them; a year before the earliest is not in the facts.
+        assert!(check("since 2023", Lang::En, &n).is_err());
+        if let Field::Value(t) = &mut f.trend {
+            t.revenue.insert(0, qp("2024-06-29", 85.8e9));
+        }
+        let n = numbers_in_facts(&f);
+        assert_eq!(check("up from mid-2024", Lang::En, &n), Ok(()));
+        assert!(check("since 2023", Lang::En, &n).is_err());
     }
 
     #[test]
