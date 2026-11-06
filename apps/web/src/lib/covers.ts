@@ -24,3 +24,44 @@ export async function coverResponse(bucket: R2Like, segments: string[]): Promise
     },
   });
 }
+
+/** Share cards the generator renders from SVG covers: R2 `og/<stem>.png`, requested as `/og/<stem>.png`. */
+export const CARD_FILE = /^[a-z0-9-]{1,80}\.png$/;
+
+/** The slice of the static-assets binding the card route uses. */
+export interface AssetsLike {
+  fetch(request: Request): Promise<Response>;
+}
+
+/**
+ * The response for `GET /og/<file>`: the rendered card from R2, kept for a day like the cover it shows;
+ * until the generator has rendered it (a few minutes after publishing, or never for old posts), the
+ * default card, cached briefly so the real one replaces it.
+ */
+export async function cardResponse(
+  bucket: R2Like,
+  assets: AssetsLike,
+  file: string,
+  requestUrl: string,
+): Promise<Response> {
+  if (!CARD_FILE.test(file)) return new Response("not found", { status: 404 });
+  const obj = await bucket.get(`og/${file}`);
+  if (obj) {
+    return new Response(obj.body, {
+      headers: {
+        "Content-Type": "image/png",
+        "X-Content-Type-Options": "nosniff",
+        "Cache-Control": "public, max-age=86400, s-maxage=86400",
+      },
+    });
+  }
+  const fallback = await assets.fetch(new Request(new URL("/og-default.png", requestUrl)));
+  if (!fallback.ok) return new Response("not found", { status: 404 });
+  return new Response(fallback.body, {
+    headers: {
+      "Content-Type": "image/png",
+      "X-Content-Type-Options": "nosniff",
+      "Cache-Control": "public, max-age=300, s-maxage=300",
+    },
+  });
+}
