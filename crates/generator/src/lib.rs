@@ -16,9 +16,7 @@ use prebell_core::providers::CountingHttp;
 use prebell_core::providers::LlmProvider;
 use prebell_core::recap;
 use prebell_core::run::{tick_with_hooks, update, Hooks, TickOutcome};
-use prebell_core::schedule::{
-    jobs_for_cron, queue_for, ContentJob, EarningsStep, EARNINGS_QUEUE, JOBS,
-};
+use prebell_core::schedule::{jobs_for_cron, queue_for, ContentJob, EarningsStep, JOBS};
 use prebell_core::tavily::Tavily;
 use prebell_core::yahoo::Yahoo;
 use prebell_core::yahoo_calendar::YahooCalendar;

@@ -1619,6 +1619,23 @@ mod tests {
             self.tick();
             self.0.get_post_by_run(k).await
         }
+        async fn revise_post(
+            &self,
+            p: &PostRow,
+            t: &[TranslationRow],
+            s: &[NewsReason],
+        ) -> Result<(), String> {
+            self.tick();
+            self.0.revise_post(p, t, s).await
+        }
+        async fn upsert_translation_at_revision(
+            &self,
+            t: &TranslationRow,
+            revised_at: Option<&str>,
+        ) -> Result<bool, String> {
+            self.tick();
+            self.0.upsert_translation_at_revision(t, revised_at).await
+        }
         async fn posts_on(&self, c: &str, d: &str) -> Result<Vec<PostRow>, String> {
             self.tick();
             self.0.posts_on(c, d).await
