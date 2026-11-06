@@ -4,6 +4,11 @@ use async_trait::async_trait;
 use serde_json::{json, Value};
 
 const URL: &str = "https://api.deepseek.com/chat/completions";
+/// Thinking is on by default on current DeepSeek models; the drafts and
+/// extractions run without it (as the retired `deepseek-chat` did), so the
+/// reply stays inside `max_tokens` and `temperature` keeps its effect.
+/// <https://api-docs.deepseek.com/guides/thinking_mode>
+const THINKING_OFF: &str = "disabled";
 
 pub struct DeepSeek<H> {
     pub http: H,
@@ -31,6 +36,7 @@ impl<H: Http> LlmProvider for DeepSeek<H> {
                 {"role": "user", "content": user},
             ],
             "response_format": {"type": "json_object"},
+            "thinking": {"type": THINKING_OFF},
             "temperature": 0.3,
             "max_tokens": 4096,
             "stream": false,
@@ -124,7 +130,7 @@ mod tests {
         }
     }
     fn ds(h: FakeHttp) -> DeepSeek<FakeHttp> {
-        DeepSeek::new(h, "dk".into(), "deepseek-chat".into())
+        DeepSeek::new(h, "dk".into(), "deepseek-flash".into())
     }
     fn wrap(content: &str, finish: &str) -> String {
         json!({"choices":[{"index":0,"message":{"role":"assistant","content":content},"finish_reason":finish}]})
@@ -195,7 +201,8 @@ mod tests {
             .to_string()
             .contains("\"response_format\":{\"type\":\"json_object\"}"));
         assert_eq!(body["temperature"], 0.3);
-        assert_eq!(body["model"], "deepseek-chat");
+        assert_eq!(body["model"], "deepseek-flash");
+        assert_eq!(body["thinking"], json!({"type": "disabled"}));
         assert_eq!(body["messages"][0]["role"], "system");
         assert_eq!(body["messages"][1]["content"], "usr");
     }
