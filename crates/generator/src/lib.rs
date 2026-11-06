@@ -11,7 +11,7 @@ use chrono::{DateTime, Utc};
 use prebell_core::earnings::calendar::{refresh_tick, yahoo_seeding, CalendarSource};
 use prebell_core::earnings::run::{build_tick, poll_job};
 use prebell_core::edgar::{Edgar, BUILD_GAP_MS};
-use prebell_core::events::check::check_tick;
+use prebell_core::events::check::{check_tick, missing_table};
 use prebell_core::events::watch::StoreWatch;
 use prebell_core::jobs::{redact, run_job, JobRunner};
 use prebell_core::llm::{api_key_var, llm_from_env, unknown_provider};
@@ -212,19 +212,26 @@ impl JobRunner for Runner<'_> {
         let env = self.env;
         let store = self.store;
         let t = now(env);
-        if step == EarningsStep::Events {
-            // The macro events check needs neither EDGAR nor an LLM.
-            let o = check_tick(t, store, store, &self.http).await?;
-            for e in &o.errors {
-                console_warn!("events: {e}");
-            }
-            return Ok(format!("{o:?}"));
-        }
-        let edgar = self.edgar()?;
         match step {
-            // Returned above.
-            EarningsStep::Events => Ok(String::new()),
+            EarningsStep::Events => {
+                // The macro events check needs neither EDGAR nor an LLM.
+                match check_tick(t, store, store, &self.http).await {
+                    Ok(o) => {
+                        for e in &o.errors {
+                            console_warn!("events: {e}");
+                        }
+                        Ok(format!("{o:?}"))
+                    }
+                    // Before migration 0008: nothing to alert, the site and the
+                    // brief run on the snapshot.
+                    Err(e) if missing_table(&e) => {
+                        Ok("events: macro_events missing (apply migration 0008); skipped".into())
+                    }
+                    Err(e) => Err(e),
+                }
+            }
             EarningsStep::Poll => {
+                let edgar = self.edgar()?;
                 let o = poll_job(t, self.fired, store, store, &edgar).await?;
                 if o.stale {
                     return Ok("stale message, dropped".into());
@@ -257,6 +264,7 @@ impl JobRunner for Runner<'_> {
                 ))
             }
             EarningsStep::Build => {
+                let edgar = self.edgar()?;
                 let llm = self.llm(&[])?;
                 let log = |m: &str| console_log!("{m}");
                 // Beside a poll on the other queue: slower, to stay under 10/s.
@@ -265,6 +273,8 @@ impl JobRunner for Runner<'_> {
                 Ok(format!("{o:?}"))
             }
             EarningsStep::Calendar => {
+                // SEC_CONTACT gates every earnings step, as before.
+                self.edgar()?;
                 let news_key = secret_or_empty(env, "TAVILY_API_KEY");
                 let ns = Tavily::new(self.http.clone(), news_key.clone());
                 let llm = self.llm(&[&news_key])?;
