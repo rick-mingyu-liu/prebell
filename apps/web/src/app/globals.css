@@ -381,6 +381,8 @@ h3.cal-slot .num { margin-left: auto; color: var(--ink); font-variant-caps: norm
 .cal-unconfirmed .cal-card-sym { color: var(--muted); }
 .cal-unconfirmed img { opacity: 0.6; filter: grayscale(0.4); }
 .cal-more { margin-top: 6px; }
+/* Keep a focused card clear of the sticky chips. */
+.cal-card-link, .cal-more > summary { scroll-margin-top: 3.5rem; }
 .cal-more > summary { cursor: pointer; padding: 0.2rem 0; color: var(--muted); font-size: 12.5px; font-weight: 600; }
 .cal-more > summary:hover, .cal-more > summary:focus-visible { color: var(--ink); }
 .cal-more[open] > summary { margin-bottom: 6px; }

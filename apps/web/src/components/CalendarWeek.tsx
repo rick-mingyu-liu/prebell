@@ -72,7 +72,8 @@ export default function CalendarWeek({
   );
 
   return (
-    <div className="cal-week">
+    // Keyed by Monday so a new week mounts a fresh scroller and BoardStart can scroll to today.
+    <div className="cal-week" key={days[0]?.date}>
       {/* The key to the marks: icons, tick and swatch are decoration; the words carry the meaning. */}
       <p className="cal-key">
         <span className="cal-key-item">
