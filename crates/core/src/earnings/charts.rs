@@ -29,6 +29,9 @@ const INK: RGBColor = RGBColor(0x80, 0x80, 0x80);
 pub(crate) const MIN_BARS: usize = 2;
 /// Widest slot per bar (bar plus gap), in px.
 const MAX_SLOT: i32 = 96;
+/// Narrowest slot that fits a "2024-03" date label (~48px at 13px) with room
+/// between neighbours; narrower slots label every other bar.
+const DATE_LABEL_SLOT: i32 = 52;
 const RELEASE_LABEL: &str = "8-K";
 /// Period ends further apart than one quarter (plus 52/53-week slack) mean
 /// quarters in between are missing.
@@ -137,6 +140,10 @@ fn draw(bars: &[Option<Bar>], labels: &[(usize, String)]) -> Result<String, Stri
         let slot = ((W - 2 * SIDE) / bars.len() as i32).min(MAX_SLOT);
         let left = (W - slot * bars.len() as i32) / 2;
         let gap = (slot / 4).max(2);
+        // Date labels every `every` slots, counted back from the last bar so
+        // the newest quarter is always labelled.
+        let every = (DATE_LABEL_SLOT as usize).div_ceil(slot.max(1) as usize);
+        let dated = |i: usize| (bars.len() - 1 - i).is_multiple_of(every);
         let text = |size: i32, h: HPos, v: VPos| {
             ("sans-serif", size)
                 .into_font()
@@ -158,12 +165,14 @@ fn draw(bars: &[Option<Bar>], labels: &[(usize, String)]) -> Result<String, Stri
             ))
             .map_err(err)?;
             let cx = (x0 + x1) / 2;
-            root.draw(&Text::new(
-                b.label.clone(),
-                (cx, H - BOTTOM + 10),
-                text(16, HPos::Center, VPos::Top),
-            ))
-            .map_err(err)?;
+            if dated(i) {
+                root.draw(&Text::new(
+                    b.label.clone(),
+                    (cx, H - BOTTOM + 10),
+                    text(16, HPos::Center, VPos::Top),
+                ))
+                .map_err(err)?;
+            }
             if let Some((_, l)) = labels.iter().find(|(j, _)| *j == i) {
                 let (ly, vpos) = if b.value >= 0.0 {
                     (top - 4, VPos::Bottom)
@@ -512,6 +521,30 @@ mod tests {
         let b: Vec<Option<Bar>> = b.into_iter().map(Some).collect();
         let svg = draw(&b, &[]).unwrap();
         assert!(svg.contains("&lt;b&gt;&amp;") && !svg.contains("<b>"));
+    }
+
+    #[test]
+    fn crowded_dates_label_every_other_bar_ending_on_the_newest() {
+        let bar = |label: String| Some(Bar { label, value: 1.0 });
+        let texts = |svg: &str| -> Vec<String> {
+            regex::Regex::new(r">\s*([^<]+?)\s*</text>")
+                .unwrap()
+                .captures_iter(svg)
+                .map(|c| c[1].to_string())
+                .collect()
+        };
+        // 13 slots (46px each) cannot fit a date under every bar.
+        let mut b: Vec<Option<Bar>> = (1..=12).map(|m| bar(format!("2025-{m:02}"))).collect();
+        b.push(bar("8-K".into()));
+        let shown = texts(&draw(&b, &[]).unwrap());
+        let want: Vec<String> = [1, 3, 5, 7, 9, 11]
+            .iter()
+            .map(|m| format!("2025-{m:02}"))
+            .chain(["8-K".to_string()])
+            .collect();
+        assert_eq!(shown, want);
+        // 11 slots (55px) fit them all.
+        assert_eq!(texts(&draw(&b[2..], &[]).unwrap()).len(), 11);
     }
 
     #[test]
