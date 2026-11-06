@@ -63,7 +63,7 @@ fn name_tokens(name: &str) -> Vec<String> {
 
 /// The filer's name is the row's SEC conformed name: the same significant
 /// words, ignoring case, punctuation, spacing and legal suffixes. Matching
-/// only the first word would, at about 530 rows, let a wrong CIK through
+/// only the first word would, at about 560 rows, let a wrong CIK through
 /// between names that share it (American Express and American Tower). A
 /// company renamed on EDGAR fails until the watchlist is regenerated
 /// (`--refresh`), and the poller alerts about it.
@@ -214,6 +214,8 @@ mod tests {
             ("XOM", "EXXON MOBIL HOLDINGS CORP"),
             ("USB", "US BANCORP \\DE\\"),
             ("KO", "COCA COLA CO"),
+            ("YUMC", "Yum China Holdings, Inc."),
+            ("YUMC", "YUM CHINA HOLDINGS INC"),
         ] {
             let w = crate::earnings::find(ticker).unwrap();
             assert!(same_filer(feed, w.sec), "{ticker}: {feed} vs {}", w.sec);
@@ -221,6 +223,7 @@ mod tests {
         for (ticker, feed) in [
             ("AAPL", "Apple Hospitality REIT, Inc."),
             ("AXP", "AMERICAN TOWER CORP /MA/"),
+            ("YUMC", "YUM! BRANDS, INC."),
             ("GM", "GENERAL MILLS INC"),
             ("AAPL", "INC"),
         ] {

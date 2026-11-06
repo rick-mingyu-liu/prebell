@@ -647,7 +647,7 @@ pub async fn refreshed_today(es: &dyn EarningsStore, now: DateTime<Utc>) -> Resu
 /// Reads the aggregator and reconciles its dates (rules 1-7), drops the
 /// guessed dates of companies no longer on the watchlist, then rule 8. The
 /// calendar is read in one ranged query and written in one batch: at about
-/// 530 companies, a read and a write per ticker would pass the Free plan's
+/// 560 companies, a read and a write per ticker would pass the Free plan's
 /// 1,000 D1 calls per invocation in the busiest weeks.
 async fn seed_from(
     now: DateTime<Utc>,
@@ -1472,7 +1472,7 @@ mod tests {
     #[tokio::test]
     async fn a_season_peak_refresh_reads_and_writes_in_bulk() {
         // 300 watchlist companies dated in the window (the busiest weeks at
-        // about 530 rows): a per-ticker read and write each would pass the
+        // about 560 rows): a per-ticker read and write each would pass the
         // Free plan's 1,000 D1 calls per invocation.
         let base = Rc::new(MemStore::default());
         let es = MemEarningsStore::new(base.clone());
