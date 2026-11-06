@@ -189,18 +189,28 @@ const PROSE_CHARS: usize = 200;
 /// footnote markers ("(1)", "(a)") and words such as "Q3" or "Ohio(a)";
 /// not prose.
 fn label_only(s: &str) -> bool {
+    label_line(s, true)
+}
+
+/// `label_only` for the line right above a quoted row: any cells it ends
+/// in, "(1) (2)" or a single "(1)" too, are that row's figures.
+fn group_label(s: &str) -> bool {
+    label_line(s, false)
+}
+
+fn label_line(s: &str, markers_allowed: bool) -> bool {
     static R: OnceLock<Regex> = OnceLock::new();
     let r = R.get_or_init(|| {
         Regex::new(r"(?i)\b(?:19|20)\d\d\b|'\d\d\b|\b(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?\s+\d{1,2}\b|\(\w{1,2}\)|\w*[a-z]\d+\w*|\b\d+[a-z]\w*")
             .expect("valid built-in regex")
     });
     // A row of dashes or small negatives ("— —", "$ — $ —", "(5) (3)",
-    // "(2) (1)") is a row of figures. Footnote markers are not: a single
-    // "(1)", or "(1) (2)" counting up from one; nor is one dash after a
-    // title ("Segment Results –").
+    // "(2) (1)") is a row of figures. Above a table, footnote markers are
+    // not: a single "(1)", or "(1) (2)" counting up from one; nor is one
+    // dash after a title ("Segment Results –").
     static CELLS: OnceLock<Regex> = OnceLock::new();
     let cells = CELLS.get_or_init(|| {
-        Regex::new(r"(?:\s+(?:\$\s*)?(?:[—–]|\(\d{1,2}\)))+\s*$").expect("valid built-in regex")
+        Regex::new(r"\s(?:\s*(?:\$\s*)?(?:[—–]|\(\d{1,2}\)))+\s*$").expect("valid built-in regex")
     });
     let figures = cells.find(s).is_some_and(|c| {
         let c = c.as_str();
@@ -210,7 +220,8 @@ fn label_only(s: &str) -> bool {
             .filter_map(|n| n.parse().ok())
             .collect();
         let markers = parens.iter().zip(1..).all(|(&n, i)| n == i);
-        dashes >= 2
+        !markers_allowed
+            || dashes >= 2
             || c.contains('$')
             || dashes == 1 && !parens.is_empty()
             || parens.len() >= 2 && !markers
@@ -221,18 +232,26 @@ fn label_only(s: &str) -> bool {
         && !r.replace_all(s, "").contains(|c: char| c.is_ascii_digit())
 }
 
-/// A footnote: a marker ("(1)", "*", "†", "‡", "Note") followed by a
-/// sentence ("(1) Includes unconsolidated joint ventures.", "Note: excludes
-/// noncontrolling interests."): the end of the table before. A marker
-/// before a few words with no period ("Note: Segment Information", "(a)
-/// Joint Venture Statements of Operations") is a title.
+/// A footnote: a marker ("(1)", "*", "†", "‡", "Note") and then words
+/// that do not read as a title ("(1) Includes unconsolidated joint
+/// ventures", "Note: excludes noncontrolling interests"): the end of the
+/// table before. A marker before a few title words ("Note: Segment
+/// Information", "(a) Joint Venture Statements of Operations") is a title,
+/// unless a sentence or six or more words follow.
 fn footnote(s: &str) -> bool {
     static NOTE: OnceLock<Regex> = OnceLock::new();
+    static TITLE: OnceLock<Regex> = OnceLock::new();
     let note = NOTE.get_or_init(|| {
         Regex::new(r"(?i)^\s*(?:\(\w{1,2}\)|[*†‡]|notes?\b)").expect("valid built-in regex")
     });
-    note.find(s)
-        .is_some_and(|m| sentence(s) || s[m.end()..].split_whitespace().count() >= 6)
+    let title = TITLE.get_or_init(|| {
+        Regex::new(r"(?i)\b(?:statements?|results?|information|financial|operations|income|reconciliations?|summary|table)\b")
+            .expect("valid built-in regex")
+    });
+    note.find(s).is_some_and(|m| {
+        let rest = &s[m.end()..];
+        sentence(s) || rest.split_whitespace().count() >= 6 || !title.is_match(rest)
+    })
 }
 
 /// A line ending in a period ("Provides pharmacy benefit services.",
@@ -797,7 +816,7 @@ impl<'a> Table<'a> {
             .checked_sub(1)
             .filter(|&i| i > top)
             .map(line)
-            .filter(|s| label_only(s))?;
+            .filter(|s| group_label(s))?;
         if let Some(w) = part_named(m, group, true) {
             return Some(format!(
                 "the row's group {group:?} names {w:?}, a part of the company"
@@ -2052,9 +2071,32 @@ mod tests {
             "Note: excludes noncontrolling interests.",
             "* Joint venture revenue at our share.",
             "(a) Amounts for our segments exclude intersegment eliminations and corporate items",
+            // Without a period, unless the words read as a title.
+            "(1) Includes unconsolidated joint ventures",
+            "* Excludes noncontrolling interests",
+            "Note: excludes noncontrolling interests",
+            "Notes: segment totals exclude eliminations",
+            "(a) Segment revenue",
         ] {
             let r = verify(&format!("Segment Information\nCloud 1,000 900\n{note}\nCONDENSED CONSOLIDATED STATEMENTS OF INCOME"));
             assert!(r.is_ok(), "{note}: {r:?}");
+        }
+    }
+
+    #[test]
+    fn the_row_above_is_figures_even_when_its_cells_count_up() {
+        // "(1) (2)" right above the row is a row of small losses, not
+        // footnote markers.
+        let hdr = "ACME CORPORATION\nCONDENSED CONSOLIDATED STATEMENTS OF INCOME\n(In millions, except per share amounts)\nThree Months Ended September 30,\n2026 2025";
+        let q = "Net income attributable to Acme Corporation $590 $492";
+        for row in [
+            "Net loss attributable to noncontrolling interests (1) (2)",
+            "Net loss attributable to noncontrolling interests (1) (2) (3) (4)",
+            "Net loss attributable to noncontrolling interests (1)(2)",
+        ] {
+            let t = format!("{hdr}\nNet income 600 500\n{row}\n{q}");
+            let r = verify_figure(&t, Metric::NetIncome, &raw("$590", "millions", false, q));
+            assert!(r.is_ok(), "{row}: {r:?}");
         }
     }
 
