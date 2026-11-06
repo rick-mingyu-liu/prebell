@@ -13,7 +13,9 @@
 //   public/logos/LICENSES.md              source, date and licence for every file
 // Company PNGs are 2x: a wordmark fits 256x96 px (128x48 CSS px) with no padding or tile, so it sits on
 // the card's own background; a full-bleed app icon is a 96px rounded square; a mark too pale for a white
-// card is set on a dark pill. The natural CSS size of each file is the manifest's COMPANY_LOGO_SIZES.
+// card is set on a dark pill. The natural CSS size of each file is the manifest's COMPANY_LOGO_SIZES. Every
+// manifest URL ends in `?v=` and the first 8 hex digits of the file's SHA-1, because /logos/* is served
+// immutable for a year: a changed file must be a new URL. Partner marks get the same in PARTNER_LOGOS.
 // Everything is built in node_modules/.cache/logos-build and moved into place only when the whole run
 // succeeds, so a failed run leaves the committed files alone. Definitive answers (2xx, and 4xx other
 // than 408/429) are cached in node_modules/.cache/logos, so a run that stopped (a Wikimedia timeout,
@@ -122,6 +124,9 @@ const NO_SITE_ICON = {
  * in review): no Commons file is used; simple-icons, then the site icon, then a text tile.
  */
 const NO_COMMONS = {
+  BN: "its Commons logo is Brookfield Properties, a subsidiary brand",
+  CEG: "its Commons logo is the 2012 Constellation one",
+  FDXF: "its Commons logo is the 2016 FedEx Freight one",
   AFL: "Commons only has Aflac's katakana (Japan) logo",
   ODFL: "its only Commons logo is a 48px JPG",
   P: "renamed Everpure; Commons only has the Pure Storage logo",
@@ -334,8 +339,11 @@ async function entities(ids) {
 }
 
 const plain = (html = "") => html.replace(/<[^>]+>/g, "").replace(/\s+/g, " ").trim();
-/** Free licences accepted from Commons: public domain (incl. PD-textlogo, PD-shape), CC0, CC BY, CC BY-SA. */
-const FREE = /^(public domain|pd\b|cc0|cc by(-sa)? \d)/i;
+/**
+ * Free licences accepted from Commons: public domain (incl. PD-textlogo, PD-shape) and CC0 only. CC BY and
+ * CC BY-SA need a visible credit, which no page gives, so those files are not used.
+ */
+const FREE = /^(public domain|pd\b|cc0)/i;
 
 /** A Commons licence tag that says why a file is free, e.g. PD-textlogo or PD-shape (not the layout helpers). */
 const TAG = /^Template:(PD-(?!Layout|generic)[^/]+|CC-zero)$/i;
@@ -494,7 +502,11 @@ async function artwork(file) {
     return sharp(buf, { density }).ensureAlpha().png().toBuffer();
   };
   let flat;
-  if (svg) flat = await draw(2048).catch(() => draw(512));
+  if (svg)
+    flat = await draw(2048).catch(() => {
+      console.warn("  a vector over the pixel limit is drawn at 512px, so it will be softer");
+      return draw(512);
+    });
   else {
     let img = sharp(buf).ensureAlpha();
     if (Math.max(meta.width, meta.height) > 512) img = img.resize(512, 512, { fit: "inside" });
@@ -592,6 +604,9 @@ async function renderMark(art) {
   return done(await out(sharp(back).composite([{ input: glyph.data, gravity: "centre" }])));
 }
 
+/** The first 8 hex digits of a file's SHA-1: the `?v=` of its URL, so a changed file is a new URL (served immutable for a year). */
+const hashOf = (buf) => createHash("sha1").update(buf).digest("hex").slice(0, 8);
+
 const icon = (slug) => {
   const data = SI_DATA.find((i) => i.slug === slug);
   if (!data) throw new Error(`simple-icons ${SI_VERSION} has no "${slug}"`);
@@ -633,6 +648,7 @@ const why = {};
 
 const manifest = {};
 const sizes = {};
+const partnerManifest = {};
 const todo = watchRows.filter((w) => !(w.ticker in SKIP));
 const items = await wikidataItems(todo);
 const claims = await entities([...new Set(Object.values(items).filter(Boolean))]);
@@ -716,6 +732,7 @@ for (const w of todo) {
   }
   if (!pick) continue;
   let file;
+  let hash;
   if (pick.kind === "simple-icons") {
     const i = pick.icon;
     file = `${w.ticker}.svg`;
@@ -724,6 +741,7 @@ for (const w of todo) {
       ? tile(i).replace("<svg ", '<svg width="48" height="48" ')
       : `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="48" height="48"><path fill="#${i.hex}" d="${i.path}"/></svg>\n`;
     writeFileSync(join(companiesDir, file), svg);
+    hash = hashOf(svg);
     sizes[w.ticker] = [48, 48];
     row(`companies/${file}`, i.title, siSource(i), FETCHED, siLicence(i));
     tier.simpleIcons.push(w.ticker);
@@ -731,17 +749,17 @@ for (const w of todo) {
     file = `${w.ticker}.png`;
     const m = await renderMark(pick.art);
     writeFileSync(join(companiesDir, file), m.png);
+    hash = hashOf(m.png);
     sizes[w.ticker] = [m.w, m.h];
     if (pick.kind === "commons") {
       const { info } = pick;
-      const by = /^cc by/i.test(info.licence) ? `; by ${info.attribution || info.artist || "see the file page"}` : "";
       row(
         `companies/${file}`,
         w.name,
         `Wikimedia Commons [${pick.name}](${info.page}) (${pick.prop === "hand" ? "chosen by hand in the script" : pick.prop === "search" ? "found by searching Commons for the company name" : `Wikidata [${qid}](https://www.wikidata.org/wiki/${qid}) ${pick.prop}`})`,
         pick.fetched,
         `${info.licence}${/^public domain/i.test(info.licence) && info.tags.length ? ` (${info.tags.join(", ")})` : ""}` +
-          `${info.licenceUrl ? ` (${info.licenceUrl})` : ""}${by}`,
+          `${info.licenceUrl ? ` (${info.licenceUrl})` : ""}`,
       );
       (pick.prop === "P154" ? tier.commons : pick.prop === "hand" ? tier.hand : pick.prop === "search" ? tier.search : tier.icon).push(w.ticker);
     } else {
@@ -749,19 +767,23 @@ for (const w of todo) {
       tier.site.push(w.ticker);
     }
   }
-  manifest[w.ticker] = `/logos/companies/${file}`;
+  manifest[w.ticker] = `/logos/companies/${file}?v=${hash}`;
 }
 
 for (const [id, p] of Object.entries(PARTNERS)) {
   if (p.slug) {
     const i = icon(p.slug);
-    writeFileSync(join(partnersDir, `${id}.svg`), tile(i));
+    const svg = tile(i);
+    writeFileSync(join(partnersDir, `${id}.svg`), svg);
+    partnerManifest[id] = `/logos/partners/${id}.svg?v=${hashOf(svg)}`;
     row(`partners/${id}.svg`, i.title, siSource(i), FETCHED, siLicence(i));
     continue;
   }
   const file = await get(p.url, true);
   if (!file) throw new Error(`partner ${id}: could not fetch ${p.url}`);
-  writeFileSync(join(partnersDir, `${id}.png`), await pngTile(await artwork(file.body)));
+  const png = await pngTile(await artwork(file.body));
+  writeFileSync(join(partnersDir, `${id}.png`), png);
+  partnerManifest[id] = `/logos/partners/${id}.png?v=${hashOf(png)}`;
   row(
     `partners/${id}.png`,
     p.what,
@@ -776,6 +798,8 @@ writeFileSync(
   `// Generated by scripts/build-logos.mjs. Do not edit; run \`pnpm logos\`.\n` +
     `export const COMPANY_LOGOS: Readonly<Record<string, string>> = ${JSON.stringify(manifest, null, 2)};\n` +
     `/** Natural size of each file in CSS px (the file itself is 2x): [width, height]. */\n` +
+    `/** Partner marks by id, with the same \`?v=\` hash. */\n` +
+    `export const PARTNER_LOGOS: Readonly<Record<string, string>> = ${JSON.stringify(partnerManifest, null, 2)};\n` +
     `export const COMPANY_LOGO_SIZES: Readonly<Record<string, readonly [number, number]>> = ${JSON.stringify(sizes)};\n`,
 );
 
@@ -793,11 +817,12 @@ bundled with the site; pages never load a logo from a third party.
 Sources, in order of preference per ticker (company cards are wide, so a horizontal wordmark comes first):
 
 1. **Wikimedia Commons via Wikidata** (\`.png\`, ${tier.commons.length} tickers by the logo property P154, ${tier.hand.length} chosen
-   by hand in the script, ${tier.icon.length} by the small-logo property P8972): the logo file named on the
+   by hand in the script, ${tier.icon.length} by the small-logo property P8972, ${tier.search.length} found by searching Commons for the company name): the logo file named on the
    company's Wikidata item (matched on its SEC CIK). Only files Commons lists as public domain (mostly
-   PD-textlogo), CC0, CC BY or CC BY-SA are used, and CC BY rows name the author. The file is trimmed and
-   fitted inside 128x48 CSS px (stored at 2x) with no other change to its shape. Logos wider than
-   ${MAX_WORDMARK}:1 and rasters under ${MIN_WIDE_RASTER}px wide are not used.
+   PD-textlogo) or CC0 are used: CC BY and CC BY-SA files need a visible credit, which no page gives. The
+   file is trimmed and fitted inside 128x48 CSS px (stored at 2x) with no other change to its shape. A
+   logo wider than ${MAX_WORDMARK}:1 is used only when nothing else works, and never above ${MAX_WIDE_LAST_RESORT}:1; a
+   raster under ${MIN_WIDE_RASTER}px wide (wordmark) or ${MIN_RASTER}px (other) is not used.
 2. **Simple Icons** (\`.svg\` glyphs, ${tier.simpleIcons.length} tickers): the npm package, pinned at
    simple-icons@${SI_VERSION}, for companies with no usable Commons logo. Its icon data is
    [CC0-1.0](https://github.com/simple-icons/simple-icons/blob/develop/LICENSE.md); its

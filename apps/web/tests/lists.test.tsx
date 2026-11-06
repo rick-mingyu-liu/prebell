@@ -1,7 +1,8 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
+import { companyLogoInfo } from "../src/lib/logos";
 import { COMPANY_LOGO_SIZES } from "../src/lib/logos.generated";
-import CalendarWeek, { CARDS_PER_SLOT, EAGER_PER_SLOT } from "../src/components/CalendarWeek";
+import CalendarWeek, { CARDS_PER_SLOT, EAGER_PER_SLOT, WIDE_LOGO } from "../src/components/CalendarWeek";
 import PostList from "../src/components/PostList";
 import type { CalendarDay, CalendarEntry, Slot } from "../src/lib/earnings";
 import type { PostListItem } from "../src/lib/posts";
@@ -202,26 +203,35 @@ describe("CalendarWeek", () => {
   });
 
   it("sets every company as a card: a wordmark across it, a square logo beside the ticker and name, or type", () => {
+    // Fixtures are picked by shape from the manifest, so a regenerated logo set does not break the test.
+    const shaped = (wide: boolean) =>
+      Object.entries(COMPANY_LOGO_SIZES).find(([t, [w, h]]) => (w / h >= WIDE_LOGO) === wide && Math.max(w, h) >= 28 && !t.includes("."))![0];
+    const [WIDE, ICON] = [shaped(true), shaped(false)];
     const here = [
-      entry("AMD", "bmo", "confirmed", { name: "Advanced Micro Devices" }),
-      entry("NVDA", "bmo", "confirmed", { name: "Nvidia" }),
+      entry(WIDE, "bmo", "confirmed", { name: "Wide Corp" }),
+      entry(ICON, "bmo", "confirmed", { name: "Icon Inc" }),
       entry("AVGO", "bmo", "confirmed", { name: "Broadcom" }),
       entry("ZZZZ", "bmo", "confirmed"),
     ];
     const out = renderToStaticMarkup(<CalendarWeek days={[{ date: "2026-11-02", entries: here }]} locale="en" today="2026-11-02" />);
     const li = items(out);
     const card = (href: string) => li.find((x) => x.includes(`href="${href}"`))!;
-    // A wordmark (4:1) fills the card: the company name is its alt and its link's name; no ticker or name beside it.
-    expect(card("/en/t/AMD")).toContain('<li class="cal-card cal-card-wide cal-confirmed">');
-    expect(card("/en/t/AMD")).toMatch(
-      /<img class="cal-logo-wide" src="\/logos\/companies\/AMD\.png" alt="Advanced Micro Devices" width="128" height="31" style="height:2[0-9]px" loading="(eager|lazy)"/,
+    const esc = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    // A wordmark fills the card: the company name is its alt and its link's name; no ticker or name beside it.
+    const wide = companyLogoInfo(WIDE)!;
+    expect(card(`/en/t/${WIDE}`)).toContain('<li class="cal-card cal-card-wide cal-confirmed">');
+    expect(card(`/en/t/${WIDE}`)).toMatch(
+      new RegExp(`<img class="cal-logo-wide" src="${esc(wide.src)}" alt="Wide Corp" width="${wide.width}" height="${wide.height}" style="height:\\d+px" loading="(eager|lazy)"`),
     );
-    expect(card("/en/t/AMD")).not.toContain("cal-card-sym");
-    expect(card("/en/t/AMD")).toContain('title="Advanced Micro Devices"');
+    expect(card(`/en/t/${WIDE}`)).not.toContain("cal-card-sym");
+    expect(card(`/en/t/${WIDE}`)).toContain('title="Wide Corp"');
     // A square logo is decoration beside the name, which names the link.
-    expect(card("/en/t/NVDA")).toContain('<li class="cal-card cal-card-icon cal-confirmed">');
-    expect(card("/en/t/NVDA")).toMatch(/<img class="cal-logo-icon" src="\/logos\/companies\/NVDA\.svg" alt="" width="48" height="48" loading="(eager|lazy)"/);
-    expect(card("/en/t/NVDA")).toContain('<span class="cal-card-sym" aria-hidden="true">NVDA</span><span class="cal-card-name">Nvidia</span>');
+    const icon = companyLogoInfo(ICON)!;
+    expect(card(`/en/t/${ICON}`)).toContain('<li class="cal-card cal-card-icon cal-confirmed">');
+    expect(card(`/en/t/${ICON}`)).toMatch(
+      new RegExp(`<img class="cal-logo-icon" src="${esc(icon.src)}" alt="" width="${icon.width}" height="${icon.height}" loading="(eager|lazy)"`),
+    );
+    expect(card(`/en/t/${ICON}`)).toContain(`<span class="cal-card-sym" aria-hidden="true">${ICON}</span><span class="cal-card-name">Icon Inc</span>`);
     // No logo: the ticker and name set in type, the name read out, no image.
     expect(card("/en/t/AVGO")).toContain('<li class="cal-card cal-card-text cal-confirmed">');
     expect(card("/en/t/AVGO")).toContain('<span class="cal-card-sym" aria-hidden="true">AVGO</span><span class="cal-card-name">Broadcom</span>');
@@ -233,7 +243,7 @@ describe("CalendarWeek", () => {
   });
 
   it("never draws a logo above its natural size", () => {
-    const tickers = Object.keys(COMPANY_LOGO_SIZES).slice(0, 60);
+    const tickers = Object.keys(COMPANY_LOGO_SIZES).sort().slice(0, 60);
     const out = renderToStaticMarkup(
       <CalendarWeek days={[{ date: "2026-11-02", entries: tickers.map((t) => entry(t, "bmo", "unconfirmed", { name: t })) }]} locale="en" />,
     );

@@ -3,6 +3,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import Cover, { type CoverProps } from "../src/components/Cover";
 import { companyLogo } from "../src/lib/logos";
+import { COMPANY_LOGO_SIZES } from "../src/lib/logos.generated";
 
 const render = (over: Partial<CoverProps> = {}) =>
   renderToStaticMarkup(
@@ -25,7 +26,7 @@ describe("Cover", () => {
     expect(out).toContain('<img class="cover-bg" src="/covers/aapl-q4.svg" alt="" loading="eager" fetchPriority="high"/>');
     expect(out).not.toContain("cover-shade");
     expect(out).toContain('<div class="cover-in">');
-    expect(out).toContain(`<span class="cover-tag"><img src="${logo}" alt="AAPL" loading="lazy"/></span>`);
+    expect(out).toContain(`<span class="cover-tag"><img src="${logo}" alt="AAPL" width="${COMPANY_LOGO_SIZES.AAPL[0]}" height="${COMPANY_LOGO_SIZES.AAPL[1]}" loading="lazy"/></span>`);
     expect(out).toContain('<p class="cover-stat">Revenue $94.9B<br/>Beat by 2.1%</p>');
     expect(out).toContain('<span class="cover-bar"></span>');
   });

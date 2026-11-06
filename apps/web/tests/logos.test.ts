@@ -1,8 +1,11 @@
+import { createHash } from "node:crypto";
 import { readFileSync, readdirSync, statSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { companyLogo, companyLogoInfo } from "../src/lib/logos";
-import { COMPANY_LOGOS, COMPANY_LOGO_SIZES } from "../src/lib/logos.generated";
+import { COMPANY_LOGOS, COMPANY_LOGO_SIZES, PARTNER_LOGOS } from "../src/lib/logos.generated";
 
+/** A manifest URL's file path: the URL without its `?v=` hash. */
+const filePath = (url: string) => url.split("?")[0];
 const publicFile = (path: string) => new URL(`../public${path}`, import.meta.url);
 const watchlist = readFileSync(new URL("../../../crates/core/data/watchlist.tsv", import.meta.url), "utf8")
   .split("\n")
@@ -11,7 +14,7 @@ const watchlist = readFileSync(new URL("../../../crates/core/data/watchlist.tsv"
 
 describe("companyLogo", () => {
   it("finds a bundled tile by ticker, in any case", () => {
-    expect(companyLogo("AAPL")).toMatch(/^\/logos\/companies\/AAPL\.(svg|png)$/);
+    expect(companyLogo("AAPL")).toMatch(/^\/logos\/companies\/AAPL\.(svg|png)\?v=[0-9a-f]{8}$/);
     expect(companyLogo(" aapl ")).toBe(companyLogo("AAPL"));
   });
   it("is null for tickers without a logo, unknown tickers and odd input", () => {
@@ -45,7 +48,8 @@ describe("companyLogoInfo", () => {
 
 describe("logo manifest", () => {
   it("only maps watchlist tickers, each to an SVG or PNG tile that exists", () => {
-    for (const [ticker, path] of Object.entries(COMPANY_LOGOS)) {
+    for (const [ticker, url] of Object.entries(COMPANY_LOGOS)) {
+      const path = filePath(url);
       expect(watchlist).toContain(ticker);
       expect(path).toMatch(new RegExp(`^/logos/companies/${ticker.replace(".", "\\.")}\\.(svg|png)$`));
       const file = readFileSync(publicFile(path));
@@ -65,9 +69,22 @@ describe("logo manifest", () => {
   it("has no stray files and every file has a licence entry", () => {
     const licences = readFileSync(publicFile("/logos/LICENSES.md"), "utf8");
     const files = readdirSync(publicFile("/logos/companies")).map((f) => `/logos/companies/${f}`);
-    expect(files.sort()).toEqual(Object.values(COMPANY_LOGOS).sort());
+    expect(files.sort()).toEqual(Object.values(COMPANY_LOGOS).map(filePath).sort());
     const partners = readdirSync(publicFile("/logos/partners")).map((f) => `partners/${f}`);
     for (const f of [...files.map((p) => p.replace("/logos/", "")), ...partners]) expect(licences).toContain(`\`${f}\``);
+  });
+  it("puts the content hash of its file in every logo URL, so a changed file is a new URL under the immutable cache", () => {
+    const hash = (path: string) => createHash("sha1").update(readFileSync(publicFile(path))).digest("hex").slice(0, 8);
+    const urls = [...Object.values(COMPANY_LOGOS), ...Object.values(PARTNER_LOGOS)];
+    expect(urls.length).toBeGreaterThan(400);
+    for (const url of urls) {
+      expect(url).toMatch(/^\/logos\/(companies|partners)\/[^?]+\?v=[0-9a-f]{8}$/);
+      expect(url.split("?v=")[1]).toBe(hash(filePath(url)));
+    }
+    expect(Object.keys(PARTNER_LOGOS).sort()).toEqual(["cryptocom", "moomoo", "okx", "wealthsimple"]);
+    // The logo URLs the site emits come from the manifest, so they carry the hash too.
+    expect(companyLogo("AAPL")).toMatch(/\?v=[0-9a-f]{8}$/);
+    expect(companyLogoInfo("AAPL")!.src).toBe(companyLogo("AAPL"));
   });
   it("keeps the bundled assets small and free of scripts or remote references", () => {
     let bytes = 0;

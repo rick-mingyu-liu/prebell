@@ -1,3 +1,5 @@
+import { companyLogo } from "../src/lib/logos";
+import { COMPANY_LOGO_SIZES } from "../src/lib/logos.generated";
 import { readFileSync } from "node:fs";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
@@ -105,7 +107,7 @@ describe("HomeView front page", () => {
     // Earnings checks: a small cover with the company logo, a serif headline linking to the check.
     expect(out).toContain('<h2 class="section-title">Earnings checks</h2>');
     expect(out).toContain('class="cover cover-small"');
-    expect(out).toMatch(/<img src="\/logos\/companies\/AAPL\.(svg|png)" alt="AAPL" loading="lazy"\/>/);
+    expect(out).toContain(`<img src="${companyLogo("AAPL")}" alt="AAPL" width="${COMPANY_LOGO_SIZES.AAPL[0]}" height="${COMPANY_LOGO_SIZES.AAPL[1]}" loading="lazy"/>`);
     expect(out).toContain('href="/en/p/aapl-2026-10-29-earnings"');
     expect(out).toContain("Apple Q4: revenue up 8%");
 

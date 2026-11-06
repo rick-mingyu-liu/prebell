@@ -4,6 +4,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { getPathMatch } from "next/dist/shared/lib/router/utils/path-match";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import nextConfig from "../next.config";
+import { PARTNER_LOGOS } from "../src/lib/logos.generated";
 import { GET } from "../src/app/api/partners/route";
 import { PartnerNames } from "../src/components/PartnerLinks";
 import PartnersStrip from "../src/components/PartnersStrip";
@@ -84,21 +85,21 @@ describe("GET /api/partners", () => {
     expect(res.headers.get("Cache-Control")).toBe("private, no-store");
     expect(await res.json()).toEqual({
       brokers: [
-        { id: "moomoo", name: "moomoo", url: "https://j.moomoo.com/0J1BGf", logo: "/logos/partners/moomoo.png" },
+        { id: "moomoo", name: "moomoo", url: "https://j.moomoo.com/0J1BGf", logo: PARTNER_LOGOS.moomoo },
         {
           id: "wealthsimple",
           name: "Wealthsimple",
           url: "https://wealthsimple.com/invite/QDBQ5Z",
-          logo: "/logos/partners/wealthsimple.png",
+          logo: PARTNER_LOGOS.wealthsimple,
         },
       ],
       crypto: [
-        { id: "okx", name: "OKX", url: "https://okx.com/join/AIAFMP3U", logo: "/logos/partners/okx.svg" },
+        { id: "okx", name: "OKX", url: "https://okx.com/join/AIAFMP3U", logo: PARTNER_LOGOS.okx },
         {
           id: "cryptocom",
           name: "Crypto.com",
           url: "https://crypto.com/app/smqqda7396",
-          logo: "/logos/partners/cryptocom.png",
+          logo: PARTNER_LOGOS.cryptocom,
         },
       ],
     });
@@ -178,7 +179,7 @@ describe("PartnersStrip", () => {
     const out = renderToStaticMarkup(
       createElement(PartnerNames, {
         data: {
-          brokers: [{ id: "moomoo", name: "moomoo", url: "https://j.moomoo.com/0J1BGf", logo: "/logos/partners/moomoo.png" }],
+          brokers: [{ id: "moomoo", name: "moomoo", url: "https://j.moomoo.com/0J1BGf", logo: PARTNER_LOGOS.moomoo }],
           crypto: [{ id: "okx", name: "OKX", url: "https://okx.com/join/AIAFMP3U" }],
         },
       }),
