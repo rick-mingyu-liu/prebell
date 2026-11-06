@@ -72,7 +72,8 @@ follows.
   per attempt, `covers/<slug>-update-<attempt>.svg`, with the post's
   `cover_key` pointing to it (covers are served with a one-day cache, so a
   key the site may serve must never be rewritten; ruled 2026-11-06). A
-  failed cover write retries like a failed draft, leaving the 8:00 cover. `published_at` keeps the base time;
+  failed cover write retries like a failed draft, leaving the 8:00 cover.
+  `published_at` keeps the base time;
   the new `posts.revised_at` gets the update time. The update run becomes
   `published`.
 - **Reconcile must not misfire:** the base post already exists and is
