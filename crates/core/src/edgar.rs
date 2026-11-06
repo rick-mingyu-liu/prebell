@@ -330,8 +330,9 @@ pub fn exhibit_991(docs: &[FilingDoc]) -> Option<&FilingDoc> {
 /// Plain text of an HTML document: scripts, styles, comments and the hidden
 /// inline-XBRL header dropped; each table row on one line (block tags inside
 /// cells become spaces), other block ends become line breaks; entities
-/// decoded; zero-width spaces (SPG pads empty cells with "&#8203;") read as
-/// spaces; each line's whitespace collapsed; blank lines removed. Signs and
+/// decoded; zero-width characters (SPG pads empty cells with "&#8203;")
+/// read as spaces and soft hyphens dropped; each line's whitespace
+/// collapsed; blank lines removed. Signs and
 /// units that filer software puts in their own cells are re-attached
 /// ("$ (0.25 )" -> "$(0.25)", "47.2 %" -> "47.2%").
 pub fn html_to_text(html: &str) -> String {
@@ -362,7 +363,11 @@ pub fn html_to_text(html: &str) -> String {
     let s = cell.replace_all(&s, " ");
     let s = tag.replace_all(&s, "");
     decode_entities(&s)
-        .replace(['\u{200b}', '\u{feff}'], " ")
+        .replace(
+            ['\u{200b}', '\u{200c}', '\u{200d}', '\u{2060}', '\u{feff}'],
+            " ",
+        )
+        .replace('\u{ad}', "")
         .lines()
         .map(|l| l.split_whitespace().collect::<Vec<_>>().join(" "))
         .filter(|l| !l.is_empty())
@@ -672,6 +677,13 @@ pub(crate) mod tests {
         assert_eq!(
             t,
             "(Dollars in thousands, except per share amounts)\nFor the Three Months Ended September 30,\nTotal revenue 1,814,556\nNet income $(8,259)"
+        );
+        // Other zero-width characters space cells apart too; a soft hyphen
+        // splits no word.
+        let html = "<table><tr><td>Total&#8204;</td><td>&#8205;revenues</td><td>&#8288;</td><td>1,234</td></tr></table><p>Consoli&#173;dated net in\u{ad}come</p>";
+        assert_eq!(
+            html_to_text(html),
+            "Total revenues 1,234\nConsolidated net income"
         );
     }
 

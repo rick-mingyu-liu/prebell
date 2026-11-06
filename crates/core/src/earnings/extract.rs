@@ -429,31 +429,42 @@ impl<'a> Table<'a> {
         None
     }
 
-    /// Whether the period labels of header line `i` (and of the label-only
-    /// lines right above it, up to one with other words or a year header)
-    /// name the quarter first: "Three Months Ended ... Nine Months Ended",
-    /// "2025 Q4 2026 Q4"; DUK puts the lengths and the dates on two lines
-    /// above the years. `None` when they name no period length.
+    /// Whether the period labels of header line `i` (and of up to three
+    /// label lines right above it) name the quarter first: "Three Months
+    /// Ended ... Nine Months Ended", "2025 Q4 2026 Q4"; DUK puts the lengths
+    /// and the dates on two lines above the years. A label line has words,
+    /// all of them period or column labels, and is not a year header; the
+    /// walk stops at any other line and at the scale heading, unless the
+    /// heading line is the header (CVS puts its labels above it). `None`
+    /// when no line names a period length, or the lines disagree.
     fn quarter_first(&self, i: usize) -> Option<bool> {
         static R: OnceLock<Regex> = OnceLock::new();
+        static WORD: OnceLock<Regex> = OnceLock::new();
         let r = R.get_or_init(|| {
             Regex::new(r"(?i)\b(?:(three\s+months|thirteen\s+weeks|quarters?|q[1-4])|six\s+months|nine\s+months|twelve\s+months|years?|ytd|year-to-date)\b")
                 .expect("valid built-in regex")
         });
+        let word = WORD.get_or_init(|| Regex::new(r"[A-Za-z]").expect("valid built-in regex"));
         let l = self.lines;
-        let above: Vec<_> = (0..i)
+        let top = l.line_of(self.heading_at);
+        let floor = if i > top { top + 1 } else { 0 };
+        let label_line = |s: &str| {
+            word.is_match(&strip_parens(s))
+                && period_words_only(s)
+                && header_years(s, false).is_none()
+        };
+        let firsts: Vec<bool> = (floor..i)
             .rev()
+            .take(3)
             .map(|j| l.line(j, self.quote_at))
-            .take_while(|s| period_words_only(s) && header_years(s, false).is_none())
+            .take_while(|s| label_line(s))
+            .chain([l.line(i, self.quote_at)])
+            .filter_map(|s| r.captures(s).map(|c| c.get(1).is_some()))
             .collect();
-        let labels = above
-            .iter()
-            .rev()
-            .chain([&l.line(i, self.quote_at)])
-            .copied()
-            .collect::<Vec<_>>()
-            .join(" ");
-        r.captures(&labels).map(|c| c.get(1).is_some())
+        match firsts.as_slice() {
+            [first, rest @ ..] if rest.iter().all(|q| q == first) => Some(*first),
+            _ => None,
+        }
     }
 }
 
@@ -1774,6 +1785,33 @@ mod tests {
                 assert!(r.is_err(), "{a} under {header:?}: {r:?}");
             }
         }
+        // Label lines count only inside the table, below its scale heading,
+        // up to three of them, and never through a number-only row or a
+        // "(Unaudited)"; label lines that disagree about which period comes
+        // first say nothing.
+        for top in [
+            "Three Months Ended\n(In millions)\nNine Months Ended Three Months Ended",
+            "Q3\n(In millions)\nSix Months Ended",
+            "Three Months Ended\n(In millions)\n1,234 5,678",
+            "Quarter Ended\n(Unaudited)\n(In millions)",
+            "For the Quarter\n(In millions)",
+            "(In millions)\nThree Months Ended Nine Months Ended\n1,234 5,678",
+            "(In millions)\nThree Months Ended Nine Months Ended\n(Unaudited)",
+            "(In millions)\nThree Months Ended\nSeptember 30,\nSeptember 30,\nSeptember 30,",
+            "(In millions)\nThree Months Ended\nNine Months Ended",
+            "(In millions)\nQ3\nYear Ended December 31, Year Ended",
+            "(In millions)\nThree Months Ended Nine Months Ended\nNine Months Ended Three Months Ended",
+        ] {
+            let t = format!("{top}\n2026 2025 2026 2025\nTotal revenues $360 $300 $120 $100");
+            let q = "Total revenues $360 $300 $120 $100";
+            for a in ["$360", "$300", "$120", "$100"] {
+                let r = verify_figure(&t, Metric::Revenue, &raw(a, "millions", false, q));
+                assert!(r.is_err(), "{a} under {top:?}: {r:?}");
+            }
+        }
+        let t = "(In millions)\nThree Months Ended\nNine Months Ended 2026 2025 Three Months Ended 2026 2025\nTotal revenues $360 $300 $120 $100";
+        let q = "Total revenues $360 $300 $120 $100";
+        assert!(verify_figure(t, Metric::Revenue, &raw("$360", "millions", false, q)).is_err());
     }
 
     #[test]
