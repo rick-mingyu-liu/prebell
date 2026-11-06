@@ -191,7 +191,7 @@
     "calendarDescription": "US earnings dates for the S&P 500 and Nasdaq-100, with confirmed dates, reported results and links to the SEC filings.",
     "weekOf": "Week of {date}",
     "timesEt": "Times US Eastern",
-    "legend": "Confirmed: the company announced the date. Unconfirmed: the date comes from an aggregator and may change. Reported: the results are filed with the SEC. The largest companies get an earnings check; for the rest, the calendar links to the SEC filing.",
+    "legend": "Confirmed: the company announced the date. Unconfirmed: the date comes from an aggregator and may change. Reported: the results are filed with the SEC. The largest companies get an earnings check; every other company's page links to its SEC filing.",
     "bmo": "Before open",
     "amc": "After close",
     "timeUnknown": "Time n/a",

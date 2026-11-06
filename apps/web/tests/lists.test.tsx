@@ -1,6 +1,6 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
-import CalendarWeek, { EAGER_LOGOS, ROWS_PER_SLOT } from "../src/components/CalendarWeek";
+import CalendarWeek, { EAGER_LOGOS, TILES_PER_SLOT } from "../src/components/CalendarWeek";
 import PostList from "../src/components/PostList";
 import type { CalendarDay, CalendarEntry, Slot } from "../src/lib/earnings";
 import type { PostListItem } from "../src/lib/posts";
@@ -100,7 +100,7 @@ describe("CalendarWeek", () => {
     { date: "2026-11-03", entries: [] },
   ];
 
-  it("calendar week renders ruled day rows, a logo grid for write-up companies and text rows for the rest", () => {
+  it("calendar week renders ruled day rows with every company as a tile, write-up companies first", () => {
     const out = renderToStaticMarkup(<CalendarWeek days={days} locale="en" />);
     expect(out).toContain('class="cal-day"');
     expect(out).not.toMatch(/badge/);
@@ -108,39 +108,42 @@ describe("CalendarWeek", () => {
     expect(out).toContain('<h3 class="cal-slot">Before open <span class="num">4</span></h3>');
     expect(out).toContain('<h3 class="cal-slot">After close <span class="num">1</span></h3>');
     expect(out).toContain('<h3 class="cal-slot">Time n/a <span class="num">1</span></h3>');
-    // The tier split: write-up companies are tiles, in one grid ahead of the text rows; calendar-only ones are rows.
+    // One grid per slot: every company is a tile, calendar-only ones included; no text rows any more.
     const bmo = out.slice(out.indexOf("Before open"), out.indexOf("After close"));
-    const [grid, rows] = bmo.split('<ul class="cal-list">');
-    expect(grid.match(/class="cal-tile /g)).toHaveLength(3);
-    expect(grid).toContain('href="/en/t/UNH"');
-    expect(grid).toContain('href="/en/p/intc-q3"');
-    expect(rows).toContain('<a class="cal-ticker" href="/en/t/A">A</a><span class="cal-name">Agilent Technologies</span>');
-    expect(rows).not.toContain("cal-tile");
-    expect(grid).not.toContain("cal-ticker");
-    // A tile shows the logo with the company name as its alt text and the ticker beneath.
+    expect(bmo.match(/<ul class="cal-tiles">/g)).toHaveLength(1);
+    expect(bmo.match(/class="cal-tile /g)).toHaveLength(4);
+    expect(out).not.toContain("cal-list");
+    expect(out).not.toContain("cal-ticker");
+    // Write-up companies lead the grid; the calendar-only company comes last.
+    const order = [...bmo.matchAll(/href="\/en\/(?:t\/([^"]+)|p\/([^"]+))"/g)].map((m) => m[1] ?? m[2]);
+    expect(order).toEqual(["UNH", "intc-q3", "AVGO", "A"]);
+    // A tile shows the logo with the company name as its alt text, the ticker beneath, and the name on hover and below.
     expect(out).toMatch(/<img src="\/logos\/companies\/AMD\.svg" alt="Advanced Micro Devices" width="48" height="48" loading="(eager|lazy)"/);
     expect(out).toContain('<span class="cal-sym-t">AMD</span>');
+    expect(out).toContain('title="Advanced Micro Devices"');
+    expect(out).toContain('<span class="cal-tile-name" aria-hidden="true">Agilent Technologies</span>');
     // No logo: the ticker as a text tile in the same grid, named for screen readers; no image.
     expect(out).toContain('<span class="cal-chip"><span class="sr-only">Broadcom</span>AVGO</span>');
     expect(out).not.toContain("logos/companies/AVGO");
-    // A tile with no company name falls back to the ticker as its alt.
+    // A tile with no company name falls back to the ticker as its alt, and has no name line.
     expect(out).toContain('alt="UBER"');
-    // The one coloured mark is the tick on a reported entry (tile or row); the status is also text for screen readers.
+    // The one coloured mark is the tick on a reported entry; the status is also text for screen readers.
     expect(out.match(/num up/g)).toHaveLength(2);
     const li = items(out);
     const tileOf = (t: string) => li.find((x) => x.includes(`>${t}</span>`) && x.includes("cal-tile "))!;
     expect(tileOf("INTC")).toContain('<li class="cal-tile cal-reported">');
-    expect(tileOf("INTC")).toContain('<span class="num up" aria-hidden="true">✓</span></span><span class="sr-only">Reported</span>');
-    expect(li.find((x) => x.includes('href="/en/t/A"'))).toContain('<span class="num up" aria-hidden="true">✓</span><span class="sr-only">Reported</span>');
+    expect(tileOf("INTC")).toContain('<span class="num up" aria-hidden="true">✓</span></span>');
+    expect(tileOf("INTC")).toContain('<span class="sr-only">Reported</span>');
+    // The calendar-only company is a reported tile linking to its ticker page (which carries the SEC filing).
+    const a = li.find((x) => x.includes('href="/en/t/A"'))!;
+    expect(a).toContain('<li class="cal-tile cal-reported">');
+    expect(a).toContain('<span class="sr-only">Reported</span>');
     // Unconfirmed entries are muted and say so in text.
     expect(tileOf("UNH")).toContain('<li class="cal-tile cal-unconfirmed">');
     expect(tileOf("UNH")).toContain('<span class="sr-only">Unconfirmed</span>');
-    // A tile with a post says so for screen readers; a calendar-only reported row links to its SEC filing.
+    // A tile with a post says so for screen readers.
     expect(tileOf("INTC")).toContain('<span class="sr-only">Read the check</span>');
     expect(tileOf("UNH")).not.toContain("Read the check");
-    expect(out).toContain(
-      `<a class="cal-read" href="${SEC}" rel="noopener noreferrer" aria-label="SEC filing: A">SEC filing ↗</a>`,
-    );
     expect(out).toContain("No earnings reports.");
     expect(out).not.toContain("<details");
   });
@@ -151,36 +154,38 @@ describe("CalendarWeek", () => {
     expect(out).not.toContain("/p/");
   });
 
-  it("shows only text rows for a slot of calendar-only companies", () => {
+  it("shows a slot of calendar-only companies as ticker tiles, with no logos", () => {
     const out = renderToStaticMarkup(
-      <CalendarWeek days={[{ date: "2026-11-02", entries: [entry("A", "bmo", "confirmed", { writeUps: false })] }]} locale="en" />,
+      <CalendarWeek days={[{ date: "2026-11-02", entries: [entry("A", "bmo", "confirmed", { writeUps: false, name: "Agilent Technologies" })] }]} locale="en" />,
     );
-    expect(out).toContain('class="cal-list"');
-    expect(out).not.toContain("cal-tiles");
+    expect(out).toContain('<ul class="cal-tiles">');
+    expect(out).toContain('<span class="cal-chip"><span class="sr-only">Agilent Technologies</span>A</span>');
     expect(out).not.toContain("<img");
   });
 
   it("folds a long slot into a native details element", () => {
-    const many = Array.from({ length: ROWS_PER_SLOT + 3 }, (_, i) =>
+    const many = Array.from({ length: TILES_PER_SLOT + 3 }, (_, i) =>
       entry(`T${String(i).padStart(2, "0")}`, "bmo", "unconfirmed", { writeUps: false }),
     );
     const out = renderToStaticMarkup(<CalendarWeek days={[{ date: "2026-11-02", entries: many }]} locale="en" />);
-    expect(out).toContain(`<h3 class="cal-slot">Before open <span class="num">${ROWS_PER_SLOT + 3}</span></h3>`);
+    expect(out).toContain(`<h3 class="cal-slot">Before open <span class="num">${TILES_PER_SLOT + 3}</span></h3>`);
     const [shown, folded] = out.split('<details class="cal-more">');
-    expect(shown.match(/class="cal-ticker"/g)).toHaveLength(ROWS_PER_SLOT);
+    expect(shown.match(/class="cal-tile /g)).toHaveLength(TILES_PER_SLOT);
     expect(folded).toContain("<summary>Show 3 more</summary>");
-    expect(folded.match(/class="cal-ticker"/g)).toHaveLength(3);
+    expect(folded.match(/class="cal-tile /g)).toHaveLength(3);
     const zh = renderToStaticMarkup(<CalendarWeek days={[{ date: "2026-11-02", entries: many }]} locale="zh" />);
     expect(zh).toContain("<summary>展开其余3家</summary>");
   });
 
-  it("folds only the text rows; the logo tiles all stay in view", () => {
-    const tiles = Array.from({ length: ROWS_PER_SLOT + 5 }, (_, i) => entry(`W${String(i).padStart(2, "0")}`, "bmo", "unconfirmed"));
-    const rows = [entry("X1", "bmo", "unconfirmed", { writeUps: false })];
-    const out = renderToStaticMarkup(<CalendarWeek days={[{ date: "2026-11-02", entries: [...tiles, ...rows] }]} locale="en" />);
-    expect(out.match(/class="cal-tile /g)).toHaveLength(ROWS_PER_SLOT + 5);
-    expect(out).toContain(`<span class="num">${ROWS_PER_SLOT + 6}</span>`);
-    expect(out).not.toContain("<details");
+  it("keeps write-up companies in view: they lead the grid, so the fold takes calendar-only ones first", () => {
+    const rows = Array.from({ length: TILES_PER_SLOT }, (_, i) => entry(`X${String(i).padStart(2, "0")}`, "bmo", "unconfirmed", { writeUps: false }));
+    const ups = [entry("W1", "bmo", "unconfirmed"), entry("W2", "bmo", "unconfirmed")];
+    const out = renderToStaticMarkup(<CalendarWeek days={[{ date: "2026-11-02", entries: [...rows, ...ups] }]} locale="en" />);
+    const [shown, folded] = out.split('<details class="cal-more">');
+    expect(shown).toContain('href="/en/t/W1"');
+    expect(shown).toContain('href="/en/t/W2"');
+    expect(folded).toContain("<summary>Show 2 more</summary>");
+    expect(folded).toContain(`href="/en/t/X${String(TILES_PER_SLOT - 1).padStart(2, "0")}"`);
   });
 
   it("loads the first logos on the page eagerly and the rest lazily", () => {

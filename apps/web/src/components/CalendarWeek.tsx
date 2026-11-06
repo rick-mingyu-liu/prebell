@@ -8,8 +8,8 @@ import { translator } from "../lib/translator";
 import EconomyEvents from "./EconomyEvents";
 
 const SLOTS: Slot[] = ["bmo", "amc", "unknown"];
-/** Text rows (calendar-only companies) a slot shows before the rest fold into "Show N more" (a busy day has 60 reports). */
-export const ROWS_PER_SLOT = 12;
+/** Tiles a slot shows before the rest fold into "Show N more": four full rows of five on a wide screen, five of four on a phone (a busy day has 60 reports). */
+export const TILES_PER_SLOT = 20;
 /** Logos loaded eagerly: the first rows of tiles on the page (roughly the first screen); the rest are lazy. */
 export const EAGER_LOGOS = 6;
 
@@ -17,12 +17,12 @@ type T = ReturnType<typeof translator>;
 
 /**
  * One week as ruled day rows: the date, then each slot (before open, after close, time n/a) with its
- * reports. Write-up companies lead each slot as a grid of logo tiles (the ticker as a text tile when
- * there is no logo), linking to the write-up when there is one, else the ticker page; the calendar-only
- * rest follow as compact text rows: a ticker link, the company name, and the SEC filing once reported.
+ * reports as one grid of tiles: the company's logo, or its ticker as a text tile when there is no logo,
+ * with the company name on hover and beneath on wide screens. Write-up companies lead the grid. A tile
+ * links to the write-up when there is one, else the ticker page (which carries the SEC filing).
  * Colour carries nothing alone: a reported entry gets the one coloured mark, a tick, and an
- * unconfirmed one is muted; both are also written as text for screen readers. Long lists of text rows
- * fold into a native <details>, so the page needs no client script.
+ * unconfirmed one is muted; both are also written as text for screen readers. Long slots fold into a
+ * native <details>, so the page needs no client script.
  */
 export default function CalendarWeek({
   days,
@@ -44,6 +44,7 @@ export default function CalendarWeek({
   const eager = new Set(
     days
       .flatMap((d) => SLOTS.flatMap((slot) => d.entries.filter((e) => e.slot === slot && e.writeUps)))
+      // Write-up companies lead each slot, so the first logos in this order are the first on the page.
       .filter((e) => companyLogo(e.ticker))
       .slice(0, EAGER_LOGOS),
   );
@@ -62,21 +63,20 @@ export default function CalendarWeek({
               {SLOTS.map((slot) => {
                 const entries = d.entries.filter((e) => e.slot === slot);
                 if (entries.length === 0) return null;
-                const tiles = entries.filter((e) => e.writeUps);
-                const rows = entries.filter((e) => !e.writeUps);
-                const shown = rows.slice(0, ROWS_PER_SLOT);
-                const rest = rows.slice(ROWS_PER_SLOT);
+                // Write-up companies first, each group in the calendar's own order.
+                const tiles = [...entries.filter((e) => e.writeUps), ...entries.filter((e) => !e.writeUps)];
+                const shown = tiles.slice(0, TILES_PER_SLOT);
+                const rest = tiles.slice(TILES_PER_SLOT);
                 return (
                   <div key={slot} className="cal-slot-group">
                     <h3 className="cal-slot">
                       {slotLabel[slot]} <span className="num">{entries.length}</span>
                     </h3>
-                    {tiles.length > 0 && <Tiles entries={tiles} locale={locale} t={t} eager={eager} />}
-                    {shown.length > 0 && <Entries entries={shown} locale={locale} t={t} />}
+                    <Tiles entries={shown} locale={locale} t={t} eager={eager} />
                     {rest.length > 0 && (
                       <details className="cal-more">
                         <summary>{t("earnings.showMore", { count: rest.length })}</summary>
-                        <Entries entries={rest} locale={locale} t={t} />
+                        <Tiles entries={rest} locale={locale} t={t} eager={eager} />
                       </details>
                     )}
                   </div>
@@ -90,7 +90,7 @@ export default function CalendarWeek({
   );
 }
 
-/** One write-up company: its logo (alt = the company name) or the ticker as a text tile, with the ticker beneath. */
+/** One company: its logo (alt = the company name) or the ticker as a text tile, the ticker and name beneath. */
 function Tiles({ entries, locale, t, eager }: { entries: CalendarEntry[]; locale: Locale; t: T; eager: Set<CalendarEntry> }) {
   return (
     <ul className="cal-tiles">
@@ -102,6 +102,7 @@ function Tiles({ entries, locale, t, eager }: { entries: CalendarEntry[]; locale
             <Link
               className="cal-tile-link"
               href={e.postSlug ? `/${locale}/p/${e.postSlug}` : `/${locale}/t/${encodeURIComponent(e.ticker)}`}
+              title={e.name ?? undefined}
             >
               <span className="cal-mark">
                 {logo ? (
@@ -128,6 +129,11 @@ function Tiles({ entries, locale, t, eager }: { entries: CalendarEntry[]; locale
                   </span>
                 )}
               </span>
+              {e.name && (
+                <span className="cal-tile-name" aria-hidden="true">
+                  {e.name}
+                </span>
+              )}
               {e.status === "reported" && <span className="sr-only">{t("earnings.reported")}</span>}
               {e.status === "unconfirmed" && <span className="sr-only">{t("earnings.unconfirmed")}</span>}
               {e.postSlug && <span className="sr-only">{t("earnings.readCheck")}</span>}
@@ -139,46 +145,3 @@ function Tiles({ entries, locale, t, eager }: { entries: CalendarEntry[]; locale
   );
 }
 
-function Entries({ entries, locale, t }: { entries: CalendarEntry[]; locale: Locale; t: T }) {
-  return (
-    <ul className="cal-list">
-      {entries.map((e) => (
-        <li key={e.ticker} className={`cal-entry cal-${e.status}`}>
-          <Link className="cal-ticker" href={`/${locale}/t/${encodeURIComponent(e.ticker)}`}>
-            {e.ticker}
-          </Link>
-          {e.name && <span className="cal-name">{e.name}</span>}
-          {e.status === "reported" && (
-            <>
-              <span className="num up" aria-hidden="true">
-                ✓
-              </span>
-              <span className="sr-only">{t("earnings.reported")}</span>
-            </>
-          )}
-          {e.status === "unconfirmed" && <span className="sr-only">{t("earnings.unconfirmed")}</span>}
-          {e.postSlug ? (
-            <Link
-              className="cal-read"
-              href={`/${locale}/p/${e.postSlug}`}
-              aria-label={`${t("earnings.readCheck")}: ${e.ticker}`}
-            >
-              {t("earnings.readCheck")} →
-            </Link>
-          ) : (
-            e.filingUrl && (
-              <a
-                className="cal-read"
-                href={e.filingUrl}
-                rel="noopener noreferrer"
-                aria-label={`${t("earnings.secFiling")}: ${e.ticker}`}
-              >
-                {t("earnings.secFiling")} ↗
-              </a>
-            )
-          )}
-        </li>
-      ))}
-    </ul>
-  );
-}
