@@ -55,3 +55,9 @@ they are never asked twice. Things decided *not* to do go in `declined.md`.
 - **The affiliate disclosure is the partner strip's label**: "Affiliate partners" / "推广合作" replaces "From our partners" plus the sentence on the right, and the terms ("sources and links") say PreBell may earn a referral fee through those links. Rick asked "can we remove this note?"; the disclosure must stay where readers see the links, so it was folded into the label (Rick chose "Fold into the label").
 - **Earnings: fix the failures first, then widen coverage** beyond the S&P 100: all ~520 companies (S&P 500 ∪ Nasdaq-100) on the calendar, full write-ups only for the largest. Rick chose "Fix failures, then widen" on 2026-11-06 after a week where 6 of 14 detected reports did not publish.
 - **An earnings check publishes without revenue when the release states none** (AIG, ConocoPhillips): revenue stays required when the release gives it, so a figure that fails verification still blocks and retries. Ruled under Rick's "Fix failures, then widen" (2026-11-06) (the spec left required sections to the designer); reversible in `missing_required`.
+- **Earnings widening, the shape** (Rick, 2026-11-06, choosing among options from `docs/superpowers/specs/2026-11-06-earnings-widen-design.md`):
+  - Write-ups for the S&P 100 plus every company at or above $100B market cap in a dated snapshot ("S&P 100 + $100B+"); the rest of the S&P 500 ∪ Nasdaq-100 is calendar only.
+  - About 15 hand-picked large foreign companies outside both indexes (Enbridge, Sony, Ferrari, Ryanair, ...) join the calendar, calendar only ("~15 hand-picked").
+  - A calendar-only company shows its name, a ✓ once reported and the SEC filing link; its ticker page is noindex until it has a post ("Row + SEC link").
+  - Earnings builds get their own queue, `prebell-earnings-build` ("Yes, add it").
+  - English company names on ZH pages for v1 (controller's call; reversible).
