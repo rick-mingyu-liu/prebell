@@ -6,7 +6,7 @@ import { cachedSitemap, type EdgeCache, sitemapEntries, sitemapXml } from "@/lib
 // Read from D1 on a cache miss (one query), never at build time.
 export const dynamic = "force-dynamic";
 
-/** The sitemap. Past about 5,000 posts, split it (a sitemap index of one file per year) to keep each build inside the CPU limit. */
+/** The sitemap. Past about 2,000 posts, split it (a sitemap index of one file per year) to keep each build inside the CPU limit. */
 export async function GET(req: Request) {
   const { ctx } = getCloudflareContext();
   // Workers' `caches.default`; absent under `next dev`.

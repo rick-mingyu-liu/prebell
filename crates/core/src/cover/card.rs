@@ -221,6 +221,11 @@ pub async fn cards_tick(now: DateTime<Utc>, store: &dyn CardStore) -> Result<Str
         store.put_text(&counter, &(tried + 1).to_string()).await?;
         let png = render_png(&svg)
             .map_err(|e| format!("card {key}: attempt {} of {MAX_ATTEMPTS}: {e}", tried + 1))?;
+        // The publish-queued message and a cron sweep can render the same card
+        // at once; the first write stands.
+        if store.has_object(&key).await? {
+            return Ok(format!("card {key} already written by another run"));
+        }
         store.put_png(&key, &png).await?;
         return Ok(format!("card {key} ({} bytes)", png.len()));
     }
@@ -327,6 +332,8 @@ mod tests {
     struct Mem {
         posts: Vec<CoverPost>,
         objects: RefCell<BTreeMap<String, Vec<u8>>>,
+        /// Another run writes the card while this one renders (on its attempt count).
+        race: bool,
     }
 
     #[async_trait(?Send)]
@@ -355,6 +362,10 @@ mod tests {
             Ok(())
         }
         async fn put_text(&self, key: &str, text: &str) -> Result<(), String> {
+            if self.race {
+                let card = key.replace(".attempts", ".png");
+                self.objects.borrow_mut().insert(card, b"other".to_vec());
+            }
             self.put_png(key, text.as_bytes()).await
         }
     }
@@ -514,6 +525,23 @@ mod tests {
                 .collect();
             assert!(missing.is_empty(), "missing glyphs {missing:?}");
         }
+    }
+
+    #[tokio::test]
+    async fn a_card_another_run_wrote_meanwhile_is_not_overwritten() {
+        let s = Mem {
+            posts: vec![post("new")],
+            race: true,
+            ..Default::default()
+        };
+        s.objects
+            .borrow_mut()
+            .insert("covers/new.svg".into(), cover().into_bytes());
+        assert_eq!(
+            cards_tick(now(), &s).await.unwrap(),
+            "card og/new.png already written by another run"
+        );
+        assert_eq!(obj(&s, "og/new.png").as_deref(), Some(&b"other"[..]));
     }
 
     #[test]
