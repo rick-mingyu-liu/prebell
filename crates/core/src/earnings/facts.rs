@@ -217,10 +217,18 @@ pub struct EarningsFacts {
     pub trend: Field<Trend>,
 }
 
+/// Why a figure is missing when the model found none in the release.
+pub const NOT_STATED: &str = "not stated in the press release";
+
 /// Names of required sections that are unavailable. Empty means publishable.
+/// Revenue is required unless the release does not state it (insurers and
+/// some energy companies lead with other totals); a revenue figure that is
+/// there but fails verification still blocks, so the run retries.
 pub fn missing_required(f: &EarningsFacts) -> Vec<&'static str> {
     let mut out = Vec::new();
-    if f.metrics.value(Metric::Revenue).is_none() {
+    let not_stated =
+        matches!(&f.metrics.revenue, Field::Missing { reason } if reason == NOT_STATED);
+    if f.metrics.value(Metric::Revenue).is_none() && !not_stated {
         out.push("revenue");
     }
     if f.metrics.value(Metric::EpsGaap).is_none() && f.metrics.value(Metric::EpsNonGaap).is_none() {
@@ -359,6 +367,11 @@ pub(crate) mod tests {
         f.metrics.revenue = Field::Missing { reason: "x".into() };
         f.filing_url = String::new();
         assert_eq!(missing_required(&f), vec!["revenue", "filing"]);
+        // A release that states no revenue (AIG, ConocoPhillips) still publishes.
+        f.metrics.revenue = Field::Missing {
+            reason: NOT_STATED.into(),
+        };
+        assert_eq!(missing_required(&f), vec!["filing"]);
     }
 
     #[test]

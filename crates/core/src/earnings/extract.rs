@@ -8,7 +8,7 @@ use serde::Deserialize;
 use serde_json::Value;
 
 use crate::anchor::{has_word, verify_quote, verify_reason};
-use crate::earnings::facts::{Figure, FiscalPeriod, Metric, Metrics, Note, Unit};
+use crate::earnings::facts::{Figure, FiscalPeriod, Metric, Metrics, Note, Unit, NOT_STATED};
 use crate::facts::{Field, NewsReason};
 use crate::numbers::{extract as extract_numbers, Lang};
 use crate::premarket::draft::reject_markup;
@@ -178,8 +178,18 @@ pub fn verify_figure(text: &str, metric: Metric, raw: &RawFigure) -> Result<Figu
     if extract_numbers(&amount, Lang::En).len() != 1 {
         return Err(format!("amount {amount:?} must hold exactly one number"));
     }
-    let at = whole_match(&quote, &amount)
-        .ok_or_else(|| format!("amount {amount:?} is not in its quote"))?;
+    // A statement often prints "$" on its first row only ("Total revenues
+    // 8,893 9,008"); "$8,893" then names that bare cell.
+    let (amount, at) = match whole_match(&quote, &amount) {
+        Some(at) => (amount, at),
+        None => {
+            let bare = amount.trim_start_matches('$').trim_start().to_string();
+            match whole_match(&quote, &bare) {
+                Some(at) if bare != amount => (bare, at),
+                _ => return Err(format!("amount {amount:?} is not in its quote")),
+            }
+        }
+    };
     let label = &quote[..at];
     if !label.chars().any(char::is_alphabetic) {
         return Err("the quote must start with the row label, not mid-row".into());
@@ -912,7 +922,7 @@ pub async fn extract(llm: &dyn LlmProvider, text: &str, company: &str, ticker: &
 
 /// The verification half of `extract`, on an LLM reply.
 pub fn from_reply(text: &str, v: &Value) -> Extracted {
-    let mut metrics = Metrics::all_missing("not stated in the press release");
+    let mut metrics = Metrics::all_missing(NOT_STATED);
     let m = v.get("metrics");
     for metric in Metric::ALL {
         let field = match m.and_then(|m| m.get(metric.key())) {
@@ -936,7 +946,7 @@ pub fn from_reply(text: &str, v: &Value) -> Extracted {
     }
     let fiscal_period = match v.get("fiscal_period") {
         None | Some(Value::Null) => Field::Missing {
-            reason: "not stated in the press release".into(),
+            reason: NOT_STATED.into(),
         },
         Some(p) => match verify_period(text, p) {
             Ok(p) => Field::Value(p),
@@ -1004,6 +1014,37 @@ mod tests {
             ),
         )
         .is_ok());
+    }
+
+    #[test]
+    fn a_dollar_amount_matches_a_table_cell_printed_without_the_sign() {
+        // Booking's statement prints "$" on the first row only; the model
+        // still writes the amount as "$8,893".
+        let t = "(In millions) Merchant revenues $ 6,998 $ 6,131\nTotal revenues 8,893 9,008 21,777 20,568";
+        let f = verify_figure(
+            t,
+            Metric::Revenue,
+            &raw(
+                "$8,893",
+                "millions",
+                false,
+                "Total revenues 8,893 9,008 21,777 20,568",
+            ),
+        )
+        .unwrap();
+        assert_eq!(f.value, 8_893e6);
+        // The sign is only dropped to find the cell: the column rule still holds.
+        let e = verify_figure(
+            t,
+            Metric::Revenue,
+            &raw(
+                "$9,008",
+                "millions",
+                false,
+                "Total revenues 8,893 9,008 21,777 20,568",
+            ),
+        );
+        assert!(e.is_err());
     }
 
     #[test]
