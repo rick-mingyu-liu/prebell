@@ -168,8 +168,10 @@ fn label_only(s: &str) -> bool {
 
 /// The quote names the metric: its label holds one of `label_keywords`
 /// (per-share figures may say "per share" right after the amount), a
-/// per-share quote is never about a dividend, and the label names no part
-/// of the company (`part_named`) and is no "Less:"/"Add:" adjustment row.
+/// per-share quote is never about a dividend, the label names no part of
+/// the company (`part_named`) nor funds from operations (or, for net
+/// income, an adjustment or reconciliation), and is no "Less:"/"Add:"
+/// adjustment row.
 fn names_metric(m: Metric, label: &str, after: &str) -> Result<(), String> {
     static ADJUSTMENT: OnceLock<Regex> = OnceLock::new();
     let adjustment = ADJUSTMENT
@@ -177,6 +179,24 @@ fn names_metric(m: Metric, label: &str, after: &str) -> Result<(), String> {
     if let Some(w) = part_named(m, label, true) {
         return Err(format!(
             "the quote's label names {w:?}, a part of the company"
+        ));
+    }
+    // A REIT's funds from operations is not earnings; reconciling items
+    // are not net income ("Total adjustments to net income (344)",
+    // "Adjustments to reconcile net income to net cash ...").
+    let other = match m {
+        Metric::NetIncome => &["adjustment", "adjustments", "reconcile", "reconciliation"][..],
+        _ => &[
+            "ffo",
+            "affo",
+            "funds from operations",
+            "funds available for distribution",
+        ][..],
+    };
+    if let Some(w) = other.iter().find(|w| has_word(label, w)) {
+        return Err(format!(
+            "the quote's label names {w:?}: another measure, not {}",
+            m.key()
         ));
     }
     if adjustment.is_match(label) {
@@ -1540,6 +1560,99 @@ mod tests {
         // AMD: a segment's revenue in prose.
         let t = "•Data Center segment revenue was a record $8.5 billion, up 97% year-over-year.";
         bad(t, Metric::Revenue, "$8.5 billion", "units", false, t);
+    }
+
+    #[test]
+    fn other_measures_are_not_eps_or_net_income() {
+        let periods =
+            "Three Months Ended September 30, Nine Months Ended September 30,\n2026 2025 2026 2025";
+        let ok = |t: &str, m: Metric, amount: &str, scale: &str, q: &str| {
+            let r = verify_figure(t, m, &raw(amount, scale, false, q));
+            assert!(r.is_ok(), "{m:?} {q:?}: {r:?}");
+        };
+        let bad = |t: &str, m: Metric, amount: &str, scale: &str, negative: bool, q: &str| {
+            for m in match m {
+                Metric::EpsGaap => vec![Metric::EpsGaap, Metric::EpsNonGaap],
+                m => vec![m],
+            } {
+                let r = verify_figure(t, m, &raw(amount, scale, negative, q));
+                assert!(r.is_err(), "{m:?} {q:?}: {r:?}");
+            }
+        };
+        // SPG's funds from operations per share, next to its EPS.
+        let spg = format!("(Amounts in thousands, except per share amounts)\n{periods}\nDiluted net income per share $1.54 $1.86 $4.51 $4.83\nDiluted FFO per share(1) $3.09 $3.25 $9.12 $9.07\nReal Estate FFO per share(1) $3.37 $3.22 $9.82 $9.24\nBasic and Diluted Earnings per Common Share (EPS) $1.54 $1.86 $4.51 $4.83\nBasic and Diluted Real Estate FFO per Share $3.37 $3.22 $9.82 $9.24\nBasic and Diluted FFO per Share (FFOPS) $3.09 $3.25 $9.12 $9.07\nEstimated FFO per diluted share $12.60 $12.70");
+        for (amount, q) in [
+            ("$3.09", "Diluted FFO per share(1) $3.09 $3.25 $9.12 $9.07"),
+            (
+                "$3.37",
+                "Real Estate FFO per share(1) $3.37 $3.22 $9.82 $9.24",
+            ),
+            (
+                "$3.37",
+                "Basic and Diluted Real Estate FFO per Share $3.37 $3.22 $9.82 $9.24",
+            ),
+            (
+                "$3.09",
+                "Basic and Diluted FFO per Share (FFOPS) $3.09 $3.25 $9.12 $9.07",
+            ),
+            ("$12.60", "Estimated FFO per diluted share $12.60 $12.70"),
+        ] {
+            bad(&spg, Metric::EpsGaap, amount, "units", false, q);
+        }
+        ok(
+            &spg,
+            Metric::EpsGaap,
+            "$1.54",
+            "units",
+            "Diluted net income per share $1.54 $1.86 $4.51 $4.83",
+        );
+        ok(
+            &spg,
+            Metric::EpsGaap,
+            "$1.54",
+            "units",
+            "Basic and Diluted Earnings per Common Share (EPS) $1.54 $1.86 $4.51 $4.83",
+        );
+        for t in [
+            "AFFO per diluted share was $1.10 for the quarter.",
+            "Funds from operations per diluted share was $2.05 for the quarter.",
+            "Core FFO of $1.42 per diluted share for the quarter.",
+        ] {
+            let amount = t.split_whitespace().find(|w| w.starts_with('$')).unwrap();
+            bad(t, Metric::EpsGaap, amount, "units", false, t);
+        }
+        let t = "Diluted earnings per share were $1.42 for the quarter.";
+        ok(t, Metric::EpsGaap, "$1.42", "units", t);
+        // AMGN's and DUK's reconciliations: adjustments to net income are
+        // not net income.
+        let amgn = format!("(In millions, except per-share data)\n{periods}\nGAAP net income $3,864 $3,216 $8,058 $6,378\nAdjustments to net income:\nAdjustments to income before income taxes, net of the income tax effect (370) (103) 1,691 2,637\nTotal adjustments to net income (344) (161) 1,684 2,584");
+        bad(
+            &amgn,
+            Metric::NetIncome,
+            "(344)",
+            "millions",
+            true,
+            "Total adjustments to net income (344) (161) 1,684 2,584",
+        );
+        ok(
+            &amgn,
+            Metric::NetIncome,
+            "$3,864",
+            "millions",
+            "GAAP net income $3,864 $3,216 $8,058 $6,378",
+        );
+        let duk = "(In millions)\nNine Months Ended September 30,\n2026 2025\nCASH FLOWS FROM OPERATING ACTIVITIES\nNet Income $4,372 $3,865\nAdjustments to reconcile net income to net cash provided by operating activities 3,517 4,807";
+        bad(duk, Metric::NetIncome, "3,517", "millions", false, "Adjustments to reconcile net income to net cash provided by operating activities 3,517 4,807");
+        ok(
+            duk,
+            Metric::NetIncome,
+            "$4,372",
+            "millions",
+            "Net Income $4,372 $3,865",
+        );
+        let t = "(In millions)\n2026 2025\nReconciliation of net income to adjusted EBITDA: net income $2,717 $2,500";
+        let q = "Reconciliation of net income to adjusted EBITDA: net income $2,717 $2,500";
+        bad(t, Metric::NetIncome, "$2,717", "millions", false, q);
     }
 
     #[test]
