@@ -1,3 +1,4 @@
+import { companyLogo } from "../src/lib/logos";
 import { readFileSync } from "node:fs";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
@@ -214,7 +215,7 @@ describe("BriefView", () => {
     const kicker = at(out, '<p class="kicker story-kicker">Earnings check · AMGN</p>');
     const title = at(out, "<h1 class=\"story-title\">Amgen&#x27;s third quarter 2026: revenue up 8% to $10.4 billion</h1>");
     const checked = at(out, '<span class="checked">✓ Every figure traced to the filing</span>');
-    const cover = at(out, '<span class="cover-tag"><img src="/logos/companies/AMGN.png" alt="AMGN"');
+    const cover = at(out, `<span class="cover-tag"><img src="${companyLogo("AMGN")}" alt="AMGN"`);
     const lede = at(out, '<p class="story-lede">Amgen reported third quarter 2026 revenue');
     const line = at(out, "<p><strong>Amgen (AMGN)</strong> · Q3 FY2026 · Form 8-K filed Nov 3, 2026</p>");
     const table = at(out, '<div class="table-wrap"><table class="table"><thead><tr><th>Key figure</th><th style="text-align:right">This quarter</th></tr></thead>');

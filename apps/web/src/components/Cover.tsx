@@ -1,4 +1,4 @@
-import { companyLogo } from "../lib/logos";
+import { companyLogoInfo } from "../lib/logos";
 
 export interface CoverProps {
   /** R2 key of the graphic (`covers/<slug>.svg`; older posts may hold a `.png` or `.jpg`), or null for the flat light cover. */
@@ -13,7 +13,7 @@ export interface CoverProps {
 
 /** A cover composed in HTML/CSS on paper: the chart graphic at the bottom, then the tag, two ink lines and the amber bar top-left. */
 export default function Cover({ coverKey, lines, tag, size, alt }: CoverProps) {
-  const logo = tag.kind === "logo" ? companyLogo(tag.ticker) : null;
+  const logo = tag.kind === "logo" ? companyLogoInfo(tag.ticker) : null;
   const stat = lines && lines[0] !== "" ? lines : null;
   // The lead and article covers sit above the fold, so their graphic loads at once; list covers wait.
   const eager = size !== "small";
@@ -30,7 +30,7 @@ export default function Cover({ coverKey, lines, tag, size, alt }: CoverProps) {
       )}
       <div className="cover-in">
         <span className="cover-tag">
-          {tag.kind === "label" ? tag.text : logo ? <img src={logo} alt={tag.ticker} loading="lazy" /> : tag.ticker}
+          {tag.kind === "label" ? tag.text : logo ? <img src={logo.src} alt={tag.ticker} width={logo.width} height={logo.height} loading="lazy" /> : tag.ticker}
         </span>
         {stat && (
           <>

@@ -1,6 +1,8 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
-import CalendarWeek, { CARDS_PER_SLOT, EAGER_PER_SLOT } from "../src/components/CalendarWeek";
+import { companyLogoInfo } from "../src/lib/logos";
+import { COMPANY_LOGO_SIZES } from "../src/lib/logos.generated";
+import CalendarWeek, { CARDS_PER_SLOT, EAGER_PER_SLOT, WIDE_LOGO } from "../src/components/CalendarWeek";
 import PostList from "../src/components/PostList";
 import type { CalendarDay, CalendarEntry, Slot } from "../src/lib/earnings";
 import type { PostListItem } from "../src/lib/posts";
@@ -200,37 +202,72 @@ describe("CalendarWeek", () => {
     expect(brk).not.toContain("/p/");
   });
 
-  it("sets every company as a card: a square logo beside the ticker and name, or the ticker and name in type", () => {
-    const out = renderToStaticMarkup(<CalendarWeek days={days} locale="en" today="2026-11-02" />);
+  it("sets every company as a card: a wordmark across it, a square logo beside the ticker and name, or type", () => {
+    // Fixtures are picked by shape from the manifest, so a regenerated logo set does not break the test.
+    const shaped = (wide: boolean) =>
+      Object.entries(COMPANY_LOGO_SIZES).find(([t, [w, h]]) => (w / h >= WIDE_LOGO) === wide && Math.max(w, h) >= 28 && !t.includes("."))![0];
+    const [WIDE, ICON] = [shaped(true), shaped(false)];
+    const here = [
+      entry(WIDE, "bmo", "confirmed", { name: "Wide Corp" }),
+      entry(ICON, "bmo", "confirmed", { name: "Icon Inc" }),
+      entry("AVGO", "bmo", "confirmed", { name: "Broadcom" }),
+      entry("ZZZZ", "bmo", "confirmed"),
+    ];
+    const out = renderToStaticMarkup(<CalendarWeek days={[{ date: "2026-11-02", entries: here }]} locale="en" today="2026-11-02" />);
     const li = items(out);
-    const card = (t: string) => li.find((x) => x.includes(`>${t}</span>`) && x.includes("cal-card "))!;
-    // Today's manifest is square tiles: the icon is decoration beside the name, which names the link.
-    expect(card("AMD")).toContain('<li class="cal-card cal-card-icon cal-confirmed">');
-    expect(card("AMD")).toMatch(/<img class="cal-logo-icon" src="\/logos\/companies\/AMD\.svg" alt="" width="48" height="48" loading="(eager|lazy)"/);
-    expect(card("AMD")).toContain('<span class="cal-card-sym" aria-hidden="true">AMD</span><span class="cal-card-name">Advanced Micro Devices</span>');
-    expect(card("AMD")).toContain('title="Advanced Micro Devices"');
+    const card = (href: string) => li.find((x) => x.includes(`href="${href}"`))!;
+    const esc = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    // A wordmark fills the card: the company name is its alt and its link's name; no ticker or name beside it.
+    const wide = companyLogoInfo(WIDE)!;
+    expect(card(`/en/t/${WIDE}`)).toContain('<li class="cal-card cal-card-wide cal-confirmed">');
+    expect(card(`/en/t/${WIDE}`)).toMatch(
+      new RegExp(`<img class="cal-logo-wide" src="${esc(wide.src)}" alt="Wide Corp" width="${wide.width}" height="${wide.height}" style="height:\\d+px" loading="(eager|lazy)"`),
+    );
+    expect(card(`/en/t/${WIDE}`)).not.toContain("cal-card-sym");
+    expect(card(`/en/t/${WIDE}`)).toContain('title="Wide Corp"');
+    // A square logo is decoration beside the name, which names the link.
+    const icon = companyLogoInfo(ICON)!;
+    expect(card(`/en/t/${ICON}`)).toContain('<li class="cal-card cal-card-icon cal-confirmed">');
+    expect(card(`/en/t/${ICON}`)).toMatch(
+      new RegExp(`<img class="cal-logo-icon" src="${esc(icon.src)}" alt="" width="${icon.width}" height="${icon.height}" loading="(eager|lazy)"`),
+    );
+    expect(card(`/en/t/${ICON}`)).toContain(`<span class="cal-card-sym" aria-hidden="true">${ICON}</span><span class="cal-card-name">Icon Inc</span>`);
     // No logo: the ticker and name set in type, the name read out, no image.
-    expect(card("AVGO")).toContain('<li class="cal-card cal-card-text cal-confirmed">');
-    expect(card("AVGO")).toContain('<span class="cal-card-sym" aria-hidden="true">AVGO</span><span class="cal-card-name">Broadcom</span>');
-    expect(card("AVGO")).not.toContain("<img");
+    expect(card("/en/t/AVGO")).toContain('<li class="cal-card cal-card-text cal-confirmed">');
+    expect(card("/en/t/AVGO")).toContain('<span class="cal-card-sym" aria-hidden="true">AVGO</span><span class="cal-card-name">Broadcom</span>');
+    expect(card("/en/t/AVGO")).not.toContain("<img");
     // No name: the ticker is the name.
-    expect(card("UBER")).toContain('<span class="cal-card-sym">UBER</span></span>');
-    expect(card("UBER")).not.toContain("cal-card-name");
+    expect(card("/en/t/ZZZZ")).toContain('<span class="cal-card-sym">ZZZZ</span></span>');
+    expect(card("/en/t/ZZZZ")).not.toContain("cal-card-name");
     expect(out).not.toMatch(/badge|cal-tile/);
+  });
+
+  it("never draws a logo above its natural size", () => {
+    const tickers = Object.keys(COMPANY_LOGO_SIZES).sort().slice(0, 60);
+    const out = renderToStaticMarkup(
+      <CalendarWeek days={[{ date: "2026-11-02", entries: tickers.map((t) => entry(t, "bmo", "unconfirmed", { name: t })) }]} locale="en" />,
+    );
+    for (const img of out.match(/<img [^>]*>/g)!) {
+      const [w, h] = [Number(img.match(/ width="(\d+)"/)![1]), Number(img.match(/ height="(\d+)"/)![1])];
+      const style = img.match(/style="([^"]*)"/)?.[1] ?? "";
+      const styled = Number(style.match(/height:(\d+)px/)?.[1] ?? h);
+      expect(styled).toBeLessThanOrEqual(h);
+      if (/width:(\d+)px/.test(style)) expect(Number(style.match(/width:(\d+)px/)![1])).toBeLessThanOrEqual(w);
+    }
   });
 
   it("writes the status in text: a corner tick for reported, muted unconfirmed, and the write-up", () => {
     const out = renderToStaticMarkup(<CalendarWeek days={days} locale="en" today="2026-11-02" />);
     const li = items(out);
-    const card = (t: string) => li.find((x) => x.includes(`>${t}</span>`) && x.includes("cal-card "))!;
+    const card = (href: string) => li.find((x) => x.includes(`href="${href}"`))!;
     expect(out.match(/cal-card-tick/g)).toHaveLength(2);
-    expect(card("INTC")).toContain('cal-reported">');
-    expect(card("INTC")).toContain('<span class="cal-card-tick" aria-hidden="true">✓</span><span class="sr-only">Reported</span><span class="sr-only">Read the check</span>');
-    expect(li.find((x) => x.includes('href="/en/t/A"'))).toContain('<span class="sr-only">Reported</span>');
-    expect(card("UNH")).toContain('cal-unconfirmed">');
-    expect(card("UNH")).toContain('<span class="sr-only">Unconfirmed</span>');
-    expect(card("UNH")).not.toContain("Read the check");
-    expect(card("AVGO")).not.toMatch(/sr-only/);
+    expect(card("/en/p/intc-q3")).toContain('cal-reported">');
+    expect(card("/en/p/intc-q3")).toContain('<span class="cal-card-tick" aria-hidden="true">✓</span><span class="sr-only">Reported</span><span class="sr-only">Read the check</span>');
+    expect(card("/en/t/A")).toContain('<span class="sr-only">Reported</span>');
+    expect(card("/en/t/UNH")).toContain('cal-unconfirmed">');
+    expect(card("/en/t/UNH")).toContain('<span class="sr-only">Unconfirmed</span>');
+    expect(card("/en/t/UNH")).not.toContain("Read the check");
+    expect(card("/en/t/AVGO")).not.toMatch(/sr-only/);
   });
 
   it("folds a long list into a native details element, keeping the write-up companies in view", () => {

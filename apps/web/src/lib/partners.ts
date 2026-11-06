@@ -1,6 +1,7 @@
 /** Partner invite links and where each may be shown. Change a link or a rule here only. */
 // Server-only so the gated URLs can never be bundled into client JS; client code imports types only.
 import "server-only";
+import { PARTNER_LOGOS } from "./logos.generated";
 
 export type PartnerGroup = "brokers" | "crypto";
 
@@ -27,7 +28,7 @@ const PARTNERS: Partner[] = [
     name: "moomoo",
     url: "https://j.moomoo.com/0J1BGf",
     group: "brokers",
-    logo: "/logos/partners/moomoo.png",
+    logo: PARTNER_LOGOS.moomoo,
     allowedIn: notInChina,
   },
   {
@@ -35,7 +36,7 @@ const PARTNERS: Partner[] = [
     name: "Wealthsimple",
     url: "https://wealthsimple.com/invite/QDBQ5Z",
     group: "brokers",
-    logo: "/logos/partners/wealthsimple.png",
+    logo: PARTNER_LOGOS.wealthsimple,
     allowedIn: (country) => country === "CA",
   },
   {
@@ -43,7 +44,7 @@ const PARTNERS: Partner[] = [
     name: "OKX",
     url: "https://okx.com/join/AIAFMP3U",
     group: "crypto",
-    logo: "/logos/partners/okx.svg",
+    logo: PARTNER_LOGOS.okx,
     allowedIn: notInChina,
   },
   {
@@ -51,7 +52,7 @@ const PARTNERS: Partner[] = [
     name: "Crypto.com",
     url: "https://crypto.com/app/smqqda7396",
     group: "crypto",
-    logo: "/logos/partners/cryptocom.png",
+    logo: PARTNER_LOGOS.cryptocom,
     allowedIn: notInChina,
   },
 ];
