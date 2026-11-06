@@ -15,8 +15,10 @@ use prebell_core::llm::{api_key_var, llm_from_env, unknown_provider};
 use prebell_core::providers::CountingHttp;
 use prebell_core::providers::LlmProvider;
 use prebell_core::recap;
-use prebell_core::run::{tick_with_hooks, Hooks, TickOutcome};
-use prebell_core::schedule::{jobs_for_cron, queue_for, ContentJob, EarningsStep, JOBS};
+use prebell_core::run::{tick_with_hooks, update, Hooks, TickOutcome};
+use prebell_core::schedule::{
+    jobs_for_cron, queue_for, ContentJob, EarningsStep, EARNINGS_QUEUE, JOBS,
+};
 use prebell_core::tavily::Tavily;
 use prebell_core::yahoo::Yahoo;
 use prebell_core::yahoo_calendar::YahooCalendar;
@@ -164,7 +166,7 @@ impl Runner<'_> {
 
 #[async_trait(?Send)]
 impl JobRunner for Runner<'_> {
-    /// A premarket or recap tick.
+    /// A premarket, premarket update or recap tick.
     async fn content(&self, job: ContentJob) -> std::result::Result<TickOutcome, String> {
         let env = self.env;
         let md = Yahoo::new(self.http.clone());
@@ -185,6 +187,9 @@ impl JobRunner for Runner<'_> {
         Ok(match job {
             ContentJob::Premarket => {
                 tick_with_hooks(at, store, &md, &ns, llm.as_ref(), &hooks).await
+            }
+            ContentJob::PremarketUpdate => {
+                update::tick_with_hooks(at, store, &md, &ns, llm.as_ref(), &hooks).await
             }
             ContentJob::Recap => {
                 recap::tick_with_hooks(at, store, &md, &ns, llm.as_ref(), &hooks).await

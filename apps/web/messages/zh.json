@@ -37,6 +37,7 @@
   "post": {
     "permalink": "本文链接",
     "published": "发布于 {time}",
+    "updated": "更新于 {time}",
     "pendingTitle": "{type} {date}",
     "pending": "中文版稍后推出",
     "readEnglish": "阅读英文版",

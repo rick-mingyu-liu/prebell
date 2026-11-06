@@ -71,6 +71,16 @@ describe("getPostBySlug", () => {
     });
   });
 
+  it("returns when an update rewrote the post, or null", async () => {
+    const db = memoryD1(`${seed}UPDATE posts SET revised_at = '2026-10-27T12:35:00Z' WHERE id = 1;`);
+    for (const lang of ["en", "zh"] as const) {
+      const p = await getPostBySlug(db, "premarket-2026-10-27", lang);
+      expect(p).toMatchObject({ publishedAt: "2026-10-27T12:34:00Z", revisedAt: "2026-10-27T12:35:00Z" });
+    }
+    expect((await getPostBySlug(db, "premarket-2026-10-29", "en"))!.revisedAt).toBeNull();
+    expect((await getLatestPremarket(db, "en"))!.revisedAt).toBeNull();
+  });
+
   it("returns sources, falling back to the URL for a missing title", async () => {
     const db = memoryD1(seed);
     const p = await getPostBySlug(db, "premarket-2026-10-27", "zh");

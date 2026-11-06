@@ -3,7 +3,7 @@
 //! numbers days 1-7 from Sunday, unlike most cron dialects.
 
 /// Every job a cron queues.
-pub const JOBS: &[&str] = &["premarket", "recap", "earnings"];
+pub const JOBS: &[&str] = &["premarket", "premarket-update", "recap", "earnings"];
 
 /// Queue binding for the earnings polls and calendar refresh: one consumer,
 /// one message at a time, so a poll never runs twice at once and an
@@ -20,6 +20,9 @@ pub const JOBS_QUEUE: &str = "JOBS";
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ContentJob {
     Premarket,
+    /// `premarket-update`: the 08:35 ET rebuild of the day's brief, its
+    /// own message so it gets its own subrequest budget.
+    PremarketUpdate,
     Recap,
 }
 
@@ -58,6 +61,7 @@ impl JobKind {
     pub fn parse(job: &str) -> Option<JobKind> {
         match job {
             "premarket" => Some(JobKind::Content(ContentJob::Premarket)),
+            "premarket-update" => Some(JobKind::Content(ContentJob::PremarketUpdate)),
             "recap" => Some(JobKind::Content(ContentJob::Recap)),
             "earnings" => Some(JobKind::Earnings(EarningsStep::Poll)),
             "earnings:build" => Some(JobKind::Earnings(EarningsStep::Build)),
@@ -83,11 +87,15 @@ pub fn queue_for(job: &str) -> &'static str {
 pub const CRONS: &[(&str, &[&str])] = &[
     // 10:00-23:55Z weekdays. Earnings polling from 06:00 ET under both
     // offsets (10:00Z EDT, 11:00Z EST), on its own queue. Premarket
-    // 08:30-09:25 ET (12:30Z EDT, 13:30Z EST) and its ZH retries to the
-    // 18:00 ET give-up; the recap window from 13:45 ET (early close) or
-    // 16:45 ET to 19:00 ET EDT (23:00Z), with its ZH retries. The clock
-    // gates the earlier firings: they read D1 and do nothing.
-    ("*/5 10-23 * * MON-FRI", &["premarket", "recap", "earnings"]),
+    // 08:00-09:25 ET (12:00Z EDT, 13:00Z EST) and its ZH retries to the
+    // 18:00 ET give-up; the premarket update 08:35-09:25 ET; the recap
+    // window from 13:45 ET (early close) or 16:45 ET to 19:00 ET EDT
+    // (23:00Z), with its ZH retries. The clock gates the earlier firings:
+    // they read D1 and do nothing.
+    (
+        "*/5 10-23 * * MON-FRI",
+        &["premarket", "premarket-update", "recap", "earnings"],
+    ),
     // 00:00-03:55Z the next UTC day: the EST recap tail to 19:00 ET
     // (00:00Z) and recap ZH retries to the 22:00 ET give-up; earnings
     // polling to 22:00 ET (02:00Z EDT, 03:00Z EST).
@@ -107,8 +115,8 @@ pub fn jobs_for_cron(cron: &str) -> Option<&'static [&'static str]> {
 mod tests {
     use super::*;
     use crate::clock::{
-        et, premarket_decision, premarket_window, recap_decision, recap_window, trading_day,
-        SlotDecision, Window,
+        et, premarket_decision, premarket_update_decision, premarket_update_window,
+        premarket_window, recap_decision, recap_window, trading_day, SlotDecision, Window,
     };
     use chrono::{DateTime, Datelike, Duration, NaiveDate, NaiveTime, Timelike, Utc, Weekday};
 
@@ -253,7 +261,10 @@ mod tests {
     #[test]
     fn each_cron_maps_to_its_job() {
         let want: [(&str, &[&str]); 2] = [
-            ("*/5 10-23 * * MON-FRI", &["premarket", "recap", "earnings"]),
+            (
+                "*/5 10-23 * * MON-FRI",
+                &["premarket", "premarket-update", "recap", "earnings"],
+            ),
             ("*/5 0-3 * * TUE-SAT", &["recap", "earnings"]),
         ];
         for (cron, jobs) in want {
@@ -273,6 +284,10 @@ mod tests {
             Some(JobKind::Content(ContentJob::Premarket))
         );
         assert_eq!(
+            JobKind::parse("premarket-update"),
+            Some(JobKind::Content(ContentJob::PremarketUpdate))
+        );
+        assert_eq!(
             JobKind::parse("recap"),
             Some(JobKind::Content(ContentJob::Recap))
         );
@@ -289,11 +304,11 @@ mod tests {
             };
             assert_eq!(queue_for(step.job()), queue);
         }
-        for j in ["premarket", "recap", "nope"] {
+        for j in ["premarket", "premarket-update", "recap", "nope"] {
             assert_eq!(queue_for(j), JOBS_QUEUE, "{j}");
         }
         let kinds: Vec<JobKind> = JOBS.iter().map(|j| JobKind::parse(j).unwrap()).collect();
-        assert_eq!(kinds.len(), 3);
+        assert_eq!(kinds.len(), 4);
         for (i, k) in kinds.iter().enumerate() {
             assert!(!kinds[..i].contains(k), "{k:?}");
         }
@@ -360,6 +375,9 @@ mod tests {
                 if fires("premarket", t) {
                     assert_eq!(premarket_decision(t), SlotDecision::NotToday, "{t}");
                 }
+                if fires("premarket-update", t) {
+                    assert_eq!(premarket_update_decision(t), SlotDecision::NotToday, "{t}");
+                }
                 if fires("recap", t) {
                     assert_eq!(recap_decision(t), SlotDecision::NotToday, "{t}");
                 }
@@ -420,8 +438,8 @@ mod tests {
         assert!(fires("earnings", early) && !in_window(early));
     }
 
-    /// Premarket and recap firings before their windows (the widened
-    /// 10:00-11:55Z hours) are clock-gated: nothing builds.
+    /// Premarket, update and recap firings before their windows (the
+    /// widened 10:00-11:55Z hours) are clock-gated: nothing builds.
     #[test]
     fn early_firings_never_build_premarket_or_recap() {
         for date in DAYS {
@@ -434,6 +452,12 @@ mod tests {
                 if fires("premarket", t) {
                     assert!(
                         !matches!(premarket_decision(t), SlotDecision::InWindow { .. }),
+                        "{t}"
+                    );
+                }
+                if fires("premarket-update", t) {
+                    assert!(
+                        !matches!(premarket_update_decision(t), SlotDecision::InWindow { .. }),
                         "{t}"
                     );
                 }
@@ -450,6 +474,15 @@ mod tests {
     #[test]
     fn premarket_window_and_deadline_covered() {
         assert_window_covered("premarket", premarket_window, premarket_decision);
+    }
+
+    #[test]
+    fn premarket_update_window_and_deadline_covered() {
+        assert_window_covered(
+            "premarket-update",
+            premarket_update_window,
+            premarket_update_decision,
+        );
     }
 
     #[test]

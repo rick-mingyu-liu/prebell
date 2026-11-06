@@ -704,6 +704,7 @@ async fn build(
             facts_r2_key: facts_key,
             published_at: Some(ts.clone()),
             cover_key,
+            revised_at: None,
         })
         .await?;
     for c in &mut chart_rows {
@@ -1996,6 +1997,7 @@ mod tests {
             facts_r2_key: "x".into(),
             published_at: None,
             cover_key: None,
+            revised_at: None,
         });
         build_tick(
             poll_time(),
