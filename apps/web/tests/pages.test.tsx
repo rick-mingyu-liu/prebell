@@ -74,7 +74,7 @@ describe("list pages are one paper column", () => {
 
   it("the calendar page renders the week from D1", async () => {
     const out = renderToStaticMarkup(await pages[1][1]());
-    expect(out).toContain('<a class="cal-tile-link" href="/en/p/earnings-intc-2026-10-29">');
+    expect(out).toMatch(/<a class="cal-tile-link" title="Intel" href="\/en\/p\/earnings-intc-2026-10-29">/);
     expect(out).toContain('alt="Intel"');
     expect(out).toContain('<span class="num up" aria-hidden="true">✓</span>');
     expect(out).toContain("Confirmed: the company announced the date.");
