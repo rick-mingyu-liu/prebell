@@ -54,7 +54,7 @@ describe("Privacy & Terms page", () => {
   it("states the dated English facts", async () => {
     const out = await render("en");
     expect(out).toContain("<h1>Privacy &amp; Terms</h1>");
-    expect(out).toContain("Last updated: November 5, 2026");
+    expect(out).toContain("Last updated: November 6, 2026");
     for (const fact of ["prebell.site", "Buttondown", "Cloudflare Web Analytics", "Ontario, Canada", "privacy@prebell.site", "support@prebell.site", "under 16", "PreBell may earn a referral fee"]) {
       expect(out, fact).toContain(fact);
     }
@@ -63,7 +63,7 @@ describe("Privacy & Terms page", () => {
   it("states the Chinese facts and the Chinese date", async () => {
     const out = await render("zh");
     expect(out).toContain("<h1>隐私与条款</h1>");
-    expect(out).toContain("最后更新：2026 年 11 月 5 日");
+    expect(out).toContain("最后更新：2026 年 11 月 6 日");
     for (const fact of ["Buttondown", "Cloudflare", "安大略省", "privacy@prebell.site", "support@prebell.site", "16 岁", "PreBell 可能获得推荐费"]) expect(out, fact).toContain(fact);
   });
 

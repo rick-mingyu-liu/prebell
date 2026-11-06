@@ -61,7 +61,7 @@
   },
   "legal": {
     "title": "Privacy & Terms",
-    "updated": "Last updated: November 5, 2026",
+    "updated": "Last updated: November 6, 2026",
     "privacy": [
       {
         "h": "Privacy: scope",
@@ -76,7 +76,8 @@
         ],
         "ul": [
           "Weekly digest email. If you subscribe, we collect your email address. Buttondown, our newsletter provider, handles it and sends you a confirmation email first. You can unsubscribe from any email we send, or in Buttondown's preferences portal.",
-          "Technical data. The site runs on Cloudflare. Cloudflare's edge logs may record your IP address, browser and request metadata, for security and to operate the service. If enabled, Cloudflare Web Analytics measures page views without cookies and without tracking individuals.",
+          "Technical data. The site runs on Cloudflare. Cloudflare's edge logs may record your IP address, browser and request metadata, for security and to operate the service.",
+          "Analytics. The site uses Cloudflare Web Analytics to count visits. It sets no cookies and does not track you across sites; it collects only aggregate visit data, such as the pages viewed, the referring site, the country and the browser type.",
           "Cookies and storage. The site sets no cookies of its own. It uses your browser's storage only for display preferences, if at all."
         ]
       },
