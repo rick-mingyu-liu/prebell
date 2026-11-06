@@ -108,6 +108,9 @@ const SKIP = {
 
 /** Tickers whose site icon is not the company's mark (it would be wrong, not just small): Commons and simple-icons only. */
 const NO_SITE_ICON = {
+  APTV: "its site icon is a plain orange dot, not Aptiv's logo",
+  RL: "its site icon is a 21px pony",
+  ODFL: "its site icon is a 32px seal, soft on a card",
   IBM: "its site icon is a grey bee-like glyph that does not read as IBM",
   MDT: "its site icon is a figure graphic, not the Medtronic mark",
   MAR: "its site icon is an orange ring that does not read as Marriott",
@@ -119,6 +122,11 @@ const NO_SITE_ICON = {
  * in review): no Commons file is used; simple-icons, then the site icon, then a text tile.
  */
 const NO_COMMONS = {
+  AFL: "Commons only has Aflac's katakana (Japan) logo",
+  ODFL: "its only Commons logo is a 48px JPG",
+  P: "renamed Everpure; Commons only has the Pure Storage logo",
+  TAL: "its only Commons logo is a blurry 74px raster",
+  UDR: "its only Commons logo is a 35px raster",
   BKNG: "its Commons logo is a cramped stacked lockup; the simple-icons glyph reads better",
   "BRK.B": "its Commons logo is Berkshire Hathaway Energy, a subsidiary",
   BRO: "Commons search finds Brown Bears Athletics",
@@ -175,6 +183,16 @@ const COMMONS = {
   LUV: "Southwest Airlines logo 2014.svg", // its Wikidata logo is the 1971 one
   TPR: "Tapestry logo.svg", // its Wikidata logo is Coach, one of its brands
   TT: "TraneTechnologieslogo.svg", // its Wikidata logo is Ingersoll Rand, the old name
+  // Old brands in Wikidata/search: the current mark.
+  APTV: "Aptiv logo.svg", // the site icon is a plain orange dot
+  BNY: "BNY logo 2024.svg", // Wikidata names "BNY Mellon"
+  LMT: "Lockheed Martin logo (2).svg", // Wikidata names the 2011-2022 logo
+  MCD: "McDonald's Golden Arches.svg", // the arches without the "i'm lovin' it" slogan
+  MRSH: "MarshMcLennan h rgb c.svg", // the search found the old name, Marsh & McLennan Companies
+  MSTR: "Strategy logo (2025).svg", // MicroStrategy renamed itself Strategy
+  RL: "Ralph Lauren logo.svg", // the site icon is a 21px pony
+  SNDK: "SanDisk 2024 logo.svg", // Wikidata names the 2007 logo
+  TSLA: "Tesla T symbol.svg", // Wikidata names "Tesla Motors"
   // Chinese companies listed in the US: the wordmark readers know, where Wikidata names something else.
   BILI: "Bilibili 2023.svg", // Wikidata names Bilibili Gaming, an esports team
   HSAI: "Hesai Technology.svg",
