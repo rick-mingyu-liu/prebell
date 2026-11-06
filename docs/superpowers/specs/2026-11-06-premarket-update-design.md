@@ -62,8 +62,12 @@ follows.
   `last_error` and retries next firing, untouched post. Past 09:25 it is
   marked `skipped` with **no alert**.
 - **On success** it writes, onto the base post (`posts.run_key` stays
-  `premarket:DATE`, same slug): fresh facts (same facts key, overwritten),
-  both translations, sources (replace), the front-page index line, and a new
+  `premarket:DATE`, same slug): fresh facts under a **new key**
+  `premarket/DATE-update.json`, written to R2 first, with the post's
+  `facts_r2_key` switched to it inside the same D1 batch as the text, so
+  the post and its facts flip together and the 8:00 facts stay intact
+  (a failed batch only leaves an unreferenced R2 object; ruled 2026-11-06,
+  replacing "same facts key, overwritten"), both translations, sources (replace), the front-page index line, and a new
   cover at a **new key** `covers/<slug>-update.svg` with the post's
   `cover_key` pointing to it (covers are served with a one-day cache, so the
   old key must not be reused). `published_at` keeps the base time;

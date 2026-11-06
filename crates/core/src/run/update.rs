@@ -27,6 +27,12 @@ pub fn run_key(trading_date: NaiveDate) -> String {
     format!("{CONTENT_TYPE}:{}", trading_date.format("%Y-%m-%d"))
 }
 
+/// The update's facts key, `premarket/YYYY-MM-DD-update.json`, beside the
+/// base's `premarket/YYYY-MM-DD.json`. Readers follow `posts.facts_r2_key`.
+pub fn facts_key(trading_date: NaiveDate) -> String {
+    format!("premarket/{}-update.json", trading_date.format("%Y-%m-%d"))
+}
+
 /// One update cron firing. A store error is reported as `Retrying`.
 pub async fn tick(
     now: DateTime<Utc>,
@@ -195,10 +201,11 @@ async fn build(
     if let Some(e) = cover_err {
         (hooks.log)(&format!("cover write failed: {e}"));
     }
-    // Same facts key; the base's facts are kept to put back if the rewrite fails.
+    // Its own facts key, written first and switched to in the rewrite below,
+    // so the post and its facts change together; the 8:00 facts stay as they are.
+    let facts_key = facts_key(date);
     let json = serde_json::to_string(&facts).map_err(|e| format!("facts json: {e}"))?;
-    let previous = store.get_facts(&post.facts_r2_key).await?;
-    store.put_facts(&post.facts_r2_key, &json).await?;
+    store.put_facts(&facts_key, &json).await?;
 
     let post_id = post.id.ok_or("post has no id")?;
     let cover = c.cover_lines(&facts);
@@ -224,22 +231,15 @@ async fn build(
         &ts,
     );
     let revised = PostRow {
+        facts_r2_key: facts_key,
         cover_key,
         revised_at: Some(ts.clone()),
         ..post
     };
-    let rewrite = store
+    // On failure nothing changed: the new facts and cover are unreferenced.
+    store
         .revise_post(&revised, &[en_row, zh_row], &c.sources(&facts))
-        .await;
-    if let Err(e) = rewrite {
-        // The post still has the base text: give it back the base facts.
-        if let Some(json) = previous {
-            if let Err(pe) = store.put_facts(&revised.facts_r2_key, &json).await {
-                (hooks.log)(&format!("base facts not restored: {pe}"));
-            }
-        }
-        return Err(e);
-    }
+        .await?;
     // The front page's index line; a failed write keeps the previous one.
     let index_line = match serde_json::to_string(&c.index_snapshot(&facts)) {
         Ok(json) => store.kv_set(INDEX_LINE_KEY, &json, &ts).await,
@@ -272,6 +272,7 @@ mod tests {
 
     const UPDATE_KEY: &str = "premarket-update:2026-10-29";
     const FACTS_KEY: &str = "premarket/2026-10-29.json";
+    const UPDATE_FACTS_KEY: &str = "premarket/2026-10-29-update.json";
     /// 08:00 ET on Thu 2026-10-29 (EDT), when the base brief publishes.
     const BASE_AT: &str = "2026-10-29T12:00:00Z";
     /// 08:35 ET, the update's first firing.
@@ -332,16 +333,17 @@ mod tests {
     fn run(s: &MemStore) -> Option<RunRow> {
         s.runs.borrow().get(UPDATE_KEY).cloned()
     }
+    /// The facts the post points at.
     fn stored_facts(s: &MemStore) -> PremarketFacts {
-        serde_json::from_str(&s.facts.borrow()[FACTS_KEY]).unwrap()
+        let key = s.posts.borrow()[0].facts_r2_key.clone();
+        serde_json::from_str(&s.facts.borrow()[&key]).unwrap()
     }
 
     #[test]
-    fn run_key_format() {
-        assert_eq!(
-            run_key(NaiveDate::from_ymd_opt(2026, 10, 29).unwrap()),
-            UPDATE_KEY
-        );
+    fn run_key_and_facts_key_format() {
+        let date = NaiveDate::from_ymd_opt(2026, 10, 29).unwrap();
+        assert_eq!(run_key(date), UPDATE_KEY);
+        assert_eq!(facts_key(date), UPDATE_FACTS_KEY);
     }
 
     #[tokio::test]
@@ -438,11 +440,13 @@ mod tests {
         let out = tick_with_hooks(utc(UPDATE_AT), &s, &m, &FakeNs, &l, &hooks).await;
         assert_eq!(out, TickOutcome::Published);
 
-        // One post, same id, run key, slug and publish time; new revision and cover.
+        // One post, same id, run key, slug and publish time; new revision,
+        // facts key and cover.
         let key = "covers/premarket-2026-10-29-update.svg";
         assert_eq!(
             *s.posts.borrow(),
             [PostRow {
+                facts_r2_key: UPDATE_FACTS_KEY.into(),
                 cover_key: Some(key.into()),
                 revised_at: Some(UPDATE_AT.into()),
                 ..base_post
@@ -463,14 +467,18 @@ mod tests {
         assert!(s.translations.borrow()[&(1, "zh".to_string())]
             .body_md
             .contains("## 期货"));
-        // Sources replaced, facts overwritten at the same key, index line rewritten.
+        // Sources replaced, fresh facts under their own key (the 8:00 facts
+        // kept), index line rewritten.
         let src = s.sources.borrow()[&1].clone();
         assert_eq!(
             src.iter().map(|r| r.url.as_str()).collect::<Vec<_>>(),
             [URL]
         );
         assert_eq!(stored_facts(&s).as_of_utc, utc(UPDATE_AT));
-        assert_eq!(s.facts.borrow().len(), 1);
+        let base_facts: PremarketFacts =
+            serde_json::from_str(&s.facts.borrow()[FACTS_KEY]).unwrap();
+        assert_eq!(base_facts.as_of_utc, utc(BASE_AT));
+        assert_eq!(s.facts.borrow().len(), 2);
         let snap: IndexSnapshot = serde_json::from_str(&s.kv.borrow()[INDEX_LINE_KEY]).unwrap();
         assert_eq!(snap.as_of_utc, UPDATE_AT);
         // Runs: the update is published; the base is untouched.
@@ -615,7 +623,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn failed_rewrite_writes_no_text_and_restores_the_facts() {
+    async fn failed_rewrite_leaves_the_post_on_the_8_00_facts() {
         let s = base_brief(true).await;
         let before = snapshot(&s);
         s.fail_revise_post.set(true);
@@ -626,10 +634,20 @@ mod tests {
         );
         let after = snapshot(&s);
         assert_eq!(after.posts, before.posts);
+        assert_eq!(after.posts[0].facts_r2_key, FACTS_KEY);
         assert_eq!(after.translations, before.translations);
         assert_eq!(after.sources, before.sources);
-        assert_eq!(after.facts, before.facts);
         assert_eq!(after.kv, before.kv);
+        // The 8:00 facts are untouched; the update's own are an unreferenced orphan.
+        assert_eq!(after.facts[FACTS_KEY], before.facts[FACTS_KEY]);
+        assert_eq!(
+            after
+                .facts
+                .keys()
+                .filter(|k| *k != FACTS_KEY)
+                .collect::<Vec<_>>(),
+            [UPDATE_FACTS_KEY]
+        );
         assert_eq!(run(&s).unwrap().status, "building");
         // After the lease the update rebuilds and lands.
         s.fail_revise_post.set(false);
@@ -638,6 +656,33 @@ mod tests {
             TickOutcome::Published
         );
         assert_eq!(stored_facts(&s).as_of_utc, utc("2026-10-29T12:50:00Z"));
+    }
+
+    #[tokio::test]
+    async fn base_zh_retry_reads_the_facts_the_post_points_at() {
+        let s = base_brief(true).await;
+        let (m, l) = (md(true), llm(true, true));
+        assert_eq!(
+            tick(utc(UPDATE_AT), &s, &m, &FakeNs, &l).await,
+            TickOutcome::Published
+        );
+        // With the 8:00 facts gone and ZH pending again, a base ZH retry
+        // can only draft from the update's facts key.
+        s.facts.borrow_mut().remove(FACTS_KEY);
+        s.translations
+            .borrow_mut()
+            .get_mut(&(1, "zh".to_string()))
+            .unwrap()
+            .status = "pending".into();
+        assert_eq!(
+            base_tick(utc("2026-10-29T12:45:00Z"), &s, &m, &FakeNs, &l).await,
+            TickOutcome::Published
+        );
+        let zh = s.translations.borrow()[&(1, "zh".to_string())].clone();
+        assert_eq!(
+            (zh.status.as_str(), zh.updated_at.as_str()),
+            ("published", "2026-10-29T12:45:00Z")
+        );
     }
 
     /// An LLM that, on its first ZH draft, lets the update land (a full

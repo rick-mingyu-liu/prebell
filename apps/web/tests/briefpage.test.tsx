@@ -387,6 +387,12 @@ describe("loadBrief", () => {
     expect(s.queries.some((q) => q.includes("post_charts"))).toBe(false);
   });
 
+  it("reads an updated brief's facts from the key the post points at", async () => {
+    const s = spies(seed());
+    await loadBrief(s.db, s.bucket, post({ factsKey: "premarket/2026-10-30-update.json", revisedAt: "2026-10-30T12:35:00Z" }), "en");
+    expect(s.gets).toEqual(["premarket/2026-10-30-update.json"]);
+  });
+
   it("loadBrief no longer loads the strip", async () => {
     const s = spies(seed());
     const data = await loadBrief(s.db, s.bucket, post(), "en");
