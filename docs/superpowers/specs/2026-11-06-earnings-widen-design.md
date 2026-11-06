@@ -233,15 +233,21 @@ to `proof_url` (the 8-K index, a primary source). No write-up, no logo. Their
    counts D1 calls for 300 seeds, and a poll test where a calendar-tier
    filing marks `reported` and queues no run.
 
-## Decisions for Rick
+## Decisions (Rick, 2026-11-06; docs/decisions.md)
 
-1. Write-up tier rule: recommend S&P 100 ∪ market cap ≥ $100B snapshot
-   (~150; about +50% earnings LLM spend).
-2. Extra foreign ADRs outside the indexes (Enbridge, Sony, Ferrari, Ryanair,
-   Suncor, CNQ, TC Energy, Manulife, Brookfield, Itaú, Teva, Novo):
-   recommend ~15 curated in the overrides file, calendar tier, total ≤550.
-   Teva files 10-Q/8-K and would be detected like any domestic filer.
-3. What calendar-only companies show: recommend row + name + ✓ + SEC link;
-   ticker page `noindex` until it has a post.
-4. New build queue (deploy configuration): recommend yes.
-5. English company names on ZH pages for v1: recommend yes.
+1. Write-up tier: S&P 100 + every company at or above $100B in a dated
+   market-cap snapshot ("S&P 100 + $100B+"). The snapshot of 2026-11-06 gives
+   139 rows (102 + 37).
+2. About 15 hand-picked large foreign companies outside both indexes, calendar
+   only: the six already listed (BCS NVO SAN SAP TM TSM) plus ENB SONY RACE
+   RYAAY SU CNQ TRP MFC BN ITUB TEVA, 17 in all. ENB and TEVA file 10-Q/8-K, so
+   their 8-Ks mark the calendar too.
+3. Calendar-only companies: row + name + ✓ + SEC filing link; ticker page
+   noindex until it has a check.
+4. Builds on their own queue, `prebell-earnings-build`.
+5. English company names on ZH pages for v1 (controller's call; reversible).
+
+Built as designed, with these rulings: the market caps come from Nasdaq's
+stock screener (Yahoo's v7 quote answered 429 to the build machine), and a
+filer is foreign only when it files 20-F/40-F/6-K and no 10-Q (so a new
+spin-off without a 10-Q yet is domestic).

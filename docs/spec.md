@@ -26,8 +26,8 @@ What defines it:
    - "Biggest premarket movers" / "盘前异动": top premarket gainers and losers among liquid US stocks, each with the news behind the move;
    - "What to watch" / "今日关注": a short list (scheduled data releases, earnings before the open).
 2. **After-close recap**, weekdays ~4:45 PM ET: "Index closes" / "指数收盘", "Macro & after the close" / "宏观与盘后", "Themes" / "板块动向" (same list line and paragraphs), "Notable movers" / "个股异动" with reasons, "After-hours earnings to watch" / "盘后财报关注". Shorter than the premarket brief. (Kept by default; owner hasn't objected.)
-3. **Earnings health checks** for a watchlist of large companies: triggered when the company's 8-K Item 2.02 appears on EDGAR. Covers revenue, margins, EPS (GAAP vs non-GAAP), cash flow, guidance, with charts, citing the filing and press release.
-4. **Earnings calendar page** (upcoming dates, before open / after close / unknown), confirmed from primary sources.
+3. **Earnings health checks** for the largest companies (the S&P 100 plus every S&P 500 ∪ Nasdaq-100 company at or above $100B in a dated market-cap snapshot): triggered when the company's 8-K Item 2.02 appears on EDGAR. Covers revenue, margins, EPS (GAAP vs non-GAAP), cash flow, guidance, with charts, citing the filing and press release.
+4. **Earnings calendar page** (upcoming dates, before open / after close / unknown), confirmed from primary sources, for the whole S&P 500 ∪ Nasdaq-100 plus about 15 hand-picked large foreign companies (Rick, 2026-11-06). A calendar-only company shows its name, a ✓ once reported and a link to its SEC filing; its ticker page is noindex until it has a check.
 5. **English + Simplified Chinese** for every piece, at `/en/...` and `/zh/...`.
 
 ## 4. Non-goals (not at launch)
@@ -81,7 +81,7 @@ EDGAR poller (every 2–5 min, market hours) ─┤
   - `MarketData`: Yahoo Finance unofficial endpoints first (owner); paid provider later. Covers quotes incl. premarket/after-hours, futures, index levels, movers screens.
   - `NewsSearch`: a web search API (Brave Search or Tavily — designer's call) because our code needs the full article text to verify quotes. Kept on Tavily after the Claude switch; Claude's web-search tool returns results to the model rather than raw text to our code.
   - `Filings`: SEC EDGAR (`data.sec.gov/submissions`, full-text/filing index). Must send a descriptive User-Agent with contact email and stay under 10 requests/second.
-- **Earnings detection:** during US hours (~6 AM–9 PM ET, weekdays), poll EDGAR submissions for watchlist companies every few minutes; a new 8-K with Item 2.02 queues an earnings job using the filing and its Exhibit 99.1 press release. Foreign filers (6-K, e.g., Toyota, Barclays, Santander) have no Item 2.02: at launch they're tracked only on the calendar, not auto-written.
+- **Earnings detection:** during US hours (~6 AM–9 PM ET, weekdays), poll EDGAR's current 8-K feed every few minutes (one feed for every company, so the cost does not grow with the watchlist); a new 8-K with Item 2.02 by a write-up company queues an earnings job using the filing and its Exhibit 99.1 press release, and one by a calendar-only company marks its calendar date reported. Foreign filers (6-K, e.g., Toyota, Barclays, Santander) have no Item 2.02: they're tracked only on the calendar, not auto-written. The watchlist (`crates/core/data/watchlist.tsv`) is generated from SEC data by `scripts/build-watchlist.mjs`.
 - **Earnings calendar:** seed upcoming dates from an aggregator (Yahoo's earnings calendar at launch); mark each entry `confirmed` only after primary proof (company IR announcement or EDGAR); entries with conflicting dates go to a quarantine list with reason and check times.
 
 ## 8. Content pipeline rules
@@ -123,7 +123,7 @@ EDGAR poller (every 2–5 min, market hours) ─┤
 
 - Exact D1 schema, crate choices, prompt wording, chart styling, visual design of the site.
 - Which liquid-stock universe defines "premarket movers" (e.g., S&P 500 + Nasdaq 100 + names above a volume threshold).
-- Watchlist size for earnings checks at launch (suggest S&P 100).
+- Watchlist size for earnings checks at launch (suggest S&P 100). Widened on 2026-11-06 (decisions.md): S&P 100 + $100B write-ups, S&P 500 ∪ Nasdaq-100 on the calendar.
 - Alerting channel for failures.
 - Whether to use the native-binary fallback for any part of the generator.
 
