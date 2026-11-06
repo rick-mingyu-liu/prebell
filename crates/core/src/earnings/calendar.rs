@@ -22,8 +22,9 @@ use crate::store::Store;
 
 /// Calendar rows of one ticker this close together describe the same report.
 pub const SAME_EVENT_DAYS: i64 = 21;
-/// Trading days ahead the aggregator's dates are kept for.
-pub const SEED_DAYS: usize = 10;
+/// Trading days ahead the aggregator's dates are kept for: from a Monday,
+/// this week and the two after; from a Friday, the next two full weeks.
+pub const SEED_DAYS: usize = 15;
 /// Company-announcement checks per daily refresh (each is one search and one LLM call).
 pub const IR_CHECKS: usize = 5;
 /// Only entries this close are checked against company announcements.
@@ -59,6 +60,9 @@ pub struct Seed {
     pub ticker: String,
     pub date: NaiveDate,
     pub slot: TimeSlot,
+    /// The aggregator's own guess (Yahoo's `isEarningsDateEstimate`): it can
+    /// add or move an unconfirmed row but never quarantines a company's date.
+    pub estimate: bool,
 }
 
 /// A company announcement naming the report date, anchored in the page text.
@@ -144,7 +148,8 @@ fn conflict(aggregator: NaiveDate, company: NaiveDate) -> String {
 /// Applies the reconcile rules (see `docs/plan-3.md` Task 11) to one
 /// ticker's rows and returns the writes. `reported` rows (EDGAR proof) and
 /// rows before `today` are history and never touched. A proof is applied
-/// before the seed, so a seed that disagrees with a fresh proof quarantines it.
+/// before the seed, so a seed that disagrees with a fresh proof quarantines it
+/// (unless the seed is an estimate, which only adds or moves unconfirmed rows).
 pub fn reconcile(
     existing: &[CalendarRow],
     seed: Option<&Seed>,
@@ -242,6 +247,10 @@ pub fn reconcile(
                     moved.first_seen_at = r.first_seen_at;
                     moved.time_slot = s.slot.as_str().into();
                     rows.insert(s.date, moved);
+                }
+                // The aggregator's guess never outweighs the company's date.
+                (false, _) if s.estimate => {
+                    rows.insert(d, r);
                 }
                 // Rule 4: the aggregator disagrees with a company-confirmed date.
                 (false, _) => {
@@ -729,14 +738,14 @@ async fn seed_from(
     }
     apply(es, store, changes, &rows, out).await?;
     // Rule 8: when the aggregator was read in full and no longer has a
-    // quarantined ticker in the window, its conflicting date is gone and
-    // the company's date stands.
+    // quarantined ticker in the window (or has only a guess for it), its
+    // conflicting date is gone and the company's date stands.
     if read.failed == 0 {
         let rows = es.calendar_between(&ymd(today), &ymd(last)).await?;
         let mut confirmed = Vec::new();
         for r in &rows {
-            if r.status == "quarantined" && r.proof_url.is_some() && !seeds.contains_key(&r.ticker)
-            {
+            let firm = seeds.get(&r.ticker).is_some_and(|s| !s.estimate);
+            if r.status == "quarantined" && r.proof_url.is_some() && !firm {
                 let mut r = r.clone();
                 r.status = "confirmed".into();
                 r.conflict_reason = None;
@@ -850,6 +859,7 @@ mod tests {
             ticker: "AAPL".into(),
             date: d(date),
             slot: TimeSlot::Amc,
+            estimate: false,
         }
     }
     fn proof(date: &str) -> Proof {
@@ -985,6 +995,35 @@ mod tests {
         let rows = after(&[q], &ch);
         assert_eq!(summary(&rows), [s3("2026-10-30", "confirmed", "ir")]);
         assert!(rows[0].conflict_reason.is_none());
+    }
+
+    #[test]
+    fn an_estimate_seeds_and_moves_guesses_but_never_quarantines() {
+        let guess = |date: &str| Seed {
+            estimate: true,
+            slot: TimeSlot::Unknown,
+            ..seed(date)
+        };
+        let ch = reconcile(&[], Some(&guess("2026-10-30")), None, today(), utc(NOW));
+        assert_eq!(
+            summary(&after(&[], &ch)),
+            [s3("2026-10-30", "unconfirmed", "yahoo")]
+        );
+        let old = [existing("2026-10-29", "unconfirmed", "yahoo")];
+        let ch = reconcile(&old, Some(&guess("2026-10-30")), None, today(), utc(NOW));
+        assert_eq!(
+            summary(&after(&old, &ch)),
+            [s3("2026-10-30", "unconfirmed", "yahoo")]
+        );
+        // Against the company's own date: only the check time moves.
+        for status in ["confirmed", "quarantined"] {
+            let old = [existing("2026-10-30", status, "ir")];
+            let ch = reconcile(&old, Some(&guess("2026-11-05")), None, today(), utc(NOW));
+            assert!(
+                !ch.iter().any(|c| changes_content(c, &old)),
+                "{status}: {ch:?}"
+            );
+        }
     }
 
     #[test]
@@ -1242,6 +1281,7 @@ mod tests {
                 ticker: t.into(),
                 date: d(date),
                 slot,
+                estimate: false,
             };
             SeedRead {
                 seeds: vec![
@@ -1354,6 +1394,66 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn an_aggregator_left_with_only_a_guess_confirms_the_company_date() {
+        let base = Rc::new(MemStore::default());
+        let es = MemEarningsStore::new(base.clone());
+        let mut q = existing("2026-10-30", "quarantined", "ir");
+        q.conflict_reason = Some("aggregator says 2026-10-29; company says 2026-10-30".into());
+        es.upsert_calendar(&q).await.unwrap();
+        struct Guess;
+        #[async_trait(?Send)]
+        impl CalendarSource for Guess {
+            async fn upcoming(&self, _: &[&str]) -> SeedRead {
+                SeedRead {
+                    seeds: vec![Seed {
+                        estimate: true,
+                        slot: TimeSlot::Unknown,
+                        ..seed("2026-11-05")
+                    }],
+                    ..Default::default()
+                }
+            }
+        }
+        let o = refresh_tick(utc(NOW), &es, base.as_ref(), Some(&Guess), &Ns, &Llm)
+            .await
+            .unwrap();
+        let rows = es.calendar_for("AAPL").await.unwrap();
+        assert_eq!(summary(&rows), [s3("2026-10-30", "confirmed", "ir")]);
+        assert!(o.quarantined.is_empty() && base.alerts.borrow().is_empty());
+    }
+
+    #[tokio::test]
+    async fn the_window_reaches_two_full_weeks_past_a_friday() {
+        // Fri 2026-11-06 07:00 ET: 15 trading days run to Fri Nov 27
+        // (Thanksgiving, Nov 26, is closed), so the week of Nov 23 is seeded.
+        let now = utc("2026-11-06T12:00:00Z");
+        let days = trading_days(d("2026-11-06"));
+        assert_eq!(days.len(), SEED_DAYS);
+        assert_eq!(days.last(), Some(&d("2026-11-27")));
+        assert!(!days.contains(&d("2026-11-26")));
+        let base = Rc::new(MemStore::default());
+        let es = MemEarningsStore::new(base.clone());
+        let src = Many(vec![
+            ("NVDA", d("2026-11-17")),
+            ("ADI", d("2026-11-24")),
+            ("DE", d("2026-11-27")),
+            ("HPQ", d("2026-11-30")),
+        ]);
+        let o = refresh_tick(
+            now,
+            &es,
+            base.as_ref(),
+            Some(&src),
+            &Queries::default(),
+            &Llm,
+        )
+        .await
+        .unwrap();
+        assert_eq!(o.seeds, 3, "HPQ's Nov 30 is the 16th trading day");
+        assert!(es.calendar_for("HPQ").await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
     async fn aggregator_down_alerts_once() {
         let base = Rc::new(MemStore::default());
         let es = MemEarningsStore::new(base.clone());
@@ -1407,6 +1507,7 @@ mod tests {
                         ticker: "XOM".into(),
                         date: "2026-10-30".parse().unwrap(),
                         slot: TimeSlot::Bmo,
+                        estimate: false,
                     }],
                     failed: tickers.len() - 50,
                     error: Some("not requested after HTTP 429".into()),
@@ -1459,6 +1560,7 @@ mod tests {
                         ticker: t.to_string(),
                         date: *date,
                         slot: TimeSlot::Bmo,
+                        estimate: false,
                     })
                     .collect(),
                 ..Default::default()
