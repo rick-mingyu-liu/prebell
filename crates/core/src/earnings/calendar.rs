@@ -711,14 +711,18 @@ pub async fn refresh_tick(
     }
 
     let horizon = ymd(today + Duration::days(IR_HORIZON_DAYS));
+    let full: HashSet<&'static str> = watchlist()
+        .iter()
+        .filter(|e| e.tier == Tier::Full)
+        .map(|e| e.ticker)
+        .collect();
     // Rotate: rows checked in the last `IR_RECHECK_HOURS` wait, so a busy
     // week does not check the same five names every day.
     let mut candidates = Vec::new();
     for r in es.calendar_between(&ymd(today), &horizon).await? {
         // Only write-up companies: the rest are calendar only, and the five
         // daily searches would go to them.
-        let full = find(&r.ticker).is_some_and(|e| e.tier == Tier::Full);
-        if r.status != "unconfirmed" || !full {
+        if r.status != "unconfirmed" || !full.contains(r.ticker.as_str()) {
             continue;
         }
         let key = ir_key(&r);
