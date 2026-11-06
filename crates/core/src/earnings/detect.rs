@@ -64,8 +64,9 @@ fn name_tokens(name: &str) -> Vec<String> {
 /// The filer's name is the row's SEC conformed name: the same significant
 /// words, ignoring case, punctuation, spacing and legal suffixes. Matching
 /// only the first word would, at about 530 rows, let a wrong CIK through
-/// between names that share it (American Express and American Tower). A company renamed on EDGAR fails until the watchlist is
-/// regenerated, and the poller alerts about it.
+/// between names that share it (American Express and American Tower). A
+/// company renamed on EDGAR fails until the watchlist is regenerated
+/// (`--refresh`), and the poller alerts about it.
 pub fn same_filer(filer: &str, sec: &str) -> bool {
     let (a, b) = (name_tokens(filer).concat(), name_tokens(sec).concat());
     !a.is_empty() && a == b

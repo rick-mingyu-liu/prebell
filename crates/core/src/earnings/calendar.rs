@@ -272,19 +272,26 @@ pub fn reconcile(
     out
 }
 
-/// An 8-K Item 2.02 is the strongest proof: its ET acceptance date becomes a
-/// `reported` row, replacing any other row of the same event.
-pub async fn record_filing(
-    es: &dyn EarningsStore,
-    f: &FilingRow,
-    now: DateTime<Utc>,
-) -> Result<(), String> {
-    let day = DateTime::parse_from_rfc3339(&f.accepted_at)
+/// The ET date an 8-K was accepted.
+fn accepted_day(f: &FilingRow) -> Result<NaiveDate, String> {
+    DateTime::parse_from_rfc3339(&f.accepted_at)
         .map(|t| et(t.with_timezone(&Utc)).date_naive())
-        .map_err(|e| format!("bad accepted_at: {e}"))?;
-    let existing = es.calendar_for(&f.ticker).await?;
+        .map_err(|e| format!("bad accepted_at: {e}"))
+}
+
+/// The writes that make one ticker's rows (`existing`) show the filing: its
+/// ET acceptance date becomes a `reported` row with the filing as proof,
+/// replacing any other row of the same event. Nothing when that row is
+/// already there.
+fn filing_changes(
+    existing: &[CalendarRow],
+    f: &FilingRow,
+    day: NaiveDate,
+    now: DateTime<Utc>,
+) -> Vec<Change> {
+    let mut out = Vec::new();
     let mut r = row(&f.ticker, day, "reported", "edgar", now);
-    for old in &existing {
+    for old in existing {
         let Some(d) = date(&old.report_date) else {
             continue;
         };
@@ -295,11 +302,63 @@ pub async fn record_filing(
             r.first_seen_at = old.first_seen_at.clone();
             r.time_slot = old.time_slot.clone();
         } else if old.status != "reported" {
-            es.delete_calendar(&old.ticker, &old.report_date).await?;
+            out.push(Change::Delete {
+                ticker: old.ticker.clone(),
+                date: old.report_date.clone(),
+            });
         }
     }
     r.proof_url = Some(filing_url(f.cik, &f.accession));
-    es.upsert_calendar(&r).await
+    out.push(Change::Upsert(Box::new(r)));
+    out.retain(|c| changes_content(c, existing));
+    out
+}
+
+/// An 8-K Item 2.02 is the strongest proof: each filing's ET acceptance date
+/// becomes a `reported` row, replacing any other row of the same event. One
+/// ranged read and one batched write for all of them, and no write for a
+/// filing already shown (a poll sees the same filings for hours): the Free
+/// plan allows 50 D1 queries per invocation. Returns the rows written.
+pub async fn record_filings(
+    es: &dyn EarningsStore,
+    filings: &[FilingRow],
+    now: DateTime<Utc>,
+) -> Result<usize, String> {
+    let days = filings
+        .iter()
+        .map(accepted_day)
+        .collect::<Result<Vec<_>, _>>()?;
+    let (Some(first), Some(last)) = (days.iter().min(), days.iter().max()) else {
+        return Ok(0);
+    };
+    let span = Duration::days(SAME_EVENT_DAYS);
+    let mut by_ticker: BTreeMap<String, Vec<CalendarRow>> = BTreeMap::new();
+    for r in es
+        .calendar_between(&ymd(*first - span), &ymd(*last + span))
+        .await?
+    {
+        by_ticker.entry(r.ticker.clone()).or_default().push(r);
+    }
+    let mut changes = Vec::new();
+    for (f, day) in filings.iter().zip(days) {
+        let rows = by_ticker.entry(f.ticker.clone()).or_default();
+        let ch = filing_changes(rows, f, day, now);
+        // Later filings of the same ticker see these writes.
+        for c in &ch {
+            match c {
+                Change::Delete { date, .. } => rows.retain(|r| &r.report_date != date),
+                Change::Upsert(r) => {
+                    rows.retain(|o| o.report_date != r.report_date);
+                    rows.push((**r).clone());
+                }
+            }
+        }
+        changes.extend(ch);
+    }
+    if !changes.is_empty() {
+        es.write_calendar(&changes).await?;
+    }
+    Ok(changes.len())
 }
 
 fn host(url: &str) -> Option<String> {
@@ -539,8 +598,9 @@ fn changes_content(c: &Change, prior: &[CalendarRow]) -> bool {
 }
 
 /// Writes the changes in one store call, skipping upserts that would only
-/// move the check times, and alerts once for each newly quarantined row.
-/// `prior` holds the rows the changes were computed from.
+/// move the check times, then alerts once for each newly quarantined row
+/// (after the write, so a failed write never alerts a quarantine that did
+/// not happen). `prior` holds the rows the changes were computed from.
 async fn apply(
     es: &dyn EarningsStore,
     store: &dyn Store,
@@ -552,6 +612,11 @@ async fn apply(
         .into_iter()
         .filter(|c| changes_content(c, prior))
         .collect();
+    if changes.is_empty() {
+        return Ok(());
+    }
+    es.write_calendar(&changes).await?;
+    out.changes += changes.len();
     for c in &changes {
         let Change::Upsert(r) = c else { continue };
         let was = prior
@@ -570,11 +635,7 @@ async fn apply(
             out.quarantined.push(r.ticker.clone());
         }
     }
-    out.changes += changes.len();
-    if changes.is_empty() {
-        return Ok(());
-    }
-    es.write_calendar(&changes).await
+    Ok(())
 }
 
 /// Whether the calendar refresh already ran on `now`'s ET date.
@@ -1065,6 +1126,10 @@ mod tests {
             ("KO", "The Coca-Cola Company will report results on October 30, 2026."),
             // The ticker inside a longer one is not the ticker.
             ("T", "AT&T partner TTEC Holdings (NASDAQ: TTEC) will report results on October 30, 2026."),
+            // Short names the $100B line added to the write-up tier.
+            ("KLAC", "Klaviyo, Inc. (NYSE: KVYO) will report results on October 30, 2026."),
+            ("ETN", "Eaton Vance Tax-Managed Fund (NYSE: ETV) will report results on October 30, 2026."),
+            ("CB", "Chubb Fire & Security, a Carrier unit (NYSE: CARR), will report results on October 30, 2026."),
         ] {
             assert!(!check(ticker, quote), "{ticker}: {quote}");
         }
@@ -1088,6 +1153,18 @@ mod tests {
             (
                 "AAPL",
                 "Apple Inc. (NASDAQ: AAPL) will report results on October 30, 2026.",
+            ),
+            (
+                "KLAC",
+                "KLA Corporation (NASDAQ: KLAC) will report results on October 30, 2026.",
+            ),
+            (
+                "ETN",
+                "Eaton Corporation plc (NYSE: ETN) will report results on October 30, 2026.",
+            ),
+            (
+                "CB",
+                "Chubb Limited (NYSE: CB) will report results on October 30, 2026.",
             ),
         ] {
             assert!(check(ticker, quote), "{ticker}: {quote}");
@@ -1515,7 +1592,7 @@ mod tests {
             state: "open".into(),
             detected_at: "2026-10-30T20:31:00Z".into(),
         };
-        record_filing(&es, &f, utc("2026-10-30T20:31:00Z"))
+        record_filings(&es, &[f], utc("2026-10-30T20:31:00Z"))
             .await
             .unwrap();
         let rows = es.calendar_for("AAPL").await.unwrap();

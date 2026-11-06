@@ -2,6 +2,8 @@
 //! `migrations/0001_init.sql`; NULL text columns read back as "". Read
 //! failures are returned as `Err`, never as a missing row.
 
+use std::cell::Cell;
+
 use async_trait::async_trait;
 use prebell_core::facts::NewsReason;
 use prebell_core::store::{PostRow, RunRow, Store, TranslationRow};
@@ -13,6 +15,9 @@ use worker::{Bucket, D1Database, HttpMetadata};
 pub struct D1Store {
     pub db: D1Database,
     pub facts: Bucket,
+    /// D1 queries run since the last `reset_queries` (Free plan: 50 per
+    /// invocation; a batch is one).
+    pub queries: Cell<usize>,
 }
 
 pub(crate) fn s(v: &str) -> JsValue {
@@ -105,11 +110,30 @@ pub fn now_iso() -> String {
 }
 
 impl D1Store {
+    pub fn new(db: D1Database, facts: Bucket) -> Self {
+        Self {
+            db,
+            facts,
+            queries: Cell::new(0),
+        }
+    }
+
+    /// Counts one D1 query (a statement or a batch) against the Free plan's 50.
+    pub(crate) fn query(&self) {
+        self.queries.set(self.queries.get() + 1);
+    }
+
+    /// Returns the queries counted so far and starts again from 0.
+    pub fn reset_queries(&self) -> usize {
+        self.queries.replace(0)
+    }
+
     pub(crate) async fn first<T: DeserializeOwned>(
         &self,
         sql: &str,
         args: &[JsValue],
     ) -> Result<Option<T>, String> {
+        self.query();
         let stmt = self.db.prepare(sql).bind(args).map_err(|e| err(sql, e))?;
         stmt.first::<T>(None).await.map_err(|e| err(sql, e))
     }
@@ -125,6 +149,7 @@ impl D1Store {
     }
 
     pub(crate) async fn run(&self, sql: &str, args: &[JsValue]) -> Result<(), String> {
+        self.query();
         let stmt = self.db.prepare(sql).bind(args).map_err(|e| err(sql, e))?;
         let r = stmt.run().await.map_err(|e| err(sql, e))?;
         match r.error() {
@@ -139,6 +164,7 @@ impl crate::alerts::AlertQueue for D1Store {
     async fn unsent_alerts(&self, limit: usize) -> Result<Vec<AlertRec>, String> {
         let sql =
             "SELECT id, run_key, level, message FROM alerts WHERE sent = 0 ORDER BY id LIMIT ?1";
+        self.query();
         let r = self
             .db
             .prepare(sql)
@@ -215,6 +241,7 @@ impl Store for D1Store {
     ) -> Result<Vec<PostRow>, String> {
         let sql = "SELECT id, run_key, content_type, template_id, trading_date, slug, facts_r2_key, published_at, cover_key \
                    FROM posts WHERE content_type = ?1 AND trading_date = ?2 AND published_at IS NOT NULL ORDER BY id";
+        self.query();
         let r = self
             .db
             .prepare(sql)
@@ -318,6 +345,7 @@ impl Store for D1Store {
             );
         }
         // One batch = one transaction: delete and re-insert land together.
+        self.query();
         let results = self.db.batch(stmts).await.map_err(|e| err(ctx, e))?;
         match results.iter().find(|r| !r.success()) {
             Some(r) => Err(format!("{ctx}: {}", r.error().unwrap_or_default())),

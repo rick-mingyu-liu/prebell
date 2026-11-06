@@ -12,7 +12,8 @@
 //   node scripts/build-watchlist.mjs            generate (fetches what the cache lacks or has old)
 //   node scripts/build-watchlist.mjs --refresh  fetch everything from SEC again, whatever the cache
 //   node scripts/build-watchlist.mjs --offline  use only the cache, whatever its age
-//   node scripts/build-watchlist.mjs --caps     refresh marketcap-snapshot.tsv (Nasdaq screener) first
+//   node scripts/build-watchlist.mjs --caps     refresh marketcap-snapshot.tsv (Nasdaq screener)
+//                                               first
 // A full-tier row without domains stops the run and prints Wikidata's official websites (P856)
 // for those CIKs as suggestions; check them and add them to the overrides. See docs/runbook.md.
 import { createHash } from "node:crypto";
@@ -47,9 +48,9 @@ const BROWSER_UA =
 const MAX_ROWS = 550;
 
 /**
- * Rows whose display name does not start with a word of their SEC name, checked by hand. Any other such
- * row stops the run: SEC may map a reused ticker to a different company (SATS went from EchoStar to
- * Strive), and the CIK would follow it.
+ * Rows whose display name does not start with a word of their SEC name, checked by hand. Any
+ * other such row stops the run: SEC may map a reused ticker to a different company (SATS went
+ * from EchoStar to Strive), and the CIK would follow it.
  */
 const NAME_OK = {
   BNY: "Bank of New York Mellon",
@@ -60,7 +61,8 @@ const NAME_OK = {
 };
 /** The same noise words as `NAME_NOISE` in crates/core/src/earnings/detect.rs. */
 const NAME_NOISE = new Set(
-  "inc incorporated corp corporation co company companies ltd limited plc holdings holding the group sa nv ag lp llc".split(" "),
+  ("inc incorporated corp corporation co company companies ltd limited plc holdings holding the " +
+    "group sa nv ag lp llc").split(" "),
 );
 /** Lowercase, accent-free significant words ("Itaú Unibanco" -> ["itau", "unibanco"]). */
 const nameWords = (name) =>
@@ -136,8 +138,8 @@ async function fetchCaps(tickers) {
   const day = new Intl.DateTimeFormat("en-CA", { timeZone: "America/New_York" }).format(new Date());
   const lines = [
     `# Market caps (USD, Nasdaq stock screener) of the universe.txt tickers, fetched ${day} ET by`,
-    "# scripts/build-watchlist.mjs --caps. 0 = the screener gave none. The $100B write-up line reads this",
-    "# snapshot; refresh it with the quarterly index refresh, not daily.",
+    "# scripts/build-watchlist.mjs --caps. 0 = the screener gave none. The $100B write-up line",
+    "# reads this snapshot; refresh it with the quarterly index refresh, not daily.",
     `# as-of ${day}`,
     ...tickers.map((t) => `${t}\t${Math.round(bySymbol.get(t))}`),
   ];
@@ -202,7 +204,8 @@ for (const ticker of candidates) {
   const sub = await secJson(`https://data.sec.gov/submissions/CIK${String(cik).padStart(10, "0")}.json`);
   const recent = sub.filings.recent;
   const since = new Date(Date.parse(asOf) - DOMESTIC_DAYS * 86_400_000).toISOString().slice(0, 10);
-  const filed = (pred) => recent.form.some((f, i) => recent.filingDate[i] >= since && recent.filingDate[i] <= asOf && pred(f, i));
+  const inWindow = (i) => recent.filingDate[i] >= since && recent.filingDate[i] <= asOf;
+  const filed = (pred) => recent.form.some((f, i) => inWindow(i) && pred(f, i));
   // Foreign: files 20-F/40-F/6-K and no 10-Q. A new company (spin-off, IPO) with no 10-Q yet is
   // domestic.
   const fpi = filed((f) => ["20-F", "40-F", "6-K"].includes(f)) && !filed((f) => f === "10-Q");
@@ -210,14 +213,20 @@ for (const ticker of candidates) {
   if (filer === "domestic" && !filed((f, i) => f === "8-K" && recent.items[i].split(",").includes("2.02")))
     notes.no202.push(ticker);
   const secName = sub.name.trim();
-  if (secName.toLowerCase() !== sec.title.trim().toLowerCase()) notes.titleDiffers.push(`${ticker}: ${sec.title} / ${secName}`);
+  if (secName.toLowerCase() !== sec.title.trim().toLowerCase())
+    notes.titleDiffers.push(`${ticker}: ${sec.title} / ${secName}`);
   const name = o.name ?? universe.find((u) => u.ticker === ticker)?.name;
   if (!name) fail(`${ticker}: an extra company needs a name in the overrides`);
   if (!sameCompany(name, secName) && !(ticker in NAME_OK))
-    fail(`${ticker}: SEC files CIK ${cik} as "${secName}", not "${name}" (a reused ticker?); check it, then add it to NAME_OK`);
+    fail(
+      `${ticker}: SEC files CIK ${cik} as "${secName}", not "${name}" (a reused ticker?); ` +
+        "check it, then add it to NAME_OK",
+    );
   if (!inUniverse.has(ticker) && o.tier !== "calendar") fail(`${ticker}: extra companies are calendar only`);
-  // A universe ticker the snapshot lacks fails (rerun with --caps); 0 is a cap the screener left out.
-  if (inUniverse.has(ticker) && !caps.has(ticker)) fail(`${ticker} is not in marketcap-snapshot.tsv; run with --caps`);
+  // A universe ticker the snapshot lacks fails (rerun with --caps); 0 is a cap the screener left
+  // out.
+  if (inUniverse.has(ticker) && !caps.has(ticker))
+    fail(`${ticker} is not in marketcap-snapshot.tsv; run with --caps`);
   let tier = o.tier ?? (caps.get(ticker) >= FULL_CAP ? "full" : "calendar");
   // A foreign (6-K) filer has no Item 2.02 to write from.
   if (filer === "foreign") tier = "calendar";
@@ -265,11 +274,15 @@ writeFileSync(`${WEB_OUT}.tmp`, web);
 renameSync(`${OUT}.tmp`, OUT);
 renameSync(`${WEB_OUT}.tmp`, WEB_OUT);
 
-const count = (pred) => rows.filter(pred).length;
+const count = (key, value) => rows.filter((r) => r[key] === value).length;
 console.log(
-  `wrote ${rows.length} rows: ${count((r) => r.tier === "full")} full, ${count((r) => r.tier === "calendar")} calendar; ` +
-    `${count((r) => r.filer === "domestic")} domestic, ${count((r) => r.filer === "foreign")} foreign (caps as of ${asOf})`,
+  `wrote ${rows.length} rows: ${count("tier", "full")} full, ${count("tier", "calendar")} calendar; ` +
+    `${count("filer", "domestic")} domestic, ${count("filer", "foreign")} foreign (caps as of ${asOf})`,
 );
 console.log(`foreign filers: ${rows.filter((r) => r.filer === "foreign").map((r) => r.ticker).join(" ")}`);
-console.log(`domestic, no 8-K Item 2.02 in ${DOMESTIC_DAYS} days (never detected, calendar seeds only): ${notes.no202.join(" ") || "none"}`);
-if (notes.titleDiffers.length) console.log(`company_tickers title differs from the submissions name:\n  ${notes.titleDiffers.join("\n  ")}`);
+console.log(
+  `domestic, no 8-K Item 2.02 in ${DOMESTIC_DAYS} days (never detected, calendar seeds only): ` +
+    (notes.no202.join(" ") || "none"),
+);
+if (notes.titleDiffers.length)
+  console.log(`company_tickers title differs from the submissions name:\n  ${notes.titleDiffers.join("\n  ")}`);
