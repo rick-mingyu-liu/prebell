@@ -17,6 +17,7 @@ describe("companyLogo", () => {
   it("is null for tickers without a logo, unknown tickers and odd input", () => {
     expect(companyLogo("AVGO")).toBeNull();
     expect(companyLogo("BRK.B")).toBeNull();
+    for (const t of ["ISRG", "STX", "IBM", "MDT", "MAR", "AMAT", "ADI", "AMT"]) expect(companyLogo(t)).toBeNull(); // the script's SKIP list
     expect(companyLogo("ZZZZ")).toBeNull();
     expect(companyLogo("")).toBeNull();
     expect(companyLogo("constructor")).toBeNull();
