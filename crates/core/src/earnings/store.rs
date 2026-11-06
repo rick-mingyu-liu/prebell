@@ -3,12 +3,13 @@
 //! state. Rows mirror `migrations/0003_earnings.sql` column for column.
 //! The generator implements this on D1; `MemEarningsStore` serves tests.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
 use std::rc::Rc;
 
 use async_trait::async_trait;
 
+use crate::earnings::calendar::Change;
 use crate::store::MemStore;
 
 /// `earnings_filings` row. `state`: open | done.
@@ -76,6 +77,9 @@ pub trait EarningsStore {
     /// Insert or replace by `(ticker, report_date)`.
     async fn upsert_calendar(&self, r: &CalendarRow) -> Result<(), String>;
     async fn delete_calendar(&self, ticker: &str, report_date: &str) -> Result<(), String>;
+    /// Applies the changes in order, in as few calls as the store allows (D1:
+    /// one batch per 100 statements).
+    async fn write_calendar(&self, changes: &[Change]) -> Result<(), String>;
     async fn kv_get(&self, key: &str) -> Result<Option<String>, String>;
     async fn kv_set(&self, key: &str, value: &str, now: &str) -> Result<(), String>;
 }
@@ -88,6 +92,8 @@ pub struct MemEarningsStore {
     pub charts: RefCell<BTreeMap<i64, Vec<ChartRow>>>,
     pub calendar: RefCell<BTreeMap<(String, String), CalendarRow>>,
     pub kv: RefCell<BTreeMap<String, String>>,
+    /// Calendar and kv calls made (each one D1 call in the generator).
+    pub calls: Cell<usize>,
 }
 
 impl MemEarningsStore {
@@ -140,6 +146,7 @@ impl EarningsStore for MemEarningsStore {
         Ok(())
     }
     async fn calendar_for(&self, ticker: &str) -> Result<Vec<CalendarRow>, String> {
+        self.calls.set(self.calls.get() + 1);
         Ok(self
             .calendar
             .borrow()
@@ -149,6 +156,7 @@ impl EarningsStore for MemEarningsStore {
             .collect())
     }
     async fn calendar_between(&self, from: &str, to: &str) -> Result<Vec<CalendarRow>, String> {
+        self.calls.set(self.calls.get() + 1);
         let mut v: Vec<CalendarRow> = self
             .calendar
             .borrow()
@@ -160,21 +168,40 @@ impl EarningsStore for MemEarningsStore {
         Ok(v)
     }
     async fn upsert_calendar(&self, r: &CalendarRow) -> Result<(), String> {
+        self.calls.set(self.calls.get() + 1);
         self.calendar
             .borrow_mut()
             .insert((r.ticker.clone(), r.report_date.clone()), r.clone());
         Ok(())
     }
     async fn delete_calendar(&self, ticker: &str, report_date: &str) -> Result<(), String> {
+        self.calls.set(self.calls.get() + 1);
         self.calendar
             .borrow_mut()
             .remove(&(ticker.to_string(), report_date.to_string()));
         Ok(())
     }
+    async fn write_calendar(&self, changes: &[Change]) -> Result<(), String> {
+        self.calls.set(self.calls.get() + 1);
+        let mut cal = self.calendar.borrow_mut();
+        for c in changes {
+            match c {
+                Change::Upsert(r) => {
+                    cal.insert((r.ticker.clone(), r.report_date.clone()), (**r).clone());
+                }
+                Change::Delete { ticker, date } => {
+                    cal.remove(&(ticker.clone(), date.clone()));
+                }
+            }
+        }
+        Ok(())
+    }
     async fn kv_get(&self, key: &str) -> Result<Option<String>, String> {
+        self.calls.set(self.calls.get() + 1);
         Ok(self.kv.borrow().get(key).cloned())
     }
     async fn kv_set(&self, key: &str, value: &str, _now: &str) -> Result<(), String> {
+        self.calls.set(self.calls.get() + 1);
         self.kv.borrow_mut().insert(key.into(), value.into());
         Ok(())
     }

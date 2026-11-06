@@ -2,6 +2,7 @@
 //! Read failures are returned as `Err`, never as a missing row.
 
 use async_trait::async_trait;
+use prebell_core::earnings::calendar::Change;
 use prebell_core::earnings::store::{CalendarRow, ChartRow, EarningsStore, FilingRow};
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
@@ -96,6 +97,39 @@ const FILING_COLS: &str = "accession, cik, ticker, form, items, filing_date, rep
     accepted_at, primary_doc, run_key, state, detected_at";
 const CAL_COLS: &str = "ticker, report_date, time_slot, status, source, proof_url, proof_quote, \
     conflict_reason, first_seen_at, checked_at, next_check_at, updated_at";
+
+const DELETE_CALENDAR: &str =
+    "DELETE FROM earnings_calendar WHERE ticker = ?1 AND report_date = ?2";
+/// Statements per D1 batch in `write_calendar` (each batch is one call).
+const WRITE_BATCH: usize = 100;
+
+fn upsert_calendar_sql() -> String {
+    format!(
+        "INSERT INTO earnings_calendar ({CAL_COLS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12) \
+         ON CONFLICT(ticker, report_date) DO UPDATE SET time_slot = excluded.time_slot, \
+         status = excluded.status, source = excluded.source, proof_url = excluded.proof_url, \
+         proof_quote = excluded.proof_quote, conflict_reason = excluded.conflict_reason, \
+         first_seen_at = excluded.first_seen_at, checked_at = excluded.checked_at, \
+         next_check_at = excluded.next_check_at, updated_at = excluded.updated_at"
+    )
+}
+
+fn calendar_args(r: &CalendarRow) -> Vec<JsValue> {
+    vec![
+        s(&r.ticker),
+        s(&r.report_date),
+        s(&r.time_slot),
+        s(&r.status),
+        s(&r.source),
+        opt(r.proof_url.as_deref()),
+        opt(r.proof_quote.as_deref()),
+        opt(r.conflict_reason.as_deref()),
+        s(&r.first_seen_at),
+        s(&r.checked_at),
+        opt(r.next_check_at.as_deref()),
+        s(&r.updated_at),
+    ]
+}
 
 impl D1Store {
     async fn all<T: DeserializeOwned>(
@@ -212,40 +246,32 @@ impl EarningsStore for D1Store {
     }
 
     async fn upsert_calendar(&self, r: &CalendarRow) -> Result<(), String> {
-        let sql = format!(
-            "INSERT INTO earnings_calendar ({CAL_COLS}) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12) \
-             ON CONFLICT(ticker, report_date) DO UPDATE SET time_slot = excluded.time_slot, \
-             status = excluded.status, source = excluded.source, proof_url = excluded.proof_url, \
-             proof_quote = excluded.proof_quote, conflict_reason = excluded.conflict_reason, \
-             first_seen_at = excluded.first_seen_at, checked_at = excluded.checked_at, \
-             next_check_at = excluded.next_check_at, updated_at = excluded.updated_at"
-        );
-        self.run(
-            &sql,
-            &[
-                s(&r.ticker),
-                s(&r.report_date),
-                s(&r.time_slot),
-                s(&r.status),
-                s(&r.source),
-                opt(r.proof_url.as_deref()),
-                opt(r.proof_quote.as_deref()),
-                opt(r.conflict_reason.as_deref()),
-                s(&r.first_seen_at),
-                s(&r.checked_at),
-                opt(r.next_check_at.as_deref()),
-                s(&r.updated_at),
-            ],
-        )
-        .await
+        self.run(&upsert_calendar_sql(), &calendar_args(r)).await
     }
 
     async fn delete_calendar(&self, ticker: &str, report_date: &str) -> Result<(), String> {
-        self.run(
-            "DELETE FROM earnings_calendar WHERE ticker = ?1 AND report_date = ?2",
-            &[s(ticker), s(report_date)],
-        )
-        .await
+        self.run(DELETE_CALENDAR, &[s(ticker), s(report_date)])
+            .await
+    }
+
+    async fn write_calendar(&self, changes: &[Change]) -> Result<(), String> {
+        let ctx = "write_calendar";
+        let upsert = upsert_calendar_sql();
+        for chunk in changes.chunks(WRITE_BATCH) {
+            let mut stmts = Vec::with_capacity(chunk.len());
+            for c in chunk {
+                let (sql, args) = match c {
+                    Change::Upsert(r) => (upsert.as_str(), calendar_args(r)),
+                    Change::Delete { ticker, date } => (DELETE_CALENDAR, vec![s(ticker), s(date)]),
+                };
+                stmts.push(self.db.prepare(sql).bind(&args).map_err(|e| err(ctx, e))?);
+            }
+            let results = self.db.batch(stmts).await.map_err(|e| err(ctx, e))?;
+            if let Some(r) = results.iter().find(|r| !r.success()) {
+                return Err(format!("{ctx}: {}", r.error().unwrap_or_default()));
+            }
+        }
+        Ok(())
     }
 
     async fn kv_get(&self, key: &str) -> Result<Option<String>, String> {
