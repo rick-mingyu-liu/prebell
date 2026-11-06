@@ -452,6 +452,7 @@ async fn publish<C: Content>(
             facts_r2_key: facts_key,
             published_at: Some(ts.clone()),
             cover_key,
+            revised_at: None,
         })
         .await?;
     // The front page's index line; a failed write keeps the previous one.
@@ -902,6 +903,7 @@ mod tests {
             facts_r2_key: "premarket/2026-10-29.json".into(),
             published_at: None,
             cover_key: None,
+            revised_at: None,
         });
         s.runs
             .borrow_mut()
@@ -1387,6 +1389,14 @@ mod tests {
         }
         async fn upsert_post(&self, p: &PostRow) -> Result<i64, String> {
             self.inner.upsert_post(p).await
+        }
+        async fn revise_post(
+            &self,
+            p: &PostRow,
+            t: &[TranslationRow],
+            s: &[NewsReason],
+        ) -> Result<(), String> {
+            self.inner.revise_post(p, t, s).await
         }
         async fn get_translation(
             &self,

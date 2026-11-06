@@ -37,6 +37,8 @@ pub struct PostRow {
     pub published_at: Option<String>,
     /// R2 key of the rendered cover image, once one exists.
     pub cover_key: Option<String>,
+    /// UTC ISO 8601 with `Z`: when `revise_post` last rewrote the post.
+    pub revised_at: Option<String>,
 }
 
 /// `post_translations` row. `lang`: en | zh; `status`: published | pending | failed.
@@ -68,8 +70,20 @@ pub trait Store {
         trading_date: &str,
     ) -> Result<Vec<PostRow>, String>;
     /// Insert or update by `run_key`; returns the existing id when the run
-    /// already has a post, so re-runs never create a second post.
+    /// already has a post, so re-runs never create a second post. An update
+    /// keeps the stored `revised_at`: only `revise_post` changes it.
     async fn upsert_post(&self, p: &PostRow) -> Result<i64, String>;
+    /// Rewrites the post `p.id` in one transaction: its `facts_r2_key`,
+    /// `cover_key` and `revised_at` (every other column, `published_at`
+    /// included, is kept), the translations `t` (insert or replace by
+    /// `(post_id, lang)`) and its sources (replaced by `s`). On `Err`
+    /// nothing was written.
+    async fn revise_post(
+        &self,
+        p: &PostRow,
+        t: &[TranslationRow],
+        s: &[NewsReason],
+    ) -> Result<(), String>;
     async fn get_translation(
         &self,
         post_id: i64,
@@ -110,6 +124,8 @@ pub struct MemStore {
     pub fail_facts_key: RefCell<Option<String>>,
     /// Makes `put_bytes` fail and store nothing, as an R2 outage would.
     pub fail_put_bytes: Cell<bool>,
+    /// Makes `revise_post` fail and write nothing, as a failed D1 batch would.
+    pub fail_revise_post: Cell<bool>,
 }
 
 #[async_trait(?Send)]
@@ -155,7 +171,12 @@ impl Store for MemStore {
         let mut posts = self.posts.borrow_mut();
         if let Some(existing) = posts.iter_mut().find(|e| e.run_key == p.run_key) {
             let id = existing.id;
-            *existing = PostRow { id, ..p.clone() };
+            let revised_at = existing.revised_at.take();
+            *existing = PostRow {
+                id,
+                revised_at,
+                ..p.clone()
+            };
             return id.ok_or_else(|| "stored post has no id".to_string());
         }
         let id = posts.len() as i64 + 1;
@@ -164,6 +185,31 @@ impl Store for MemStore {
             ..p.clone()
         });
         Ok(id)
+    }
+    async fn revise_post(
+        &self,
+        p: &PostRow,
+        t: &[TranslationRow],
+        s: &[NewsReason],
+    ) -> Result<(), String> {
+        if self.fail_revise_post.get() {
+            return Err("d1: revise_post failed".into());
+        }
+        let id = p.id.ok_or("revise_post: post has no id")?;
+        let mut posts = self.posts.borrow_mut();
+        let existing = posts
+            .iter_mut()
+            .find(|e| e.id == Some(id))
+            .ok_or_else(|| format!("revise_post: no post {id}"))?;
+        existing.facts_r2_key = p.facts_r2_key.clone();
+        existing.cover_key = p.cover_key.clone();
+        existing.revised_at = p.revised_at.clone();
+        let mut translations = self.translations.borrow_mut();
+        for row in t {
+            translations.insert((id, row.lang.clone()), row.clone());
+        }
+        self.sources.borrow_mut().insert(id, s.to_vec());
+        Ok(())
     }
     async fn get_translation(
         &self,
@@ -235,6 +281,7 @@ mod tests {
             facts_r2_key: "facts/x.json".into(),
             published_at: Some("2026-11-04T12:00:00Z".into()),
             cover_key: Some("covers/x.png".into()),
+            revised_at: None,
         }
     }
 
@@ -280,5 +327,93 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(s.kv.borrow()["index_line"], "{}");
+    }
+
+    fn tr(post_id: i64, lang: &str, title: &str) -> TranslationRow {
+        TranslationRow {
+            post_id,
+            lang: lang.into(),
+            status: "published".into(),
+            title: title.into(),
+            summary: "S".into(),
+            body_md: "B".into(),
+            updated_at: "2026-11-04T12:35:00Z".into(),
+            cover_line1: None,
+            cover_line2: None,
+        }
+    }
+    fn reason(url: &str) -> NewsReason {
+        NewsReason {
+            url: url.into(),
+            title: "t".into(),
+            quote: "q".into(),
+            summary_en: "s".into(),
+        }
+    }
+
+    #[tokio::test]
+    async fn mem_store_revise_post_rewrites_in_place_and_upsert_keeps_revised_at() {
+        let s = MemStore::default();
+        let id = s.upsert_post(&post()).await.unwrap();
+        s.upsert_translation(&tr(id, "en", "old")).await.unwrap();
+        s.add_sources(id, &[reason("https://a.test")])
+            .await
+            .unwrap();
+        let revised = PostRow {
+            id: Some(id),
+            slug: "ignored".into(),
+            published_at: Some("ignored".into()),
+            facts_r2_key: "facts/y.json".into(),
+            cover_key: Some("covers/x-update.svg".into()),
+            revised_at: Some("2026-11-04T12:35:00Z".into()),
+            ..post()
+        };
+        s.revise_post(
+            &revised,
+            &[tr(id, "en", "new"), tr(id, "zh", "新")],
+            &[reason("https://b.test")],
+        )
+        .await
+        .unwrap();
+        let got = s.posts.borrow()[0].clone();
+        assert_eq!(
+            got,
+            PostRow {
+                id: Some(id),
+                facts_r2_key: "facts/y.json".into(),
+                cover_key: Some("covers/x-update.svg".into()),
+                revised_at: Some("2026-11-04T12:35:00Z".into()),
+                ..post()
+            }
+        );
+        assert_eq!(
+            s.get_translation(id, "en").await.unwrap().unwrap().title,
+            "new"
+        );
+        assert_eq!(
+            s.get_translation(id, "zh").await.unwrap().unwrap().title,
+            "新"
+        );
+        assert_eq!(s.sources.borrow()[&id], [reason("https://b.test")]);
+
+        // A later upsert by run key keeps the revision time.
+        assert_eq!(s.upsert_post(&post()).await.unwrap(), id);
+        assert_eq!(
+            s.posts.borrow()[0].revised_at.as_deref(),
+            Some("2026-11-04T12:35:00Z")
+        );
+
+        // A failed rewrite writes nothing.
+        s.fail_revise_post.set(true);
+        let before = (s.posts.borrow().clone(), s.translations.borrow().clone());
+        assert!(s
+            .revise_post(&revised, &[tr(id, "en", "x")], &[])
+            .await
+            .is_err());
+        assert_eq!(
+            (s.posts.borrow().clone(), s.translations.borrow().clone()),
+            before
+        );
+        assert_eq!(s.sources.borrow()[&id], [reason("https://b.test")]);
     }
 }
