@@ -16,6 +16,7 @@ use crate::earnings::detect::{domestic_by_cik, earnings_entries, name_mismatches
 use crate::earnings::draft::{slug, write, CONTENT_TYPE, TEMPLATE_ID};
 use crate::earnings::extract::{extract, Extracted};
 use crate::earnings::facts::{missing_required, EarningsFacts, Metric, Metrics, NOT_STATED};
+use crate::earnings::foreign::{foreign_tick, ForeignOutcome};
 use crate::earnings::store::{ChartRow, EarningsStore, FilingRow};
 use crate::earnings::xbrl::fetch_trend;
 use crate::earnings::{find, in_window, Tier, WatchEntry};
@@ -69,6 +70,8 @@ pub struct PollOutcome {
     pub stale: bool,
     /// Messages to queue next, each its own invocation.
     pub follow_ups: Vec<EarningsStep>,
+    /// The 6-K part: foreign filers' results releases.
+    pub foreign: ForeignOutcome,
 }
 
 pub fn run_key(ticker: &str, accession: &str) -> String {
@@ -235,6 +238,19 @@ pub async fn poll_job(
     }
     if !in_window(now) {
         return Ok(out);
+    }
+    // Foreign filers report on 6-Ks; skipped while SEC refuses requests.
+    if !out.throttled {
+        let f = foreign_tick(now, es, filings).await?;
+        if f.throttled {
+            let msg = format!(
+                "SEC EDGAR refused requests (403/429) on the 6-K feed: {}",
+                f.errors.last().cloned().unwrap_or_default()
+            );
+            alert_once_today(now, "sec-throttled", "error", &msg, store).await?;
+        }
+        out.errors.extend(f.errors.iter().cloned());
+        out.foreign = f;
     }
     let builds = match out.detected.len() {
         0 => retry_builds(&es.open_runs().await?, now),
@@ -1330,6 +1346,8 @@ mod tests {
         let o = poll_job(t, Some(t), &es, base.as_ref(), &fl).await.unwrap();
         assert!(fl.page_calls.borrow().len() <= MAX_FEED_PAGES);
         assert_eq!(o.detected, vec![KEY.to_string()]);
+        // The 6-K feed is read too (empty here).
+        assert_eq!(o.foreign.pages, 1);
         // One build per new filing, plus the day's calendar refresh.
         assert_eq!(o.follow_ups, [EarningsStep::Build, EarningsStep::Calendar]);
         assert!(!o.stale);

@@ -279,18 +279,19 @@ fn accepted_day(f: &FilingRow) -> Result<NaiveDate, String> {
         .map_err(|e| format!("bad accepted_at: {e}"))
 }
 
-/// The writes that make one ticker's rows (`existing`) show the filing: its
-/// ET acceptance date becomes a `reported` row with the filing as proof,
+/// The writes that make one ticker's rows (`existing`) show a report: `day`
+/// becomes a `reported` row with the filing index `proof_url` as proof,
 /// replacing any other row of the same event. Nothing when that row is
 /// already there.
-fn filing_changes(
+pub(crate) fn report_changes(
     existing: &[CalendarRow],
-    f: &FilingRow,
+    ticker: &str,
     day: NaiveDate,
+    proof_url: String,
     now: DateTime<Utc>,
 ) -> Vec<Change> {
     let mut out = Vec::new();
-    let mut r = row(&f.ticker, day, "reported", "edgar", now);
+    let mut r = row(ticker, day, "reported", "edgar", now);
     for old in existing {
         let Some(d) = date(&old.report_date) else {
             continue;
@@ -308,10 +309,23 @@ fn filing_changes(
             });
         }
     }
-    r.proof_url = Some(filing_url(f.cik, &f.accession));
+    r.proof_url = Some(proof_url);
     out.push(Change::Upsert(Box::new(r)));
     out.retain(|c| changes_content(c, existing));
     out
+}
+
+/// One ticker's rows after `changes`, so later changes see them.
+pub(crate) fn apply_to(rows: &mut Vec<CalendarRow>, changes: &[Change]) {
+    for c in changes {
+        match c {
+            Change::Delete { date, .. } => rows.retain(|r| &r.report_date != date),
+            Change::Upsert(r) => {
+                rows.retain(|o| o.report_date != r.report_date);
+                rows.push((**r).clone());
+            }
+        }
+    }
 }
 
 /// An 8-K Item 2.02 is the strongest proof: each filing's ET acceptance date
@@ -342,17 +356,9 @@ pub async fn record_filings(
     let mut changes = Vec::new();
     for (f, day) in filings.iter().zip(days) {
         let rows = by_ticker.entry(f.ticker.clone()).or_default();
-        let ch = filing_changes(rows, f, day, now);
+        let ch = report_changes(rows, &f.ticker, day, filing_url(f.cik, &f.accession), now);
         // Later filings of the same ticker see these writes.
-        for c in &ch {
-            match c {
-                Change::Delete { date, .. } => rows.retain(|r| &r.report_date != date),
-                Change::Upsert(r) => {
-                    rows.retain(|o| o.report_date != r.report_date);
-                    rows.push((**r).clone());
-                }
-            }
-        }
+        apply_to(rows, &ch);
         changes.extend(ch);
     }
     if !changes.is_empty() {

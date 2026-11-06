@@ -56,6 +56,8 @@ pub struct FeedEntry {
 #[derive(Debug, Clone, PartialEq)]
 pub struct FilingDoc {
     pub name: String,
+    /// The index's Description column ("FY2027 SEMI-ANNUAL FINANCIAL SUMMARY").
+    pub description: String,
     /// EDGAR document type, e.g. `8-K`, `EX-99.1`.
     pub doc_type: String,
     /// Absolute `https://www.sec.gov/Archives/...` URL.
@@ -97,6 +99,16 @@ pub trait Filings {
     async fn current_filings(&self, start: usize) -> Result<Vec<FeedEntry>, ProviderError>;
     async fn filing_docs(&self, cik: u64, accession: &str)
         -> Result<Vec<FilingDoc>, ProviderError>;
+    /// One page of the current 6-K filings feed (foreign private issuers),
+    /// like `current_filings`. No 6-K filings unless implemented.
+    async fn current_6k_filings(&self, _start: usize) -> Result<Vec<FeedEntry>, ProviderError> {
+        Ok(vec![])
+    }
+    /// The first `max` bytes of a filed document as plain text: enough to
+    /// recognise a release without reading (and parsing) all of it.
+    async fn document_head(&self, url: &str, _max: usize) -> Result<String, ProviderError> {
+        self.document_text(url).await
+    }
     /// A filed document as plain text (`html_to_text`).
     async fn document_text(&self, url: &str) -> Result<String, ProviderError>;
     /// One us-gaap concept, or `None` when the company never tagged it (404).
@@ -147,6 +159,15 @@ impl<H: Http, T: Timer> Edgar<H, T> {
 
     /// `prefix`: keep the first `MAX_BYTES` of a bigger body instead of failing.
     async fn fetch(&self, url: &str, prefix: bool) -> Result<String, ProviderError> {
+        self.fetch_max(url, prefix, MAX_BYTES).await
+    }
+
+    async fn fetch_max(
+        &self,
+        url: &str,
+        prefix: bool,
+        max: usize,
+    ) -> Result<String, ProviderError> {
         if self.used.replace(true) {
             self.timer
                 .sleep(std::time::Duration::from_millis(self.gap_ms))
@@ -157,9 +178,9 @@ impl<H: Http, T: Timer> Edgar<H, T> {
             ("Accept-Encoding", "gzip, deflate"),
         ];
         let r = if prefix {
-            self.http.get_prefix(url, &headers, MAX_BYTES).await?
+            self.http.get_prefix(url, &headers, max).await?
         } else {
-            self.http.get_capped(url, &headers, MAX_BYTES).await?
+            self.http.get_capped(url, &headers, max).await?
         };
         if r.status != 200 {
             return Err(ProviderError::Http(r.status));
@@ -204,9 +225,20 @@ pub const FEED_PAGE: usize = 100;
 
 /// The current 8-K filings feed, newest first, `FEED_PAGE` entries from `start`.
 pub fn current_feed_url(start: usize) -> String {
+    current_form_feed_url("8-K", start)
+}
+
+/// The current filings feed of one form (`8-K`, `6-K`; amendments included).
+pub fn current_form_feed_url(form: &str, start: usize) -> String {
     format!(
-        "https://www.sec.gov/cgi-bin/browse-edgar?action=getcurrent&type=8-K&company=&dateb=&owner=include&start={start}&count={FEED_PAGE}&output=atom"
+        "https://www.sec.gov/cgi-bin/browse-edgar?action=getcurrent&type={form}&company=&dateb=&owner=include&start={start}&count={FEED_PAGE}&output=atom"
     )
+}
+
+/// Plain text of the opening of a document cut at a byte limit: the cut
+/// half-tag is dropped first.
+pub fn head_text(html: &str) -> String {
+    html_to_text(&html[..html.rfind('>').map_or(0, |i| i + 1)])
 }
 
 /// The text between `<tag ...>` and `</tag>` in `s`.
@@ -315,6 +347,7 @@ pub fn parse_filing_index(html: &str) -> Vec<FilingDoc> {
         }
         out.push(FilingDoc {
             name: html_to_text(&a[2]),
+            description: html_to_text(cells[1]),
             doc_type: html_to_text(cells[3]),
             url: format!("https://www.sec.gov{path}"),
         });
@@ -395,6 +428,23 @@ pub fn html_to_text(html: &str) -> String {
 impl<H: Http, T: Timer> Filings for Edgar<H, T> {
     async fn current_filings(&self, start: usize) -> Result<Vec<FeedEntry>, ProviderError> {
         parse_current_feed(&self.get(&current_feed_url(start)).await?)
+    }
+
+    async fn current_6k_filings(&self, start: usize) -> Result<Vec<FeedEntry>, ProviderError> {
+        parse_current_feed(&self.get(&current_form_feed_url("6-K", start)).await?)
+    }
+
+    async fn document_head(&self, url: &str, max: usize) -> Result<String, ProviderError> {
+        if !url.starts_with(ARCHIVES) {
+            return Err(ProviderError::Parse(format!(
+                "not an EDGAR archive url: {url}"
+            )));
+        }
+        let text = head_text(&self.fetch_max(url, true, max).await?);
+        if text.is_empty() {
+            return Err(ProviderError::Empty);
+        }
+        Ok(text)
     }
 
     async fn filing_docs(
@@ -652,6 +702,7 @@ pub(crate) mod tests {
     #[test]
     fn exhibit_fallback_and_absence() {
         let doc = |name: &str, t: &str| FilingDoc {
+            description: String::new(),
             name: name.into(),
             doc_type: t.into(),
             url: format!("{ARCHIVES}1/2/{name}"),

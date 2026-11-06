@@ -263,11 +263,15 @@ impl JobRunner for Runner<'_> {
                 }
                 Ok((
                     format!(
-                        "pages {}, entries {}, new {:?}, queued {:?}",
+                        "pages {}, entries {}, new {:?}, queued {:?}; 6-K pages {}, read {}, reported {:?}, rejected {:?}",
                         o.pages,
                         o.checked,
                         o.detected,
-                        o.follow_ups.iter().map(|s| s.job()).collect::<Vec<_>>()
+                        o.follow_ups.iter().map(|s| s.job()).collect::<Vec<_>>(),
+                        o.foreign.pages,
+                        o.foreign.read,
+                        o.foreign.reported,
+                        o.foreign.rejected
                     ),
                     false,
                 ))
