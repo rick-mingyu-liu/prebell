@@ -214,7 +214,20 @@
     "showMore": "Show {count} more",
     "charts": "Charts (GAAP)",
     "chartsNote": "Charts show GAAP figures from SEC filings; the last bar marked 8-K is this release. A gap means the company did not report that quarter separately.",
-    "checkedFiling": "✓ Every figure traced to the filing"
+    "checkedFiling": "✓ Every figure traced to the filing",
+    "boardTitle": "Week of {date}",
+    "countCompanies": "{count, plural, =0 {No companies} one {# company} other {# companies}}",
+    "countEvents": "{count, plural, one {# economy event} other {# economy events}}",
+    "thisWeek": "Back to this week",
+    "share": "Share",
+    "shareCopied": "Link copied",
+    "shareFailed": "Copy this link:",
+    "today": "Today",
+    "past": "Past",
+    "days": "Days of the week",
+    "emptySlot": "None",
+    "weeks": "Weeks",
+    "keyDashed": "dashed card: date not confirmed"
   },
   "events": {
     "group": "Economy & Fed",

@@ -2,6 +2,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { Locale } from "../src/i18n/routing";
 import { translator } from "../src/lib/translator";
+import { addDays, todayEt, weekStart } from "../src/lib/earnings";
 import { memoryD1 } from "./d1";
 
 // The pages read D1 through getDb() and messages through next-intl/server; both are swapped for
@@ -54,7 +55,9 @@ describe("list pages are one paper column", () => {
     it(`${name}: one column with no sidebar and no in-page language pill`, async () => {
       const out = renderToStaticMarkup(await page());
       // React hoists a preload link for each eager image (the calendar's first logos); it comes ahead of the page.
-      expect(out.replace(/^(<link [^>]*\/>)+/, "").startsWith('<div class="list-page">')).toBe(true);
+      // The calendar is the one wide page: its board of day columns is wider than the paper column.
+      const root = name === "earnings calendar" ? '<div class="cal-page">' : '<div class="list-page">';
+      expect(out.replace(/^(<link [^>]*\/>)+/, "").startsWith(root)).toBe(true);
       expect(out).not.toContain("sidebar");
       expect(out).not.toContain("grid-article");
       expect(out).not.toContain("lang-pill");
@@ -72,13 +75,67 @@ describe("list pages are one paper column", () => {
     expect(out).not.toContain("<h3");
   });
 
-  it("the calendar page renders the week from D1", async () => {
+  it("the calendar page renders the week from D1 as a board", async () => {
     const out = renderToStaticMarkup(await pages[1][1]());
-    expect(out).toMatch(/<a class="cal-tile-link" title="Intel" href="\/en\/p\/earnings-intc-2026-10-29">/);
-    expect(out).toContain('alt="Intel"');
-    expect(out).toContain('<span class="num up" aria-hidden="true">✓</span>');
+    expect(out).toContain('<div class="cal-board">');
+    expect(out).toMatch(/<a class="cal-card-link" title="Intel" href="\/en\/p\/earnings-intc-2026-10-29">/);
+    expect(out).toContain('<span class="cal-card-name">Intel</span>');
+    expect(out).toContain('<span class="cal-card-tick" aria-hidden="true">✓</span>');
+    expect(out).toContain('<span class="cal-card-name">Agilent Technologies</span>');
     expect(out).toContain("Confirmed: the company announced the date.");
+    expect(out).toContain("Times US Eastern. Economy &amp; Fed:");
     expect(out).toContain('<nav class="pager">');
+  });
+
+  it("heads the board with the week, its count, the week arrows, the way back and a share button", async () => {
+    const out = renderToStaticMarkup(await pages[1][1]());
+    expect(out).toContain('<h1 class="cal-title"><span class="kicker">Market calendar</span>Week of Oct 26, 2026</h1>');
+    // Two companies, no events that week: the events count is left out.
+    expect(out).toContain('<p class="cal-count">2 companies</p>');
+    expect(out).toContain('<nav class="cal-weeks" aria-label="Weeks">');
+    expect(out).toContain(
+      '<a class="cal-btn cal-arrow" rel="prev" href="/en/earnings?week=2026-10-19"><span aria-hidden="true">←</span><span class="sr-only">Previous week</span></a>',
+    );
+    expect(out).toContain('<a class="cal-btn cal-arrow" rel="next" href="/en/earnings?week=2026-11-02">');
+    // A week that is not this one links back to it.
+    expect(out).toContain('<a class="cal-btn cal-this-week" href="/en/earnings">Back to this week</a>');
+    // The share button waits for script (hidden in the server markup), with a live region for its result.
+    expect(out).toMatch(/<button type="button" class="cal-btn cal-share-btn" hidden="">.*?Share<\/button><span class="cal-share-msg" role="status"><\/span>/);
+    expect(out).not.toMatch(/download/i);
+    // The board itself: five columns, none of them today in a past week.
+    expect(out.match(/<section id="d-2026-10-/g)).toHaveLength(5);
+    expect(out).not.toContain("is-today");
+  });
+
+  it("the current week has no way back, counts companies once and events, and marks today", async () => {
+    const today = todayEt();
+    const monday = weekStart(today);
+    env.db = memoryD1(
+      `${seed}
+      INSERT INTO earnings_calendar (ticker, report_date, time_slot, status, source, first_seen_at, checked_at, updated_at)
+        VALUES ('AMD','${monday}','amc','confirmed','yahoo','2026-10-01','2026-10-29','2026-10-29');
+      INSERT INTO earnings_calendar (ticker, report_date, time_slot, status, source, first_seen_at, checked_at, updated_at)
+        VALUES ('AMD','${addDays(monday, 1)}','bmo','unconfirmed','yahoo','2026-10-01','2026-10-29','2026-10-29');
+      INSERT INTO macro_events (id, series, ref_period, variant, starts_at, et_date, tier, status, proof_url, release_url, moved_from, missing_count, first_seen_at, checked_at, updated_at)
+        VALUES ('bls:cpi:x','cpi','2026-10',NULL,'${monday}T13:30:00Z','${monday}',1,'confirmed','https://www.bls.gov/schedule/news_release/cpi.htm',NULL,NULL,0,'x','x','x');`,
+    );
+    const out = renderToStaticMarkup(await EarningsCalendar(props({ locale: "en" })));
+    expect(out).toContain('<p class="cal-count">1 company · 1 economy event</p>');
+    expect(out).not.toContain("Back to this week");
+    expect(out).toContain('<div class="cal-econ"><h3 class="cal-slot">Economy &amp; Fed</h3>');
+    const weekday = new Date(`${today}T12:00:00Z`).getUTCDay();
+    if (weekday >= 1 && weekday <= 5) expect(out).toContain(`<section id="d-${today}" class="cal-col is-today"`);
+  });
+
+  it("the Chinese calendar heads the board in Chinese", async () => {
+    const out = renderToStaticMarkup(await EarningsCalendar(props({ locale: "zh" }, { week: "2026-10-26" })));
+    expect(out).toContain('<h1 class="cal-title"><span class="kicker">市场日历</span>2026年10月26日当周</h1>');
+    expect(out).toContain('<p class="cal-count">本周 2 家公司</p>');
+    expect(out).toContain('<span class="sr-only">上一周</span>');
+    expect(out).toContain(">回到本周</a>");
+    expect(out).toMatch(/hidden="">.*?分享<\/button>/);
+    expect(out).toContain("<time dateTime=\"2026-10-26\">周一 · 10/26</time>");
+    expect(out).toContain("时间均为美东时间。经济与美联储");
   });
 
   it("the ticker page lists its checks and its report dates without badges", async () => {
