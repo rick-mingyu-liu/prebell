@@ -212,6 +212,23 @@ describe("globals.css", () => {
     expect(css).toMatch(/\.cal-unconfirmed \.cal-card-link \{ border-style: dashed; border-color: var\(--muted\);/);
   });
 
+  it("keeps the desktop board compact, inside the content column", () => {
+    // No breakout past the wrap: the board and its header are as wide as the masthead rule.
+    expect(css).not.toMatch(/--board|100vw/);
+    const desktop = boardBlocks().join("\n");
+    // About 96x44 cards (2.18:1), an 80x28 logo box (the per-mark height is at most 28px), 20px icons.
+    expect(desktop).toMatch(/\.cal-card-link \{[^}]*aspect-ratio: 24 \/ 11;[^}]*max-height: 44px;/);
+    expect(desktop).toMatch(/\.cal-logo-wide \{ max-width: 80px;/);
+    expect(desktop).toMatch(/\.cal-logo-icon \{ width: 20px; height: 20px; \}/);
+    expect(desktop).toMatch(/\.cal-card-text \.cal-card-sym \{ font-size: 13px; \}/);
+    expect(desktop).toMatch(/\.cal-card-text \.cal-card-name \{ font-size: 10.5px; \}/);
+    expect(desktop).toMatch(/\.cal-cards \{ grid-template-columns: repeat\(auto-fill, minmax\(min\(100%, 80px\), 1fr\)\); gap: 6px; \}/);
+    // Five columns of two halves still fit at a 1000px window: only a column under 160px stacks its halves.
+    expect(css).toMatch(/@container col \(max-width: 160px\)/);
+    // A narrow half keeps its English label on one line by dropping the icon, not by clipping the words.
+    expect(css).toMatch(/@container half \(max-width: 95px\) \{ html:not\(:lang\(zh-Hans\)\) \.cal-half > h3\.cal-slot \.cal-slot-icon \{ display: none; \} \}/);
+  });
+
   it("keeps the day chips on screen above a column the reader jumps to", () => {
     expect(css).toMatch(/\.cal-chips \{ position: sticky; top: 0;[^}]*background: var\(--paper\);/);
     // A jump lands the column below the stuck chips (about 40px tall), not under them.

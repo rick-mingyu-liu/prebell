@@ -11,7 +11,7 @@ vi.mock("../src/lib/logos.generated", () => ({
     SMALLW: "/logos/companies/SMALLW.png",
     TINY: "/logos/companies/TINY.png",
   },
-  COMPANY_LOGO_SIZES: { WIDE: [128, 32], EDGE: [86, 48], SMALLW: [51, 22], TINY: [17, 19] },
+  COMPANY_LOGO_SIZES: { WIDE: [128, 32], EDGE: [86, 48], SMALLW: [45, 18], TINY: [17, 19] },
 }));
 
 const { default: CalendarWeek, WIDE_LOGO, wordmarkHeight } = await import("../src/components/CalendarWeek");
@@ -54,21 +54,24 @@ describe("calendar cards with wide logos", () => {
 
   it("sets a wordmark across the card, named by its alt, with no ticker beside it", () => {
     expect(card("WIDE")).toContain('class="cal-card cal-card-wide cal-confirmed"');
-    expect(card("WIDE")).toContain('<img class="cal-logo-wide" src="/logos/companies/WIDE.svg" alt="Wide Corp" width="128" height="32" style="height:22px" loading="eager"');
+    expect(card("WIDE")).toContain('<img class="cal-logo-wide" src="/logos/companies/WIDE.svg" alt="Wide Corp" width="128" height="32" style="height:17px" loading="eager"');
     expect(card("WIDE")).not.toContain("cal-card-sym");
   });
 
-  it("sizes wordmarks for an even weight: long marks shorter, within 16-30px", () => {
-    expect(wordmarkHeight(1.8)).toBe(30);
-    expect(wordmarkHeight(2.6)).toBe(28);
-    expect(wordmarkHeight(128 / 32)).toBe(22);
-    expect(wordmarkHeight(5)).toBe(20);
-    expect(wordmarkHeight(20)).toBe(16);
+  it("sizes wordmarks for an even weight in the 80x28 logo box: long marks shorter, within 12-28px", () => {
+    expect(wordmarkHeight(1.8)).toBe(25);
+    expect(wordmarkHeight(2)).toBe(23);
+    expect(wordmarkHeight(2.6)).toBe(21);
+    expect(wordmarkHeight(128 / 32)).toBe(17);
+    expect(wordmarkHeight(5)).toBe(15);
+    expect(wordmarkHeight(20)).toBe(12);
+    // Never taller than the box, whatever the ratio.
+    for (const r of [1.8, 1.9, 2, 3, 10]) expect(wordmarkHeight(r)).toBeLessThanOrEqual(28);
   });
 
   it("never draws a logo above its natural size", () => {
-    // 51x22 would get 29px from the even-weight rule; it stays at its own 22px.
-    expect(card("SMALLW")).toContain('width="51" height="22" style="height:22px"');
+    // 45x18 would get 21px from the even-weight rule; it stays at its own 18px.
+    expect(card("SMALLW")).toContain('width="45" height="18" style="height:18px"');
     // A 17x19 icon keeps its size instead of filling the 28px box; full-size icons need no style.
     expect(card("TINY")).toContain('class="cal-logo-icon" src="/logos/companies/TINY.png" alt="" width="17" height="19" style="width:17px;height:19px"');
   });
