@@ -5,8 +5,8 @@
 # large foreign companies. Write-ups ("full" tier) for the S&P 100 and every company at or above
 # $100B in the market-cap snapshot of 2026-11-06; the rest is calendar only. CIKs and SEC names from
 # SEC company_tickers.json and submissions; a filer is foreign when, in the 456 days
-# before 2026-11-06, it filed a 20-F, 40-F or 6-K and no 10-Q. The poller skips (and alerts once a day about) an EDGAR filing
-# under a row's CIK whose filer name is not the row's SEC name.
+# before 2026-11-06, it filed a 20-F, 40-F or 6-K and no 10-Q. The poller skips (and alerts once a
+# day about) an EDGAR filing under a row's CIK whose filer name is not the row's SEC name.
 #
 # Columns (tab-separated): ticker, CIK, filer (domestic | foreign), display name, company web
 # domains (comma-separated; subdomains match; calendar proof), SEC conformed name, tier

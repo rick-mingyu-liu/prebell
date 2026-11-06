@@ -5,16 +5,18 @@
 //   crates/core/data/marketcap-snapshot.tsv  dated market caps (the $100B write-up line)
 // plus SEC data: company_tickers.json (ticker -> CIK) and each CIK's submissions JSON (conformed
 // name, filing history -> domestic or foreign filer). SEC fair access: a User-Agent with a contact
-// address and at most 5 requests/second (half the 10/s limit). Definitive SEC answers (200) are
-// cached in node_modules/.cache/watchlist, so a rerun on the same cache writes the same bytes.
+// address and at most 5 requests/second (half the 10/s limit). SEC answers (200) are cached in
+// node_modules/.cache/watchlist for CACHE_HOURS, so reruns the same day write the same bytes; an
+// older entry is fetched again, so a rename or a new filing type shows up on the next day's run.
 // Usage (repo root):
-//   node scripts/build-watchlist.mjs            generate (fetches what the cache lacks)
-//   node scripts/build-watchlist.mjs --offline  use only the cache
+//   node scripts/build-watchlist.mjs            generate (fetches what the cache lacks or has old)
+//   node scripts/build-watchlist.mjs --refresh  fetch everything from SEC again, whatever the cache
+//   node scripts/build-watchlist.mjs --offline  use only the cache, whatever its age
 //   node scripts/build-watchlist.mjs --caps     refresh marketcap-snapshot.tsv (Nasdaq screener) first
 // A full-tier row without domains stops the run and prints Wikidata's official websites (P856)
 // for those CIKs as suggestions; check them and add them to the overrides. See docs/runbook.md.
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -28,6 +30,9 @@ const WEB_OUT = join(ROOT, "apps/web/src/lib/companies.generated.ts");
 const CACHE = join(ROOT, "node_modules/.cache/watchlist");
 const OFFLINE = process.argv.includes("--offline");
 const REFRESH_CAPS = process.argv.includes("--caps");
+const REFRESH_SEC = process.argv.includes("--refresh");
+/** A cached SEC answer older than this is fetched again (unless --offline). */
+const CACHE_HOURS = 20;
 const UA = "PreBell watchlist build (https://prebell.site; support@prebell.site)";
 /** 5 requests/second to SEC. */
 const SEC_GAP_MS = 200;
@@ -41,11 +46,49 @@ const BROWSER_UA =
 /** watchlist.rs reads every row; 11 Yahoo batches of 50 in the calendar refresh. */
 const MAX_ROWS = 550;
 
+/**
+ * Rows whose display name does not start with a word of their SEC name, checked by hand. Any other such
+ * row stops the run: SEC may map a reused ticker to a different company (SATS went from EchoStar to
+ * Strive), and the CIK would follow it.
+ */
+const NAME_OK = {
+  BNY: "Bank of New York Mellon",
+  GE: "General Electric, trading as GE Aerospace",
+  IBM: "International Business Machines",
+  SPCX: "Space Exploration Technologies",
+  WAB: "Westinghouse Air Brake Technologies, trading as Wabtec",
+};
+/** The same noise words as `NAME_NOISE` in crates/core/src/earnings/detect.rs. */
+const NAME_NOISE = new Set(
+  "inc incorporated corp corporation co company companies ltd limited plc holdings holding the group sa nv ag lp llc".split(" "),
+);
+/** Lowercase, accent-free significant words ("Itaú Unibanco" -> ["itau", "unibanco"]). */
+const nameWords = (name) =>
+  name
+    .normalize("NFD")
+    .replace(/\p{M}/gu, "")
+    .toLowerCase()
+    .replace(/[&.'\u2019]/g, "")
+    .split(/[^\p{L}\p{N}]+/u)
+    .filter((w) => w && !NAME_NOISE.has(w));
+/**
+ * The display name's first word of 3 or more letters (initials such as "C.H." are spelled apart on
+ * EDGAR) is a word of the SEC name, or the SEC name's first two words joined ("ExxonMobil").
+ */
+const sameCompany = (display, sec) => {
+  const all = nameWords(display);
+  const key = all.find((w) => w.length >= 3) ?? all[0];
+  const words = nameWords(sec);
+  return Boolean(key) && (words.includes(key) || words.slice(0, 2).join("") === key);
+};
+
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const fail = (msg) => {
   console.error(`build-watchlist: ${msg}`);
   process.exit(1);
 };
+
+if (OFFLINE && REFRESH_SEC) fail("--offline and --refresh exclude each other");
 
 /** Tab-separated data lines without comments. */
 const tsv = (path) =>
@@ -62,7 +105,8 @@ let lastSec = 0;
 async function secJson(url) {
   mkdirSync(CACHE, { recursive: true });
   const file = join(CACHE, `${createHash("sha1").update(url).digest("hex")}.json`);
-  if (existsSync(file)) return JSON.parse(readFileSync(file, "utf8"));
+  const fresh = existsSync(file) && Date.now() - statSync(file).mtimeMs < CACHE_HOURS * 3_600_000;
+  if (existsSync(file) && (OFFLINE || (fresh && !REFRESH_SEC))) return JSON.parse(readFileSync(file, "utf8"));
   if (OFFLINE) fail(`not cached (--offline): ${url}`);
   const wait = lastSec + SEC_GAP_MS - Date.now();
   if (wait > 0) await sleep(wait);
@@ -159,7 +203,8 @@ for (const ticker of candidates) {
   const recent = sub.filings.recent;
   const since = new Date(Date.parse(asOf) - DOMESTIC_DAYS * 86_400_000).toISOString().slice(0, 10);
   const filed = (pred) => recent.form.some((f, i) => recent.filingDate[i] >= since && recent.filingDate[i] <= asOf && pred(f, i));
-  // Foreign: files 20-F/40-F/6-K and no 10-Q. A new company (spin-off, IPO) with no 10-Q yet is domestic.
+  // Foreign: files 20-F/40-F/6-K and no 10-Q. A new company (spin-off, IPO) with no 10-Q yet is
+  // domestic.
   const fpi = filed((f) => ["20-F", "40-F", "6-K"].includes(f)) && !filed((f) => f === "10-Q");
   const filer = fpi ? "foreign" : "domestic";
   if (filer === "domestic" && !filed((f, i) => f === "8-K" && recent.items[i].split(",").includes("2.02")))
@@ -168,8 +213,12 @@ for (const ticker of candidates) {
   if (secName.toLowerCase() !== sec.title.trim().toLowerCase()) notes.titleDiffers.push(`${ticker}: ${sec.title} / ${secName}`);
   const name = o.name ?? universe.find((u) => u.ticker === ticker)?.name;
   if (!name) fail(`${ticker}: an extra company needs a name in the overrides`);
+  if (!sameCompany(name, secName) && !(ticker in NAME_OK))
+    fail(`${ticker}: SEC files CIK ${cik} as "${secName}", not "${name}" (a reused ticker?); check it, then add it to NAME_OK`);
   if (!inUniverse.has(ticker) && o.tier !== "calendar") fail(`${ticker}: extra companies are calendar only`);
-  let tier = o.tier ?? ((caps.get(ticker) ?? 0) >= FULL_CAP ? "full" : "calendar");
+  // A universe ticker the snapshot lacks fails (rerun with --caps); 0 is a cap the screener left out.
+  if (inUniverse.has(ticker) && !caps.has(ticker)) fail(`${ticker} is not in marketcap-snapshot.tsv; run with --caps`);
+  let tier = o.tier ?? (caps.get(ticker) >= FULL_CAP ? "full" : "calendar");
   // A foreign (6-K) filer has no Item 2.02 to write from.
   if (filer === "foreign") tier = "calendar";
   rows.push({ ticker, cik, filer, name, domains: o.domains, sec: secName, tier });
@@ -197,8 +246,8 @@ const header = `# GENERATED by scripts/build-watchlist.mjs; do not edit. Change 
 # large foreign companies. Write-ups ("full" tier) for the S&P 100 and every company at or above
 # $100B in the market-cap snapshot of ${asOf}; the rest is calendar only. CIKs and SEC names from
 # SEC company_tickers.json and submissions; a filer is foreign when, in the ${DOMESTIC_DAYS} days
-# before ${asOf}, it filed a 20-F, 40-F or 6-K and no 10-Q. The poller skips (and alerts once a day about) an EDGAR filing
-# under a row's CIK whose filer name is not the row's SEC name.
+# before ${asOf}, it filed a 20-F, 40-F or 6-K and no 10-Q. The poller skips (and alerts once a
+# day about) an EDGAR filing under a row's CIK whose filer name is not the row's SEC name.
 #
 # Columns (tab-separated): ticker, CIK, filer (domestic | foreign), display name, company web
 # domains (comma-separated; subdomains match; calendar proof), SEC conformed name, tier
