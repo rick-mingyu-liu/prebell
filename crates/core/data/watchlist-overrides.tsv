@@ -144,6 +144,40 @@ BN	calendar	Brookfield	bn.brookfield.com,brookfield.com
 ITUB	calendar	Itaú Unibanco	itau.com.br
 TEVA	calendar	Teva Pharmaceutical	tevapharm.com
 
+# Large Chinese companies listed in the US (NYSE or Nasdaq, not OTC), calendar
+# only (Rick, 2026-11-06, "Yes, ~30 of them"; PDD is already in the universe).
+# Picked by US market cap and reader interest on 2026-11-06; Zeekr (taken
+# private) and Luckin (OTC) left out.
+BABA	calendar	Alibaba	-
+JD	calendar	JD.com	-
+BIDU	calendar	Baidu	-
+NTES	calendar	NetEase	-
+TCOM	calendar	Trip.com	-
+TME	calendar	Tencent Music	-
+BILI	calendar	Bilibili	-
+NIO	calendar	NIO	-
+XPEV	calendar	XPeng	-
+LI	calendar	Li Auto	-
+FUTU	calendar	Futu	-
+TIGR	calendar	UP Fintech (Tiger Brokers)	-
+BZ	calendar	Kanzhun (BOSS Zhipin)	-
+YMM	calendar	Full Truck Alliance	-
+VIPS	calendar	Vipshop	-
+ZTO	calendar	ZTO Express	-
+HTHT	calendar	H World	-
+BEKE	calendar	KE Holdings	-
+TAL	calendar	TAL Education	-
+EDU	calendar	New Oriental	-
+YUMC	calendar	Yum China	-
+QFIN	calendar	Qfin	-
+LU	calendar	Lufax	-
+HSAI	calendar	Hesai	-
+WB	calendar	Weibo	-
+IQ	calendar	iQIYI	-
+GDS	calendar	GDS Holdings	-
+MNSO	calendar	MINISO	-
+ATAT	calendar	Atour	-
+
 # Domains for the companies the $100B line adds to the write-up tier
 # (Wikidata P856 suggestions, checked by hand on 2026-11-06).
 ABNB	-	-	airbnb.com
