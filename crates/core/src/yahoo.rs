@@ -413,7 +413,7 @@ fn parse_batch<T>(
 /// - `preMarketTime` must fall on `today` (ET) before 09:30 ET. Otherwise
 ///   the fields are left over from an earlier session and the symbol is
 ///   `Empty`, the same as a name with no premarket trades.
-/// - Before the open (the brief runs around 8:30 AM ET),
+/// - Before the open (the brief runs from 8:00 AM ET),
 ///   `regularMarketPrice` is still the prior session's close, so it is
 ///   `prev_close`. It is cross-checked against `preMarketPrice -
 ///   preMarketChange`. If they differ by more than `ANCHOR_TOLERANCE`, the

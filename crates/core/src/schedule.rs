@@ -78,7 +78,7 @@ pub fn queue_for(job: &str) -> &'static str {
 pub const CRONS: &[(&str, &[&str])] = &[
     // 10:00-23:55Z weekdays. Earnings polling from 06:00 ET under both
     // offsets (10:00Z EDT, 11:00Z EST), on its own queue. Premarket
-    // 08:30-09:25 ET (12:30Z EDT, 13:30Z EST) and its ZH retries to the
+    // 08:00-09:25 ET (12:00Z EDT, 13:00Z EST) and its ZH retries to the
     // 18:00 ET give-up; the recap window from 13:45 ET (early close) or
     // 16:45 ET to 19:00 ET EDT (23:00Z), with its ZH retries. The clock
     // gates the earlier firings: they read D1 and do nothing.

@@ -99,7 +99,7 @@ impl Content for Premarket<'_> {
     fn zh_give_up(&self) -> NaiveTime {
         NaiveTime::from_hms_opt(18, 0, 0).expect("valid built-in time")
     }
-    /// Every firing inside the 08:30-09:25 ET window, then hourly on the
+    /// Every firing inside the 08:00-09:25 ET window, then hourly on the
     /// hour: the cron fires every 5 minutes all day.
     fn zh_retry_due(&self, t: NaiveTime) -> bool {
         let w = premarket_window(DayKind::Full);
@@ -1334,7 +1334,7 @@ mod tests {
     async fn too_early_is_nothing() {
         let s = MemStore::default();
         let out = tick(
-            utc("2026-10-29T12:25:00Z"),
+            utc("2026-10-29T11:55:00Z"),
             &s,
             &md(true),
             &FakeNs,
