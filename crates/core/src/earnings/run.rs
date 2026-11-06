@@ -16,6 +16,7 @@ use crate::earnings::detect::{domestic_by_cik, earnings_entries, name_mismatches
 use crate::earnings::draft::{slug, write, CONTENT_TYPE, TEMPLATE_ID};
 use crate::earnings::extract::{extract, Extracted};
 use crate::earnings::facts::{missing_required, EarningsFacts, Metric, Metrics, NOT_STATED};
+use crate::earnings::foreign::{foreign_tick, ForeignOutcome};
 use crate::earnings::store::{ChartRow, EarningsStore, FilingRow};
 use crate::earnings::xbrl::fetch_trend;
 use crate::earnings::{find, in_window, Tier, WatchEntry};
@@ -69,6 +70,8 @@ pub struct PollOutcome {
     pub stale: bool,
     /// Messages to queue next, each its own invocation.
     pub follow_ups: Vec<EarningsStep>,
+    /// The 6-K part: foreign filers' results releases.
+    pub foreign: ForeignOutcome,
 }
 
 pub fn run_key(ticker: &str, accession: &str) -> String {
@@ -236,11 +239,40 @@ pub async fn poll_job(
     if !in_window(now) {
         return Ok(out);
     }
+    // Foreign filers report on 6-Ks; skipped while SEC refuses requests.
+    // An error here (a D1 failure included) is logged, and the builds,
+    // calendar refresh and events check below are still queued.
+    if !out.throttled {
+        match foreign_tick(now, es, filings).await {
+            Ok(f) => {
+                if f.throttled {
+                    let msg = format!(
+                        "SEC EDGAR refused requests (403/429) on the 6-K feed: {}",
+                        f.errors.last().cloned().unwrap_or_default()
+                    );
+                    alert_once_today(now, "sec-throttled", "error", &msg, store).await?;
+                }
+                for (ticker, msg) in &f.mismatches {
+                    out.errors.push(msg.clone());
+                    alert_once_today(now, &format!("watchlist-cik:{ticker}"), "warn", msg, store)
+                        .await?;
+                }
+                out.errors.extend(f.errors.iter().cloned());
+                out.foreign = f;
+            }
+            Err(e) => out.errors.push(format!("6-K: {e}")),
+        }
+    }
     let builds = match out.detected.len() {
         0 => retry_builds(&es.open_runs().await?, now),
         n => n,
     };
     out.follow_ups = vec![EarningsStep::Build; builds];
+    // One message per pending 6-K, each read in its own invocation.
+    out.follow_ups.extend(std::iter::repeat_n(
+        EarningsStep::Foreign,
+        out.foreign.reads,
+    ));
     if !crate::earnings::calendar::refreshed_today(es, now).await? {
         out.follow_ups.push(EarningsStep::Calendar);
     }
@@ -961,6 +993,8 @@ mod tests {
         no_trend: Cell<bool>,
         /// The exhibit's text, when not the AAPL fixture's.
         exhibit_text: RefCell<Option<String>>,
+        /// The current 6-K feed's first page.
+        six_k: RefCell<Vec<FeedEntry>>,
     }
     #[async_trait(?Send)]
     impl Filings for FakeFilings {
@@ -972,6 +1006,13 @@ mod tests {
                 None => feed(&[]),
             };
             parse_current_feed(&body)
+        }
+        async fn current_6k_filings(&self, start: usize) -> Result<Vec<FeedEntry>, ProviderError> {
+            Ok(if start == 0 {
+                self.six_k.borrow().clone()
+            } else {
+                vec![]
+            })
         }
         async fn filing_docs(&self, _: u64, _: &str) -> Result<Vec<FilingDoc>, ProviderError> {
             if self.no_exhibit.get() {
@@ -1330,6 +1371,8 @@ mod tests {
         let o = poll_job(t, Some(t), &es, base.as_ref(), &fl).await.unwrap();
         assert!(fl.page_calls.borrow().len() <= MAX_FEED_PAGES);
         assert_eq!(o.detected, vec![KEY.to_string()]);
+        // The 6-K feed is read too (empty here).
+        assert_eq!(o.foreign.pages, 1);
         // One build per new filing, plus the day's calendar refresh.
         assert_eq!(o.follow_ups, [EarningsStep::Build, EarningsStep::Calendar]);
         assert!(!o.stale);
@@ -1573,6 +1616,57 @@ mod tests {
         // While a build holds its lease, nothing is sent.
         let o = open(vec![run("building", 1, 3), run("pending", 0, 0)]);
         assert_eq!(retry_builds(&o, t), 0);
+    }
+
+    #[tokio::test]
+    async fn a_failing_6k_part_never_holds_up_the_poll() {
+        let (base, es) = stores();
+        let fl = FakeFilings::default();
+        *es.fail_kv.borrow_mut() = Some(crate::earnings::foreign::KV_6K_WATERMARK.into());
+        let t = poll_time();
+        let o = poll_job(t, Some(t), &es, base.as_ref(), &fl).await.unwrap();
+        assert!(
+            o.errors.iter().any(|e| e.starts_with("6-K: ")),
+            "{:?}",
+            o.errors
+        );
+        // The new filing's build and the day's calendar refresh still go.
+        assert_eq!(o.detected, [KEY]);
+        assert!(o.follow_ups.contains(&EarningsStep::Build));
+        assert!(o.follow_ups.contains(&EarningsStep::Calendar));
+    }
+
+    #[tokio::test]
+    async fn a_foreign_filer_under_another_name_alerts_once_a_day() {
+        let (base, es) = stores();
+        let fl = FakeFilings::default();
+        let tm = find("TM").unwrap();
+        let t = poll_time();
+        let acc = "0001094517-26-000077".to_string();
+        let mut entry = parse_current_feed(&feed(&[(tm.cik, acc, t - Duration::minutes(5), "")]))
+            .unwrap()
+            .remove(0);
+        entry.form = "6-K".into();
+        entry.company = "TOYOTA INDUSTRIES CORP".into();
+        fl.six_k.borrow_mut().push(entry);
+        poll_job(t, Some(t), &es, base.as_ref(), &fl).await.unwrap();
+        poll_job(
+            t + Duration::minutes(5),
+            Some(t + Duration::minutes(5)),
+            &es,
+            base.as_ref(),
+            &fl,
+        )
+        .await
+        .unwrap();
+        let alerts: Vec<_> = base
+            .alerts
+            .borrow()
+            .iter()
+            .filter(|a| a.0.starts_with("watchlist-cik:TM"))
+            .cloned()
+            .collect();
+        assert_eq!(alerts.len(), 1, "{alerts:?}");
     }
 
     #[tokio::test]

@@ -10,6 +10,7 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use prebell_core::cover::card::{cards_tick, wants_card};
 use prebell_core::earnings::calendar::{refresh_tick, yahoo_seeding, CalendarSource};
+use prebell_core::earnings::foreign::foreign_read;
 use prebell_core::earnings::run::{build_tick, poll_job};
 use prebell_core::edgar::{Edgar, BUILD_GAP_MS};
 use prebell_core::events::check::{check_tick, mark_checked, missing_table};
@@ -263,14 +264,27 @@ impl JobRunner for Runner<'_> {
                 }
                 Ok((
                     format!(
-                        "pages {}, entries {}, new {:?}, queued {:?}",
+                        "pages {}, entries {}, new {:?}, queued {:?}; 6-K pages {}, found {}, pending {}",
                         o.pages,
                         o.checked,
                         o.detected,
-                        o.follow_ups.iter().map(|s| s.job()).collect::<Vec<_>>()
+                        o.follow_ups.iter().map(|s| s.job()).collect::<Vec<_>>(),
+                        o.foreign.pages,
+                        o.foreign.found,
+                        o.foreign.pending
                     ),
                     false,
                 ))
+            }
+            EarningsStep::Foreign => {
+                // One pending 6-K, on the poll's serial queue (EDGAR is
+                // never read by two of them at once).
+                let edgar = self.edgar()?;
+                let o = foreign_read(t, store, store, &edgar).await?;
+                for e in &o.errors {
+                    console_warn!("earnings 6-K: {e}");
+                }
+                Ok((format!("6-K {o:?}"), false))
             }
             EarningsStep::Build => {
                 let edgar = self.edgar()?;

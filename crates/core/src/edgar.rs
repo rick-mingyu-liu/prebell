@@ -56,6 +56,8 @@ pub struct FeedEntry {
 #[derive(Debug, Clone, PartialEq)]
 pub struct FilingDoc {
     pub name: String,
+    /// The index's Description column ("FY2027 SEMI-ANNUAL FINANCIAL SUMMARY").
+    pub description: String,
     /// EDGAR document type, e.g. `8-K`, `EX-99.1`.
     pub doc_type: String,
     /// Absolute `https://www.sec.gov/Archives/...` URL.
@@ -97,6 +99,16 @@ pub trait Filings {
     async fn current_filings(&self, start: usize) -> Result<Vec<FeedEntry>, ProviderError>;
     async fn filing_docs(&self, cik: u64, accession: &str)
         -> Result<Vec<FilingDoc>, ProviderError>;
+    /// One page of the current 6-K filings feed (foreign private issuers),
+    /// like `current_filings`. No 6-K filings unless implemented.
+    async fn current_6k_filings(&self, _start: usize) -> Result<Vec<FeedEntry>, ProviderError> {
+        Ok(vec![])
+    }
+    /// The first `max` bytes of a filed document as plain text: enough to
+    /// recognise a release without reading (and parsing) all of it.
+    async fn document_head(&self, url: &str, _max: usize) -> Result<String, ProviderError> {
+        self.document_text(url).await
+    }
     /// A filed document as plain text (`html_to_text`).
     async fn document_text(&self, url: &str) -> Result<String, ProviderError>;
     /// One us-gaap concept, or `None` when the company never tagged it (404).
@@ -147,6 +159,15 @@ impl<H: Http, T: Timer> Edgar<H, T> {
 
     /// `prefix`: keep the first `MAX_BYTES` of a bigger body instead of failing.
     async fn fetch(&self, url: &str, prefix: bool) -> Result<String, ProviderError> {
+        self.fetch_max(url, prefix, MAX_BYTES).await
+    }
+
+    async fn fetch_max(
+        &self,
+        url: &str,
+        prefix: bool,
+        max: usize,
+    ) -> Result<String, ProviderError> {
         if self.used.replace(true) {
             self.timer
                 .sleep(std::time::Duration::from_millis(self.gap_ms))
@@ -157,9 +178,9 @@ impl<H: Http, T: Timer> Edgar<H, T> {
             ("Accept-Encoding", "gzip, deflate"),
         ];
         let r = if prefix {
-            self.http.get_prefix(url, &headers, MAX_BYTES).await?
+            self.http.get_prefix(url, &headers, max).await?
         } else {
-            self.http.get_capped(url, &headers, MAX_BYTES).await?
+            self.http.get_capped(url, &headers, max).await?
         };
         if r.status != 200 {
             return Err(ProviderError::Http(r.status));
@@ -204,9 +225,118 @@ pub const FEED_PAGE: usize = 100;
 
 /// The current 8-K filings feed, newest first, `FEED_PAGE` entries from `start`.
 pub fn current_feed_url(start: usize) -> String {
+    current_form_feed_url("8-K", start)
+}
+
+/// The current filings feed of one form (`8-K`, `6-K`; amendments included).
+pub fn current_form_feed_url(form: &str, start: usize) -> String {
     format!(
-        "https://www.sec.gov/cgi-bin/browse-edgar?action=getcurrent&type=8-K&company=&dateb=&owner=include&start={start}&count={FEED_PAGE}&output=atom"
+        "https://www.sec.gov/cgi-bin/browse-edgar?action=getcurrent&type={form}&company=&dateb=&owner=include&start={start}&count={FEED_PAGE}&output=atom"
     )
+}
+
+/// Plain text of the opening of a document cut at a byte limit: the cut
+/// half-tag is dropped first.
+pub fn head_text(html: &str) -> String {
+    quick_text(&html[..html.rfind('>').map_or(0, |i| i + 1)])
+}
+
+/// Tags that style text inside a word or line, not separate it.
+const INLINE_TAGS: [&str; 19] = [
+    "a", "abbr", "b", "big", "code", "del", "em", "font", "i", "ins", "s", "small", "span",
+    "strike", "strong", "sub", "sup", "tt", "u",
+];
+
+/// `tag` (lowercase, from its `<`) opens or closes an inline tag.
+fn is_inline_tag(tag: &str) -> bool {
+    let name = tag
+        .trim_start_matches('<')
+        .trim_start_matches('/')
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .next()
+        .unwrap_or("");
+    INLINE_TAGS.contains(&name)
+}
+
+/// Plain text of HTML on one line, without regexes: scripts, styles,
+/// comments, the head and the hidden inline-XBRL header dropped, every tag
+/// but an inline one a space, entities decoded, whitespace collapsed. For text that is matched
+/// against, not quoted: a cold Worker spends several ms compiling
+/// `html_to_text`'s patterns, and the 6-K reader has 10 ms of CPU in all.
+pub fn quick_text(html: &str) -> String {
+    let bytes = html.as_bytes();
+    let lower = html.to_ascii_lowercase();
+    let mut out = String::with_capacity(html.len() / 2);
+    let mut i = 0;
+    let mut text_from = 0;
+    while let Some(off) = html[i..].find('<') {
+        let at = i + off;
+        out.push_str(&html[text_from..at]);
+        let rest = &lower[at..];
+        // Inline tags join their text ("L<span>ondon</span>" is "London");
+        // any other tag separates words.
+        if !is_inline_tag(rest) {
+            out.push(' ');
+        }
+        let skip_to = |close: &str| {
+            rest.find(close)
+                .map_or(html.len(), |e| at + e + close.len())
+        };
+        i = if rest.starts_with("<!--") {
+            skip_to("-->")
+        } else if ["<script", "<style", "<head", "<ix:header"]
+            .iter()
+            .any(|t| {
+                rest.starts_with(t)
+                    && !rest[t.len()..].starts_with(|c: char| c.is_ascii_alphanumeric())
+            })
+        {
+            let name = &rest[1..rest
+                .find(|c: char| c.is_whitespace() || c == '>')
+                .unwrap_or(rest.len())];
+            let end = format!("</{name}");
+            match rest.find(&end) {
+                Some(e) => {
+                    let after = at + e;
+                    lower[after..]
+                        .find('>')
+                        .map_or(html.len(), |g| after + g + 1)
+                }
+                None => html.len(),
+            }
+        } else {
+            // To the tag's '>', outside quoted attribute values.
+            let mut j = at + 1;
+            let mut quote = 0u8;
+            while j < bytes.len() {
+                let b = bytes[j];
+                if quote != 0 {
+                    if b == quote {
+                        quote = 0;
+                    }
+                } else if b == b'"' || b == b'\'' {
+                    quote = b;
+                } else if b == b'>' {
+                    break;
+                }
+                j += 1;
+            }
+            (j + 1).min(html.len())
+        };
+        text_from = i;
+    }
+    out.push_str(&html[text_from.min(html.len())..]);
+    decode_entities(&out)
+        .replace(
+            [
+                '\u{200b}', '\u{200c}', '\u{200d}', '\u{2060}', '\u{feff}', '\u{a0}',
+            ],
+            " ",
+        )
+        .replace('\u{ad}', "")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// The text between `<tag ...>` and `</tag>` in `s`.
@@ -314,8 +444,9 @@ pub fn parse_filing_index(html: &str) -> Vec<FilingDoc> {
             continue;
         }
         out.push(FilingDoc {
-            name: html_to_text(&a[2]),
-            doc_type: html_to_text(cells[3]),
+            name: quick_text(&a[2]),
+            description: quick_text(cells[1]),
+            doc_type: quick_text(cells[3]),
             url: format!("https://www.sec.gov{path}"),
         });
     }
@@ -395,6 +526,23 @@ pub fn html_to_text(html: &str) -> String {
 impl<H: Http, T: Timer> Filings for Edgar<H, T> {
     async fn current_filings(&self, start: usize) -> Result<Vec<FeedEntry>, ProviderError> {
         parse_current_feed(&self.get(&current_feed_url(start)).await?)
+    }
+
+    async fn current_6k_filings(&self, start: usize) -> Result<Vec<FeedEntry>, ProviderError> {
+        parse_current_feed(&self.get(&current_form_feed_url("6-K", start)).await?)
+    }
+
+    async fn document_head(&self, url: &str, max: usize) -> Result<String, ProviderError> {
+        if !url.starts_with(ARCHIVES) {
+            return Err(ProviderError::Parse(format!(
+                "not an EDGAR archive url: {url}"
+            )));
+        }
+        let text = head_text(&self.fetch_max(url, true, max).await?);
+        if text.is_empty() {
+            return Err(ProviderError::Empty);
+        }
+        Ok(text)
     }
 
     async fn filing_docs(
@@ -570,6 +718,23 @@ pub(crate) mod tests {
         assert!(current_feed_url(200).contains("&start=200&count=100&"));
     }
 
+    #[test]
+    fn quick_text_joins_inline_tags_and_splits_blocks() {
+        assert_eq!(
+            quick_text("<p>L<span style=\"x\">ondon</span>, <b>August 26</b>, 2026</p><p>Next</p>"),
+            "London, August 26, 2026 Next"
+        );
+        assert_eq!(
+            quick_text("<td>Revenue</td><td>RMB 1,234</td>"),
+            "Revenue RMB 1,234"
+        );
+        assert_eq!(
+            quick_text("a<br>b<div>c</div><!-- x -->d<script>e</script>f"),
+            "a b c d f"
+        );
+        assert_eq!(quick_text("<header>x</header><a href='y>z'>k</a>"), "x k");
+    }
+
     #[tokio::test]
     async fn user_agent_and_pacing() {
         let e = edgar(&[
@@ -652,6 +817,7 @@ pub(crate) mod tests {
     #[test]
     fn exhibit_fallback_and_absence() {
         let doc = |name: &str, t: &str| FilingDoc {
+            description: String::new(),
             name: name.into(),
             doc_type: t.into(),
             url: format!("{ARCHIVES}1/2/{name}"),
