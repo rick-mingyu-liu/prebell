@@ -4,7 +4,7 @@ Date: 2026-11-06. Rick: "we can also add the big events into the calender.
 such as the us midterm election, the Fed's news in advance". Scope, Rick
 2026-11-06: "for now just only the market-moving events (Fed decisions,
 jobs, CPI, elections). we will decide if we want to add the fuller later".
-Design only; open decisions marked **[Rick]**, each with a recommendation.
+Approved by Rick 2026-11-06; his decisions are listed at the end.
 
 ## Goals
 
@@ -163,7 +163,7 @@ page: the official release is the detail. Most weeks: zero to two events.
   (`{id, et_time, title, tier, status, release_url}`, title in the brief's
   language from the glossary). Old R2 facts hold `Missing`, which still
   deserialises.
-- Built from today's tier 1 events (plus, **[Rick] 6**, write-up earnings
+- Built from today's tier 1 events (plus write-up earnings
   due after today's close). Empty -> `Missing`, and the section drops as it
   does now (`crates/core/src/premarket/draft.rs:58-70`). With v1 kinds
   alone that is about 3 trading days a month (jobs, CPI, ~2/3 FOMC).
@@ -198,23 +198,19 @@ instead of rebuilding. Nothing in v1 blocks it.
 
 ## Decisions
 
-1. **Decided, Rick 2026-11-06:** "for now just only the market-moving
-   events (Fed decisions, jobs, CPI, elections). we will decide if we want
-   to add the fuller later". Closures ride along (designer's call, free).
+Decided, Rick 2026-11-06:
+1. **v1 kinds:** "for now just only the market-moving events (Fed
+   decisions, jobs, CPI, elections). we will decide if we want to add the
+   fuller later". Closures ride along (designer's call, free).
+2. **FOMC minutes in v1:** "Yes, include" (tier 2; dates from the Fed's
+   month pages, release at fomcminutesYYYYMMDD.htm).
+3. **Figures:** "Link only for now": never consensus, no actual figures in
+   v1, the release link only.
+4. **Heading:** "Market calendar" / "市场日历"; the `/earnings` URL stays.
+5. **Earnings in "What to watch":** "Yes, add them": write-up-tier
+   companies reporting after that day's close.
 
-Open, for Rick:
-2. **Figures.** Rec: never consensus/forecasts (Bloomberg, LSEG, Dow Jones
-   polls are licensed). v1 shows no actual jobs/CPI numbers either, only
-   the release link; actuals from the BLS release (public domain) can
-   follow with anchored extraction like earnings.
-3. **Page name.** Rec: keep the `/earnings` URL; H1 "Market calendar" /
-   "市场日历" (the nav already says Calendar / 日历). User-visible wording.
-4. **8:35 update gated on the calendar.** Rec: no for v1; keep it every
-   trading day. v1 tracks only two 8:30 releases (jobs, CPI), so gating
-   would skip claims, PPI, GDP and retail mornings. Revisit with "Later".
-5. **Political events beyond elections.** Rec: none in v1 (Rick's scope).
-   If the fuller set is chosen later: funding deadlines with enacted-law
-   proof and neutral wording; debt-ceiling X-dates never (estimates).
-6. **Earnings in "What to watch".** Rec: yes, write-up-tier companies
-   reporting after today's close (already in D1, no new fetch); without it
-   the section shows on only ~3 days a month.
+Designer's calls (no question needed): the 8:35 update keeps running every
+trading day (v1 tracks two 8:30 releases only); no political events beyond
+elections in v1 (later: funding deadlines with enacted-law proof, never
+debt-ceiling X-dates).
