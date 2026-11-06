@@ -72,7 +72,10 @@ ticker normalizer (optional).
 The poll reads EDGAR's all-company current 8-K feed (`edgar.rs:192-197`), 1-3
 pages back to the watermark (`run.rs:49`, `run.rs:128`), and filters by CIK in
 memory (`detect.rs:109-121`). Cost is the same at 109 or 550 rows. The only
-growth is D1 work per matched filing (`record_filing`, 2-3 binding calls).
+growth was D1 work per matched filing (`record_filing`, 2-3 queries per
+sighting, and every poll re-sees hours of filings); review fix: one ranged
+read, one batched write that skips filings already shown, one `IN (...)`
+check and one insert batch, about 8 queries a poll however many it sees.
 
 Change: in `poll_tick` (`run.rs:162-172`), call `record_filing` for every
 domestic match, but `insert_filing` + `upsert_run` (the build queue) only for
@@ -94,7 +97,7 @@ searches + 5 LLM calls ≈ 15 fetches.
 | Yahoo session + 401 refresh (`yahoo.rs:143-151`) | 2 (+3) | 2 (+3) | — |
 | IR searches + LLM (`IR_CHECKS` 5, `calendar.rs:28`) | 10 | 10 | — |
 | Fetch subrequests, worst case | 18 | 26 | 50 (runbook.md:86) |
-| D1 binding calls (see below) | ~60 | ~900 at season peak | 1,000 (runbook.md:87) |
+| D1 queries (see below) | ~60 | ~900 at season peak | 50 per invocation (D1 limits, Free; a batch is 1) |
 | Tavily searches/month (5 × 21 days) | 105 | 105 | plan quota |
 
 Yahoo: 11 v7 batches from a Worker already run twice a day for the movers
@@ -107,7 +110,9 @@ calendar runs once a day at 06:00 ET (`calendar_refreshed_on` was written at
 (`calendar.rs:536`) and upserts. An agreeing seed still changes `checked_at`
 and `updated_at` (`calendar.rs:224,236`), so every seed is a write. With
 ~300 tickers dated in the 10-trading-day window at season peak, that is ~900
-calls plus rule 8 and IR checks, near the 1,000 internal-service cap. Fix:
+calls plus rule 8 and IR checks, far past D1's 50 queries per invocation on
+Free (the review's correction; the first draft used the Workers 1,000
+internal-service cap). Fix:
 - One ranged read: `calendar_between(today − SAME_EVENT_DAYS, last +
   SAME_EVENT_DAYS)`, grouped by ticker in memory. `reconcile` only looks at
   rows ≥ today and `reported` rows within 21 days (`calendar.rs:162-174`), so
