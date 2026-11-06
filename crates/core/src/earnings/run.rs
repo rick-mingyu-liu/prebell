@@ -1396,8 +1396,9 @@ mod tests {
 
     #[tokio::test]
     async fn foreign_and_chinese_filers_never_queue_a_build() {
-        // An 8-K with Item 2.02 under every 20-F/6-K filer's CIK (none should
-        // exist; a test feed can send one anyway) and under Yum China's.
+        // An 8-K with Item 2.02 under Yum China's CIK (a domestic, calendar
+        // tier filer) and under every 20-F/6-K filer's. Foreign rows are not
+        // watched at all; this guards that they stay so.
         let (base, es) = stores();
         let fl = FakeFilings::default();
         let t = poll_time();

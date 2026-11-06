@@ -134,7 +134,9 @@ pub(crate) mod tests {
         let w = watchlist();
         // S&P 500 ∪ Nasdaq-100, one row per CIK, plus the hand-picked
         // foreign companies; the calendar's Yahoo read stays at 12 batches.
-        assert!((550..=600).contains(&w.len()), "{}", w.len());
+        // The floor only catches a truncated file; an index rebalance may
+        // drop a dozen names.
+        assert!((520..=600).contains(&w.len()), "{}", w.len());
         assert!(
             w.len().div_ceil(crate::yahoo::QUOTE_BATCH) <= 12,
             "{}",

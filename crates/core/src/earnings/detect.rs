@@ -214,6 +214,8 @@ mod tests {
             ("XOM", "EXXON MOBIL HOLDINGS CORP"),
             ("USB", "US BANCORP \\DE\\"),
             ("KO", "COCA COLA CO"),
+            ("YUMC", "Yum China Holdings, Inc."),
+            ("YUMC", "YUM CHINA HOLDINGS INC"),
         ] {
             let w = crate::earnings::find(ticker).unwrap();
             assert!(same_filer(feed, w.sec), "{ticker}: {feed} vs {}", w.sec);
@@ -221,6 +223,7 @@ mod tests {
         for (ticker, feed) in [
             ("AAPL", "Apple Hospitality REIT, Inc."),
             ("AXP", "AMERICAN TOWER CORP /MA/"),
+            ("YUMC", "YUM! BRANDS, INC."),
             ("GM", "GENERAL MILLS INC"),
             ("AAPL", "INC"),
         ] {
