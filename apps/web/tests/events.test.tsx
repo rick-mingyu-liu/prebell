@@ -69,6 +69,7 @@ describe("EconomyEvents", () => {
     proofUrl: CPI,
     releaseUrl: null,
     movedFrom: null,
+    hasRelease: true,
     ...more,
   });
 
@@ -102,6 +103,14 @@ describe("EconomyEvents", () => {
     expect(fomc).toContain('<span class="cal-event-note">Press conference 2:30 PM ET</span>');
   });
 
+  it("links an election to its law as the source", () => {
+    const law = "https://www.govinfo.gov/content/pkg/USCODE-2023-title3/html/USCODE-2023-title3-chap1-sec21.htm";
+    const out = renderToStaticMarkup(
+      <EconomyEvents events={[ev({ series: "election", title: "US general election", startsAt: null, proofUrl: law, hasRelease: false })]} locale="en" />,
+    );
+    expect(out).toContain(`href="${law}" rel="noopener noreferrer">Source ↗</a>`);
+  });
+
   it("renders nothing for a day without events", () => {
     expect(renderToStaticMarkup(<EconomyEvents events={[]} locale="en" />)).toBe("");
   });
@@ -112,5 +121,11 @@ describe("EconomyEvents", () => {
     );
     expect(out.indexOf("cal-econ")).toBeGreaterThan(out.indexOf("cal-date"));
     expect(out.indexOf("cal-econ")).toBeLessThan(out.indexOf("cal-none"));
+    expect(out).toContain("No earnings reports.");
+    const zh = renderToStaticMarkup(
+      <CalendarWeek days={[{ date: "2026-11-10", entries: [] }, { date: "2026-11-11", entries: [] }]} events={{ "2026-11-10": [ev({})] }} locale="zh" />,
+    );
+    expect(zh).toContain("当日无财报。");
+    expect(zh).toContain("无财报。</p>");
   });
 });

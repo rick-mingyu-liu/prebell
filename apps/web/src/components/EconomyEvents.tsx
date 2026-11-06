@@ -6,7 +6,7 @@ import { translator } from "../lib/translator";
 /**
  * A calendar day's "Economy & Fed" group, above its earnings: each event's ET time (none for all-day
  * events), title, a "Major" mark for tier 1, its status, and the official link (the release once out,
- * else the schedule that lists the date). Colour carries nothing alone: the major mark and the
+ * else the schedule that lists the date, or for elections and closures the law or NYSE page). Colour carries nothing alone: the major mark and the
  * statuses are words.
  */
 export default function EconomyEvents({ events, locale }: { events: MacroEvent[]; locale: Locale }) {
@@ -35,7 +35,7 @@ export default function EconomyEvents({ events, locale }: { events: MacroEvent[]
             )}
             {e.note && <span className="cal-event-note">{e.note}</span>}
             <a className="cal-read" href={e.releaseUrl ?? e.proofUrl} rel="noopener noreferrer">
-              {e.releaseUrl ? t("events.release") : t("events.schedule")} ↗
+              {e.releaseUrl ? t("events.release") : e.hasRelease ? t("events.schedule") : t("events.source")} ↗
             </a>
           </li>
         ))}

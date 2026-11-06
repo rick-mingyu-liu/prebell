@@ -196,7 +196,8 @@
     "unconfirmed": "Unconfirmed",
     "confirmed": "Confirmed",
     "reported": "Reported",
-    "none": "No reports.",
+    "none": "No earnings reports.",
+    "noneWithEvents": "No earnings reports.",
     "stripAll": "Full calendar →",
     "stripMore": "+{count} more",
     "prevWeek": "Previous week",
@@ -220,7 +221,8 @@
     "schedule": "Schedule",
     "postponed": "Postponed",
     "movedFrom": "Moved from {date}",
-    "legend": "Economy & Fed: official dates from the BLS and the Federal Reserve, linked to the schedule and, once out, to the release."
+    "legend": "Economy & Fed: official dates from the BLS, the Federal Reserve, US law (elections) and the NYSE (closures), linked to their source and, once out, to the release.",
+    "source": "Source"
   },
   "index": {
     "es": "S&P 500 futures",

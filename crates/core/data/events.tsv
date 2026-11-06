@@ -7,7 +7,7 @@
 # covers: 2026-10-06 2027-12-11
 # id	series	ref_period	variant	starts_at	et_date	tier	proof_url
 fed:fomc:2026-10	fomc	2026-10	-	2026-10-28T18:00:00Z	2026-10-28	1	https://www.federalreserve.gov/monetarypolicy/fomccalendars.htm
-us:election:2026-11-03	election	-	midterm	-	2026-11-03	1	https://www.govinfo.gov/app/details/USCODE-2023-title2/USCODE-2023-title2-chap1-sec7
+us:election:2026-11-03	election	-	midterm	-	2026-11-03	1	https://www.govinfo.gov/content/pkg/USCODE-2023-title2/html/USCODE-2023-title2-chap1-sec7.htm
 bls:jobs:2026-10	jobs	2026-10	-	2026-11-06T13:30:00Z	2026-11-06	1	https://www.bls.gov/schedule/news_release/empsit.htm
 bls:cpi:2026-10	cpi	2026-10	-	2026-11-10T13:30:00Z	2026-11-10	1	https://www.bls.gov/schedule/news_release/cpi.htm
 fed:fomc_minutes:2026-10-28	fomc_minutes	2026-10-28	-	2026-11-18T19:00:00Z	2026-11-18	2	https://www.federalreserve.gov/newsevents/2026-november.htm
@@ -47,4 +47,4 @@ bls:cpi:2027-10	cpi	2027-10	-	2027-11-10T13:30:00Z	2027-11-10	1	https://www.bls.
 bls:jobs:2027-11	jobs	2027-11	-	2027-12-03T13:30:00Z	2027-12-03	1	https://www.bls.gov/schedule/news_release/empsit.htm
 fed:fomc:2027-12	fomc	2027-12	sep	2027-12-08T19:00:00Z	2027-12-08	1	https://www.federalreserve.gov/monetarypolicy/fomccalendars.htm
 bls:cpi:2027-11	cpi	2027-11	-	2027-12-10T13:30:00Z	2027-12-10	1	https://www.bls.gov/schedule/news_release/cpi.htm
-us:election:2028-11-07	election	-	general	-	2028-11-07	1	https://www.govinfo.gov/app/details/USCODE-2023-title3/USCODE-2023-title3-chap1-sec1
+us:election:2028-11-07	election	-	general	-	2028-11-07	1	https://www.govinfo.gov/content/pkg/USCODE-2023-title3/html/USCODE-2023-title3-chap1-sec21.htm

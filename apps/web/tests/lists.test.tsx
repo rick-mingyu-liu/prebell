@@ -141,7 +141,7 @@ describe("CalendarWeek", () => {
     expect(out).toContain(
       `<a class="cal-read" href="${SEC}" rel="noopener noreferrer" aria-label="SEC filing: A">SEC filing ↗</a>`,
     );
-    expect(out).toContain("No reports.");
+    expect(out).toContain("No earnings reports.");
     expect(out).not.toContain("<details");
   });
 

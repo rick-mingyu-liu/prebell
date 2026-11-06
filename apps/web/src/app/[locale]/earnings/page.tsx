@@ -49,7 +49,9 @@ export default async function EarningsCalendar({ params, searchParams }: PagePro
         {t("weekOf", { date: formatDate(start, locale) })} · {t("timesEt")}
       </p>
       <p className="legend">
-        {te("legend")} {t("legend")}
+        {te("legend")}
+        {locale === "zh" ? "" : " "}
+        {t("legend")}
       </p>
       <CalendarWeek days={days} locale={locale} events={events} />
       <nav className="pager">

@@ -56,7 +56,7 @@ export default function CalendarWeek({
           </h2>
           <EconomyEvents events={events[d.date] ?? []} locale={locale} />
           {d.entries.length === 0 ? (
-            <p className="muted cal-none">{t("earnings.none")}</p>
+            <p className="muted cal-none">{t(events[d.date]?.length ? "earnings.noneWithEvents" : "earnings.none")}</p>
           ) : (
             <div className="cal-slots">
               {SLOTS.map((slot) => {

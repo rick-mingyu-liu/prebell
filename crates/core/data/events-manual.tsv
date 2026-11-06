@@ -1,7 +1,10 @@
 # US federal elections, by hand (scripts/build-events.mjs copies them into events.tsv).
-# Election day is set by statute: the Tuesday after the first Monday in November of even years
-# (2 U.S.C. 7 for Congress, 3 U.S.C. 1 for President). Every row needs an official https proof_url.
+# Election day is set by statute, and each proof is the GovInfo text that states the rule:
+# 2 U.S.C. 7 (Congress: the Tuesday after the first Monday in November of even years) for midterms;
+# 3 U.S.C. 21(1) for presidential years ("election day", the same Tuesday every fourth year; since
+# the Electoral Count Reform Act of 2022, 3 U.S.C. 1 only refers to it). Every row needs an official
+# https proof_url.
 # variant: midterm (Congress only) or general (with the presidential election). All-day: starts_at -.
 # id	series	ref_period	variant	starts_at	et_date	tier	proof_url
-us:election:2026-11-03	election	-	midterm	-	2026-11-03	1	https://www.govinfo.gov/app/details/USCODE-2023-title2/USCODE-2023-title2-chap1-sec7
-us:election:2028-11-07	election	-	general	-	2028-11-07	1	https://www.govinfo.gov/app/details/USCODE-2023-title3/USCODE-2023-title3-chap1-sec1
+us:election:2026-11-03	election	-	midterm	-	2026-11-03	1	https://www.govinfo.gov/content/pkg/USCODE-2023-title2/html/USCODE-2023-title2-chap1-sec7.htm
+us:election:2028-11-07	election	-	general	-	2028-11-07	1	https://www.govinfo.gov/content/pkg/USCODE-2023-title3/html/USCODE-2023-title3-chap1-sec21.htm
