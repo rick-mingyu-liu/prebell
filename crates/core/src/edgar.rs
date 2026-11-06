@@ -330,7 +330,8 @@ pub fn exhibit_991(docs: &[FilingDoc]) -> Option<&FilingDoc> {
 /// Plain text of an HTML document: scripts, styles, comments and the hidden
 /// inline-XBRL header dropped; each table row on one line (block tags inside
 /// cells become spaces), other block ends become line breaks; entities
-/// decoded; each line's whitespace collapsed; blank lines removed. Signs and
+/// decoded; zero-width spaces (SPG pads empty cells with "&#8203;") read as
+/// spaces; each line's whitespace collapsed; blank lines removed. Signs and
 /// units that filer software puts in their own cells are re-attached
 /// ("$ (0.25 )" -> "$(0.25)", "47.2 %" -> "47.2%").
 pub fn html_to_text(html: &str) -> String {
@@ -361,6 +362,7 @@ pub fn html_to_text(html: &str) -> String {
     let s = cell.replace_all(&s, " ");
     let s = tag.replace_all(&s, "");
     decode_entities(&s)
+        .replace(['\u{200b}', '\u{feff}'], " ")
         .lines()
         .map(|l| l.split_whitespace().collect::<Vec<_>>().join(" "))
         .filter(|l| !l.is_empty())
@@ -659,6 +661,17 @@ pub(crate) mod tests {
         assert_eq!(
             t,
             "Total net sales $102,466\nDiluted $(0.25)\nGross margin 47.2%"
+        );
+        // SPG pads every empty cell with a zero-width space.
+        let html = r#"<div>(Dollars in thousands, except per share amounts)<font>&#8203;<font> </font></font></div>
+<table><tr><td>&#8203;</td><td>&#8203;</td><td colspan="10"><div><font>For the Three Months</font><br ><font>Ended September&#160;30, </font></div></td></tr>
+<tr><td>&#8203;</td><td><div><font>Total revenue </font></div></td><td>&#8203;</td><td>&#8203;</td><td>1,814,556 </td><td>&#8203;</td></tr>
+<tr><td>&#8203;</td><td>Net income</td><td>$</td><td>&#8203;</td><td>(8,259</td><td>&#8203;</td><td>)</td></tr>
+<tr><td>&#8203;</td><td>&#8203;</td></tr></table>"#;
+        let t = html_to_text(html);
+        assert_eq!(
+            t,
+            "(Dollars in thousands, except per share amounts)\nFor the Three Months Ended September 30,\nTotal revenue 1,814,556\nNet income $(8,259)"
         );
     }
 
