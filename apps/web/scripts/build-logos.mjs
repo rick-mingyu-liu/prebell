@@ -117,6 +117,8 @@ const NO_SITE_ICON = {
  * in review): no Commons file is used; simple-icons, then the site icon, then a text tile.
  */
 const NO_COMMONS = {
+  BIDU: "Commons only has a generic icon-set paw, not Baidu's own file",
+  BILI: "Commons names Bilibili Gaming, an esports team",
   BKNG: "its Commons logo is a cramped stacked lockup; the simple-icons glyph reads better",
   "BRK.B": "its Commons logo is Berkshire Hathaway Energy, a subsidiary",
   BRO: "Commons search finds Brown Bears Athletics",
