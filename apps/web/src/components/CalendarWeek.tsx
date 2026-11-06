@@ -8,8 +8,8 @@ import { translator } from "../lib/translator";
 import EconomyEvents from "./EconomyEvents";
 
 const SLOTS: Slot[] = ["bmo", "amc", "unknown"];
-/** Tiles a slot shows before the rest fold into "Show N more": about three rows on a wide screen (a busy day has 60 reports). */
-export const TILES_PER_SLOT = 18;
+/** Tiles a slot shows before the rest fold into "Show N more": four full rows of five on a wide screen, five of four on a phone (a busy day has 60 reports). */
+export const TILES_PER_SLOT = 20;
 /** Logos loaded eagerly: the first rows of tiles on the page (roughly the first screen); the rest are lazy. */
 export const EAGER_LOGOS = 6;
 
@@ -44,7 +44,7 @@ export default function CalendarWeek({
   const eager = new Set(
     days
       .flatMap((d) => SLOTS.flatMap((slot) => d.entries.filter((e) => e.slot === slot && e.writeUps)))
-      // Only shown tiles count; write-up companies lead each slot, so their logos come first.
+      // Write-up companies lead each slot, so the first logos in this order are the first on the page.
       .filter((e) => companyLogo(e.ticker))
       .slice(0, EAGER_LOGOS),
   );
@@ -102,7 +102,7 @@ function Tiles({ entries, locale, t, eager }: { entries: CalendarEntry[]; locale
             <Link
               className="cal-tile-link"
               href={e.postSlug ? `/${locale}/p/${e.postSlug}` : `/${locale}/t/${encodeURIComponent(e.ticker)}`}
-              title={name}
+              title={e.name ?? undefined}
             >
               <span className="cal-mark">
                 {logo ? (

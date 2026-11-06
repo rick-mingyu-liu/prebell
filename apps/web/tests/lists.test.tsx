@@ -185,7 +185,7 @@ describe("CalendarWeek", () => {
     expect(shown).toContain('href="/en/t/W1"');
     expect(shown).toContain('href="/en/t/W2"');
     expect(folded).toContain("<summary>Show 2 more</summary>");
-    expect(folded).toContain('href="/en/t/X17"');
+    expect(folded).toContain(`href="/en/t/X${String(TILES_PER_SLOT - 1).padStart(2, "0")}"`);
   });
 
   it("loads the first logos on the page eagerly and the rest lazily", () => {

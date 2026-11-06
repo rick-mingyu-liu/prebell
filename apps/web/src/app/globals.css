@@ -315,7 +315,8 @@ html:lang(zh-Hans) .cal-slot { font-variant-caps: normal; letter-spacing: 0.02em
 h3.cal-slot { margin: 0 0 0.3rem; font-weight: 600; }
 /* Every company: a grid of 48px logo tiles (a ticker chip when there is no logo), ticker and name beneath. */
 .cal-tiles { list-style: none; margin: 0 0 0.6rem; padding: 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(4.25rem, 1fr)); gap: 0.6rem 0.5rem; min-width: 0; }
-.cal-tile-link { display: flex; flex-direction: column; align-items: center; gap: 0.2rem; text-decoration: none; }
+.cal-tile { min-width: 0; }
+.cal-tile-link { display: flex; flex-direction: column; align-items: center; gap: 0.2rem; min-width: 0; text-decoration: none; }
 .cal-mark { display: flex; align-items: center; justify-content: center; width: 48px; height: 48px; }
 .cal-mark img { display: block; width: 48px; height: 48px; }
 .cal-chip { box-sizing: border-box; display: flex; align-items: center; justify-content: center; width: 48px; height: 48px; border: 1px solid var(--rule); border-radius: 10px; background: var(--card); font-size: 12px; font-weight: 700; line-height: 1; }
@@ -327,8 +328,6 @@ h3.cal-slot { margin: 0 0 0.3rem; font-weight: 600; }
   .cal-tiles { grid-template-columns: repeat(auto-fill, minmax(5.75rem, 1fr)); }
   .cal-tile-name { display: -webkit-box; }
 }
-.cal-tile { min-width: 0; }
-.cal-tile-link { min-width: 0; }
 .cal-unconfirmed .cal-sym, .cal-unconfirmed .cal-chip { color: var(--muted); font-weight: 400; }
 .cal-more { margin-top: 0.4rem; }
 .cal-more > summary { cursor: pointer; color: var(--muted); font-size: 13px; }
