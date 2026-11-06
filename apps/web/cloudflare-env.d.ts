@@ -2,7 +2,7 @@
 interface CloudflareEnv {
   DB: import("./src/lib/posts").D1Like;
   /** Generator's R2 bucket; the site reads `charts/` SVGs and posts' facts JSON from it. */
-  FACTS: import("./src/lib/earnings").R2Like & import("./src/lib/facts").R2Like;
+  FACTS: import("./src/lib/earnings").R2Like & import("./src/lib/facts").R2Like & import("./src/lib/covers").CardBucket;
   ASSETS: { fetch(request: Request): Promise<Response> };
   SITE_URL?: string;
   CF_BEACON_TOKEN?: string;

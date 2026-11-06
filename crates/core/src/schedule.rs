@@ -3,7 +3,13 @@
 //! numbers days 1-7 from Sunday, unlike most cron dialects.
 
 /// Every job a cron queues.
-pub const JOBS: &[&str] = &["premarket", "premarket-update", "recap", "earnings"];
+pub const JOBS: &[&str] = &[
+    "premarket",
+    "premarket-update",
+    "recap",
+    "earnings",
+    "cards",
+];
 
 /// Queue binding for the earnings polls and calendar refresh: one consumer,
 /// one message at a time, so a poll never runs twice at once and an
@@ -60,6 +66,9 @@ impl EarningsStep {
 pub enum JobKind {
     Content(ContentJob),
     Earnings(EarningsStep),
+    /// `cards`: render at most one missing share card (`cover::card`), in
+    /// its own message so its CPU never adds to a build's.
+    Cards,
 }
 
 impl JobKind {
@@ -72,6 +81,7 @@ impl JobKind {
             "earnings:build" => Some(JobKind::Earnings(EarningsStep::Build)),
             "earnings:calendar" => Some(JobKind::Earnings(EarningsStep::Calendar)),
             "events:check" => Some(JobKind::Earnings(EarningsStep::Events)),
+            "cards" => Some(JobKind::Cards),
             _ => None,
         }
     }
@@ -97,15 +107,22 @@ pub const CRONS: &[(&str, &[&str])] = &[
     // 18:00 ET give-up; the premarket update 08:35-09:25 ET; the recap
     // window from 13:45 ET (early close) or 16:45 ET to 19:00 ET EDT
     // (23:00Z), with its ZH retries. The clock gates the earlier firings:
-    // they read D1 and do nothing.
+    // they read D1 and do nothing. Every firing also renders a missing
+    // share card, so a post's card follows it within 5 minutes.
     (
         "*/5 10-23 * * MON-FRI",
-        &["premarket", "premarket-update", "recap", "earnings"],
+        &[
+            "premarket",
+            "premarket-update",
+            "recap",
+            "earnings",
+            "cards",
+        ],
     ),
     // 00:00-03:55Z the next UTC day: the EST recap tail to 19:00 ET
     // (00:00Z) and recap ZH retries to the 22:00 ET give-up; earnings
     // polling to 22:00 ET (02:00Z EDT, 03:00Z EST).
-    ("*/5 0-3 * * TUE-SAT", &["recap", "earnings"]),
+    ("*/5 0-3 * * TUE-SAT", &["recap", "earnings", "cards"]),
 ];
 
 /// The jobs for a firing of `cron`, or `None` when the cron is unknown (the
@@ -269,9 +286,15 @@ mod tests {
         let want: [(&str, &[&str]); 2] = [
             (
                 "*/5 10-23 * * MON-FRI",
-                &["premarket", "premarket-update", "recap", "earnings"],
+                &[
+                    "premarket",
+                    "premarket-update",
+                    "recap",
+                    "earnings",
+                    "cards",
+                ],
             ),
-            ("*/5 0-3 * * TUE-SAT", &["recap", "earnings"]),
+            ("*/5 0-3 * * TUE-SAT", &["recap", "earnings", "cards"]),
         ];
         for (cron, jobs) in want {
             assert_eq!(jobs_for_cron(cron), Some(jobs), "{cron}");
@@ -297,6 +320,7 @@ mod tests {
             JobKind::parse("recap"),
             Some(JobKind::Content(ContentJob::Recap))
         );
+        assert_eq!(JobKind::parse("cards"), Some(JobKind::Cards));
         assert_eq!(JobKind::parse("nope"), None);
         for step in [
             EarningsStep::Poll,
@@ -311,11 +335,11 @@ mod tests {
             };
             assert_eq!(queue_for(step.job()), queue);
         }
-        for j in ["premarket", "premarket-update", "recap", "nope"] {
+        for j in ["premarket", "premarket-update", "recap", "cards", "nope"] {
             assert_eq!(queue_for(j), JOBS_QUEUE, "{j}");
         }
         let kinds: Vec<JobKind> = JOBS.iter().map(|j| JobKind::parse(j).unwrap()).collect();
-        assert_eq!(kinds.len(), 4);
+        assert_eq!(kinds.len(), 5);
         for (i, k) in kinds.iter().enumerate() {
             assert!(!kinds[..i].contains(k), "{k:?}");
         }

@@ -8,6 +8,7 @@ mod store;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
+use prebell_core::cover::card::{cards_tick, wants_card};
 use prebell_core::earnings::calendar::{refresh_tick, yahoo_seeding, CalendarSource};
 use prebell_core::earnings::run::{build_tick, poll_job};
 use prebell_core::edgar::{Edgar, BUILD_GAP_MS};
@@ -208,7 +209,7 @@ impl JobRunner for Runner<'_> {
 
     /// One earnings step, each its own message and so its own subrequest
     /// budget: a poll (no LLM) queues the builds and the calendar refresh.
-    async fn earnings(&self, step: EarningsStep) -> std::result::Result<String, String> {
+    async fn earnings(&self, step: EarningsStep) -> std::result::Result<(String, bool), String> {
         let env = self.env;
         let store = self.store;
         let t = now(env);
@@ -220,14 +221,17 @@ impl JobRunner for Runner<'_> {
                         for e in &o.errors {
                             console_warn!("events: {e}");
                         }
-                        Ok(format!("{o:?}"))
+                        Ok((format!("{o:?}"), false))
                     }
                     // Before migration 0008: nothing to alert, the site and the
                     // brief run on the snapshot. Marked done for the day, so
                     // polls stop queuing it until tomorrow.
                     Err(e) if missing_table(&e) => {
                         mark_checked(store, t).await?;
-                        Ok("events: macro_events missing (apply migration 0008); skipped".into())
+                        Ok((
+                            "events: macro_events missing (apply migration 0008); skipped".into(),
+                            false,
+                        ))
                     }
                     Err(e) => Err(e),
                 }
@@ -236,7 +240,7 @@ impl JobRunner for Runner<'_> {
                 let edgar = self.edgar()?;
                 let o = poll_job(t, self.fired, store, store, &edgar).await?;
                 if o.stale {
-                    return Ok("stale message, dropped".into());
+                    return Ok(("stale message, dropped".into(), false));
                 }
                 for e in &o.errors {
                     console_warn!("earnings poll: {e}");
@@ -257,12 +261,15 @@ impl JobRunner for Runner<'_> {
                         console_error!("earnings: queue send for {} failed: {e}", next.job());
                     }
                 }
-                Ok(format!(
-                    "pages {}, entries {}, new {:?}, queued {:?}",
-                    o.pages,
-                    o.checked,
-                    o.detected,
-                    o.follow_ups.iter().map(|s| s.job()).collect::<Vec<_>>()
+                Ok((
+                    format!(
+                        "pages {}, entries {}, new {:?}, queued {:?}",
+                        o.pages,
+                        o.checked,
+                        o.detected,
+                        o.follow_ups.iter().map(|s| s.job()).collect::<Vec<_>>()
+                    ),
+                    false,
                 ))
             }
             EarningsStep::Build => {
@@ -272,7 +279,8 @@ impl JobRunner for Runner<'_> {
                 // Beside a poll on the other queue: slower, to stay under 10/s.
                 let edgar = edgar.paced(BUILD_GAP_MS);
                 let o = build_tick(t, store, store, &edgar, llm.as_ref(), &log).await?;
-                Ok(format!("{o:?}"))
+                let published = o.iter().any(|(_, outcome)| wants_card(outcome));
+                Ok((format!("{o:?}"), published))
             }
             EarningsStep::Calendar => {
                 // SEC_CONTACT gates every earnings step, as before.
@@ -284,9 +292,26 @@ impl JobRunner for Runner<'_> {
                 let cal = YahooCalendar::new(self.http.clone());
                 let src: Option<&dyn CalendarSource> = if yahoo { Some(&cal) } else { None };
                 let o = refresh_tick(t, store, store, src, &ns, llm.as_ref()).await?;
-                Ok(format!("{o:?}"))
+                Ok((format!("{o:?}"), false))
             }
         }
+    }
+
+    /// Renders at most one missing share card; no providers, only D1 and R2.
+    async fn cards(&self) -> std::result::Result<String, String> {
+        cards_tick(now(self.env), self.store).await
+    }
+
+    async fn queue_cards(&self) -> std::result::Result<(), String> {
+        self.env
+            .queue(queue_for("cards"))
+            .map_err(|e| e.to_string())?
+            .send(Job {
+                job: "cards".into(),
+                at: None,
+            })
+            .await
+            .map_err(|e| e.to_string())
     }
 }
 

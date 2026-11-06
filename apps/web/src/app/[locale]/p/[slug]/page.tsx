@@ -4,16 +4,19 @@ import { cache } from "react";
 import { getCloudflareContext } from "@opennextjs/cloudflare";
 import { getTranslations, setRequestLocale } from "next-intl/server";
 import BriefView from "@/components/BriefView";
-import type { Locale } from "@/i18n/routing";
+import { htmlLang, type Locale } from "@/i18n/routing";
 import { loadBrief } from "@/lib/brief";
 import { getDb } from "@/lib/db";
 import { pendingTitle } from "@/lib/labels";
 import { resolvePost } from "@/lib/posts";
-import { pairedAlternates } from "@/lib/seo";
+import { postCard } from "@/lib/covers";
+import { jsonLd, newsArticleLd, pairedAlternates, shareMetadata, siteOrigin } from "@/lib/seo";
 import { signupEnabled } from "@/lib/signup";
 
 // One lookup shared by generateMetadata and the page.
 const resolve = cache((slug: string, locale: Locale) => resolvePost(getDb(), slug, locale));
+// The share card, once per request: the post's own only after the generator has rendered it.
+const card = cache((coverKey: string | null) => postCard(getCloudflareContext().env.FACTS, coverKey));
 
 export async function generateMetadata({ params }: PageProps<"/[locale]/p/[slug]">): Promise<Metadata> {
   const { locale, slug } = await params;
@@ -23,12 +26,33 @@ export async function generateMetadata({ params }: PageProps<"/[locale]/p/[slug]
   const t = await getTranslations({ locale });
   if (post.status === "pending") {
     // Not indexed and not paired until the Chinese text is published.
-    return { title: pendingTitle(t, post, locale as Locale), robots: { index: false } };
+    const title = pendingTitle(t, post, locale as Locale);
+    return {
+      title,
+      robots: { index: false },
+      ...shareMetadata({
+        locale: locale as Locale,
+        url: `/${locale}/p/${slug}`,
+        title,
+        description: t("site.tagline"),
+        siteName: t("site.name"),
+        image: await card(post.coverKey),
+      }),
+    };
   }
   return {
     title: post.title,
     description: post.summary,
     alternates: post.hasOtherLang ? pairedAlternates(locale, `/p/${slug}`) : { canonical: `/${locale}/p/${slug}` },
+    ...shareMetadata({
+      locale: locale as Locale,
+      url: `/${locale}/p/${slug}`,
+      title: post.title,
+      description: post.summary,
+      siteName: t("site.name"),
+      image: await card(post.coverKey),
+      article: { publishedTime: post.publishedAt, modifiedTime: post.revisedAt ?? post.publishedAt },
+    }),
   };
 }
 
@@ -45,5 +69,22 @@ export default async function PostPage({ params }: PageProps<"/[locale]/p/[slug]
   const data = await loadBrief(getDb(), getCloudflareContext().env.FACTS, post, locale, (e) =>
     console.error(`post facts ${post.factsKey}:`, e),
   );
-  return <BriefView data={data} locale={locale} signup={signupEnabled()} />;
+  const ld =
+    post.status === "published"
+      ? newsArticleLd(await siteOrigin(), {
+          url: `/${locale}/p/${slug}`,
+          headline: post.title,
+          description: post.summary,
+          image: await card(post.coverKey),
+          lang: htmlLang(locale),
+          publishedAt: post.publishedAt,
+          revisedAt: post.revisedAt,
+        })
+      : null;
+  return (
+    <>
+      {ld && <script type="application/ld+json" dangerouslySetInnerHTML={{ __html: jsonLd(ld) }} />}
+      <BriefView data={data} locale={locale} signup={signupEnabled()} />
+    </>
+  );
 }

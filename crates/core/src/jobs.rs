@@ -7,6 +7,7 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 
 use crate::clock::et;
+use crate::cover::card::wants_card;
 use crate::run::TickOutcome;
 use crate::schedule::{ContentJob, EarningsStep, JobKind};
 use crate::store::Store;
@@ -18,9 +19,26 @@ pub trait JobRunner {
     /// only the jobs that need it) and ticks it. `Err` is a config error
     /// whose text must already be free of secret values (see `redact`).
     async fn content(&self, job: ContentJob) -> Result<TickOutcome, String>;
-    /// One earnings step. `Ok` is a log line; `Err` is a config error, as
-    /// for `content`.
-    async fn earnings(&self, step: EarningsStep) -> Result<String, String>;
+    /// One earnings step. `Ok` is a log line and whether the step put a
+    /// post live; `Err` is a config error, as for `content`.
+    async fn earnings(&self, step: EarningsStep) -> Result<(String, bool), String>;
+    /// One `cards` job (`cover::card::cards_tick`). `Ok` is a log line; `Err`
+    /// a store or render error, logged and left for the next firing.
+    async fn cards(&self) -> Result<String, String>;
+    /// Sends a `cards` message now, so a post that just went live gets its
+    /// share card within seconds instead of at the next firing.
+    async fn queue_cards(&self) -> Result<(), String>;
+}
+
+/// `line`, after queueing a `cards` message when `published`.
+async fn queue_card_if(runner: &dyn JobRunner, published: bool, line: String) -> String {
+    if !published {
+        return line;
+    }
+    match runner.queue_cards().await {
+        Ok(()) => format!("{line}; card queued"),
+        Err(e) => format!("{line}; card queue failed: {e}"),
+    }
 }
 
 /// Alert text is at most this many characters.
@@ -35,11 +53,13 @@ pub async fn run_job(
 ) -> Result<String, String> {
     match JobKind::parse(job) {
         Some(JobKind::Content(c)) => match runner.content(c).await {
-            Ok(o) => Ok(format!("job {job}: {o:?}")),
+            Ok(o) => Ok(queue_card_if(runner, wants_card(&o), format!("job {job}: {o:?}")).await),
             Err(e) => Err(config_error(now, job, &e, store).await),
         },
         Some(JobKind::Earnings(step)) => match runner.earnings(step).await {
-            Ok(line) => Ok(format!("job {job}: {line}")),
+            Ok((line, published)) => {
+                Ok(queue_card_if(runner, published, format!("job {job}: {line}")).await)
+            }
             // The events check shares the queue, not the config: its own
             // alert, so it never uses up the earnings one.
             Err(e) if step == EarningsStep::Events => {
@@ -48,6 +68,11 @@ pub async fn run_job(
             // One alert per day for every earnings step: they share the config.
             Err(e) => Err(config_error(now, "earnings", &e, store).await),
         },
+        Some(JobKind::Cards) => runner
+            .cards()
+            .await
+            .map(|line| format!("job {job}: {line}"))
+            .map_err(|e| format!("job {job}: {e}")),
         None => Err(format!("job {job}: unknown job, dropped")),
     }
 }
@@ -107,21 +132,37 @@ mod tests {
         content_calls: RefCell<Vec<ContentJob>>,
         earnings_calls: RefCell<Vec<EarningsStep>>,
     }
+    thread_local! {
+        /// What the next `content` and earnings build return, and the `cards` messages sent.
+        static OUTCOME: RefCell<TickOutcome> = const { RefCell::new(TickOutcome::Nothing) };
+        static QUEUED: RefCell<usize> = const { RefCell::new(0) };
+    }
     #[async_trait(?Send)]
     impl JobRunner for FakeRunner {
         async fn content(&self, job: ContentJob) -> Result<TickOutcome, String> {
             self.content_calls.borrow_mut().push(job);
             match &self.content_err {
                 Some(e) => Err(e.clone()),
-                None => Ok(TickOutcome::Nothing),
+                None => Ok(OUTCOME.with(|o| o.borrow().clone())),
             }
         }
-        async fn earnings(&self, step: EarningsStep) -> Result<String, String> {
+        async fn earnings(&self, step: EarningsStep) -> Result<(String, bool), String> {
             self.earnings_calls.borrow_mut().push(step);
+            let built = step == EarningsStep::Build && OUTCOME.with(|o| wants_card(&o.borrow()));
             match &self.content_err {
                 Some(e) => Err(e.clone()),
-                None => Ok("polled".into()),
+                None => Ok(("polled".into(), built)),
             }
+        }
+        async fn cards(&self) -> Result<String, String> {
+            match &self.content_err {
+                Some(e) => Err(e.clone()),
+                None => Ok("no card missing".into()),
+            }
+        }
+        async fn queue_cards(&self) -> Result<(), String> {
+            QUEUED.with(|q| *q.borrow_mut() += 1);
+            Ok(())
         }
     }
     /// A runner whose LLM config has `LLM_EFFORT=hgih`, with the error text
@@ -275,6 +316,61 @@ mod tests {
         };
         let out = run_job(utc("2026-10-29T12:30:00Z"), "earnings", &s, &r).await;
         assert_eq!(out, Ok("job earnings: polled".to_string()));
+        assert!(s.alerts.borrow().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_publish_queues_its_card_at_once() {
+        let s = MemStore::default();
+        let r = FakeRunner {
+            content_err: None,
+            content_calls: RefCell::new(vec![]),
+            earnings_calls: RefCell::new(vec![]),
+        };
+        let now = utc("2026-11-06T13:00:00Z");
+        let queued = || QUEUED.with(|q| *q.borrow());
+        OUTCOME.with(|o| *o.borrow_mut() = TickOutcome::Published);
+        assert_eq!(
+            run_job(now, "premarket", &s, &r).await,
+            Ok("job premarket: Published; card queued".to_string())
+        );
+        assert_eq!(
+            run_job(now, "earnings:build", &s, &r).await,
+            Ok("job earnings:build: polled; card queued".to_string())
+        );
+        // A poll publishes nothing, whatever the outcome says.
+        assert_eq!(
+            run_job(now, "earnings", &s, &r).await,
+            Ok("job earnings: polled".to_string())
+        );
+        assert_eq!(queued(), 2);
+        OUTCOME.with(|o| *o.borrow_mut() = TickOutcome::Retrying("en: x".into()));
+        run_job(now, "recap", &s, &r).await.unwrap();
+        run_job(now, "earnings:build", &s, &r).await.unwrap();
+        assert_eq!(queued(), 2);
+    }
+
+    #[tokio::test]
+    async fn a_cards_error_is_logged_and_never_alerted() {
+        let s = MemStore::default();
+        let ok = FakeRunner {
+            content_err: None,
+            content_calls: RefCell::new(vec![]),
+            earnings_calls: RefCell::new(vec![]),
+        };
+        let now = utc("2026-10-29T12:30:00Z");
+        assert_eq!(
+            run_job(now, "cards", &s, &ok).await,
+            Ok("job cards: no card missing".to_string())
+        );
+        let failing = FakeRunner {
+            content_err: Some("R2 put: down".into()),
+            ..ok
+        };
+        assert_eq!(
+            run_job(now, "cards", &s, &failing).await,
+            Err("job cards: R2 put: down".to_string())
+        );
         assert!(s.alerts.borrow().is_empty());
     }
 
