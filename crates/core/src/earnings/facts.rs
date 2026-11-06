@@ -372,6 +372,11 @@ pub(crate) mod tests {
             reason: NOT_STATED.into(),
         };
         assert_eq!(missing_required(&f), vec!["filing"]);
+        // An LLM outage is not "not stated": revenue stays required, so the run retries.
+        f.metrics.revenue = Field::Missing {
+            reason: "extraction failed: http status 503".into(),
+        };
+        assert_eq!(missing_required(&f), vec!["revenue", "filing"]);
     }
 
     #[test]

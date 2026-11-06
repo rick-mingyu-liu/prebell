@@ -284,6 +284,12 @@ mod tests {
         assert_eq!(utf8_prefix(s.clone(), 4).unwrap(), "ab");
         assert_eq!(utf8_prefix(s, 2).unwrap(), "ab");
         assert!(utf8_prefix(vec![b'a', 0xff, b'b'], 3).is_err());
+        // A 4-byte character split after any of its first three bytes.
+        let s = "a😀".as_bytes().to_vec();
+        for cap in 2..=4 {
+            assert_eq!(utf8_prefix(s.clone(), cap).unwrap(), "a");
+        }
+        assert_eq!(utf8_prefix(s, 5).unwrap(), "a😀");
     }
 
     #[tokio::test]

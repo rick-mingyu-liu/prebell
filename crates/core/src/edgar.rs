@@ -157,6 +157,24 @@ impl<H: Http, T: Timer> Edgar<H, T> {
     }
 }
 
+/// A press release cut at `MAX_BYTES` ends mid-element, possibly mid-number
+/// ("Total revenues 8,8"), and a cut cell must never verify. A body that
+/// reached the cap is trimmed to its last complete paragraph, row or block.
+fn whole_blocks(mut html: String) -> String {
+    // `get_prefix` drops at most 3 bytes of a split character.
+    if html.len() + 4 <= MAX_BYTES {
+        return html;
+    }
+    let lower = html.to_ascii_lowercase();
+    let end = ["</p>", "</tr>", "</div>", "</table>"]
+        .iter()
+        .filter_map(|tag| lower.rfind(tag).map(|i| i + tag.len()))
+        .max()
+        .unwrap_or(0);
+    html.truncate(end);
+    html
+}
+
 /// `0000320193-26-000070` -> `000032019326000070`.
 fn acc_nodash(accession: &str) -> String {
     accession.replace('-', "")
@@ -379,7 +397,7 @@ impl<H: Http, T: Timer> Filings for Edgar<H, T> {
                 "not an EDGAR archive url: {url}"
             )));
         }
-        let text = html_to_text(&self.fetch(url, true).await?);
+        let text = html_to_text(&whole_blocks(self.fetch(url, true).await?));
         if text.is_empty() {
             return Err(ProviderError::Empty);
         }
@@ -664,6 +682,20 @@ pub(crate) mod tests {
         let e = edgar(&[(url, 200, &body)]);
         let text = e.document_text(url).await.unwrap();
         assert!(text.starts_with("Simon Property Group Reports Third Quarter 2026 Results"));
+    }
+
+    #[test]
+    fn a_cut_press_release_ends_on_a_whole_row() {
+        // The cap falls inside "8,893": the half row is dropped, not "8,8".
+        let head = "<table><tr><td>Total revenues</td><td>1,234</td></tr>".to_string();
+        let filler = "x".repeat(MAX_BYTES - head.len() - "<tr><td>Net income</td><td>8,8".len());
+        let cut = format!("{head}{filler}<tr><td>Net income</td><td>8,8");
+        assert_eq!(cut.len(), MAX_BYTES);
+        let kept = whole_blocks(cut);
+        assert!(kept.ends_with("</tr>"), "{}", &kept[kept.len() - 20..]);
+        assert!(!html_to_text(&kept).contains("8,8"));
+        // A body under the cap is untouched.
+        assert_eq!(whole_blocks("<p>a 8,8".into()), "<p>a 8,8");
     }
 
     #[tokio::test]

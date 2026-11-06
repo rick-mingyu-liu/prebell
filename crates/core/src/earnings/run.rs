@@ -887,6 +887,8 @@ mod tests {
         no_exhibit: Cell<bool>,
         /// No XBRL concepts: the facts carry no quarterly trend.
         no_trend: Cell<bool>,
+        /// The exhibit's text, when not the AAPL fixture's.
+        exhibit_text: RefCell<Option<String>>,
     }
     #[async_trait(?Send)]
     impl Filings for FakeFilings {
@@ -906,7 +908,11 @@ mod tests {
             Ok(parse_filing_index(INDEX))
         }
         async fn document_text(&self, _: &str) -> Result<String, ProviderError> {
-            Ok(html_to_text(EX991))
+            Ok(self
+                .exhibit_text
+                .borrow()
+                .clone()
+                .unwrap_or_else(|| html_to_text(EX991)))
         }
         async fn company_concept(
             &self,
@@ -1432,6 +1438,12 @@ mod tests {
     #[tokio::test]
     async fn a_release_that_states_no_revenue_still_publishes() {
         let (base, es, fl) = detected().await;
+        // The AAPL release with every revenue line renamed: none left to state.
+        let text = regex::Regex::new(r"(?i)revenues?|net sales")
+            .unwrap()
+            .replace_all(&html_to_text(EX991), "turnover")
+            .into_owned();
+        *fl.exhibit_text.borrow_mut() = Some(text);
         let l = llm(true, true);
         l.no_revenue.set(true);
         let t = poll_time() + Duration::minutes(1);
@@ -1443,6 +1455,23 @@ mod tests {
         assert!(matches!(&f.metrics.revenue, Field::Missing { reason } if reason == NOT_STATED));
         let en = base.translations.borrow()[&(1, "en".to_string())].clone();
         assert!(!en.body_md.contains("| Revenue |"), "{}", en.body_md);
+    }
+
+    #[tokio::test]
+    async fn a_model_that_skips_a_stated_revenue_retries() {
+        // The AAPL release states revenue; a reply without it is not "not stated".
+        let (base, es, fl) = detected().await;
+        let l = llm(true, true);
+        l.no_revenue.set(true);
+        let t = poll_time() + Duration::minutes(1);
+        let o = build_tick(t, &es, base.as_ref(), &fl, &l, &|_| {})
+            .await
+            .unwrap();
+        assert!(
+            matches!(&o[0].1, TickOutcome::Retrying(e) if e.starts_with("missing revenue")),
+            "{o:?}"
+        );
+        assert!(base.posts.borrow().is_empty());
     }
 
     #[tokio::test]
