@@ -14,15 +14,18 @@ const HALVES: Slot[] = ["bmo", "amc"];
 export const CARDS_PER_SLOT = 8;
 /** Width over height from which a logo is a wordmark set across the card, not an icon beside the ticker. */
 export const WIDE_LOGO = 1.8;
+/** Width over height from which a wordmark is long enough to take the card's whole inner width on a desktop. */
+export const LONG_LOGO = 5;
 /**
- * A wordmark's height in its card: about the same ink area for every mark, so a long one sits lower and a
- * stubby one does not shout (2:1 and wider up to 30px tall, 5:1 20px), never under 16px. The card's width caps it too.
+ * A wordmark's height in its card's 80x28 logo box: about the same ink area for every mark, so a long one sits
+ * lower and a stubby one does not shout (2:1 is 23px tall, 5:1 15px), never over 28px or under 12px. The box's
+ * width caps it too, and so does the mark's own height.
  */
-export const wordmarkHeight = (ratio: number) => Math.round(Math.min(30, Math.max(16, Math.sqrt(2000 / ratio))));
+export const wordmarkHeight = (ratio: number) => Math.round(Math.min(28, Math.max(12, Math.sqrt(1100 / ratio))));
 /** Logos loaded eagerly: the first cards of the before-open and after-close lists of the day the board opens on. */
 export const EAGER_PER_SLOT = 1;
-/** An icon's box; a smaller image keeps its own size, so no logo is drawn above its natural size. */
-const ICON = 28;
+/** The largest icon box (22px on a phone, 20px on a desktop); a smaller image keeps its own size, so no logo is drawn above its natural size. */
+const ICON = 22;
 
 type T = ReturnType<typeof translator>;
 
@@ -238,7 +241,7 @@ function Cards({ entries, locale, t, eager }: { entries: CalendarEntry[]; locale
         const kind = logo ? (wide ? "wide" : "icon") : "text";
         const img = logo && (
           <img
-            className={wide ? "cal-logo-wide" : "cal-logo-icon"}
+            className={wide ? (ratio >= LONG_LOGO ? "cal-logo-wide cal-logo-long" : "cal-logo-wide") : "cal-logo-icon"}
             src={logo.src}
             alt={wide ? name : ""}
             width={logo.width}

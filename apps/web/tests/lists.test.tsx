@@ -221,7 +221,7 @@ describe("CalendarWeek", () => {
     const wide = companyLogoInfo(WIDE)!;
     expect(card(`/en/t/${WIDE}`)).toContain('<li class="cal-card cal-card-wide cal-confirmed">');
     expect(card(`/en/t/${WIDE}`)).toMatch(
-      new RegExp(`<img class="cal-logo-wide" src="${esc(wide.src)}" alt="Wide Corp" width="${wide.width}" height="${wide.height}" style="height:\\d+px" loading="(eager|lazy)"`),
+      new RegExp(`<img class="cal-logo-wide(?: cal-logo-long)?" src="${esc(wide.src)}" alt="Wide Corp" width="${wide.width}" height="${wide.height}" style="height:\\d+px" loading="(eager|lazy)"`),
     );
     expect(card(`/en/t/${WIDE}`)).not.toContain("cal-card-sym");
     expect(card(`/en/t/${WIDE}`)).toContain('title="Wide Corp"');
