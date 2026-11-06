@@ -1,10 +1,7 @@
 //! The single stored record both language drafts are written from, plus the
 //! publish gate and the number allow-list.
 
-use std::sync::OnceLock;
-
 use chrono::{DateTime, Datelike, NaiveDate, Utc};
-use regex::Regex;
 use serde::{Deserialize, Serialize};
 
 use crate::numbers::{self, Lang};
@@ -145,92 +142,40 @@ fn push_quote(out: &mut Vec<f64>, q: &Quote) {
 /// Numbers a source quote allows, in base units. Without an explicit sign
 /// marker the quote carries no direction, so both signs are allowed. A
 /// range's first figure is allowed bare too ("2.32 to 2.36 million" allows
-/// 2.32 and 2.32 million); so are counts spelled out ("twelve months") and
-/// the size an industry unit implies ("13 MTPA" is 13 million tonnes, which
-/// a Chinese draft writes "1300万吨").
+/// 2.32 and 2.32 million).
 pub(crate) fn quote_numbers(quote: &str) -> Vec<f64> {
-    static WORDS: OnceLock<Regex> = OnceLock::new();
-    static UNITS: OnceLock<Regex> = OnceLock::new();
     let mut out = Vec::new();
-    let mut push = |v: f64, signed: bool| {
-        out.push(v);
-        if !signed {
-            out.push(-v);
-        }
-    };
     // `Num.value` is already scaled to base units.
     for n in numbers::extract(quote, Lang::En) {
-        push(n.value, n.signed);
+        push_signed(&mut out, n.value, n.signed);
         if n.from_range {
-            push(n.value / n.multiplier, n.signed);
+            push_signed(&mut out, n.value / n.multiplier, n.signed);
         }
-    }
-    let words = WORDS.get_or_init(|| {
-        Regex::new(r"(?i)\b(?:one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred)\b")
-            .expect("valid built-in regex")
-    });
-    for w in words.find_iter(quote) {
-        push(spelled(&w.as_str().to_ascii_lowercase()), true);
-    }
-    let units = UNITS.get_or_init(|| {
-        Regex::new(r"(\d+(?:\.\d+)?)\s?(MTPA|MMBOE|MMboe|MMBbl|MMbbl|MMBtu|MMbtu|MMcfe?|Bcfe?|MBOE|Mboe|MBbl|Mbbl|Mcfe?)\b")
-            .expect("valid built-in regex")
-    });
-    for c in units.captures_iter(quote) {
-        let Ok(v) = c[1].parse::<f64>() else {
-            continue;
-        };
-        let size = match &c[2] {
-            u if u.starts_with("MM") || u == "MTPA" => 1e6,
-            u if u.starts_with('B') => 1e9,
-            _ => 1e3,
-        };
-        push(v * size, false);
     }
     out
 }
 
-/// "twelve" -> 12.
-fn spelled(w: &str) -> f64 {
-    const ONES: [&str; 20] = [
-        "",
-        "one",
-        "two",
-        "three",
-        "four",
-        "five",
-        "six",
-        "seven",
-        "eight",
-        "nine",
-        "ten",
-        "eleven",
-        "twelve",
-        "thirteen",
-        "fourteen",
-        "fifteen",
-        "sixteen",
-        "seventeen",
-        "eighteen",
-        "nineteen",
-    ];
-    const TENS: [&str; 8] = [
-        "twenty", "thirty", "forty", "fifty", "sixty", "seventy", "eighty", "ninety",
-    ];
-    if let Some(i) = ONES.iter().position(|o| *o == w) {
-        return i as f64;
+fn push_signed(out: &mut Vec<f64>, v: f64, signed: bool) {
+    out.push(v);
+    if !signed {
+        out.push(-v);
     }
-    if let Some(i) = TENS.iter().position(|t| *t == w) {
-        return 20.0 + 10.0 * i as f64;
-    }
-    100.0
 }
 
-/// A reason's quote and its title (fetched with the article, never written
-/// by the model: "... Biggest Losses on Record, $2.9 Trillion").
+/// A reason's quote and its title, which is fetched with the article and
+/// never written by the model ("... Biggest Losses on Record, $2.9
+/// Trillion"). Only a title's figures count, not a list's small numbers
+/// ("3 Stocks to Buy Now, 7 to Avoid"): a percentage, a "$" amount, a size
+/// word or 11 and up.
 pub(crate) fn push_reason(out: &mut Vec<f64>, r: &NewsReason) {
     out.extend(quote_numbers(&r.quote));
-    out.extend(quote_numbers(&r.title));
+    for n in numbers::extract(&r.title, Lang::En) {
+        let figure =
+            n.is_percent || n.raw.contains('$') || n.multiplier != 1.0 || n.value.abs() >= 11.0;
+        if figure {
+            push_signed(out, n.value, n.signed);
+        }
+    }
 }
 
 /// Each theme's member moves and median, computed in code so the draft may
@@ -459,6 +404,20 @@ mod tests {
             "18个月来最大跌幅",
         ] {
             assert!(numbers::check(bad, Lang::Zh, &n).is_err(), "{bad}");
+        }
+        // A list's small numbers are not figures.
+        let mut n = Vec::new();
+        push_reason(
+            &mut n,
+            &NewsReason {
+                url: "https://news.test/b".into(),
+                title: "3 Stocks to Buy Now, 7 to Avoid".into(),
+                quote: "Shares moved.".into(),
+                summary_en: String::new(),
+            },
+        );
+        for bad in ["NVDA fell 3%", "AMD rose 7%"] {
+            assert!(numbers::check(bad, Lang::En, &n).is_err(), "{bad}");
         }
     }
 

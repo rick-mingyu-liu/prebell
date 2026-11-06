@@ -19,6 +19,7 @@ pub enum Lang {
 /// (`+ - − ▲ ▼` or `上涨 下跌 涨 跌`) sits directly before the number.
 /// `from_range` marks a range's first figure that takes the unit written
 /// once after the second ("2.32 to 2.36 million", "$4.3 to $4.4 billion").
+/// `at` is where `raw` starts in the text.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Num {
     pub raw: String,
@@ -28,6 +29,7 @@ pub struct Num {
     pub multiplier: f64,
     pub signed: bool,
     pub from_range: bool,
+    pub at: usize,
 }
 
 fn re(pattern: &str) -> Regex {
@@ -127,6 +129,7 @@ fn parse_unit(rest: &str, has_dollar: bool) -> (usize, f64, bool) {
     }
     // zh multipliers, longest first ("2.36百万桶" is 2.36 million barrels).
     for (unit, mult) in [
+        ("千万亿", 1e15),
         ("万亿", 1e12),
         ("千万", 1e7),
         ("百万", 1e6),
@@ -283,6 +286,7 @@ pub fn extract(text: &str, _lang: Lang) -> Vec<Num> {
             multiplier,
             signed: sign.is_some(),
             from_range: false,
+            at: raw_start,
         });
         spans.push((raw_start, end));
     }
@@ -294,10 +298,15 @@ pub fn extract(text: &str, _lang: Lang) -> Vec<Num> {
 /// million", "$4.3 to $4.4 billion", "232至236万". The first figure takes
 /// that unit when it has none of its own, is under 1,000 and is within a
 /// factor of ten of the second ("from 508,000 to 1.8 million" keeps its
-/// own units).
+/// own units). A change ("grew 9 to $45 billion", "rose by 5 to ...") is
+/// not a range, nor are two columns ("$1.62 ~$7.25 billion").
 fn range_units(text: &str, out: &mut [Num], spans: &[(usize, usize)]) {
     static R: OnceLock<Regex> = OnceLock::new();
-    let between = R.get_or_init(|| re(r"^\s*(?:to|through|-|–|—|~|～|至|到)\s*$"));
+    static CHANGE: OnceLock<Regex> = OnceLock::new();
+    let between = R.get_or_init(|| re(r"^\s*(?:to|through|-|–|—|至|到)\s*$"));
+    let change = CHANGE.get_or_init(|| {
+        re(r"(?i)\b(?:grew|grow|grows|rose|rise|rises|fell|fall|falls|increased|decreased|up|down|by)\s*$")
+    });
     for i in 1..out.len() {
         let (a, b) = (&out[i - 1], &out[i]);
         let (first, second) = (a.value.abs(), b.value.abs() / b.multiplier);
@@ -308,7 +317,8 @@ fn range_units(text: &str, out: &mut [Num], spans: &[(usize, usize)]) {
             && first < 1000.0
             && first > 0.0
             && (0.1..=10.0).contains(&(first / second))
-            && between.is_match(&text[spans[i - 1].1..spans[i].0]);
+            && between.is_match(&text[spans[i - 1].1..spans[i].0])
+            && !change.is_match(&text[..spans[i - 1].0]);
         if range {
             let m = b.multiplier;
             let a = &mut out[i - 1];
@@ -345,9 +355,78 @@ fn matches(n: &Num, allowed: f64) -> bool {
 /// Checks that every number in `text` traces to some value in `allowed`.
 /// Returns the `raw` text of each unmatched number, in order.
 pub fn check(text: &str, lang: Lang, allowed: &[f64]) -> Result<(), Vec<String>> {
+    check_allowed(
+        text,
+        lang,
+        &Allowed {
+            any: allowed,
+            ..Allowed::default()
+        },
+    )
+}
+
+/// What a draft's numbers may trace to, by how each value may be written.
+#[derive(Default)]
+pub struct Allowed<'a> {
+    /// Any number.
+    pub any: &'a [f64],
+    /// A quantity in its own unit ("13 MTPA" is 13 million tonnes): never a
+    /// "$" amount or a percentage.
+    pub quantities: &'a [f64],
+    /// A count ("twelve months"): only a bare integer.
+    pub counts: &'a [f64],
+    /// A rate from a table quote ("Revenue $13,467 $14,766 10% 10%"): only
+    /// a percentage.
+    pub rates: &'a [f64],
+    /// A value that holds only in context: `ok` gets the sentence (or line)
+    /// the number sits in.
+    pub in_context: &'a [(f64, Holds<'a>)],
+}
+
+/// Whether a value holds in the sentence a number sits in.
+pub type Holds<'a> = &'a dyn Fn(&str) -> bool;
+
+/// The sentence or line around byte `at`: up to a line break, "。", "!",
+/// "?" or a period that ends a sentence (not a decimal point). A "；"
+/// joins clauses of one sentence ("...22.72亿美元；前九个月为46.54亿美元").
+pub fn sentence_at(text: &str, at: usize) -> &str {
+    let ends = |i: usize, c: char| {
+        matches!(c, '\n' | '。' | '!' | '?' | '！' | '？')
+            || c == '.' && !text[i + 1..].starts_with(|d: char| d.is_ascii_digit())
+    };
+    let start = text[..at]
+        .char_indices()
+        .rev()
+        .find(|&(i, c)| ends(i, c))
+        .map_or(0, |(i, c)| i + c.len_utf8());
+    let end = text[at..]
+        .char_indices()
+        .find(|&(i, c)| ends(at + i, c))
+        .map_or(text.len(), |(i, _)| at + i);
+    &text[start..end]
+}
+
+/// `check` with values that hold only as a quantity, a count or in context.
+pub fn check_allowed(text: &str, lang: Lang, a: &Allowed) -> Result<(), Vec<String>> {
     let bad: Vec<String> = extract(text, lang)
         .into_iter()
-        .filter(|n| !is_small_count(n) && !allowed.iter().any(|&a| matches(n, a)))
+        .filter(|n| {
+            let bare = n.multiplier == 1.0 && n.decimals == 0 && !n.signed;
+            let after = text[n.at + n.raw.len()..].trim_start();
+            let money = n.raw.contains('$')
+                || ["美元", "元", "dollar", "USD"]
+                    .iter()
+                    .any(|u| after.starts_with(u));
+            let plain = !n.is_percent && !money;
+            !(is_small_count(n)
+                || a.any.iter().any(|&v| matches(n, v))
+                || plain && a.quantities.iter().any(|&v| matches(n, v))
+                || plain && bare && a.counts.iter().any(|&v| matches(n, v))
+                || n.is_percent && a.rates.iter().any(|&v| matches(n, v))
+                || a.in_context
+                    .iter()
+                    .any(|(v, ok)| matches(n, *v) && ok(sentence_at(text, n.at))))
+        })
         .map(|n| n.raw)
         .collect();
     if bad.is_empty() {
@@ -383,6 +462,8 @@ mod tests {
         assert_eq!(read("$4.3 - $4.4 billion"), [(4.3, 1e9), (4.4, 1e9)]);
         assert_eq!(read("232至236万桶"), [(232.0, 1e4), (236.0, 1e4)]);
         assert_eq!(read("每日2.32至2.36百万桶"), [(2.32, 1e6), (2.36, 1e6)]);
+        assert_eq!(read("1.5千万"), [(1.5, 1e7)]);
+        assert_eq!(read("5千万亿"), [(5.0, 1e15)]);
         // Not a range of one unit: its own magnitude, a rate, a list, a
         // first figure far from the second.
         assert_eq!(
@@ -392,6 +473,16 @@ mod tests {
         assert_eq!(read("grew 16% to 4.1 billion"), [(16.0, 1.0), (4.1, 1e9)]);
         assert_eq!(read("rose 5 and 2.36 million"), [(5.0, 1.0), (2.36, 1e6)]);
         assert_eq!(read("from 900 to 2.3 million"), [(900.0, 1.0), (2.3, 1e6)]);
+        // A change, and two columns, are no range.
+        assert_eq!(
+            read("Backlog grew 9 to $45 billion"),
+            [(9.0, 1.0), (45.0, 1e9)]
+        );
+        assert_eq!(read("rose by 2 to 2.36 million"), [(2.0, 1.0), (2.36, 1e6)]);
+        assert_eq!(
+            read("Adjusted EPS $1.62 ~$7.25 billion"),
+            [(1.62, 1.0), (7.25, 1e9)]
+        );
     }
 
     // Brief's exact cases.
