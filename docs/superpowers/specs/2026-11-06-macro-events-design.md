@@ -9,7 +9,7 @@ Approved by Rick 2026-11-06; his decisions are listed at the end.
 ## Goals
 
 - **v1 kinds: FOMC decision day (statement 2:00 PM ET + press conference,
-  projections flag), the jobs report (BLS Employment Situation), CPI, US
+  projections flag), FOMC minutes (Rick's answer 2), the jobs report (BLS Employment Situation), CPI, US
   federal elections**, plus closures/early closes, free from `clock.rs`
   (designer's call: no fetch, no new source; drop if unwanted).
 - The calendar shows them next to earnings, each with ET time, importance
@@ -54,7 +54,7 @@ self-funded; FOMC dates move only tentative -> confirmed, or in emergencies.
 
 | Kind | Source, format, lead | Note |
 |---|---|---|
-| FOMC minutes, Beige Book (2:00 PM) | federalreserve.gov/newsevents/YYYY-month.htm (slugs vary: `2026-04.htm`, `2026-may.htm`), a year+ ahead; released: feeds/press_monetary.xml | minutes ~3 weeks after a meeting |
+| Beige Book (2:00 PM) | the Fed month pages the minutes come from, a year+ ahead | |
 | Chair speeches/testimony | same month pages, ~1 week ahead, Board members only | |
 | PPI, JOLTS, ECI | same BLS per-release pages | JOLTS page shows only the next date |
 | GDP, PCE | apps.bea.gov/API/signup/release_dates.json (UTC, through 2027-12) + BEA ICS (estimate names); released: apps.bea.gov/rss/rss.xml | GDP and PCE now share dates |
@@ -88,8 +88,8 @@ MacroEvent {
   it moved/confirmed. **released**: the release URL answers 200; never
   inferred from the clock. Elections and closures: scheduled only.
 
-Tiers: FOMC, jobs, CPI, elections tier 1; closures tier 2. Later kinds get
-2 or 3 (minutes, PPI, retail, claims 2; housing, durables 3). Tiers are a
+Tiers: FOMC, jobs, CPI, elections tier 1; minutes and closures tier 2. Later
+kinds get 2 or 3 (PPI, retail, claims 2; housing, durables 3). Tiers are a
 code table, so the page and the brief filter by tier, not by kind.
 
 ## Storage: a new table, not `earnings_calendar`
@@ -120,7 +120,8 @@ Rick applies it to remote D1 before deploying (as with 0007).
 
 1. **Snapshot** `scripts/build-events.mjs` -> `crates/core/data/events.tsv`
    (like `scripts/build-watchlist.mjs`: contact UA, cache, `--offline`,
-   deterministic bytes). v1 fetches 3 pages (FOMC calendar, BLS
+   deterministic bytes). v1 fetches 3 pages plus the Fed month pages for
+   minutes (FOMC calendar, BLS
    `empsit.htm`, `cpi.htm`) and reads `crates/core/data/events-manual.tsv`
    (elections; a row without an official `proof_url` stops the run). One
    parser per source: a later kind is one more parser. Prints a
@@ -136,8 +137,8 @@ Rick applies it to remote D1 before deploying (as with 0007).
    confirmed / moved / postponed; a failed or empty parse is a diagnostic,
    never a status change. CPU: measure it; ~200 KB of HTML is small next
    to the ~620 ms a recap invocation already uses here. Not a blocker.
-4. **Released check**: on the existing `*/5` cron, for an event in the last
-   45 minutes not yet released, one GET of its release URL (BLS archive
+4. **Released check**: queued by the earnings poll (`*/5`) for two hours
+   after an event's time, and caught up by the daily check; not yet released, one GET of its release URL (BLS archive
    pattern; Fed `monetaryYYYYMMDDa.htm`). Per trading day: 3 + 0-2 fetches.
 
 If the Worker cannot reach BLS (UA or IP block), jobs and CPI rows stay
@@ -163,7 +164,7 @@ page: the official release is the detail. Most weeks: zero to two events.
   (`{id, et_time, title, tier, status, release_url}`, title in the brief's
   language from the glossary). Old R2 facts hold `Missing`, which still
   deserialises.
-- Built from today's tier 1 events (plus write-up earnings
+- Built from today's tier 1-2 events (plus write-up earnings
   due after today's close). Empty -> `Missing`, and the section drops as it
   does now (`crates/core/src/premarket/draft.rs:58-70`). With v1 kinds
   alone that is about 3 trading days a month (jobs, CPI, ~2/3 FOMC).
@@ -179,12 +180,13 @@ page: the official release is the detail. Most weeks: zero to two events.
 | key | EN | ZH |
 |---|---|---|
 | fomc | FOMC rate decision | 联邦公开市场委员会（FOMC）议息会议 |
+| fomc_minutes | FOMC minutes ({month} meeting) | FOMC会议纪要（{m}月会议） |
 | fomc_presser / sep | Fed Chair press conference / with projections (dot plot) | 美联储主席新闻发布会 / 含经济预测（点阵图） |
 | jobs | Jobs report (nonfarm payrolls) | 非农就业报告 |
 | cpi | CPI (consumer prices) | 消费者物价指数（CPI） |
 | election / midterm | US general election / US midterm elections | 美国大选 / 美国中期选举 |
 | closed / early_close | Market closed / Early close (1:00 PM) | 美股休市 / 美股提前收盘（13:00） |
-| later | FOMC minutes; PPI; JOLTS; claims; GDP advance/second/third; PCE; retail sales | FOMC会议纪要; 生产者物价指数（PPI）; 职位空缺（JOLTS）; 每周初请失业金人数; GDP初值/修正值/终值; 个人收入与支出（PCE物价指数）; 零售销售 |
+| later | PPI; JOLTS; claims; GDP advance/second/third; PCE; retail sales | 生产者物价指数（PPI）; 职位空缺（JOLTS）; 每周初请失业金人数; GDP初值/修正值/终值; 个人收入与支出（PCE物价指数）; 零售销售 |
 
 Periods: EN "October CPI"; ZH "10月CPI". Titles name offices, not people.
 
@@ -214,3 +216,6 @@ Designer's calls (no question needed): the 8:35 update keeps running every
 trading day (v1 tracks two 8:30 releases only); no political events beyond
 elections in v1 (later: funding deadlines with enacted-law proof, never
 debt-ceiling X-dates).
+
+Built 2026-11-06 (`feat/macro-events`): `scripts/build-events.mjs`, `crates/core/src/events/`,
+`events:check` on the earnings queue, `apps/web/src/lib/events.ts`; limits in `docs/runbook.md`.
