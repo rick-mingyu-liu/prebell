@@ -75,6 +75,21 @@ export function formatDayShort(date: string, lang: Lang): string {
   return lang === "en" ? enDay.format(d) : `${zhMonthDay.format(d)} ${zhWeekday.format(d)}`;
 }
 
+const enWeekday = new Intl.DateTimeFormat("en-US", { timeZone: "UTC", weekday: "short" });
+
+/** A trading date's short weekday: "Mon" / "周一". */
+export function formatWeekday(date: string, lang: Lang): string {
+  const d = new Date(`${date}T12:00:00Z`);
+  if (Number.isNaN(d.getTime())) return date;
+  return (lang === "en" ? enWeekday : zhWeekday).format(d);
+}
+
+/** A calendar column's heading: the weekday and the numeric month/day, "Mon · 11/16" / "周一 · 11/16". */
+export function formatBoardDay(date: string, lang: Lang): string {
+  const [, m, d] = date.split("-").map(Number);
+  return `${formatWeekday(date, lang)} · ${m}/${d}`;
+}
+
 const enMonthDay = new Intl.DateTimeFormat("en-US", { timeZone: "UTC", month: "short", day: "numeric" });
 
 /** A trading date as month and day only: "Nov 4" / "11月4日". */

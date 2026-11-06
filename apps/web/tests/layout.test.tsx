@@ -109,6 +109,12 @@ describe("paper shell", () => {
   });
 });
 
+/** The bodies of every `@media (min-width: 1000px)` block in globals.css (the calendar board's breakpoint). */
+const boardBlocks = () => {
+  const text = readFileSync(new URL("../src/app/globals.css", import.meta.url), "utf8").replace(/\/\*[\s\S]*?\*\//g, "");
+  return [...text.matchAll(/@media \(min-width: 1000px\) \{\n([\s\S]*?)\n\}\n/g)].map((m) => m[1]);
+};
+
 describe("globals.css", () => {
   const css = readFileSync(new URL("../src/app/globals.css", import.meta.url), "utf8");
 
@@ -174,13 +180,42 @@ describe("globals.css", () => {
     expect(css).toMatch(/\.ix:first-child \{ margin-left: auto; \}/);
   });
 
-  it("uses no colour outside the palette, no shadows, and one mobile breakpoint at 720px", () => {
+  it("uses no colour outside the palette, shadows only on calendar cards, and one mobile breakpoint at 720px", () => {
     const allowed = new Set(["#faf8f3", "#1a1a1a", "#666", "#d9d5cc", "#222", "#15803d", "#b91c1c", "#8a1c1c", "#e8a317", "#e6e1d6", "#fff", "#000"]);
     const hexes = (css.toLowerCase().match(/#[0-9a-f]{3,8}\b/g) ?? []).filter((h) => !allowed.has(h));
     expect(hexes).toEqual([]);
-    expect(css).not.toMatch(/box-shadow|text-shadow/);
+    expect(css).not.toMatch(/text-shadow/);
+    // The calendar's company cards lift off the board with a soft ink shadow; nothing else casts one.
+    const shadowed = [...css.replace(/\/\*[\s\S]*?\*\//g, "").matchAll(/([^{}]+)\{[^}]*box-shadow:\s*([^;}]+)/g)]
+      .filter((m) => m[2].trim() !== "none")
+      .map((m) => m[1].trim());
+    expect(shadowed.length).toBeGreaterThan(0);
+    for (const sel of shadowed) expect(sel).toMatch(/^\.cal-card-link/);
     const widths = [...css.matchAll(/@media[^{]*\(\s*(?:max|min)-width:\s*([\d.]+px)/g)].map((m) => m[1]);
-    expect(new Set(widths)).toEqual(new Set(["720px"]));
+    expect(new Set(widths)).toEqual(new Set(["720px", "1000px"]));
+    // 1000px is the calendar board's own: everything under it, in every such block, is a calendar rule.
+    const rules = boardBlocks().flatMap((block) => [...block.matchAll(/^\s+([^{\s/][^{]*)\{/gm)].map((m) => m[1].trim()));
+    expect(rules.length).toBeGreaterThan(0);
+    for (const sel of rules) expect(sel).toMatch(/^\.cal-/);
+  });
+
+  it("starts the phone's board at today without ever scrolling the desktop page there", () => {
+    // Under 1000px the board is a sideways scroller and today's column is its initial target. From 1000px
+    // the board is not a scroller, so the target would scroll the whole page down to today: it is turned off.
+    expect(css).toMatch(/\.cal-col\.is-today \{[^}]*scroll-initial-target: nearest;/);
+    expect(boardBlocks().join("\n")).toMatch(/\.cal-col\.is-today \{ scroll-initial-target: none; \}/);
+  });
+
+  it("draws the key's marks as on the cards: the tick in the up green, a dashed swatch like an unconfirmed card", () => {
+    expect(css).toMatch(/\.cal-key-tick \{ color: var\(--up\);/);
+    expect(css).toMatch(/\.cal-key-dash \{[^}]*border: 1px dashed var\(--muted\);/);
+    expect(css).toMatch(/\.cal-unconfirmed \.cal-card-link \{ border-style: dashed; border-color: var\(--muted\);/);
+  });
+
+  it("keeps the day chips on screen above a column the reader jumps to", () => {
+    expect(css).toMatch(/\.cal-chips \{ position: sticky; top: 0;[^}]*background: var\(--paper\);/);
+    // A jump lands the column below the stuck chips (about 40px tall), not under them.
+    expect(css).toMatch(/\.cal-col \{[^}]*scroll-margin-top: 3\.5rem;/);
   });
 });
 
