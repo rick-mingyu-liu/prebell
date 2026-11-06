@@ -4,20 +4,31 @@
 //! the page's title beside them), so one card serves both languages and
 //! only Latin fonts are embedded.
 //!
-//! Rendering costs about 5 ms of CPU in wasm, half the Free plan's 10 ms per
-//! invocation, so it never shares an invocation with a build: the `cards`
-//! job renders at most one missing card per queue message.
+//! A render costs about 3-4 ms of CPU in wasm once compiled and up to about
+//! 20 ms on its first call in a fresh isolate (V8 compiles wasm lazily),
+//! against the Free plan's 10 ms per invocation, which tolerates occasional
+//! overruns. So it never shares an invocation with a build: the `cards` job
+//! renders at most one missing card per queue message, and gives a card up
+//! after `MAX_ATTEMPTS` (counted before each render, so a CPU kill counts).
 
 use async_trait::async_trait;
+use chrono::{DateTime, Duration, Utc};
 use resvg::{tiny_skia, usvg};
 
-use super::graphic::escape;
+use super::graphic::{escape, BACKGROUND, ROOT};
+use crate::clock::et;
+use crate::run::TickOutcome;
 
 pub const WIDTH: u32 = 1200;
 pub const HEIGHT: u32 = 630;
 
 /// Latest posts the `cards` job looks at for a missing card (one R2 head each).
 pub const SCAN: usize = 30;
+/// Only posts this many days back (by trading date, which D1 indexes); older
+/// ones keep the default card.
+pub const WINDOW_DAYS: i64 = 14;
+/// Renders tried per card before it is given up for good.
+pub const MAX_ATTEMPTS: u32 = 3;
 
 const PAPER: &str = "#faf8f3";
 const INK: &str = "#1a1a1a";
@@ -34,10 +45,6 @@ const FONTS: [&[u8]; 4] = [
     include_bytes!("../../data/fonts/inter-700.ttf"),
     include_bytes!("../../data/fonts/newsreader-700.ttf"),
 ];
-
-/// The root element the cover graphic opens with, and its paper background.
-const COVER_ROOT: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 360" width="640" height="360" font-family="Inter, system-ui, sans-serif">"#;
-const COVER_PAPER: &str = r##"<rect x="0" y="0" width="640" height="360" fill="#faf8f3"/>"##;
 
 /// The R2 key of a cover's card: `covers/<stem>.svg` -> `og/<stem>.png`.
 /// Raster covers (older scene images) get no card.
@@ -86,9 +93,9 @@ fn open_card(kicker: &str) -> String {
 pub fn card_svg(cover_svg: &str, kicker: &str) -> Option<String> {
     let body = cover_svg
         .trim_end()
-        .strip_prefix(COVER_ROOT)?
+        .strip_prefix(ROOT)?
         .strip_suffix("</svg>")?;
-    let body = body.strip_prefix(COVER_PAPER).unwrap_or(body);
+    let body = body.strip_prefix(BACKGROUND).unwrap_or(body);
     let mut out = open_card(kicker);
     let dy = f64::from(HEIGHT) - 360.0 * SCALE;
     out.push_str(&format!(
@@ -150,12 +157,26 @@ pub struct CoverPost {
 /// What the `cards` job reads and writes (D1 and R2 in production).
 #[async_trait(?Send)]
 pub trait CardStore {
-    /// The newest `limit` published posts whose cover is an SVG, newest
-    /// (first publish or update) first.
-    async fn cover_posts(&self, limit: usize) -> Result<Vec<CoverPost>, String>;
+    /// The newest `limit` published posts whose cover is an SVG and whose
+    /// trading date is `since` (YYYY-MM-DD) or later, newest (first publish
+    /// or update) first.
+    async fn cover_posts(&self, limit: usize, since: &str) -> Result<Vec<CoverPost>, String>;
     async fn has_object(&self, key: &str) -> Result<bool, String>;
     async fn get_text(&self, key: &str) -> Result<Option<String>, String>;
     async fn put_png(&self, key: &str, bytes: &[u8]) -> Result<(), String>;
+    async fn put_text(&self, key: &str, text: &str) -> Result<(), String>;
+}
+
+/// Whether a tick's outcome put a post (or a rewrite of one) live, so its
+/// card should be rendered now rather than at the next firing.
+pub fn wants_card(o: &TickOutcome) -> bool {
+    matches!(o, TickOutcome::Published | TickOutcome::PublishedEnOnly)
+}
+
+/// The R2 key counting a card's renders: `og/<stem>.png` -> `og/<stem>.attempts`
+/// (never served: the site's card route takes `.png` only).
+fn attempts_key(card: &str) -> String {
+    format!("{}.attempts", card.trim_end_matches(".png"))
 }
 
 /// "AAPL · 2026-11-05", or the date alone for a brief.
@@ -166,15 +187,28 @@ fn kicker(p: &CoverPost) -> String {
     }
 }
 
-/// One `cards` job: renders the newest post's missing card, at most one per
-/// invocation (CPU). A cover that is gone or not a graphic is skipped without
-/// rendering, so it never holds up the posts behind it. `Ok` is a log line.
-pub async fn cards_tick(store: &dyn CardStore) -> Result<String, String> {
-    for p in store.cover_posts(SCAN).await? {
+/// One `cards` job: renders the newest recent post's missing card, at most
+/// one per invocation (CPU). A cover that is gone or not a graphic is skipped
+/// without rendering, and a card whose renders failed (or were killed)
+/// `MAX_ATTEMPTS` times is given up, so neither holds up the posts behind it.
+/// `Ok` is a log line.
+pub async fn cards_tick(now: DateTime<Utc>, store: &dyn CardStore) -> Result<String, String> {
+    let since = (et(now).date_naive() - Duration::days(WINDOW_DAYS))
+        .format("%Y-%m-%d")
+        .to_string();
+    for p in store.cover_posts(SCAN, &since).await? {
         let Some(key) = card_key(&p.cover_key) else {
             continue;
         };
         if store.has_object(&key).await? {
+            continue;
+        }
+        let counter = attempts_key(&key);
+        let tried: u32 = match store.get_text(&counter).await? {
+            Some(n) => n.trim().parse().unwrap_or(MAX_ATTEMPTS),
+            None => 0,
+        };
+        if tried >= MAX_ATTEMPTS {
             continue;
         }
         let Some(cover) = store.get_text(&p.cover_key).await? else {
@@ -183,7 +217,10 @@ pub async fn cards_tick(store: &dyn CardStore) -> Result<String, String> {
         let Some(svg) = card_svg(&cover, &kicker(&p)) else {
             continue;
         };
-        let png = render_png(&svg)?;
+        // Counted first, so an invocation killed mid-render still counts.
+        store.put_text(&counter, &(tried + 1).to_string()).await?;
+        let png = render_png(&svg)
+            .map_err(|e| format!("card {key}: attempt {} of {MAX_ATTEMPTS}: {e}", tried + 1))?;
         store.put_png(&key, &png).await?;
         return Ok(format!("card {key} ({} bytes)", png.len()));
     }
@@ -234,7 +271,7 @@ mod tests {
         assert!(svg.contains(">BIGGEST PREMARKET MOVES</text>"));
         // The cover's own root and background are dropped; its content is scaled once.
         assert_eq!(svg.matches("<svg").count(), 1);
-        assert!(!svg.contains(COVER_PAPER));
+        assert!(!svg.contains(BACKGROUND));
         assert!(svg.contains(r#"<g transform="translate(0 -45) scale(1.875)">"#));
         assert_eq!(card_svg("<svg/>", ""), None);
     }
@@ -294,8 +331,14 @@ mod tests {
 
     #[async_trait(?Send)]
     impl CardStore for Mem {
-        async fn cover_posts(&self, limit: usize) -> Result<Vec<CoverPost>, String> {
-            Ok(self.posts.iter().take(limit).cloned().collect())
+        async fn cover_posts(&self, limit: usize, since: &str) -> Result<Vec<CoverPost>, String> {
+            Ok(self
+                .posts
+                .iter()
+                .filter(|p| p.trading_date.as_str() >= since)
+                .take(limit)
+                .cloned()
+                .collect())
         }
         async fn has_object(&self, key: &str) -> Result<bool, String> {
             Ok(self.objects.borrow().contains_key(key))
@@ -311,6 +354,9 @@ mod tests {
             self.objects.borrow_mut().insert(key.into(), bytes.to_vec());
             Ok(())
         }
+        async fn put_text(&self, key: &str, text: &str) -> Result<(), String> {
+            self.put_png(key, text.as_bytes()).await
+        }
     }
 
     fn post(stem: &str) -> CoverPost {
@@ -319,6 +365,13 @@ mod tests {
             trading_date: "2026-11-05".into(),
             ticker: None,
         }
+    }
+    /// 2026-11-06 09:00 ET.
+    fn now() -> DateTime<Utc> {
+        "2026-11-06T14:00:00Z".parse().unwrap()
+    }
+    fn obj(s: &Mem, key: &str) -> Option<Vec<u8>> {
+        s.objects.borrow().get(key).cloned()
     }
 
     #[tokio::test]
@@ -342,16 +395,137 @@ mod tests {
             o.insert("og/done.png".into(), b"png".to_vec());
         }
         assert_eq!(
-            cards_tick(&s).await.unwrap().split(" (").next(),
+            cards_tick(now(), &s).await.unwrap().split(" (").next(),
             Some("card og/new.png")
         );
         assert!(!s.objects.borrow().contains_key("og/old.png"));
         assert_eq!(
-            cards_tick(&s).await.unwrap().split(" (").next(),
+            cards_tick(now(), &s).await.unwrap().split(" (").next(),
             Some("card og/old.png")
         );
-        assert_eq!(cards_tick(&s).await.unwrap(), "no card missing");
+        assert_eq!(cards_tick(now(), &s).await.unwrap(), "no card missing");
         assert!(s.objects.borrow()["og/new.png"].starts_with(b"\x89PNG"));
         assert_eq!(s.objects.borrow()["og/done.png"], b"png");
+        assert_eq!(obj(&s, "og/new.attempts").as_deref(), Some(&b"1"[..]));
+    }
+
+    #[tokio::test]
+    async fn a_card_that_fails_to_render_is_given_up_after_three_attempts() {
+        let s = Mem {
+            posts: vec![post("bad"), post("good")],
+            ..Default::default()
+        };
+        {
+            let mut o = s.objects.borrow_mut();
+            // Strips like a graphic but is not XML, so the render fails.
+            o.insert(
+                "covers/bad.svg".into(),
+                format!("{ROOT}<rect</svg>").into_bytes(),
+            );
+            o.insert("covers/good.svg".into(), cover().into_bytes());
+        }
+        for n in 1..=MAX_ATTEMPTS {
+            let err = cards_tick(now(), &s).await.unwrap_err();
+            assert!(
+                err.starts_with(&format!("card og/bad.png: attempt {n} of 3: card svg:")),
+                "{err}"
+            );
+        }
+        assert_eq!(obj(&s, "og/bad.attempts").as_deref(), Some(&b"3"[..]));
+        // Given up: the post behind it gets its card, and the bad one is never tried again.
+        assert!(cards_tick(now(), &s)
+            .await
+            .unwrap()
+            .starts_with("card og/good.png"));
+        assert_eq!(cards_tick(now(), &s).await.unwrap(), "no card missing");
+        assert_eq!(obj(&s, "og/bad.png"), None);
+    }
+
+    #[tokio::test]
+    async fn a_killed_render_counts_and_old_posts_are_left_alone() {
+        let mut old = post("old");
+        old.trading_date = "2026-10-22".into(); // 15 days before 2026-11-06
+        let s = Mem {
+            posts: vec![post("killed"), old],
+            ..Default::default()
+        };
+        {
+            let mut o = s.objects.borrow_mut();
+            o.insert("covers/killed.svg".into(), cover().into_bytes());
+            o.insert("covers/old.svg".into(), cover().into_bytes());
+            // Three earlier invocations counted an attempt and died before writing the PNG.
+            o.insert("og/killed.attempts".into(), b"3".to_vec());
+        }
+        assert_eq!(cards_tick(now(), &s).await.unwrap(), "no card missing");
+        assert_eq!(obj(&s, "og/killed.png"), None);
+        assert_eq!(obj(&s, "og/old.png"), None);
+    }
+
+    /// Every character of `<text>` content in `svg`, entities decoded.
+    fn text_chars(svg: &str) -> Vec<char> {
+        let re = regex::Regex::new(r"<text[^>]*>([^<]*)</text>").unwrap();
+        re.captures_iter(svg)
+            .flat_map(|c| {
+                c[1].replace("&lt;", "<")
+                    .replace("&gt;", ">")
+                    .replace("&quot;", "\"")
+                    .replace("&apos;", "'")
+                    .replace("&amp;", "&")
+                    .chars()
+                    .collect::<Vec<_>>()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_embedded_fonts_cover_every_character_a_card_prints() {
+        let movers =
+            [("BRK.B", 1234.56), ("GOOGL", 0.07), ("T", -987.65)].map(|(s, p)| CoverMover {
+                symbol: s.into(),
+                change_pct: p,
+            });
+        let cards = [
+            card_svg(
+                &brief_graphic(&movers, Session::Recap).unwrap(),
+                "BRK.B · 2026-11-05",
+            )
+            .unwrap(),
+            card_svg(&cover(), "2026-11-05").unwrap(),
+            card_svg(
+                &crate::cover::earnings_graphic(&crate::earnings::facts::tests::facts()).unwrap(),
+                "AAPL · 2026-10-30",
+            )
+            .unwrap(),
+            default_card_svg(),
+        ];
+        let mut chars: Vec<char> = cards.iter().flat_map(|c| text_chars(c)).collect();
+        chars.sort();
+        chars.dedup();
+        assert!(
+            chars.contains(&'−') && chars.contains(&'·') && chars.contains(&'$'),
+            "{chars:?}"
+        );
+        for font in FONTS {
+            let face = ttf_parser::Face::parse(font, 0).unwrap();
+            let missing: Vec<char> = chars
+                .iter()
+                .copied()
+                .filter(|&c| c != ' ' && face.glyph_index(c).is_none())
+                .collect();
+            assert!(missing.is_empty(), "missing glyphs {missing:?}");
+        }
+    }
+
+    #[test]
+    fn only_a_publish_wants_a_card_now() {
+        assert!(wants_card(&TickOutcome::Published));
+        assert!(wants_card(&TickOutcome::PublishedEnOnly));
+        for o in [
+            TickOutcome::Nothing,
+            TickOutcome::Skipped,
+            TickOutcome::Retrying("x".into()),
+        ] {
+            assert!(!wants_card(&o), "{o:?}");
+        }
     }
 }

@@ -549,12 +549,13 @@ impl Store for D1Store {
     }
 }
 
-/// Newest published posts with an SVG cover, for the `cards` job (`?1` is
-/// the limit). A revised post counts from its update, which gave it a new
-/// cover key.
+/// Newest published posts with an SVG cover and a trading date on or after
+/// `?2`, for the `cards` job (`?1` is the limit). The date bound reads
+/// `idx_posts_trading_date`, so the rows read stay flat as history grows. A
+/// revised post counts from its update, which gave it a new cover key.
 pub(crate) const COVER_POSTS: &str = "SELECT p.cover_key, p.trading_date, f.ticker FROM posts p \
      LEFT JOIN earnings_filings f ON f.run_key = p.run_key \
-     WHERE p.published_at IS NOT NULL AND p.cover_key LIKE 'covers/%.svg' \
+     WHERE p.trading_date >= ?2 AND p.published_at IS NOT NULL AND p.cover_key LIKE 'covers/%.svg' \
      ORDER BY COALESCE(p.revised_at, p.published_at) DESC LIMIT ?1";
 
 #[derive(Deserialize)]
@@ -566,12 +567,12 @@ struct CoverPostRec {
 
 #[async_trait(?Send)]
 impl CardStore for D1Store {
-    async fn cover_posts(&self, limit: usize) -> Result<Vec<CoverPost>, String> {
+    async fn cover_posts(&self, limit: usize, since: &str) -> Result<Vec<CoverPost>, String> {
         self.query();
         let stmt = self
             .db
             .prepare(COVER_POSTS)
-            .bind(&[int(limit as i64)])
+            .bind(&[int(limit as i64), s(since)])
             .map_err(|e| err(COVER_POSTS, e))?;
         let rows = stmt.all().await.map_err(|e| err(COVER_POSTS, e))?;
         let rows: Vec<CoverPostRec> = rows.results().map_err(|e| err(COVER_POSTS, e))?;
@@ -599,6 +600,10 @@ impl CardStore for D1Store {
 
     async fn put_png(&self, key: &str, bytes: &[u8]) -> Result<(), String> {
         Store::put_bytes(self, key, bytes, "image/png").await
+    }
+
+    async fn put_text(&self, key: &str, text: &str) -> Result<(), String> {
+        Store::put_bytes(self, key, text.as_bytes(), "text/plain").await
     }
 }
 

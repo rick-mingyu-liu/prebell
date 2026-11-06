@@ -690,6 +690,7 @@ dependencies = [
  "serde_json",
  "thiserror",
  "tokio",
+ "ttf-parser",
 ]
 
 [[package]]
