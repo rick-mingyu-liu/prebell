@@ -320,7 +320,13 @@ fn metric_phrase(m: Metric, label: &str) -> &str {
 /// the company (`part_named`; in prose, `metric_phrase` only) nor funds
 /// from operations or a pro forma figure (or, for net income, an adjustment
 /// or reconciliation), and a table row is no "Less:"/"Add:" adjustment.
-fn names_metric(m: Metric, label: &str, after: &str, group: Option<&str>) -> Result<(), String> {
+fn names_metric(
+    m: Metric,
+    label: &str,
+    amount: &str,
+    after: &str,
+    group: Option<&str>,
+) -> Result<(), String> {
     static ADJUSTMENT: OnceLock<Regex> = OnceLock::new();
     let adjustment = ADJUSTMENT
         .get_or_init(|| Regex::new(r"(?i)^\s*(?:less|add|plus)\b").expect("valid built-in regex"));
@@ -435,7 +441,9 @@ fn names_metric(m: Metric, label: &str, after: &str, group: Option<&str>) -> Res
             m.key()
         ));
     }
+    // ... and holds cents: "$498" under SPG's group is a numerator.
     let group_names_eps = !own
+        && amount.contains('.')
         && !basic(label)
         && any(
             label,
@@ -446,7 +454,6 @@ fn names_metric(m: Metric, label: &str, after: &str, group: Option<&str>) -> Res
             any(
                 g,
                 &[
-                    "diluted",
                     "per share",
                     "per common share",
                     "per diluted share",
@@ -527,7 +534,13 @@ pub fn verify_figure(text: &str, metric: Metric, raw: &RawFigure) -> Result<Figu
         }
         _ => None,
     };
-    names_metric(metric, label, &quote[at + amount.len()..], group.as_deref())?;
+    names_metric(
+        metric,
+        label,
+        &amount,
+        &quote[at + amount.len()..],
+        group.as_deref(),
+    )?;
     // Read the number in place, so a size word after it ("102.5 billion")
     // counts even when the amount omits it.
     let n = extract_numbers(&quote[at..], Lang::En)
@@ -831,7 +844,7 @@ impl<'a> Table<'a> {
             .collect()
     }
 
-    /// The column basis labels on a line below header `h`, one per
+    /// The column basis labels on the line below header `h`, one per
     /// year with "% Change" columns left out: whether each column is not
     /// the reported basis ("Pro Forma Pro Forma % Change Actual Actual %
     /// Change" at CHTR, which reports the Cox merger's combined quarter
@@ -850,14 +863,17 @@ impl<'a> Table<'a> {
             Regex::new(r"(?i)\b(?:pro[\s-]?forma|combined|as\s+adjusted|supplemental|recast|predecessor|successor)\b")
                 .expect("valid built-in regex")
         });
-        // The first line naming a basis among the figure-free lines right
-        // below the header ("Unaudited" may sit between); a row such as
-        // "Pro forma revenue $1,000" is not one.
+        // The first line below the header but an "Unaudited" one; a group
+        // further down ("Combined businesses:") or a row ("Pro forma revenue
+        // $1,000") is not a basis line.
         let l = self.lines;
         let line = (h.line + 1..l.line_of(self.quote_at))
             .map(|i| l.line(i, self.quote_at))
-            .take_while(|s| !s.contains(|c: char| c.is_ascii_digit()))
-            .find(|s| basis.is_match(s))?;
+            .find(|s| {
+                !s.trim_matches(|c: char| c == '(' || c == ')' || c.is_whitespace())
+                    .eq_ignore_ascii_case("unaudited")
+            })
+            .filter(|s| !s.contains(|c: char| c.is_ascii_digit()) && basis.is_match(s))?;
         if !label.replace_all(line, "").trim().is_empty() {
             return Some(None);
         }
@@ -1251,7 +1267,21 @@ fn current_column(
     // some, the reported quarter is the latest year among the others, when
     // the header names the quarter alone and the quote has every labelled
     // column ("Total Revenues $16,505" cut short is no first column).
-    if let Some(bases) = t.unreported_columns(&h) {
+    // A basis line acts on a header that repeats its years (CHTR's pro forma
+    // and reported quarters), or when it labels each year with both a
+    // reported and an unreported column; "(As adjusted)" or "Combined
+    // businesses:" above an ordinary table changes nothing.
+    let repeated_years = {
+        let mut d = years.clone();
+        d.sort_unstable();
+        d.dedup();
+        years.len() > d.len()
+    };
+    if let Some(bases) = t.unreported_columns(&h).filter(|b| {
+        repeated_years
+            || b.as_ref()
+                .is_some_and(|p| p.contains(&true) && p.contains(&false))
+    }) {
         let Some(pro_forma) = bases else {
             return false;
         };
@@ -3155,6 +3185,48 @@ mod tests {
             let t = format!("(in millions)\nThree Months Ended September 30,\n2026 2025\n{labels}\nTotal Revenues $14,922 $13,672");
             let r = verify(&t, "$14,922", "Total Revenues $14,922 $13,672");
             assert!(r.is_ok(), "{labels}: {r:?}");
+        }
+    }
+
+    #[test]
+    fn basis_words_in_an_ordinary_table_head_change_nothing() {
+        let q = "Total revenues $5,000 $4,500";
+        for (years, below) in [
+            ("2026 2025", "As adjusted As adjusted"),
+            ("2026 2025", "(As adjusted)"),
+            ("2026 2025", "Reported As adjusted"),
+            ("2026 2025", "As adjusted"),
+            ("2026 2025", "Combined businesses:"),
+            ("2026 2025", "Supplemental information:"),
+            ("2026 2025", "Pro forma adjustments:"),
+            ("2026 2025", "Recast"),
+            ("2026 2025", "Successor:"),
+            ("2026 2025", "Unaudited\nCombined results:"),
+            (
+                "2026 2025 2026 2025",
+                "Revenues:\nCombined cable and wireless:",
+            ),
+        ] {
+            let t =
+                format!("(In millions)\nThree Months Ended September 30,\n{years}\n{below}\n{q}");
+            let r = verify_figure(&t, Metric::Revenue, &raw("$5,000", "millions", false, q));
+            assert!(r.is_ok(), "{below}: {r:?}");
+        }
+        // EPS reconciliations put the numerator under "Basic:" / "Diluted:".
+        let hdr = "ACME CORP\nSTATEMENTS OF OPERATIONS\n(Dollars in millions, except per share amounts)\nThree Months Ended September 30,\n2026 2025\nNet income $600 $500";
+        for row in [
+            "Net income available to common stockholders $600 $500",
+            "Net income attributable to Acme $600 $500",
+            "Net income plus assumed conversions $605 $503",
+        ] {
+            let t = format!("{hdr}\nDiluted:\n{row}");
+            let a = row.split_whitespace().find(|w| w.starts_with('$')).unwrap();
+            let r = verify_figure(&t, Metric::EpsGaap, &raw(a, "units", false, row));
+            assert!(r.is_err(), "{row}: {r:?}");
+            let t = format!("{hdr}\nBASIC AND DILUTED EARNINGS PER COMMON SHARE:\n{row}");
+            let a = row.split_whitespace().find(|w| w.starts_with('$')).unwrap();
+            let r = verify_figure(&t, Metric::EpsGaap, &raw(a, "units", false, row));
+            assert!(r.is_err(), "{row}: {r:?}");
         }
     }
 
