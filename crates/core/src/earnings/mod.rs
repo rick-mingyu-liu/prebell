@@ -9,6 +9,7 @@ pub mod detect;
 pub mod draft;
 pub mod extract;
 pub mod facts;
+pub mod foreign;
 pub mod run;
 pub mod store;
 pub mod watchlist;
