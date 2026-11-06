@@ -707,8 +707,9 @@ pub async fn build_facts(
         gainers,
         losers,
         macro_items,
+        // Filled by the caller's `WatchSource` (`run::Premarket`).
         watch_list: Field::Missing {
-            reason: "not available in v1".into(),
+            reason: "no events source".into(),
         },
         themes,
         theme_candidates,
@@ -899,7 +900,7 @@ mod tests {
         assert_eq!(
             f.watch_list,
             Field::Missing {
-                reason: "not available in v1".into()
+                reason: "no events source".into()
             }
         );
         assert!(missing_required(&f).is_empty());

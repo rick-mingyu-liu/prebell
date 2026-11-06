@@ -10,6 +10,7 @@ use regex::Regex;
 use serde_json::Value;
 
 use crate::cover::fmt_signed_pct;
+use crate::events::watch::{WatchItem, WatchKind};
 use crate::facts::{numbers_in_facts, Direction, Field, Mover, NewsReason, PremarketFacts, Theme};
 use crate::numbers::{check, Lang};
 use crate::providers::{LlmProvider, ProviderError};
@@ -51,6 +52,8 @@ fn all_headings(lang: Lang) -> [&'static str; 5] {
 pub(crate) const MOVERS: usize = 3;
 /// Where the themes heading sits in `all_headings` and the recap's headings.
 pub(crate) const THEMES: usize = 2;
+/// Where "What to watch" sits in `all_headings`.
+const WATCH: usize = 4;
 
 /// The section headings in order: futures and movers always; "Macro &
 /// overnight", "Themes" and "What to watch" only when the facts have items
@@ -222,6 +225,59 @@ fn one_line_text(s: &str) -> String {
     s.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
+/// The code-rendered "What to watch" list, one line per item, so times,
+/// titles and links never pass through the LLM: "- **8:30 AM ET** October
+/// CPI · [Schedule](url)"; once out, "· ✓ Released · [Release](url)".
+pub fn render_watch(items: &[WatchItem], lang: Lang) -> String {
+    let zh = lang == Lang::Zh;
+    let pick = |en: &'static str, z: &'static str| if zh { z } else { en };
+    items
+        .iter()
+        .map(|i| {
+            let (title, time, note) = if zh {
+                (&i.title_zh, &i.time_zh, &i.note_zh)
+            } else {
+                (&i.title, &i.time_et, &i.note)
+            };
+            let when = match (i.kind, time) {
+                (WatchKind::Earnings, _) => Some(pick("After the close", "盘后")),
+                (_, Some(t)) => Some(t.as_str()),
+                _ => None,
+            };
+            let mut line = String::from("- ");
+            if let Some(w) = when {
+                line.push_str(&format!("**{}** ", one_line_text(w)));
+            }
+            line.push_str(&one_line_text(title));
+            if let Some(n) = note {
+                line.push_str(&format!(" · {}", one_line_text(n)));
+            }
+            let released = i.status == "released";
+            let flag = match (i.kind, i.status.as_str()) {
+                (WatchKind::Event, "released") => Some(pick("✓ Released", "✓ 已发布")),
+                (WatchKind::Event, "postponed") => Some(pick("Postponed", "已推迟")),
+                (WatchKind::Earnings, "unconfirmed") => {
+                    Some(pick("date not confirmed", "日期未确认"))
+                }
+                _ => None,
+            };
+            if let Some(f) = flag {
+                line.push_str(&format!(" · {f}"));
+            }
+            if let Some(url) = &i.link {
+                let label = if released {
+                    pick("Release", "发布原文")
+                } else {
+                    pick("Schedule", "官方日程")
+                };
+                line.push_str(&format!(" · [{label}]({url})"));
+            }
+            line
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 /// Theme labels and member names, whose digits ("Phillips 66") are not
 /// figures. Theme members are not limited to the movers, so the prose may
 /// name companies the movers tables do not.
@@ -338,11 +394,17 @@ pub fn render_markdown(d: &Draft, f: &PremarketFacts) -> String {
     let heads = all_headings(lang);
     let themes = render_themes(&f.themes, lang);
     let movers = movers_table(f, lang);
+    let watch = match &f.watch_list {
+        Field::Value(items) => render_watch(items, lang),
+        Field::Missing { .. } => String::new(),
+    };
     for (heading, body) in &d.sections {
         let code = if *heading == heads[THEMES] {
             Some(themes.as_str())
         } else if *heading == heads[MOVERS] {
             Some(movers.as_str())
+        } else if *heading == heads[WATCH] {
+            Some(watch.as_str())
         } else {
             None
         };
@@ -635,6 +697,7 @@ pub async fn write(
         .chain(&f.losers)
         .map(|m| m.name.as_str())
         .chain(theme_names(&f.themes))
+        .chain(watch_names(&f.watch_list))
         .collect();
     write_with(
         llm,
@@ -653,6 +716,26 @@ pub async fn write(
         |d| render_markdown(d, f),
     )
     .await
+}
+
+/// Watch-list titles and notes, whose digits ("Apple (AAPL)" aside, "3M
+/// (MMM)", "Early close, 1:00 PM ET") are not figures.
+fn watch_names(w: &Field<Vec<WatchItem>>) -> impl Iterator<Item = &str> {
+    let items: &[WatchItem] = match w {
+        Field::Value(v) => v,
+        Field::Missing { .. } => &[],
+    };
+    items.iter().flat_map(|i| {
+        [
+            Some(&i.title),
+            Some(&i.title_zh),
+            i.note.as_ref(),
+            i.note_zh.as_ref(),
+        ]
+        .into_iter()
+        .flatten()
+        .map(String::as_str)
+    })
 }
 
 /// The drafting loop shared by every content type: ask `llm` with `system`
@@ -1033,8 +1116,15 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn present_watch_list_requires_and_renders_its_section() {
         let mut f = facts();
-        f.watch_list = Field::Value(vec!["Fed minutes at 2 PM ET".into()]);
-        for (lang, heading) in [(Lang::En, "What to watch"), (Lang::Zh, "今日关注")] {
+        f.watch_list = Field::Value(vec![cpi_item("scheduled", None)]);
+        for (lang, heading, line) in [
+            (Lang::En, "What to watch", "- **8:30 AM ET** October CPI"),
+            (
+                Lang::Zh,
+                "今日关注",
+                "- **美东 8:30** 10月消费者物价指数（CPI）",
+            ),
+        ] {
             let l = llm(vec![
                 reply_with(&headings(lang, true, false, false), "Quiet."),
                 reply_with(&all_headings(lang), "Quiet."),
@@ -1043,8 +1133,73 @@ pub(crate) mod tests {
             assert_eq!(l.prompts.borrow().len(), 2);
             // Futures, movers and watch: the facts have no macro news.
             assert_eq!(d.sections.len(), 3);
-            assert!(md.contains(&format!("## {heading}\n\nQuiet.")), "{md}");
+            // The code list comes first, then the LLM's text.
+            assert!(md.contains(&format!("## {heading}\n\n{line}")), "{md}");
+            assert!(md.contains("\n\nQuiet.\n\n"), "{md}");
         }
+    }
+
+    fn cpi_item(status: &str, release: Option<&str>) -> WatchItem {
+        WatchItem {
+            kind: WatchKind::Event,
+            id: "bls:cpi:2026-10".into(),
+            time_et: Some("8:30 AM ET".into()),
+            time_zh: Some("美东 8:30".into()),
+            title: "October CPI".into(),
+            title_zh: "10月消费者物价指数（CPI）".into(),
+            note: None,
+            note_zh: None,
+            status: status.into(),
+            link: Some(
+                release
+                    .unwrap_or("https://www.bls.gov/schedule/news_release/cpi.htm")
+                    .into(),
+            ),
+        }
+    }
+
+    #[test]
+    fn render_watch_lists_times_titles_status_and_links() {
+        let url = "https://www.bls.gov/news.release/archives/cpi_11102026.htm";
+        let fomc = WatchItem {
+            id: "fed:fomc:2026-12".into(),
+            time_et: Some("2:00 PM ET".into()),
+            time_zh: Some("美东 14:00".into()),
+            title: "FOMC rate decision (with projections)".into(),
+            title_zh: "联邦公开市场委员会（FOMC）议息会议（含经济预测）".into(),
+            note: Some("Press conference 2:30 PM ET".into()),
+            note_zh: Some("美联储主席新闻发布会，美东14:30".into()),
+            link: None,
+            ..cpi_item("postponed", None)
+        };
+        let aapl = WatchItem {
+            kind: WatchKind::Earnings,
+            id: "earnings:AAPL".into(),
+            time_et: None,
+            time_zh: None,
+            title: "Apple (AAPL)".into(),
+            title_zh: "Apple (AAPL)".into(),
+            status: "unconfirmed".into(),
+            link: None,
+            ..cpi_item("x", None)
+        };
+        let items = [cpi_item("released", Some(url)), fomc, aapl];
+        assert_eq!(
+            render_watch(&items, Lang::En),
+            format!(
+                "- **8:30 AM ET** October CPI · ✓ Released · [Release]({url})\n\
+                 - **2:00 PM ET** FOMC rate decision (with projections) · Press conference 2:30 PM ET · Postponed\n\
+                 - **After the close** Apple (AAPL) · date not confirmed"
+            )
+        );
+        assert_eq!(
+            render_watch(&items, Lang::Zh),
+            format!(
+                "- **美东 8:30** 10月消费者物价指数（CPI） · ✓ 已发布 · [发布原文]({url})\n\
+                 - **美东 14:00** 联邦公开市场委员会（FOMC）议息会议（含经济预测） · 美联储主席新闻发布会，美东14:30 · 已推迟\n\
+                 - **盘后** Apple (AAPL) · 日期未确认"
+            )
+        );
     }
 
     #[tokio::test]

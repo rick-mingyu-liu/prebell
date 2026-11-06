@@ -12,12 +12,13 @@ use prebell_core::earnings::calendar::{refresh_tick, yahoo_seeding, CalendarSour
 use prebell_core::earnings::run::{build_tick, poll_job};
 use prebell_core::edgar::{Edgar, BUILD_GAP_MS};
 use prebell_core::events::check::check_tick;
+use prebell_core::events::watch::StoreWatch;
 use prebell_core::jobs::{redact, run_job, JobRunner};
 use prebell_core::llm::{api_key_var, llm_from_env, unknown_provider};
 use prebell_core::providers::CountingHttp;
 use prebell_core::providers::LlmProvider;
 use prebell_core::recap;
-use prebell_core::run::{tick_with_hooks, update, Hooks, TickOutcome};
+use prebell_core::run::{tick_with_watch, update, Hooks, TickOutcome};
 use prebell_core::schedule::{jobs_for_cron, queue_for, ContentJob, EarningsStep, JOBS};
 use prebell_core::tavily::Tavily;
 use prebell_core::yahoo::Yahoo;
@@ -184,12 +185,20 @@ impl JobRunner for Runner<'_> {
         };
         let at = now(env);
         let store = self.store;
+        // "What to watch": today's macro events (and their released check)
+        // and the write-up earnings after the close.
+        let watch = StoreWatch {
+            events: store,
+            earnings: store,
+            http: &self.http,
+        };
         Ok(match job {
             ContentJob::Premarket => {
-                tick_with_hooks(at, store, &md, &ns, llm.as_ref(), &hooks).await
+                tick_with_watch(at, store, &md, &ns, llm.as_ref(), Some(&watch), &hooks).await
             }
             ContentJob::PremarketUpdate => {
-                update::tick_with_hooks(at, store, &md, &ns, llm.as_ref(), &hooks).await
+                update::tick_with_watch(at, store, &md, &ns, llm.as_ref(), Some(&watch), &hooks)
+                    .await
             }
             ContentJob::Recap => {
                 recap::tick_with_hooks(at, store, &md, &ns, llm.as_ref(), &hooks).await

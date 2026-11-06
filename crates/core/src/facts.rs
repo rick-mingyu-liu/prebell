@@ -94,7 +94,10 @@ pub struct PremarketFacts {
     pub gainers: Vec<Mover>,
     pub losers: Vec<Mover>,
     pub macro_items: Field<Vec<NewsReason>>,
-    pub watch_list: Field<Vec<String>>,
+    /// Today's macro events and after-close write-up earnings
+    /// (`events::watch`). Facts stored before the events calendar hold
+    /// `Missing`.
+    pub watch_list: Field<Vec<crate::events::watch::WatchItem>>,
     /// Industry groups moving together, best first. Absent in facts stored
     /// before themes existed.
     #[serde(default)]

@@ -15,6 +15,7 @@ use super::{
 };
 use crate::clock::{decide, premarket_update_window, SlotDecision};
 use crate::cover::{store_graphic, INDEX_LINE_KEY};
+use crate::events::watch::WatchSource;
 use crate::numbers::Lang;
 use crate::providers::{LlmProvider, MarketData, NewsSearch};
 use crate::store::{PostRow, RunRow, Store, TranslationRow};
@@ -58,7 +59,21 @@ pub async fn tick_with_hooks(
     llm: &dyn LlmProvider,
     hooks: &Hooks<'_>,
 ) -> TickOutcome {
-    step(now, store, &Premarket { md, ns, llm }, hooks)
+    tick_with_watch(now, store, md, ns, llm, None, hooks).await
+}
+
+/// `tick_with_hooks` with "What to watch" from `watch`, which also runs the
+/// released check for the 8:30 releases the update is for.
+pub async fn tick_with_watch(
+    now: DateTime<Utc>,
+    store: &dyn Store,
+    md: &dyn MarketData,
+    ns: &dyn NewsSearch,
+    llm: &dyn LlmProvider,
+    watch: Option<&dyn WatchSource>,
+    hooks: &Hooks<'_>,
+) -> TickOutcome {
+    step(now, store, &Premarket { md, ns, llm, watch }, hooks)
         .await
         .unwrap_or_else(TickOutcome::Retrying)
 }
@@ -593,6 +608,24 @@ mod tests {
         );
         assert_eq!(snapshot(&s), before);
         assert!(s.alerts.borrow().is_empty());
+    }
+
+    #[tokio::test]
+    async fn the_update_reads_the_watch_list_at_835() {
+        // The watch source runs the released check, so the 8:35 build is the
+        // one that sees the 8:30 release (events::watch tests that part).
+        let s = base_brief(true).await;
+        let (m, l) = (md(true), llm(true, true));
+        let w = super::super::tests::FakeWatch::default();
+        let hooks = Hooks {
+            log: &|_| {},
+            extra: &Vec::new,
+            budget: &|| 0,
+        };
+        let out = tick_with_watch(utc(UPDATE_AT), &s, &m, &FakeNs, &l, Some(&w), &hooks).await;
+        assert_eq!(out, TickOutcome::Published);
+        assert_eq!(w.calls.borrow().len(), 1);
+        assert_eq!(w.calls.borrow()[0].1, utc(UPDATE_AT));
     }
 
     #[tokio::test]

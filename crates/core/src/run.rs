@@ -13,6 +13,7 @@ use crate::cover::{
     brief_graphic, brief_lines, cover_movers, index_snapshot, store_graphic, CoverLines,
     IndexSnapshot, Session, INDEX_LINE_KEY,
 };
+use crate::events::watch::WatchSource;
 use crate::facts::{missing_required, NewsReason, PremarketFacts};
 use crate::numbers::Lang;
 use crate::premarket::build_facts;
@@ -81,6 +82,9 @@ pub struct Premarket<'a> {
     pub md: &'a dyn MarketData,
     pub ns: &'a dyn NewsSearch,
     pub llm: &'a dyn LlmProvider,
+    /// Today's events and after-close earnings for "What to watch"; `None`
+    /// leaves the section out.
+    pub watch: Option<&'a dyn WatchSource>,
 }
 
 #[async_trait(?Send)]
@@ -113,7 +117,11 @@ impl Content for Premarket<'_> {
         now: DateTime<Utc>,
         budget: &dyn Fn() -> usize,
     ) -> PremarketFacts {
-        build_facts(self.md, self.ns, self.llm, date, now, budget).await
+        let mut f = build_facts(self.md, self.ns, self.llm, date, now, budget).await;
+        if let Some(w) = self.watch {
+            f.watch_list = w.watch_list(date, now).await;
+        }
+        f
     }
     fn missing_required(&self, f: &PremarketFacts) -> Vec<&'static str> {
         missing_required(f)
@@ -198,7 +206,21 @@ pub async fn tick_with_hooks(
     llm: &dyn LlmProvider,
     hooks: &Hooks<'_>,
 ) -> TickOutcome {
-    tick_content(now, store, &Premarket { md, ns, llm }, hooks).await
+    tick_with_watch(now, store, md, ns, llm, None, hooks).await
+}
+
+/// `tick_with_hooks` with "What to watch" from `watch`.
+pub async fn tick_with_watch(
+    now: DateTime<Utc>,
+    store: &dyn Store,
+    md: &dyn MarketData,
+    ns: &dyn NewsSearch,
+    llm: &dyn LlmProvider,
+    watch: Option<&dyn WatchSource>,
+    hooks: &Hooks<'_>,
+) -> TickOutcome {
+    let c = Premarket { md, ns, llm, watch };
+    tick_content(now, store, &c, hooks).await
 }
 
 /// What the caller adds to a tick.
@@ -826,6 +848,48 @@ mod tests {
             .clone()
     }
 
+    /// A watch source that records each call and lists one item.
+    #[derive(Default)]
+    pub(crate) struct FakeWatch {
+        pub calls: std::cell::RefCell<Vec<(NaiveDate, DateTime<Utc>)>>,
+    }
+    #[async_trait(?Send)]
+    impl WatchSource for FakeWatch {
+        async fn watch_list(
+            &self,
+            date: NaiveDate,
+            now: DateTime<Utc>,
+        ) -> Field<Vec<crate::events::watch::WatchItem>> {
+            self.calls.borrow_mut().push((date, now));
+            Field::Missing {
+                reason: "fake".into(),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn premarket_facts_take_the_watch_list_from_the_source() {
+        let (md, llm) = (md(true), llm(true, true));
+        let w = FakeWatch::default();
+        let c = Premarket {
+            md: &md,
+            ns: &FakeNs,
+            llm: &llm,
+            watch: Some(&w),
+        };
+        let date = "2026-10-29".parse().unwrap();
+        let f = c
+            .build_facts(date, utc("2026-10-29T12:00:00Z"), &|| 0)
+            .await;
+        assert_eq!(*w.calls.borrow(), [(date, utc("2026-10-29T12:00:00Z"))]);
+        assert_eq!(
+            f.watch_list,
+            Field::Missing {
+                reason: "fake".into()
+            }
+        );
+    }
+
     #[test]
     fn premarket_cover_and_snapshot_come_from_the_futures() {
         let (md, llm) = (md(true), llm(true, true));
@@ -833,6 +897,7 @@ mod tests {
             md: &md,
             ns: &FakeNs,
             llm: &llm,
+            watch: None,
         };
         let f = PremarketFacts {
             trading_date: "2026-10-29".parse().unwrap(),
@@ -1714,6 +1779,7 @@ mod tests {
             md: &m,
             ns: &FakeNs,
             llm: &l,
+            watch: None,
         };
         c.cover_lines(&f)
     }

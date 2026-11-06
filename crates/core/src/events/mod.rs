@@ -13,6 +13,7 @@
 pub mod check;
 pub mod parse;
 pub mod store;
+pub mod watch;
 
 use std::sync::OnceLock;
 
