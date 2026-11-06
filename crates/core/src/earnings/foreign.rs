@@ -21,7 +21,9 @@ use crate::earnings::detect::{name_mismatches, same_filer};
 use crate::earnings::store::{CalendarRow, EarningsStore};
 use crate::earnings::{watchlist, Filer, WatchEntry};
 use crate::edgar::{exhibit_991, filing_url, FeedEntry, FilingDoc, Filings, FEED_PAGE};
+use crate::jobs::alert_once_today;
 use crate::providers::ProviderError;
+use crate::store::Store;
 
 /// kv key: the newest 6-K feed acceptance time a poll read (RFC 3339).
 pub const KV_6K_WATERMARK: &str = "edgar_6k_watermark";
@@ -238,11 +240,12 @@ fn regex(p: &str) -> Regex {
 }
 
 /// A written date: "september 30, 2026", "sept. 30, 2026", "30 september
-/// 2026" (lowercase), as `(start, end, date)`.
+/// 2026", and "august 26 , 2026" (`quick_text` puts a space where a tag
+/// ended, as in LI's dateline), lowercase, as `(start, end, date)`.
 fn dates(lower: &str) -> impl Iterator<Item = (usize, usize, NaiveDate)> + '_ {
     static DATE: OnceLock<Regex> = OnceLock::new();
     DATE.get_or_init(|| {
-        regex(r"\b(?:([a-z]{3,9}\.?)\s+(\d{1,2}),?\s+(\d{4})|(\d{1,2})\s+([a-z]{3,9}\.?)\s+(\d{4}))\b")
+        regex(r"\b(?:([a-z]{3,9}\.?)\s+(\d{1,2})\s*,?\s+(\d{4})|(\d{1,2})\s+([a-z]{3,9}\.?)\s+(\d{4}))\b")
     })
     .captures_iter(lower)
     .filter_map(|c| {
@@ -555,6 +558,8 @@ pub struct ReadOutcome {
     pub errors: Vec<String>,
     /// SEC answered 403/429: the 6-K stays pending.
     pub throttled: bool,
+    /// A recent 403/429 held this message back: nothing fetched.
+    pub held: bool,
 }
 
 /// kv key: the 6-Ks found near a calendar date and not yet read (a JSON
@@ -567,6 +572,11 @@ pub const MAX_READS: usize = 3;
 const PENDING_KEEP: usize = 50;
 /// Network or 5xx failures of one 6-K before it is given up.
 const MAX_FAILED: u8 = 5;
+/// kv key: no `earnings:6k` message fetches from SEC before this time
+/// (RFC 3339), set after a 403/429, so the rest of a poll's messages wait.
+pub const KV_6K_BACKOFF: &str = "edgar_6k_backoff";
+/// How long a 403/429 holds the 6-K reads back.
+const BACKOFF_MINUTES: i64 = 15;
 
 fn iso(t: DateTime<Utc>) -> String {
     t.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
@@ -757,16 +767,29 @@ pub async fn foreign_tick(
 /// results release, marks its release date reported with the 6-K as proof
 /// (moving the calendar date when it differs, as the 8-K path does).
 /// Idempotent: a redelivered message finds that 6-K checked and reads the
-/// next one, or nothing. A 403/429 or network failure leaves it pending; a
-/// missing document (404/410) is retried once by a later message. D1: the
-/// pending and checked reads, the ticker's calendar rows, at most one
-/// calendar write, and the two list writes.
+/// next one, or nothing. A 6-K whose ticker was reported meanwhile is
+/// dropped unread. A 403/429 raises the daily `sec-throttled` alert, leaves
+/// the 6-K pending and holds every message back for `BACKOFF_MINUTES`; a
+/// network failure leaves it pending; a missing document (404/410) is
+/// retried once by a later message. D1: the backoff, pending and checked
+/// reads, the ticker's calendar rows, at most one calendar write, and the
+/// two list writes.
 pub async fn foreign_read(
     now: DateTime<Utc>,
     es: &dyn EarningsStore,
+    store: &dyn Store,
     filings: &dyn Filings,
 ) -> Result<ReadOutcome, String> {
     let mut out = ReadOutcome::default();
+    let held = es
+        .kv_get(KV_6K_BACKOFF)
+        .await?
+        .and_then(|t| DateTime::parse_from_rfc3339(&t).ok())
+        .is_some_and(|until| now < until.with_timezone(&Utc));
+    if held {
+        out.held = true;
+        return Ok(out);
+    }
     let mut pending: Vec<Pending> = kv_list(es, KV_6K_PENDING).await?;
     if pending.is_empty() {
         return Ok(out);
@@ -780,28 +803,27 @@ pub async fn foreign_read(
         return Ok(out);
     };
     if !checked.contains(&p.accession) {
-        let f = FeedEntry {
-            form: "6-K".into(),
-            cik: p.cik,
-            company: w.sec.to_string(),
-            accession: p.accession.clone(),
-            filing_date: ymd(day),
-            items: vec![],
-            accepted_at: DateTime::parse_from_rfc3339(&p.accepted_at)
-                .map(|t| t.with_timezone(&Utc))
-                .unwrap_or(now),
-            index_url: filing_url(p.cik, &p.accession),
-        };
-        match read(filings, &f).await {
-            Ok(text) => {
-                out.read = Some(label.clone());
-                checked.push(p.accession.clone());
-                match classify(&text, w, day) {
-                    Ok(dated) => {
-                        let rows = es.calendar_for(w.ticker).await?;
-                        // Already reported meanwhile (an 8-K, an earlier 6-K):
-                        // nothing to do.
-                        if let Some(d) = target(&rows, day) {
+        let rows = es.calendar_for(w.ticker).await?;
+        // Reported meanwhile (an 8-K, another 6-K): nothing to read.
+        if let Some(d) = target(&rows, day) {
+            let f = FeedEntry {
+                form: "6-K".into(),
+                cik: p.cik,
+                company: w.sec.to_string(),
+                accession: p.accession.clone(),
+                filing_date: ymd(day),
+                items: vec![],
+                accepted_at: DateTime::parse_from_rfc3339(&p.accepted_at)
+                    .map(|t| t.with_timezone(&Utc))
+                    .unwrap_or(now),
+                index_url: filing_url(p.cik, &p.accession),
+            };
+            match read(filings, &f).await {
+                Ok(text) => {
+                    out.read = Some(label.clone());
+                    checked.push(p.accession.clone());
+                    match classify(&text, w, day) {
+                        Ok(dated) => {
                             // The release's own date (its dateline), else the
                             // 6-K's when that is later than the calendar's; an
                             // earlier 6-K is the Asian-morning case and keeps
@@ -819,35 +841,44 @@ pub async fn foreign_read(
                             }
                             out.reported = Some(ymd(released));
                         }
+                        Err(why) => out.rejected = Some(format!("{label}: {why}")),
                     }
-                    Err(why) => out.rejected = Some(format!("{label}: {why}")),
+                }
+                Err(e) => {
+                    out.errors.push(format!("{label}: {e}"));
+                    match e {
+                        ProviderError::Http(403 | 429) => {
+                            out.throttled = true;
+                            pending.insert(0, p);
+                            let until = now + Duration::minutes(BACKOFF_MINUTES);
+                            es.kv_set(KV_6K_BACKOFF, &iso(until), &iso(now)).await?;
+                            let msg = format!(
+                                "SEC EDGAR refused requests (403/429) reading a 6-K: {}",
+                                out.errors.last().cloned().unwrap_or_default()
+                            );
+                            alert_once_today(now, "sec-throttled", "error", &msg, store).await?;
+                        }
+                        // Not there yet, or not at all: one more try later.
+                        ProviderError::Http(404 | 410) if p.missing == 0 => {
+                            p.missing = 1;
+                            pending.push(p);
+                        }
+                        // No readable document: it reads the same next time.
+                        ProviderError::Http(404 | 410)
+                        | ProviderError::Empty
+                        | ProviderError::Parse(_) => {
+                            checked.push(p.accession.clone());
+                        }
+                        _ if p.failed + 1 < MAX_FAILED => {
+                            p.failed += 1;
+                            pending.push(p);
+                        }
+                        _ => checked.push(p.accession.clone()),
+                    }
                 }
             }
-            Err(e) => {
-                out.errors.push(format!("{label}: {e}"));
-                match e {
-                    ProviderError::Http(403 | 429) => {
-                        out.throttled = true;
-                        pending.insert(0, p);
-                    }
-                    // Not there yet, or not at all: one more try later.
-                    ProviderError::Http(404 | 410) if p.missing == 0 => {
-                        p.missing = 1;
-                        pending.push(p);
-                    }
-                    // No readable document: it reads the same next time.
-                    ProviderError::Http(404 | 410)
-                    | ProviderError::Empty
-                    | ProviderError::Parse(_) => {
-                        checked.push(p.accession.clone());
-                    }
-                    _ if p.failed + 1 < MAX_FAILED => {
-                        p.failed += 1;
-                        pending.push(p);
-                    }
-                    _ => checked.push(p.accession.clone()),
-                }
-            }
+        } else {
+            checked.push(p.accession.clone());
         }
     }
     kv_put(es, KV_6K_CHECKED, &checked, CHECKED_KEEP, now).await?;
@@ -929,6 +960,21 @@ mod tests {
     }
 
     #[test]
+    fn dates_survive_split_tags() {
+        let found = |t: &str| dates(t).map(|(_, _, d)| d).collect::<Vec<_>>();
+        assert_eq!(
+            found("beijing, china, august 26 , 2026 -"),
+            [d("2026-08-26")]
+        );
+        assert_eq!(found("ended 30 september 2026"), [d("2026-09-30")]);
+        // LI's September delivery update: its dateline reads, and it is still
+        // not a results release.
+        let lower = normalize(&fx("li_september_deliveries.htm")).to_ascii_lowercase();
+        assert!(found(&lower).contains(&d("2026-10-01")));
+        assert!(check("LI", "li_september_deliveries.htm", "2026-10-01").is_err());
+    }
+
+    #[test]
     fn a_figure_is_money_or_a_financial_amount() {
         assert!(has_figure("total revenues were rmb32,136.9 million"));
         assert!(has_figure("net sales of €11.7 billion"));
@@ -958,6 +1004,11 @@ mod tests {
         let at = |ticker: &str, name: &str, accepted: &str| {
             classify(&fx(name), &find(ticker).unwrap(), d(accepted)).unwrap()
         };
+        // "BEIJING, China, August 26 , 2026": a tag ended before the comma.
+        assert_eq!(
+            at("LI", "li_results.htm", "2026-08-26"),
+            Some(d("2026-08-26"))
+        );
         // "SHANGHAI, China, September 1, 2026"
         assert_eq!(
             at("NIO", "nio_results.htm", "2026-09-01"),
@@ -1306,7 +1357,7 @@ mod tests {
         let o = foreign_tick(now, es, fl).await.unwrap();
         let mut reads = Vec::new();
         for _ in 0..o.reads {
-            reads.push(foreign_read(now, es, fl).await.unwrap());
+            reads.push(foreign_read(now, es, es.base.as_ref(), fl).await.unwrap());
         }
         (o, reads)
     }
@@ -1347,19 +1398,19 @@ mod tests {
         // pending and watermark writes.
         assert_eq!(es.calls.get(), 6);
         es.calls.set(0);
-        let first = foreign_read(now, &es, &fl).await.unwrap();
-        // The older one first: the delivery update. Pending, checked reads;
-        // the two list writes.
+        let first = foreign_read(now, &es, es.base.as_ref(), &fl).await.unwrap();
+        // The older one first: the delivery update. Backoff, pending and
+        // checked reads; the ticker's rows; the two list writes.
         assert!(
             first.rejected.is_some() && first.reported.is_none(),
             "{first:?}"
         );
-        assert_eq!((es.calls.get(), fl.fetches.get()), (4, 3));
+        assert_eq!((es.calls.get(), fl.fetches.get()), (6, 3));
         es.calls.set(0);
-        let second = foreign_read(now, &es, &fl).await.unwrap();
+        let second = foreign_read(now, &es, es.base.as_ref(), &fl).await.unwrap();
         assert_eq!(second.reported.as_deref(), Some("2026-09-01"), "{second:?}");
-        // Plus the ticker's calendar rows and the calendar write.
-        assert_eq!((es.calls.get(), fl.fetches.get()), (6, 5));
+        // Plus the calendar write.
+        assert_eq!((es.calls.get(), fl.fetches.get()), (7, 5));
         assert_eq!(
             status(&es, "NIO"),
             [(
@@ -1370,7 +1421,7 @@ mod tests {
         );
         // A redelivered message finds nothing pending.
         assert_eq!(
-            foreign_read(now, &es, &fl).await.unwrap(),
+            foreign_read(now, &es, es.base.as_ref(), &fl).await.unwrap(),
             ReadOutcome::default()
         );
         // The next firing sees the same feed: nothing is queued again.
@@ -1551,9 +1602,87 @@ mod tests {
         let now = utc("2026-09-01T11:20:00Z");
         let (_, reads) = run(now, &es, &fl).await;
         assert!(reads[0].throttled);
-        let (o, reads) = run(now + Duration::minutes(5), &es, &fl).await;
+        let (o, reads) = run(now + Duration::minutes(16), &es, &fl).await;
         assert_eq!(o.reads, 1);
         assert_eq!(reported(&reads), ["2026-09-01"]);
+    }
+
+    #[tokio::test]
+    async fn once_reported_the_tickers_other_pending_6ks_are_not_fetched() {
+        let es = stores();
+        seed(&es, "NIO", "2026-09-01").await;
+        let fl = Fake::default();
+        // The results first, then a reconciliation filed the same morning.
+        fl.add(
+            "NIO",
+            1,
+            "2026-09-01T11:00:00Z",
+            "6-K",
+            Some(fx("nio_results.htm")),
+        );
+        fl.add(
+            "NIO",
+            2,
+            "2026-09-01T11:15:00Z",
+            "6-K",
+            Some(fx("nio_gaap_ifrs.htm")),
+        );
+        let (o, reads) = run(utc("2026-09-01T11:20:00Z"), &es, &fl).await;
+        assert_eq!(o.reads, 2);
+        assert_eq!(reported(&reads), ["2026-09-01"]);
+        // The feed page and the first 6-K's 2 fetches; the second is dropped unread.
+        assert_eq!(fl.fetches.get(), 3);
+        assert_eq!(reads[1], ReadOutcome::default());
+        let (o, _) = run(utc("2026-09-01T11:25:00Z"), &es, &fl).await;
+        assert_eq!((o.pending, o.reads), (0, 0));
+    }
+
+    #[tokio::test]
+    async fn a_429_alerts_once_and_holds_the_other_reads_back() {
+        let es = stores();
+        for t in ["NIO", "XPEV"] {
+            seed(&es, t, "2026-09-01").await;
+        }
+        let fl = Fake::default();
+        let acc = fl.add(
+            "NIO",
+            1,
+            "2026-09-01T11:00:00Z",
+            "6-K",
+            Some(fx("nio_results.htm")),
+        );
+        fl.add(
+            "XPEV",
+            2,
+            "2026-09-01T11:05:00Z",
+            "6-K",
+            Some(fx("nio_august_deliveries.htm")),
+        );
+        fl.head_errors
+            .borrow_mut()
+            .insert(acc, vec![ProviderError::Http(429)]);
+        let now = utc("2026-09-01T11:20:00Z");
+        let (o, reads) = run(now, &es, &fl).await;
+        assert_eq!(o.reads, 2);
+        assert!(reads[0].throttled, "{reads:?}");
+        // The second message of that poll fetches nothing.
+        assert!(reads[1].held, "{reads:?}");
+        assert_eq!(fl.fetches.get(), 1 + 2);
+        let throttled = || {
+            es.base
+                .alerts
+                .borrow()
+                .iter()
+                .filter(|a| a.0.starts_with("sec-throttled"))
+                .count()
+        };
+        assert_eq!(throttled(), 1);
+        // Still held five minutes later; read again after the backoff.
+        let (_, reads) = run(now + Duration::minutes(5), &es, &fl).await;
+        assert!(reads.iter().all(|r| r.held), "{reads:?}");
+        let (_, reads) = run(now + Duration::minutes(16), &es, &fl).await;
+        assert_eq!(reported(&reads), ["2026-09-01"], "{reads:?}");
+        assert_eq!(throttled(), 1);
     }
 
     #[tokio::test]

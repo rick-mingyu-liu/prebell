@@ -280,7 +280,7 @@ impl JobRunner for Runner<'_> {
                 // One pending 6-K, on the poll's serial queue (EDGAR is
                 // never read by two of them at once).
                 let edgar = self.edgar()?;
-                let o = foreign_read(t, store, &edgar).await?;
+                let o = foreign_read(t, store, store, &edgar).await?;
                 for e in &o.errors {
                     console_warn!("earnings 6-K: {e}");
                 }
