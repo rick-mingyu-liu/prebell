@@ -28,6 +28,40 @@ export async function coverResponse(bucket: R2Like, segments: string[]): Promise
 /** Share cards the generator renders from SVG covers: R2 `og/<stem>.png`, requested as `/og/<stem>.png`. */
 export const CARD_FILE = /^[a-z0-9-]{1,80}\.png$/;
 
+/** The share card for pages without one of their own (1200×630, `public/og-default.png`). */
+export const DEFAULT_CARD = "/og-default.png";
+
+/**
+ * Where a post's card would be: the generator renders `covers/<stem>.svg` to `og/<stem>.png` in R2.
+ * Older raster covers and posts without a cover have none.
+ */
+export function cardPath(coverKey: string | null): string {
+  const stem = coverKey && /^covers\/([a-z0-9-]{1,80})\.svg$/.exec(coverKey)?.[1];
+  return stem ? `/og/${stem}.png` : DEFAULT_CARD;
+}
+
+/** The slice of the R2 binding the card lookups use. */
+export interface CardBucket {
+  get(key: string): Promise<{ body: ReadableStream | string; size?: number; httpEtag?: string } | null>;
+  head(key: string): Promise<unknown>;
+}
+
+/**
+ * The card a post's page should name: its own once the generator has rendered it, else the default.
+ * A share made before the card exists then caches the default card's URL, never a post card URL that
+ * would later change what it shows. One R2 head; a failed lookup gives the default.
+ */
+export async function postCard(bucket: Pick<CardBucket, "head">, coverKey: string | null): Promise<string> {
+  const path = cardPath(coverKey);
+  if (path === DEFAULT_CARD) return path;
+  try {
+    return (await bucket.head(path.slice(1))) ? path : DEFAULT_CARD;
+  } catch (err) {
+    console.error(`card lookup ${path}:`, err);
+    return DEFAULT_CARD;
+  }
+}
+
 /** The slice of the static-assets binding the card route uses. */
 export interface AssetsLike {
   fetch(request: Request): Promise<Response>;
@@ -39,7 +73,7 @@ export interface AssetsLike {
  * default card, cached briefly so the real one replaces it.
  */
 export async function cardResponse(
-  bucket: R2Like,
+  bucket: Pick<CardBucket, "get">,
   assets: AssetsLike,
   file: string,
   requestUrl: string,
@@ -52,6 +86,8 @@ export async function cardResponse(
         "Content-Type": "image/png",
         "X-Content-Type-Options": "nosniff",
         "Cache-Control": "public, max-age=86400, s-maxage=86400",
+        ...(obj.size !== undefined ? { "Content-Length": String(obj.size) } : {}),
+        ...(obj.httpEtag ? { ETag: obj.httpEtag } : {}),
       },
     });
   }

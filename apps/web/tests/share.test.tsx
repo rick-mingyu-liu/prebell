@@ -3,15 +3,21 @@ import type { Metadata } from "next";
 import { prerender } from "react-dom/static";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Locale } from "../src/i18n/routing";
-import { cardPath, homeLd, jsonLd, newsArticleLd, AUTHOR } from "../src/lib/seo";
+import { cardPath } from "../src/lib/covers";
+import { homeLd, jsonLd, newsArticleLd, AUTHOR } from "../src/lib/seo";
 import { translator } from "../src/lib/translator";
 import { memoryD1 } from "./d1";
 
 // The pages read D1 through getDb(), R2 through the Cloudflare context and messages through
 // next-intl/server; each is swapped for an in-memory or synchronous stand-in.
-const env = vi.hoisted(() => ({ db: null as unknown, locale: "en" as string }));
+const env = vi.hoisted(() => ({ db: null as unknown, locale: "en" as string, cards: new Set<string>() }));
 vi.mock("@/lib/db", () => ({ getDb: () => env.db }));
-vi.mock("@opennextjs/cloudflare", () => ({ getCloudflareContext: () => ({ env: { FACTS: { get: async () => null } } }) }));
+// R2 holds the cards in `env.cards`; nothing else.
+vi.mock("@opennextjs/cloudflare", () => ({
+  getCloudflareContext: () => ({
+    env: { FACTS: { get: async () => null, head: async (k: string) => (env.cards.has(k) ? { key: k } : null) } },
+  }),
+}));
 vi.mock("next/headers", () => ({ headers: async () => new Headers({ host: "prebell.site" }) }));
 vi.mock("next-intl/server", () => ({
   setRequestLocale: (l: string) => {
@@ -59,9 +65,12 @@ type Tw = NonNullable<Metadata["twitter"]> & Record<string, unknown>;
 const og = (m: Metadata) => m.openGraph as Og;
 const tw = (m: Metadata) => m.twitter as Tw;
 
+const CARD = "og/premarket-2026-11-05-update-1.png";
+
 describe("share cards", () => {
   beforeEach(() => {
     env.db = memoryD1(seed);
+    env.cards = new Set([CARD]);
   });
 
   it("a post is an article card in its language, with its rendered cover card and both times", async () => {
@@ -79,7 +88,7 @@ describe("share cards", () => {
         siteName: translator(locale)("site.name"),
         publishedTime: "2026-11-05T12:01:00Z",
         modifiedTime: "2026-11-05T12:37:00Z",
-        images: [{ url: "/og/premarket-2026-11-05-update-1.png", width: 1200, height: 630, alt: title }],
+        images: [{ url: "/og/premarket-2026-11-05-update-1.png", width: 1200, height: 630, type: "image/png", alt: title }],
       });
       expect(tw(m)).toMatchObject({
         card: "summary_large_image",
@@ -87,6 +96,16 @@ describe("share cards", () => {
         images: [{ url: "/og/premarket-2026-11-05-update-1.png" }],
       });
     }
+  });
+
+  it("a post names the default card until its own is rendered, so an early share never caches a URL that changes", async () => {
+    env.cards = new Set();
+    const props_ = props({ locale: "en", slug: "premarket-2026-11-05" });
+    const m = await post.generateMetadata(props_);
+    expect(og(m).images).toEqual([expect.objectContaining({ url: "/og-default.png" })]);
+    expect(tw(m).images).toEqual([expect.objectContaining({ url: "/og-default.png" })]);
+    const out = await html(await post.default(props_));
+    expect(ldBlocks(out)[0].image).toEqual(["https://prebell.site/og-default.png"]);
   });
 
   it("home, calendar, ticker and about pages are website cards with the default card", async () => {
@@ -121,6 +140,7 @@ describe("share cards", () => {
 describe("article markup", () => {
   beforeEach(() => {
     env.db = memoryD1(seed);
+    env.cards = new Set([CARD]);
   });
 
   it("a post carries one NewsArticle with absolute URLs, its language and both dates", async () => {
@@ -197,14 +217,16 @@ describe("Cloudflare Web Analytics", () => {
     expect(await render()).not.toContain("cloudflareinsights");
   });
 
-  it("with the token, one deferred beacon at the end of the body, carrying the token", async () => {
+  it("with the token, one async beacon carrying the token", async () => {
     vi.stubEnv("CF_BEACON_TOKEN", "abc123");
     const out = await render();
+    // React hoists an async script into <head>; async never blocks parsing or DOMContentLoaded.
     const tags = out.match(/<script[^>]*cloudflareinsights[^>]*>/g) ?? [];
     expect(tags).toHaveLength(1);
     expect(tags[0]).toContain('src="https://static.cloudflareinsights.com/beacon.min.js"');
-    expect(tags[0]).toMatch(/\sdefer[\s=>]/);
+    expect(tags[0]).toMatch(/\sasync[\s=>]/);
+    expect(tags[0]).not.toContain("defer");
     expect(tags[0]).toContain(`data-cf-beacon="{&quot;token&quot;:&quot;abc123&quot;}"`);
-    expect(out.indexOf("cloudflareinsights")).toBeGreaterThan(out.indexOf('<footer class="site-footer">'));
+    expect(out.match(/cloudflareinsights/g)).toHaveLength(1);
   });
 });

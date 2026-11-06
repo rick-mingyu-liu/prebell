@@ -9,11 +9,14 @@ import { loadBrief } from "@/lib/brief";
 import { getDb } from "@/lib/db";
 import { pendingTitle } from "@/lib/labels";
 import { resolvePost } from "@/lib/posts";
-import { cardPath, jsonLd, newsArticleLd, pairedAlternates, shareMetadata, siteOrigin } from "@/lib/seo";
+import { postCard } from "@/lib/covers";
+import { jsonLd, newsArticleLd, pairedAlternates, shareMetadata, siteOrigin } from "@/lib/seo";
 import { signupEnabled } from "@/lib/signup";
 
 // One lookup shared by generateMetadata and the page.
 const resolve = cache((slug: string, locale: Locale) => resolvePost(getDb(), slug, locale));
+// The share card, once per request: the post's own only after the generator has rendered it.
+const card = cache((coverKey: string | null) => postCard(getCloudflareContext().env.FACTS, coverKey));
 
 export async function generateMetadata({ params }: PageProps<"/[locale]/p/[slug]">): Promise<Metadata> {
   const { locale, slug } = await params;
@@ -33,7 +36,7 @@ export async function generateMetadata({ params }: PageProps<"/[locale]/p/[slug]
         title,
         description: t("site.tagline"),
         siteName: t("site.name"),
-        image: cardPath(post.coverKey),
+        image: await card(post.coverKey),
       }),
     };
   }
@@ -47,7 +50,7 @@ export async function generateMetadata({ params }: PageProps<"/[locale]/p/[slug]
       title: post.title,
       description: post.summary,
       siteName: t("site.name"),
-      image: cardPath(post.coverKey),
+      image: await card(post.coverKey),
       article: { publishedTime: post.publishedAt, modifiedTime: post.revisedAt ?? post.publishedAt },
     }),
   };
@@ -72,7 +75,7 @@ export default async function PostPage({ params }: PageProps<"/[locale]/p/[slug]
           url: `/${locale}/p/${slug}`,
           headline: post.title,
           description: post.summary,
-          image: cardPath(post.coverKey),
+          image: await card(post.coverKey),
           lang: htmlLang(locale),
           publishedAt: post.publishedAt,
           revisedAt: post.revisedAt,

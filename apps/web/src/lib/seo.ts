@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import { headers } from "next/headers";
+import { DEFAULT_CARD } from "./covers";
 
 /**
  * The site origin for canonical and hreflang URLs.
@@ -30,19 +31,6 @@ export function pairedAlternates(locale: string, path: string): Metadata["altern
   };
 }
 
-/** The share card for pages without one of their own (1200×630, `public/og-default.png`). */
-export const DEFAULT_CARD = "/og-default.png";
-
-/**
- * A post's share card: the generator renders `covers/<stem>.svg` to `og/<stem>.png` in R2 (served by
- * the /og route, which falls back to the default card until it exists). Older raster covers and posts
- * without a cover use the default card.
- */
-export function cardPath(coverKey: string | null): string {
-  const stem = coverKey && /^covers\/([a-z0-9-]{1,80})\.svg$/.exec(coverKey)?.[1];
-  return stem ? `/og/${stem}.png` : DEFAULT_CARD;
-}
-
 /** Open Graph locale tags. */
 const OG_LOCALE = { en: "en_US", zh: "zh_CN" } as const;
 
@@ -61,7 +49,7 @@ export interface ShareInput {
 
 /** Open Graph and Twitter card tags in the page's language. Relative URLs resolve against `metadataBase`. */
 export function shareMetadata(s: ShareInput): Pick<Metadata, "openGraph" | "twitter"> {
-  const images = [{ url: s.image ?? DEFAULT_CARD, width: 1200, height: 630, alt: s.title }];
+  const images = [{ url: s.image ?? DEFAULT_CARD, width: 1200, height: 630, type: "image/png", alt: s.title }];
   const base = {
     ...(s.url ? { url: s.url } : {}),
     title: s.title,

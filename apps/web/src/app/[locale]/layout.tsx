@@ -69,8 +69,9 @@ export default async function LocaleLayout({ children, params }: LayoutProps<"/[
           </div>
         </footer>
         {beacon && (
+          // async, not defer: a hung connection (mainland China) then never holds back DOMContentLoaded.
           <script
-            defer
+            async
             src="https://static.cloudflareinsights.com/beacon.min.js"
             data-cf-beacon={JSON.stringify({ token: beacon })}
           />
