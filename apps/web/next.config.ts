@@ -28,8 +28,8 @@ const nextConfig: NextConfig = {
         headers: [{ key: "Cache-Control", value: "public, s-maxage=60" }],
       },
       {
-        // The sitemap and robots.txt read D1 or SITE_URL per request; an hour at the edge is fresh enough.
-        source: "/:file(sitemap.xml|robots.txt)",
+        // robots.txt reads SITE_URL per request and rarely changes. (The sitemap sets its own header.)
+        source: "/robots.txt",
         headers: [{ key: "Cache-Control", value: "public, s-maxage=3600" }],
       },
       {

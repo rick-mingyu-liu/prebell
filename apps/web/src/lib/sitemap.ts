@@ -71,3 +71,57 @@ export async function sitemapEntries(db: D1Like, origin: URL): Promise<MetadataR
     ...[...tickers].flatMap(([ticker, modified]) => paired(origin, `/t/${encodeURIComponent(ticker)}`, modified)),
   ];
 }
+
+const escapeXml = (s: string) =>
+  s.replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&apos;" })[c]!);
+
+/** The sitemap XML, with each entry's hreflang alternates as `xhtml:link`. */
+export function sitemapXml(entries: MetadataRoute.Sitemap): string {
+  const urls = entries.map((e) => {
+    const links = Object.entries(e.alternates?.languages ?? {}).map(
+      ([lang, href]) => `<xhtml:link rel="alternate" hreflang="${lang}" href="${escapeXml(String(href))}" />`,
+    );
+    const lastmod = e.lastModified ? [`<lastmod>${escapeXml(String(e.lastModified))}</lastmod>`] : [];
+    return ["<url>", `<loc>${escapeXml(e.url)}</loc>`, ...links, ...lastmod, "</url>"].join("\n");
+  });
+  return [
+    '<?xml version="1.0" encoding="UTF-8"?>',
+    '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9" xmlns:xhtml="http://www.w3.org/1999/xhtml">',
+    ...urls,
+    "</urlset>",
+    "",
+  ].join("\n");
+}
+
+/** The slice of the Workers Cache API (`caches.default`) the sitemap uses. */
+export interface EdgeCache {
+  match(request: Request): Promise<Response | undefined>;
+  put(request: Request, response: Response): Promise<void>;
+}
+
+/** How long the edge keeps the sitemap. */
+export const SITEMAP_MAX_AGE = 3600;
+
+/**
+ * `GET /sitemap.xml`, kept in this colo's edge cache for an hour: a Worker's own responses are not
+ * cached by `Cache-Control` alone, so without this every crawl would read D1 and build the XML again.
+ * The key ignores the query string. `build` runs only on a miss; the write finishes after the response.
+ */
+export async function cachedSitemap(
+  requestUrl: string,
+  cache: EdgeCache | undefined,
+  waitUntil: (p: Promise<unknown>) => void,
+  build: () => Promise<string>,
+): Promise<Response> {
+  const key = new Request(new URL("/sitemap.xml", requestUrl));
+  const hit = await cache?.match(key);
+  if (hit) return hit;
+  const res = new Response(await build(), {
+    headers: {
+      "Content-Type": "application/xml; charset=utf-8",
+      "Cache-Control": `public, max-age=${SITEMAP_MAX_AGE}`,
+    },
+  });
+  if (cache) waitUntil(cache.put(key, res.clone()));
+  return res;
+}

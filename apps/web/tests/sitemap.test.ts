@@ -1,6 +1,6 @@
 import { resolveRobots, resolveSitemap } from "next/dist/build/webpack/loaders/metadata/resolve-route-data";
 import { describe, expect, it, vi } from "vitest";
-import { sitemapEntries } from "../src/lib/sitemap";
+import { cachedSitemap, type EdgeCache, sitemapEntries, sitemapXml } from "../src/lib/sitemap";
 import { memoryD1 } from "./d1";
 
 vi.mock("next/headers", () => ({ headers: async () => new Headers({ host: "prebell.site" }) }));
@@ -76,8 +76,11 @@ describe("sitemap", () => {
     });
   });
 
-  it("renders as a sitemap with xhtml:link hreflang alternates", async () => {
-    const xml = resolveSitemap(await sitemapEntries(memoryD1(seed), origin));
+  it("renders as a sitemap with xhtml:link hreflang alternates, the same XML Next writes", async () => {
+    const entries = await sitemapEntries(memoryD1(seed), origin);
+    const xml = sitemapXml(entries);
+    expect(xml).toBe(resolveSitemap(entries));
+    expect(xml.startsWith('<?xml version="1.0" encoding="UTF-8"?>\n<urlset')).toBe(true);
     expect(xml).toContain('xmlns:xhtml="http://www.w3.org/1999/xhtml"');
     expect(xml).toContain("<loc>https://prebell.site/zh/p/premarket-2026-11-05</loc>");
     expect(xml).toContain(
@@ -85,6 +88,10 @@ describe("sitemap", () => {
     );
     expect(xml).toContain("<lastmod>2026-11-05T12:37:00Z</lastmod>");
     expect(xml).not.toContain("/t/A<");
+  });
+
+  it("escapes XML in URLs", () => {
+    expect(sitemapXml([{ url: "https://x.test/?a=1&b=<2>" }])).toContain("<loc>https://x.test/?a=1&amp;b=&lt;2&gt;</loc>");
   });
 
   it("costs one D1 query", async () => {
@@ -98,5 +105,40 @@ describe("sitemap", () => {
     const { default: robots } = await import("../src/app/robots");
     const txt = resolveRobots(await robots());
     expect(txt).toBe("User-Agent: *\nAllow: /\n\nSitemap: https://prebell.site/sitemap.xml\n");
+  });
+});
+
+describe("sitemap edge cache", () => {
+  /** An in-memory `caches.default`, keyed by URL. */
+  const memoryCache = () => {
+    const store = new Map<string, Response>();
+    const cache: EdgeCache = {
+      match: async (r) => store.get(r.url)?.clone(),
+      put: async (r, res) => {
+        store.set(r.url, res);
+      },
+    };
+    return { store, cache };
+  };
+
+  it("builds once an hour per colo: a miss builds and stores, a hit skips D1 and the build", async () => {
+    const { store, cache } = memoryCache();
+    const pending: Promise<unknown>[] = [];
+    const build = vi.fn(async () => "<urlset/>");
+    const first = await cachedSitemap("https://prebell.site/sitemap.xml", cache, (p) => pending.push(p), build);
+    await Promise.all(pending);
+    expect(await first.text()).toBe("<urlset/>");
+    expect(first.headers.get("Content-Type")).toBe("application/xml; charset=utf-8");
+    expect(first.headers.get("Cache-Control")).toBe("public, max-age=3600");
+    expect([...store.keys()]).toEqual(["https://prebell.site/sitemap.xml"]);
+    // A query string does not bypass the cache.
+    const second = await cachedSitemap("https://prebell.site/sitemap.xml?x=1", cache, (p) => pending.push(p), build);
+    expect(await second.text()).toBe("<urlset/>");
+    expect(build).toHaveBeenCalledTimes(1);
+  });
+
+  it("still answers without a cache (next dev)", async () => {
+    const res = await cachedSitemap("http://localhost:3000/sitemap.xml", undefined, () => {}, async () => "<urlset/>");
+    expect(await res.text()).toBe("<urlset/>");
   });
 });
