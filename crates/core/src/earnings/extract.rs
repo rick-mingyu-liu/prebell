@@ -429,24 +429,43 @@ impl<'a> Table<'a> {
         None
     }
 
-    /// Whether the period labels of header line `i` (and of a label-only
-    /// line right above it) name the quarter first: "Three Months Ended
-    /// ... Nine Months Ended", "2025 Q4 2026 Q4". `None` when they name no
-    /// period length.
+    /// Whether the period labels of header line `i` (and of up to three
+    /// label lines right above it) name the quarter first: "Three Months
+    /// Ended ... Nine Months Ended", "2025 Q4 2026 Q4"; DUK puts the lengths
+    /// and the dates on two lines above the years. A label line has words,
+    /// all of them period or column labels, and is not a year header; the
+    /// walk stops at any other line and at the scale heading, unless the
+    /// heading line is the header (CVS puts its labels above it). `None`
+    /// when no line names a period length; `Some(false)` when the lines
+    /// disagree.
     fn quarter_first(&self, i: usize) -> Option<bool> {
         static R: OnceLock<Regex> = OnceLock::new();
+        static WORD: OnceLock<Regex> = OnceLock::new();
         let r = R.get_or_init(|| {
             Regex::new(r"(?i)\b(?:(three\s+months|thirteen\s+weeks|quarters?|q[1-4])|six\s+months|nine\s+months|twelve\s+months|years?|ytd|year-to-date)\b")
                 .expect("valid built-in regex")
         });
+        let word = WORD.get_or_init(|| Regex::new(r"[A-Za-z]").expect("valid built-in regex"));
         let l = self.lines;
-        let above = i
-            .checked_sub(1)
+        let top = l.line_of(self.heading_at);
+        let floor = if i > top { top + 1 } else { 0 };
+        let label_line = |s: &str| {
+            word.is_match(&strip_parens(s))
+                && period_words_only(s)
+                && header_years(s, false).is_none()
+        };
+        let firsts: Vec<bool> = (floor..i)
+            .rev()
+            .take(3)
             .map(|j| l.line(j, self.quote_at))
-            .filter(|s| period_words_only(s))
-            .unwrap_or("");
-        let labels = format!("{above} {}", l.line(i, self.quote_at));
-        r.captures(&labels).map(|c| c.get(1).is_some())
+            .take_while(|s| label_line(s))
+            .chain([l.line(i, self.quote_at)])
+            .filter_map(|s| r.captures(s).map(|c| c.get(1).is_some()))
+            .collect();
+        match firsts.as_slice() {
+            [] => None,
+            [first, rest @ ..] => Some(*first && rest.iter().all(|&q| q)),
+        }
     }
 }
 
@@ -551,8 +570,9 @@ fn strip_parens(s: &str) -> String {
 }
 
 /// Every word outside parentheses names a period or a column: "Three
-/// Months Ended September 30,", "GAAP Non-GAAP", "Change", "Inc/ (Dec)
-/// Excluding Currency Translation", "(Unaudited)".
+/// Months Ended September 30,", "For the Nine Months Ended", "GAAP
+/// Non-GAAP", "Change", "Inc/ (Dec) Excluding Currency Translation",
+/// "(Unaudited)".
 fn period_words_only(s: &str) -> bool {
     const WORDS: &[&str] = &[
         "jan",
@@ -589,6 +609,8 @@ fn period_words_only(s: &str) -> bool {
         "weeks",
         "ended",
         "ending",
+        "for",
+        "the",
         "quarter",
         "quarters",
         "year",
@@ -1698,6 +1720,123 @@ mod tests {
         let t = "(In millions)\n2026 2025 2026 2025\nTotal revenues $360 $300 $120 $100";
         let q = "Total revenues $360 $300 $120 $100";
         assert!(verify_figure(t, Metric::Revenue, &raw("$360", "millions", false, q)).is_err());
+    }
+
+    #[test]
+    fn period_labels_can_span_lines_above_the_years() {
+        // DUK's statement: the period lengths, then the dates, then the
+        // years, each on its own line.
+        let duk = "(In millions, except per share amounts)\nThree Months Ended Nine Months Ended\nSeptember 30, September 30,\n2026 2025 2026 2025\nOperating Revenues\nRegulated electric $8,677 $8,106 $23,583 $22,138\nRegulated natural gas 358 361 2,073 1,928\nNonregulated electric and other 69 75 218 233\nTotal operating revenues 9,104 8,542 25,874 24,299\nEarnings Per Share – Basic and Diluted\nNet income available to Duke Energy Corporation common stockholders\nBasic and Diluted $1.99 $1.81 $5.34 $4.81";
+        let q = "Total operating revenues 9,104 8,542 25,874 24,299";
+        let f = verify_figure(duk, Metric::Revenue, &raw("9,104", "millions", false, q));
+        assert_eq!(f.unwrap().value, 9.104e9);
+        for a in ["8,542", "25,874", "24,299"] {
+            let r = verify_figure(duk, Metric::Revenue, &raw(a, "millions", false, q));
+            assert!(r.unwrap_err().contains("current period"), "{a}");
+        }
+        let q = "Basic and Diluted $1.99 $1.81 $5.34 $4.81";
+        let f = verify_figure(duk, Metric::EpsGaap, &raw("$1.99", "units", false, q));
+        assert_eq!(f.unwrap().value, 1.99);
+        for a in ["$1.81", "$5.34", "$4.81"] {
+            let r = verify_figure(duk, Metric::EpsGaap, &raw(a, "units", false, q));
+            assert!(r.unwrap_err().contains("current period"), "{a}");
+        }
+        // SPG writes "For the Three Months Ended ...".
+        let spg = "(Dollars in thousands, except per share amounts)\nFor the Three Months Ended September 30, For the Nine Months Ended September 30,\n2026 2025 2026 2025\nREVENUE:\nLease income $1,681,393 $1,452,930 $4,969,633 $4,199,812\nTotal revenue 1,814,556 1,601,572 5,362,247 4,573,043\nDiluted net income per share $1.54 $1.86 $4.51 $4.83";
+        let q = "Total revenue 1,814,556 1,601,572 5,362,247 4,573,043";
+        let f = verify_figure(
+            spg,
+            Metric::Revenue,
+            &raw("1,814,556", "thousands", false, q),
+        );
+        assert_eq!(f.unwrap().value, 1.814556e9);
+        for a in ["1,601,572", "5,362,247", "4,573,043"] {
+            let r = verify_figure(spg, Metric::Revenue, &raw(a, "thousands", false, q));
+            assert!(r.unwrap_err().contains("current period"), "{a}");
+        }
+        let q = "Diluted net income per share $1.54 $1.86 $4.51 $4.83";
+        let f = verify_figure(spg, Metric::EpsGaap, &raw("$1.54", "units", false, q));
+        assert_eq!(f.unwrap().value, 1.54);
+        for a in ["$1.86", "$4.51", "$4.83"] {
+            let r = verify_figure(spg, Metric::EpsGaap, &raw(a, "units", false, q));
+            assert!(r.unwrap_err().contains("current period"), "{a}");
+        }
+        // Prior year first: the quarter's 2026 column, never the prior
+        // year's or the nine months'.
+        let t = "(In millions)\nThree Months Ended Nine Months Ended\nSeptember 30, September 30,\n2025 2026 2025 2026\nTotal revenues $100 $120 $300 $360";
+        let q = "Total revenues $100 $120 $300 $360";
+        let f = verify_figure(t, Metric::Revenue, &raw("$120", "millions", false, q));
+        assert_eq!(f.unwrap().value, 120e6);
+        for a in ["$100", "$300", "$360"] {
+            let r = verify_figure(t, Metric::Revenue, &raw(a, "millions", false, q));
+            assert!(r.unwrap_err().contains("current period"), "{a}");
+        }
+        // The year-to-date block first is still rejected, and so is a
+        // period line that a row or a group label separates from the years.
+        for header in [
+            "Nine Months Ended Three Months Ended\nSeptember 30, September 30,\n2026 2025 2026 2025",
+            "For the Nine Months Ended September 30, For the Three Months Ended September 30,\n2026 2025 2026 2025",
+            "Three Months Ended Nine Months Ended\nOperating Revenues\nSeptember 30, September 30,\n2026 2025 2026 2025",
+            "Three Months Ended Nine Months Ended\nTotal revenues 300 360 900 1,080\nSeptember 30, September 30,\n2026 2025 2026 2025",
+        ] {
+            let t = format!("(In millions)\n{header}\nTotal revenues $360 $300 $120 $100");
+            let q = "Total revenues $360 $300 $120 $100";
+            for a in ["$360", "$300", "$120", "$100"] {
+                let r = verify_figure(&t, Metric::Revenue, &raw(a, "millions", false, q));
+                assert!(r.is_err(), "{a} under {header:?}: {r:?}");
+            }
+        }
+        // Label lines count only inside the table, below its scale heading,
+        // up to three of them, and never through a number-only row or a
+        // "(Unaudited)"; label lines that disagree about which period comes
+        // first say nothing.
+        for top in [
+            "Three Months Ended\n(In millions)\nNine Months Ended Three Months Ended",
+            "Q3\n(In millions)\nSix Months Ended",
+            "Three Months Ended\n(In millions)\n1,234 5,678",
+            "Quarter Ended\n(Unaudited)\n(In millions)",
+            "For the Quarter\n(In millions)",
+            "(In millions)\nThree Months Ended Nine Months Ended\n1,234 5,678",
+            "(In millions)\nThree Months Ended Nine Months Ended\n(Unaudited)",
+            "(In millions)\nThree Months Ended\nSeptember 30,\nSeptember 30,\nSeptember 30,",
+            "(In millions)\nThree Months Ended\nNine Months Ended",
+            "(In millions)\nQ3\nYear Ended December 31, Year Ended",
+            "(In millions)\nThree Months Ended Nine Months Ended\nNine Months Ended Three Months Ended",
+        ] {
+            let t = format!("{top}\n2026 2025 2026 2025\nTotal revenues $360 $300 $120 $100");
+            let q = "Total revenues $360 $300 $120 $100";
+            for a in ["$360", "$300", "$120", "$100"] {
+                let r = verify_figure(&t, Metric::Revenue, &raw(a, "millions", false, q));
+                assert!(r.is_err(), "{a} under {top:?}: {r:?}");
+            }
+        }
+        let t = "(In millions)\nThree Months Ended\nNine Months Ended 2026 2025 Three Months Ended 2026 2025\nTotal revenues $360 $300 $120 $100";
+        let q = "Total revenues $360 $300 $120 $100";
+        assert!(verify_figure(t, Metric::Revenue, &raw("$360", "millions", false, q)).is_err());
+        // Dated years do not settle disagreeing label lines either; with
+        // agreeing ones, the first cell is the quarter.
+        let dated = "September 30, 2026 September 30, 2025 September 30, 2026 September 30, 2025";
+        for top in [
+            "(In millions)\nThree Months Ended\nNine Months Ended".to_string(),
+            "(In millions)\nQ3\nYear Ended December 31, Year Ended".to_string(),
+            "(In millions)\nThree Months Ended Nine Months Ended\nNine Months Ended Three Months Ended"
+                .to_string(),
+            format!("(In millions)\nThree Months Ended\nNine Months Ended {dated}"),
+        ] {
+            let header = if top.ends_with(dated) { "" } else { dated };
+            let t = format!("{top}\n{header}\nTotal revenues $360 $300 $120 $100");
+            for a in ["$360", "$300", "$120", "$100"] {
+                let r = verify_figure(&t, Metric::Revenue, &raw(a, "millions", false, q));
+                assert!(r.is_err(), "{a} under {top:?}: {r:?}");
+            }
+        }
+        let t = format!("(In millions)\nThree Months Ended Nine Months Ended\n{dated}\nTotal revenues $360 $300 $120 $100");
+        let f = verify_figure(&t, Metric::Revenue, &raw("$360", "millions", false, q));
+        assert_eq!(f.unwrap().value, 360e6);
+        for a in ["$300", "$120", "$100"] {
+            let r = verify_figure(&t, Metric::Revenue, &raw(a, "millions", false, q));
+            assert!(r.unwrap_err().contains("current period"), "{a}");
+        }
     }
 
     #[test]
