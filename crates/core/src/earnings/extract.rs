@@ -110,7 +110,9 @@ pub fn label_keywords(m: Metric) -> &'static [&'static str] {
 
 /// Words naming a part of the company or a share of it held by others: a
 /// segment, a consolidating (by-entity) table, joint ventures and other
-/// investees, a pro-rata share, the noncontrolling interests.
+/// investees and the equity-method income from them, a pro-rata share,
+/// the noncontrolling (minority) interests and limited partners, the
+/// parent company alone.
 const PARTS: &[&str] = &[
     "segment",
     "segments",
@@ -122,20 +124,47 @@ const PARTS: &[&str] = &[
     "unconsolidated",
     "equity method",
     "equity-method",
+    "equity in earnings",
+    "equity in net earnings",
+    "equity in income",
+    "equity in net income",
+    "equity in losses",
+    "equity in net losses",
+    "equity in loss",
+    "equity in net loss",
     "pro-rata",
     "pro rata",
     "our share",
     "noncontrolling",
     "non-controlling",
-    "minority interest",
-    "minority interests",
+    "non controlling",
+    "minority",
+    "limited partners",
+    "parent company only",
 ];
 
 /// The part of the company `s` names, if any. A row's own label or group
 /// line (`row`) also may not name discontinued operations, "NCI", or (but
 /// for a per-share figure: "Earnings per share of common stock") a "share
 /// of" something; a table title may, as a statement covers those rows too.
+/// "Subsidiaries" is a part too, but for the company's own "Acme Corp and
+/// Subsidiaries".
 fn part_named(m: Metric, s: &str, row: bool) -> Option<&'static str> {
+    static SUBSIDIARIES: OnceLock<Regex> = OnceLock::new();
+    static OWN: OnceLock<Regex> = OnceLock::new();
+    let subsidiaries = SUBSIDIARIES
+        .get_or_init(|| Regex::new(r"(?i)\bsubsidiar(?:y|ies)\b").expect("valid built-in regex"));
+    let own = OWN.get_or_init(|| {
+        Regex::new(r"(?i)(?:\band(?:\s+its)?|\bits|&)\s*$").expect("valid built-in regex")
+    });
+    // "non\u{2011}controlling": a filer's non-breaking hyphen.
+    let s = &s.replace(['\u{2010}', '\u{2011}'], "-");
+    if subsidiaries
+        .find_iter(s)
+        .any(|f| !own.is_match(&s[..f.start()]))
+    {
+        return Some("subsidiaries");
+    }
     let per_share = matches!(m, Metric::EpsGaap | Metric::EpsNonGaap);
     let row_parts: &[&'static str] = match (row, per_share) {
         (false, _) => &[],
@@ -161,22 +190,116 @@ fn label_only(s: &str) -> bool {
         Regex::new(r"(?i)\b(?:19|20)\d\d\b|'\d\d\b|\b(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?\s+\d{1,2}\b|\(\w{1,2}\)|\w*[a-z]\d+\w*|\b\d+[a-z]\w*")
             .expect("valid built-in regex")
     });
+    // A row of dashes or small negatives ("— —", "(5) (3)") is a row of
+    // figures; a single trailing "(1)" is a footnote marker.
+    static CELLS: OnceLock<Regex> = OnceLock::new();
+    let cells = CELLS.get_or_init(|| {
+        Regex::new(r"(?:\s+(?:\$\s*)?(?:[—–]|\(\d{1,2}\)))+\s*$").expect("valid built-in regex")
+    });
+    let figures = cells.find(s).is_some_and(|c| {
+        let c = c.as_str();
+        c.contains(['—', '–']) || c.matches('(').count() >= 2
+    });
     s.len() <= PROSE_CHARS
         && s.chars().any(char::is_alphabetic)
+        && !figures
         && !r.replace_all(s, "").contains(|c: char| c.is_ascii_digit())
+}
+
+/// A footnote ("(1) Includes ...", "* At our share", "Note: ...") or a
+/// sentence ("Segment results are discussed above."): the end of the table
+/// before, never a table's title.
+fn note_line(s: &str) -> bool {
+    static NOTE: OnceLock<Regex> = OnceLock::new();
+    static ABBREVIATION: OnceLock<Regex> = OnceLock::new();
+    let note = NOTE.get_or_init(|| {
+        Regex::new(r"(?i)^\s*(?:\(\w{1,2}\)|[*†‡]|notes?\b)").expect("valid built-in regex")
+    });
+    let abbreviation = ABBREVIATION.get_or_init(|| {
+        Regex::new(r"(?i)\b(?:inc|corp|co|ltd|llc|plc|l\.p|n\.a)\.$").expect("valid built-in regex")
+    });
+    let s = s.trim();
+    note.is_match(s) || s.ends_with('.') && !abbreviation.is_match(s)
+}
+
+/// The words of a prose quote's label that qualify its metric: the last
+/// keyword (`label_keywords`) with up to three words before it, within its
+/// clause, and the rest of that clause up to the amount ("Data Center
+/// segment revenue was", "net income attributable to noncontrolling
+/// interests was"); without a keyword, the last clause's last six words.
+fn metric_phrase(m: Metric, label: &str) -> &str {
+    let lower = label.to_ascii_lowercase();
+    let delimiter = |c: char| ",;:()•—–".contains(c) || c == '.';
+    let kw = label_keywords(m)
+        .iter()
+        .flat_map(|w| {
+            lower
+                .match_indices(w)
+                .filter(|&(i, _)| {
+                    let before = lower[..i].chars().next_back();
+                    let after = lower[i + w.len()..].chars().next();
+                    !before.is_some_and(char::is_alphanumeric)
+                        && !after.is_some_and(char::is_alphanumeric)
+                })
+                .map(|(i, w)| (i, i + w.len()))
+        })
+        .max();
+    let (start, end) = match kw {
+        Some((at, kw_end)) => {
+            let end = label[kw_end..]
+                .find(delimiter)
+                .map_or(label.len(), |e| kw_end + e);
+            (at, end)
+        }
+        None => (label.len(), label.len()),
+    };
+    let clause = label[..start]
+        .char_indices()
+        .rfind(|&(_, c)| delimiter(c))
+        .map_or(0, |(d, c)| d + c.len_utf8());
+    let words = if kw.is_some() { 3 } else { 6 };
+    let mut from = start;
+    for _ in 0..words {
+        match label[clause..from].trim_end().rfind(char::is_whitespace) {
+            Some(w) => from = clause + w,
+            None => {
+                from = clause;
+                break;
+            }
+        }
+    }
+    label[from..end].trim()
 }
 
 /// The quote names the metric: its label holds one of `label_keywords`
 /// (per-share figures may say "per share" right after the amount), a
 /// per-share quote is never about a dividend, the label names no part of
-/// the company (`part_named`) nor funds from operations (or, for net
-/// income, an adjustment or reconciliation), and is no "Less:"/"Add:"
-/// adjustment row.
+/// the company (`part_named`; in prose, `metric_phrase` only) nor funds
+/// from operations or a pro forma figure (or, for net income, an adjustment
+/// or reconciliation), and a table row is no "Less:"/"Add:" adjustment.
 fn names_metric(m: Metric, label: &str, after: &str) -> Result<(), String> {
     static ADJUSTMENT: OnceLock<Regex> = OnceLock::new();
     let adjustment = ADJUSTMENT
         .get_or_init(|| Regex::new(r"(?i)^\s*(?:less|add|plus)\b").expect("valid built-in regex"));
-    if let Some(w) = part_named(m, label, true) {
+    // In prose (words after the amount, not a row's "NM", or a verb right
+    // before it) only the words
+    // qualifying the metric count: "Across our three segments, revenue
+    // was ..." is the company's revenue.
+    static WORD: OnceLock<Regex> = OnceLock::new();
+    static VERB: OnceLock<Regex> = OnceLock::new();
+    let word =
+        WORD.get_or_init(|| Regex::new(r"[a-z]{2,}|[A-Za-z]{3,}").expect("valid built-in regex"));
+    let verb = VERB.get_or_init(|| {
+        Regex::new(r"(?i)\b(?:was|were|is|are|of|totaled|totalled|reached|to|at|approximately|about|record)\s*$")
+            .expect("valid built-in regex")
+    });
+    let prose = word.is_match(after) || verb.is_match(label);
+    let qualifier = if prose {
+        metric_phrase(m, label)
+    } else {
+        label
+    };
+    if let Some(w) = part_named(m, qualifier, true) {
         return Err(format!(
             "the quote's label names {w:?}, a part of the company"
         ));
@@ -185,12 +308,21 @@ fn names_metric(m: Metric, label: &str, after: &str) -> Result<(), String> {
     // are not net income ("Total adjustments to net income (344)",
     // "Adjustments to reconcile net income to net cash ...").
     let other = match m {
-        Metric::NetIncome => &["adjustment", "adjustments", "reconcile", "reconciliation"][..],
+        Metric::NetIncome => &[
+            "adjustment",
+            "adjustments",
+            "reconcile",
+            "reconciliation",
+            "pro forma",
+            "pro-forma",
+        ][..],
         _ => &[
             "ffo",
             "affo",
             "funds from operations",
             "funds available for distribution",
+            "pro forma",
+            "pro-forma",
         ][..],
     };
     if let Some(w) = other.iter().find(|w| has_word(label, w)) {
@@ -199,7 +331,7 @@ fn names_metric(m: Metric, label: &str, after: &str) -> Result<(), String> {
             m.key()
         ));
     }
-    if adjustment.is_match(label) {
+    if !prose && adjustment.is_match(label) {
         return Err(
             "a \"Less:\" or \"Add:\" row adjusts a total; it is a part of the company's figure"
                 .into(),
@@ -620,13 +752,14 @@ impl<'a> Table<'a> {
                 }
                 head = head_above(head);
             }
-            // Up to a row of figures; a description in between is skipped.
+            // Up to a row of figures or a note under the table before; a
+            // description in between is skipped.
             let title = (0..head)
                 .rev()
                 .take(6)
                 .map(line)
                 .filter(|s| s.len() <= PROSE_CHARS)
-                .take_while(|s| label_only(s))
+                .take_while(|s| label_only(s) && !note_line(s))
                 .chain(Some(line(head)).filter(|s| label_only(s)))
                 .find_map(|s| part_named(m, s, false));
             let columns = (head + 1..at)
@@ -1653,6 +1786,190 @@ mod tests {
         let t = "(In millions)\n2026 2025\nReconciliation of net income to adjusted EBITDA: net income $2,717 $2,500";
         let q = "Reconciliation of net income to adjusted EBITDA: net income $2,717 $2,500";
         bad(t, Metric::NetIncome, "$2,717", "millions", false, q);
+    }
+
+    #[test]
+    fn company_rows_next_to_part_rows_still_verify() {
+        let hdr = "ACME CORPORATION\nCONDENSED CONSOLIDATED STATEMENTS OF INCOME\n(Unaudited)\n(In millions, except per share amounts)\nThree Months Ended September 30,\n2026 2025";
+        let ok = |t: &str, m: Metric, amount: &str, scale: &str, q: &str| {
+            let r = verify_figure(t, m, &raw(amount, scale, false, q));
+            assert!(r.is_ok(), "{m:?} {q:?} in {t:?}: {r:?}");
+        };
+        // A row of dashes or small negatives above the total is a row, not
+        // the total's group label.
+        for row in [
+            "Loss from discontinued operations, net of tax (5) (3)",
+            "Loss from discontinued operations, net of tax (50) (30)",
+            "Income (loss) from discontinued operations, net of tax — —",
+        ] {
+            let t = format!("{hdr}\nNet sales $5,000 $4,500\nIncome from continuing operations 600 500\n{row}\nNet income $600 $500");
+            ok(
+                &t,
+                Metric::NetIncome,
+                "$600",
+                "millions",
+                "Net income $600 $500",
+            );
+        }
+        for row in [
+            "Less: Net income attributable to noncontrolling interests — —",
+            "Net income attributable to noncontrolling interests $ — $ —",
+            "Net loss attributable to noncontrolling interests (2) (1)",
+            "Net loss attributable to noncontrolling interests (12) (9)",
+        ] {
+            let t = format!("{hdr}\nNet sales $5,000 $4,500\nNet income 600 500\n{row}\nNet income attributable to Acme Corporation $590 $492");
+            ok(
+                &t,
+                Metric::NetIncome,
+                "$590",
+                "millions",
+                "Net income attributable to Acme Corporation $590 $492",
+            );
+        }
+        for row in [
+            "Intersegment eliminations (5) (3)",
+            "Intersegment eliminations — —",
+            "Corporate and eliminations (5) (3)",
+        ] {
+            let t = format!("{hdr}\nCloud $2,000 $1,800\nServices 3,005 2,703\n{row}\nTotal revenues $5,000 $4,500");
+            ok(
+                &t,
+                Metric::Revenue,
+                "$5,000",
+                "millions",
+                "Total revenues $5,000 $4,500",
+            );
+        }
+        let t = format!("{hdr}\nNet income $600 $500\nEarnings per share:\nDiscontinued operations — —\nDiluted – as reported $1.20 $1.00");
+        ok(
+            &t,
+            Metric::EpsGaap,
+            "$1.20",
+            "units",
+            "Diluted – as reported $1.20 $1.00",
+        );
+        // Nor do such rows, or footnotes, at the end of the table before
+        // make the next one about a part.
+        let stmt = format!(
+            "{hdr}\nNet sales $5,000 $4,500\nNet income attributable to Acme Corporation $590 $492"
+        );
+        for end in [
+            "Intersegment eliminations (5) (3)",
+            "Noncontrolling interests — —",
+            "Total segment revenue 3,000 2,800\n(1) Includes unconsolidated joint ventures.",
+            "Total segment revenue 3,000 2,800\nNote: excludes noncontrolling interests.",
+            "Total segment revenue 3,000 2,800\nSegment results are discussed above.",
+            "Total segment revenue 3,000 2,800\n* Joint venture revenue at our share.",
+        ] {
+            let t = format!("Segment Information\n(In millions)\nThree Months Ended September 30,\n2026 2025\nCloud 1,000 900\n{end}\n{stmt}");
+            ok(
+                &t,
+                Metric::Revenue,
+                "$5,000",
+                "millions",
+                "Net sales $5,000 $4,500",
+            );
+            ok(
+                &t,
+                Metric::NetIncome,
+                "$590",
+                "millions",
+                "Net income attributable to Acme Corporation $590 $492",
+            );
+        }
+        // Prose: a part word elsewhere in the sentence does not qualify the
+        // figure.
+        for (m, amount, t) in [
+            (
+                Metric::Revenue,
+                "$13.4 billion",
+                "Across our three segments, third quarter revenue was $13.4 billion, up 5%.",
+            ),
+            (
+                Metric::NetIncome,
+                "$1.2 billion",
+                "Net income, including discontinued operations, was $1.2 billion.",
+            ),
+            (
+                Metric::Revenue,
+                "$13.4 million",
+                "Revenue, excluding the share of results from affiliates, was $13.4 million.",
+            ),
+            (
+                Metric::Revenue,
+                "$13.4 million",
+                "Plus Therapeutics reported revenue of $13.4 million for the quarter.",
+            ),
+        ] {
+            ok(t, m, amount, "units", t);
+        }
+    }
+
+    #[test]
+    fn other_wordings_of_a_part_are_rejected() {
+        let hdr = "ACME CORPORATION\nCONDENSED CONSOLIDATED STATEMENTS OF INCOME\n(Unaudited)\n(In millions, except per share amounts)\nThree Months Ended September 30,\n2026 2025";
+        let bad = |t: &str, m: Metric, amount: &str, scale: &str, q: &str| {
+            let r = verify_figure(t, m, &raw(amount, scale, false, q));
+            assert!(r.is_err(), "{m:?} {q:?}: {r:?}");
+        };
+        for label in [
+            "Net income attributable to minority shareholders",
+            "Net income attributable to minority interest",
+            "Net income attributable to non\u{2011}controlling interests",
+            "Net income attributable to non\u{2010}controlling interests",
+            "Net income attributable to non controlling interests",
+            "Equity in net income of affiliates",
+            "Net income attributable to limited partners",
+            "Parent company only net income",
+            "Net income of subsidiaries",
+            "Pro forma net income",
+        ] {
+            let q = format!("{label} $10 $8");
+            let t = format!("{hdr}\nNet sales $5,000 $4,500\nNet income 600 500\n{q}");
+            bad(&t, Metric::NetIncome, "$10", "millions", &q);
+        }
+        for label in [
+            "Pro forma diluted earnings per share",
+            "Pro-forma diluted EPS",
+        ] {
+            let q = format!("{label} $1.20 $1.00");
+            let t = format!("{hdr}\nNet sales $5,000 $4,500\n{q}");
+            bad(&t, Metric::EpsGaap, "$1.20", "units", &q);
+        }
+        // "Subsidiaries" in a table title or group, but not "... and
+        // Subsidiaries", the company's own statements.
+        let t = "Condensed Statements of Income of Subsidiaries\n(In millions)\nThree Months Ended September 30,\n2026 2025\nTotal revenues $1,000 $900";
+        bad(
+            t,
+            Metric::Revenue,
+            "$1,000",
+            "millions",
+            "Total revenues $1,000 $900",
+        );
+        let t = "(In millions)\nThree Months Ended September 30,\n2026 2025\nTotal revenues $5,000 $4,500\nSubsidiaries:\nTotal revenues $1,000 $900";
+        bad(
+            t,
+            Metric::Revenue,
+            "$1,000",
+            "millions",
+            "Total revenues $1,000 $900",
+        );
+        let t = "ACME CORPORATION AND SUBSIDIARIES\nCONDENSED CONSOLIDATED STATEMENTS OF INCOME\n(In millions)\nThree Months Ended September 30,\n2026 2025\nTotal revenues $5,000 $4,500";
+        let r = verify_figure(
+            t,
+            Metric::Revenue,
+            &raw("$5,000", "millions", false, "Total revenues $5,000 $4,500"),
+        );
+        assert!(r.is_ok(), "{r:?}");
+        // Prose that names the part on the metric itself stays rejected.
+        for (m, amount, t) in [
+            (Metric::Revenue, "$8.5 billion", "•Data Center segment revenue was a record $8.5 billion, up 97% year-over-year."),
+            (Metric::Revenue, "$40 million", "Revenue from discontinued operations was $40 million in the quarter."),
+            (Metric::NetIncome, "$10 million", "Net income attributable to noncontrolling interests was $10 million for the quarter."),
+            (Metric::Revenue, "$1.4 billion", "Our share of revenue was $1.4 billion for the quarter."),
+        ] {
+            bad(t, m, amount, "units", t);
+        }
     }
 
     #[test]
