@@ -2,6 +2,7 @@
 
 mod alerts;
 mod earnings_store;
+mod events_store;
 mod http;
 mod store;
 
@@ -10,6 +11,7 @@ use chrono::{DateTime, Utc};
 use prebell_core::earnings::calendar::{refresh_tick, yahoo_seeding, CalendarSource};
 use prebell_core::earnings::run::{build_tick, poll_job};
 use prebell_core::edgar::{Edgar, BUILD_GAP_MS};
+use prebell_core::events::check::check_tick;
 use prebell_core::jobs::{redact, run_job, JobRunner};
 use prebell_core::llm::{api_key_var, llm_from_env, unknown_provider};
 use prebell_core::providers::CountingHttp;
@@ -201,8 +203,18 @@ impl JobRunner for Runner<'_> {
         let env = self.env;
         let store = self.store;
         let t = now(env);
+        if step == EarningsStep::Events {
+            // The macro events check needs neither EDGAR nor an LLM.
+            let o = check_tick(t, store, store, &self.http).await?;
+            for e in &o.errors {
+                console_warn!("events: {e}");
+            }
+            return Ok(format!("{o:?}"));
+        }
         let edgar = self.edgar()?;
         match step {
+            // Returned above.
+            EarningsStep::Events => Ok(String::new()),
             EarningsStep::Poll => {
                 let o = poll_job(t, self.fired, store, store, &edgar).await?;
                 if o.stale {

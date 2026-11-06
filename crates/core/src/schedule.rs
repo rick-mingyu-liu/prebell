@@ -37,6 +37,10 @@ pub enum EarningsStep {
     Build,
     /// `earnings:calendar`, queued by a poll once per ET day.
     Calendar,
+    /// `events:check`, queued by a poll: the macro events check once per ET
+    /// day, and the released check just after an event's time. It rides
+    /// this queue for its serial consumer, not for EDGAR.
+    Events,
 }
 
 impl EarningsStep {
@@ -46,6 +50,7 @@ impl EarningsStep {
             EarningsStep::Poll => "earnings",
             EarningsStep::Build => "earnings:build",
             EarningsStep::Calendar => "earnings:calendar",
+            EarningsStep::Events => "events:check",
         }
     }
 }
@@ -66,6 +71,7 @@ impl JobKind {
             "earnings" => Some(JobKind::Earnings(EarningsStep::Poll)),
             "earnings:build" => Some(JobKind::Earnings(EarningsStep::Build)),
             "earnings:calendar" => Some(JobKind::Earnings(EarningsStep::Calendar)),
+            "events:check" => Some(JobKind::Earnings(EarningsStep::Events)),
             _ => None,
         }
     }
@@ -296,6 +302,7 @@ mod tests {
             EarningsStep::Poll,
             EarningsStep::Build,
             EarningsStep::Calendar,
+            EarningsStep::Events,
         ] {
             assert_eq!(JobKind::parse(step.job()), Some(JobKind::Earnings(step)));
             let queue = match step {

@@ -6,6 +6,7 @@ pub mod cover;
 pub mod deepseek;
 pub mod earnings;
 pub mod edgar;
+pub mod events;
 pub mod facts;
 pub mod jobs;
 pub mod llm;
