@@ -28,6 +28,8 @@ export interface MacroEvent {
   releaseUrl: string | null;
   /** The previous date while the event is moved. */
   movedFrom: string | null;
+  /** A kind with a release page (FOMC, minutes, jobs, CPI); elections and closures have none. */
+  hasRelease: boolean;
 }
 
 /** [key, EN, ZH]. `{month}` is the English month name, `{m}` its number. Elections key on their variant. */
@@ -39,10 +41,10 @@ const GLOSSARY: [string, string, string][] = [
   ["election:midterm", "US midterm elections", "美国中期选举"],
   ["election:general", "US general election", "美国大选"],
   ["closed", "US stock market closed", "美股休市"],
-  ["early_close", "Early close, 1:00 PM ET", "美股提前收盘（美东13:00）"],
+  ["early_close", "Early close, 1:00 PM ET", "美股提前收盘，下午1:00（美东）"],
 ];
 const SEP_SUFFIX: [string, string] = [" (with projections)", "（含经济预测）"];
-const FOMC_NOTE: [string, string] = ["Press conference 2:30 PM ET", "美联储主席新闻发布会，美东14:30"];
+const FOMC_NOTE: [string, string] = ["Press conference 2:30 PM ET", "美联储主席新闻发布会，下午2:30（美东）"];
 const MONTHS = [
   "January",
   "February",
@@ -76,6 +78,7 @@ export function eventTitle(series: string, refPeriod: string | null, variant: st
 /** Only these official sites are linked (proof and release pages the generator writes). */
 const OFFICIAL = /^https:\/\/www\.(bls\.gov|federalreserve\.gov|govinfo\.gov|nyse\.com)\/[\w./?=&%-]*$/;
 const official = (u: string | null): string | null => (u && OFFICIAL.test(u) ? u : null);
+const RELEASED_KINDS = ["fomc", "fomc_minutes", "jobs", "cpi"];
 const STATUSES: EventStatus[] = ["scheduled", "confirmed", "moved", "postponed", "released"];
 
 interface EventRow {
@@ -108,6 +111,7 @@ function toEvent(r: EventRow, lang: Lang): MacroEvent | null {
     proofUrl,
     releaseUrl: official(r.release_url),
     movedFrom: r.moved_from,
+    hasRelease: RELEASED_KINDS.includes(r.series),
   };
 }
 

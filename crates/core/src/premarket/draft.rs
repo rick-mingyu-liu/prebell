@@ -253,11 +253,23 @@ pub fn render_watch(items: &[WatchItem], lang: Lang) -> String {
                 line.push_str(&format!(" · {}", one_line_text(n)));
             }
             let released = i.status == "released";
+            let moved = i
+                .moved_from
+                .as_deref()
+                .and_then(|d| d.parse::<chrono::NaiveDate>().ok())
+                .map(|d| {
+                    if zh {
+                        format!("由{}改期", d.format("%-m月%-d日"))
+                    } else {
+                        format!("Moved from {}", d.format("%b %-d"))
+                    }
+                });
             let flag = match (i.kind, i.status.as_str()) {
-                (WatchKind::Event, "released") => Some(pick("✓ Released", "✓ 已发布")),
-                (WatchKind::Event, "postponed") => Some(pick("Postponed", "已推迟")),
+                (WatchKind::Event, "released") => Some(pick("✓ Released", "✓ 已发布").into()),
+                (WatchKind::Event, "postponed") => Some(pick("Postponed", "已推迟").into()),
+                (WatchKind::Event, "moved") => moved,
                 (WatchKind::Earnings, "unconfirmed") => {
-                    Some(pick("date not confirmed", "日期未确认"))
+                    Some(pick("date not confirmed", "日期未确认").into())
                 }
                 _ => None,
             };
@@ -267,6 +279,8 @@ pub fn render_watch(items: &[WatchItem], lang: Lang) -> String {
             if let Some(url) = &i.link {
                 let label = if released {
                     pick("Release", "发布原文")
+                } else if i.source_only {
+                    pick("Source", "来源")
                 } else {
                     pick("Schedule", "官方日程")
                 };
@@ -639,6 +653,7 @@ fn attempt(
     known: &[&str],
     allowed: &[f64],
     names: &[&str],
+    figure_free: &[&str],
 ) -> Result<Draft, Problem> {
     let v = v.map_err(Problem::Llm)?;
     let d = parse(&v, lang, want, known).map_err(Problem::Malformed)?;
@@ -646,10 +661,27 @@ fn attempt(
     for (h, m) in &d.sections {
         text.push_str(&format!("\n{h}\n{m}"));
     }
-    check(&blank_names(&text, names), lang, allowed).map_err(|bad| {
+    let numbers = |bad: Vec<String>| {
         let mut seen = HashSet::new();
         Problem::Numbers(bad.into_iter().filter(|n| seen.insert(n.clone())).collect())
-    })?;
+    };
+    check(&blank_names(&text, names), lang, allowed).map_err(numbers)?;
+    // Sections that may cite no figure from the facts (a consensus number in
+    // a macro item is allowed elsewhere, never here): only the years the
+    // facts allow; times, dates and month labels are never figures.
+    let years: Vec<f64> = allowed
+        .iter()
+        .copied()
+        .filter(|v| v.fract() == 0.0 && (1900.0..=2100.0).contains(v))
+        .collect();
+    for (h, m) in d
+        .sections
+        .iter()
+        .filter(|(h, _)| figure_free.contains(&h.as_str()))
+    {
+        check(&blank_names(m, names), lang, &years)
+            .map_err(|bad| numbers(bad.into_iter().map(|n| format!("{h}: {n}")).collect()))?;
+    }
     Ok(d)
 }
 
@@ -712,6 +744,8 @@ pub async fn write(
             has_items(&f.watch_list),
         ),
         &all_headings(lang),
+        // "What to watch" states no figure: never a consensus or a result.
+        &[all_headings(lang)[WATCH]],
         lang,
         |d| render_markdown(d, f),
     )
@@ -741,7 +775,8 @@ fn watch_names(w: &Field<Vec<WatchItem>>) -> impl Iterator<Item = &str> {
 /// The drafting loop shared by every content type: ask `llm` with `system`
 /// and the facts JSON plus the `sections_line`, require exactly `headings`
 /// (dropping any other section of `known`), reject markup, check every
-/// number against `allowed` (ignoring the digits of known `names`), and
+/// number against `allowed` (ignoring the digits of known `names`; the
+/// `figure_free` sections' against the years in `allowed` only), and
 /// retry once with the problems appended. On success returns the draft and
 /// `render(draft)`.
 #[allow(clippy::too_many_arguments)]
@@ -753,6 +788,7 @@ pub(crate) async fn write_with(
     names: &[&str],
     headings: &[&str],
     known: &[&str],
+    figure_free: &[&str],
     lang: Lang,
     render: impl Fn(&Draft) -> String,
 ) -> Result<(Draft, String), Vec<String>> {
@@ -767,6 +803,7 @@ pub(crate) async fn write_with(
             known,
             allowed,
             names,
+            figure_free,
         ) {
             Ok(d) => {
                 let md = render(&d);
@@ -1122,7 +1159,7 @@ pub(crate) mod tests {
             (
                 Lang::Zh,
                 "今日关注",
-                "- **美东 8:30** 10月消费者物价指数（CPI）",
+                "- **上午8:30（美东）** 10月消费者物价指数（CPI）",
             ),
         ] {
             let l = llm(vec![
@@ -1139,12 +1176,96 @@ pub(crate) mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn what_to_watch_may_not_cite_a_consensus_figure_from_the_facts() {
+        let mut f = facts();
+        f.macro_items = Field::Value(vec![NewsReason {
+            quote: "Economists expect CPI rose 0.3% in October".into(),
+            ..reason("https://news.test/cpi", "CPI preview")
+        }]);
+        f.watch_list = Field::Value(vec![cpi_item("scheduled", None)]);
+        let heads = headings(Lang::En, true, false, true);
+        let with_watch = |watch: &str| {
+            Ok(json!({
+                "title": "Futures edge up",
+                "summary": "Economists expect CPI rose 0.3%.",
+                "sections": heads.iter().map(|h| {
+                    let body = if *h == "What to watch" { watch } else { "Quiet." };
+                    json!({"heading": h, "markdown": body})
+                }).collect::<Vec<_>>(),
+            }))
+        };
+        let l = llm(vec![
+            with_watch("Economists expect a 0.3% rise at 8:30 AM ET."),
+            with_watch("CPI lands at 8:30 AM ET, before the open in 2026's last quarter."),
+        ]);
+        let (d, _) = write(&l, &f, Lang::En).await.unwrap();
+        // The macro summary may cite the quoted 0.3%; What to watch may not.
+        assert_eq!(l.prompts.borrow().len(), 2);
+        assert!(
+            l.prompts.borrow()[1].1.contains("What to watch: 0.3"),
+            "{}",
+            l.prompts.borrow()[1].1
+        );
+        assert!(d
+            .sections
+            .iter()
+            .any(|(h, m)| h == "What to watch" && m.contains("8:30 AM ET")));
+    }
+
+    #[test]
+    fn render_watch_says_moved_and_links_an_election_to_its_source() {
+        let moved = WatchItem {
+            status: "moved".into(),
+            moved_from: Some("2026-11-05".into()),
+            ..cpi_item("moved", None)
+        };
+        let law = "https://www.govinfo.gov/content/pkg/USCODE-2023-title3/html/USCODE-2023-title3-chap1-sec21.htm";
+        let election = WatchItem {
+            id: "us:election:2028-11-07".into(),
+            time_et: None,
+            time_zh: None,
+            title: "US general election".into(),
+            title_zh: "美国大选".into(),
+            link: Some(law.into()),
+            source_only: true,
+            ..cpi_item("scheduled", None)
+        };
+        let items = [election, moved];
+        let en = render_watch(&items, Lang::En);
+        assert!(
+            en.starts_with(&format!("- US general election · [Source]({law})")),
+            "{en}"
+        );
+        assert!(
+            en.contains("October CPI · Moved from Nov 5 · [Schedule]"),
+            "{en}"
+        );
+        let zh = render_watch(&items, Lang::Zh);
+        assert!(zh.contains("美国大选 · [来源]"), "{zh}");
+        assert!(zh.contains("由11月5日改期"), "{zh}");
+    }
+
+    #[test]
+    fn facts_stored_before_the_calendar_still_parse() {
+        // The stub every brief before 2026-11-06 stored.
+        let mut v = serde_json::to_value(facts()).unwrap();
+        v["watch_list"] = json!({"Missing": {"reason": "not available in v1"}});
+        let f: PremarketFacts = serde_json::from_value(v).unwrap();
+        assert!(matches!(f.watch_list, Field::Missing { .. }));
+        // And an item without the optional fields.
+        let item = json!({"kind": "event", "id": "bls:cpi:2026-10", "time_et": null, "time_zh": null,
+            "title": "October CPI", "title_zh": "10月CPI", "status": "scheduled"});
+        let w: WatchItem = serde_json::from_value(item).unwrap();
+        assert!(!w.source_only && w.moved_from.is_none() && w.link.is_none());
+    }
+
     fn cpi_item(status: &str, release: Option<&str>) -> WatchItem {
         WatchItem {
             kind: WatchKind::Event,
             id: "bls:cpi:2026-10".into(),
             time_et: Some("8:30 AM ET".into()),
-            time_zh: Some("美东 8:30".into()),
+            time_zh: Some("上午8:30（美东）".into()),
             title: "October CPI".into(),
             title_zh: "10月消费者物价指数（CPI）".into(),
             note: None,
@@ -1155,6 +1276,8 @@ pub(crate) mod tests {
                     .unwrap_or("https://www.bls.gov/schedule/news_release/cpi.htm")
                     .into(),
             ),
+            source_only: false,
+            moved_from: None,
         }
     }
 
@@ -1164,11 +1287,11 @@ pub(crate) mod tests {
         let fomc = WatchItem {
             id: "fed:fomc:2026-12".into(),
             time_et: Some("2:00 PM ET".into()),
-            time_zh: Some("美东 14:00".into()),
+            time_zh: Some("下午2:00（美东）".into()),
             title: "FOMC rate decision (with projections)".into(),
             title_zh: "联邦公开市场委员会（FOMC）议息会议（含经济预测）".into(),
             note: Some("Press conference 2:30 PM ET".into()),
-            note_zh: Some("美联储主席新闻发布会，美东14:30".into()),
+            note_zh: Some("美联储主席新闻发布会，下午2:30（美东）".into()),
             link: None,
             ..cpi_item("postponed", None)
         };
@@ -1195,8 +1318,8 @@ pub(crate) mod tests {
         assert_eq!(
             render_watch(&items, Lang::Zh),
             format!(
-                "- **美东 8:30** 10月消费者物价指数（CPI） · ✓ 已发布 · [发布原文]({url})\n\
-                 - **美东 14:00** 联邦公开市场委员会（FOMC）议息会议（含经济预测） · 美联储主席新闻发布会，美东14:30 · 已推迟\n\
+                "- **上午8:30（美东）** 10月消费者物价指数（CPI） · ✓ 已发布 · [发布原文]({url})\n\
+                 - **下午2:00（美东）** 联邦公开市场委员会（FOMC）议息会议（含经济预测） · 美联储主席新闻发布会，下午2:30（美东） · 已推迟\n\
                  - **盘后** Apple (AAPL) · 日期未确认"
             )
         );
@@ -1630,6 +1753,7 @@ pub(crate) mod tests {
             &[],
             &["A", "B"],
             &["A", "B"],
+            &[],
             Lang::En,
             |d: &Draft| format!("rendered {}", d.sections.len()),
         )

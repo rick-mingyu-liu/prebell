@@ -17,7 +17,7 @@ pub mod watch;
 
 use std::sync::OnceLock;
 
-use chrono::{DateTime, Datelike, Duration, NaiveDate, Utc};
+use chrono::{DateTime, Datelike, Duration, NaiveDate, Timelike, Utc};
 
 use crate::clock::{trading_day, DayKind};
 use crate::numbers::Lang;
@@ -150,6 +150,12 @@ pub fn release_due(now: DateTime<Utc>, minutes: i64) -> bool {
     })
 }
 
+/// Kinds with a release page (`release_url_for`); elections and closures
+/// link their law or the NYSE page instead.
+pub fn has_release(series: &str) -> bool {
+    matches!(series, "fomc" | "fomc_minutes" | "jobs" | "cpi")
+}
+
 /// Where the release itself will be once it is out, from the agencies'
 /// fixed URL patterns: `None` for kinds without one (elections, closures).
 pub fn release_url_for(
@@ -206,7 +212,7 @@ pub const GLOSSARY: &[(&str, &str, &str)] = &[
     (
         "early_close",
         "Early close, 1:00 PM ET",
-        "美股提前收盘（美东13:00）",
+        "美股提前收盘，下午1:00（美东）",
     ),
 ];
 
@@ -215,7 +221,7 @@ pub const SEP_SUFFIX: (&str, &str) = (" (with projections)", "（含经济预测
 /// Shown under an FOMC decision: every meeting has a press conference.
 pub const FOMC_NOTE: (&str, &str) = (
     "Press conference 2:30 PM ET",
-    "美联储主席新闻发布会，美东14:30",
+    "美联储主席新闻发布会，下午2:30（美东）",
 );
 
 const MONTH_NAMES: [&str; 12] = [
@@ -273,12 +279,20 @@ pub fn note(series: &str, lang: Lang) -> Option<&'static str> {
 }
 
 /// An ET clock time as the brief and the page write it: "8:30 AM ET" /
-/// "美东 8:30", "2:00 PM ET" / "美东 14:00".
+/// "上午8:30（美东）", "2:00 PM ET" / "下午2:00（美东）".
 pub fn et_time(t: DateTime<Utc>, lang: Lang) -> String {
     let local = crate::clock::et(t);
     match lang {
         Lang::En => format!("{} ET", local.format("%-I:%M %p")),
-        Lang::Zh => format!("美东 {}", local.format("%-H:%M")),
+        // The site's style (apps/web/src/lib/time.ts `formatEtTime`).
+        Lang::Zh => {
+            let half = if local.hour() < 12 {
+                "上午"
+            } else {
+                "下午"
+            };
+            format!("{half}{}（美东）", local.format("%-I:%M"))
+        }
     }
 }
 
@@ -430,9 +444,15 @@ mod tests {
     #[test]
     fn et_times_in_both_languages_and_offsets() {
         assert_eq!(et_time(utc("2026-11-10T13:30:00Z"), Lang::En), "8:30 AM ET");
-        assert_eq!(et_time(utc("2026-11-10T13:30:00Z"), Lang::Zh), "美东 8:30");
+        assert_eq!(
+            et_time(utc("2026-11-10T13:30:00Z"), Lang::Zh),
+            "上午8:30（美东）"
+        );
         assert_eq!(et_time(utc("2026-10-28T18:00:00Z"), Lang::En), "2:00 PM ET");
-        assert_eq!(et_time(utc("2026-10-28T18:00:00Z"), Lang::Zh), "美东 14:00");
+        assert_eq!(
+            et_time(utc("2026-10-28T18:00:00Z"), Lang::Zh),
+            "下午2:00（美东）"
+        );
     }
 
     #[test]

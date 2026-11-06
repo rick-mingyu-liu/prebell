@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 
 use super::check::{check_releases, new_row};
 use super::store::{EventRow, EventStore};
-use super::{et_time, note, planned, title, TIER_NOTABLE};
+use super::{et_time, has_release, note, planned, title, TIER_NOTABLE};
 use crate::earnings::store::EarningsStore;
 use crate::earnings::{find, Tier};
 use crate::facts::Field;
@@ -34,7 +34,7 @@ pub struct WatchItem {
     pub kind: WatchKind,
     /// The event id, or `earnings:TICKER`.
     pub id: String,
-    /// "8:30 AM ET" / "美东 8:30"; `None` for all-day events and earnings.
+    /// "8:30 AM ET" / "上午8:30（美东）"; `None` for all-day events and earnings.
     pub time_et: Option<String>,
     pub time_zh: Option<String>,
     pub title: String,
@@ -50,6 +50,13 @@ pub struct WatchItem {
     /// The release once out, else the official schedule (events only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub link: Option<String>,
+    /// Elections and closures: the link is the law or the NYSE page, not a
+    /// release schedule.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub source_only: bool,
+    /// The previous ET date of an event moved onto today.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub moved_from: Option<String>,
 }
 
 /// Gives the brief its watch list. The Worker's is `StoreWatch`.
@@ -81,6 +88,8 @@ fn event_item(r: &EventRow) -> Option<WatchItem> {
         note_zh: note(&r.series, Lang::Zh).map(str::to_string),
         status: r.status.clone(),
         link: Some(r.release_url.clone().unwrap_or_else(|| r.proof_url.clone())),
+        source_only: !has_release(&r.series),
+        moved_from: r.moved_from.clone().filter(|_| r.status == "moved"),
     })
 }
 
@@ -88,11 +97,11 @@ fn event_item(r: &EventRow) -> Option<WatchItem> {
 impl WatchSource for StoreWatch<'_> {
     async fn watch_list(&self, date: NaiveDate, now: DateTime<Utc>) -> Field<Vec<WatchItem>> {
         let day = date.format("%Y-%m-%d").to_string();
-        // Without the table (or on a D1 error) the snapshot still gives the
-        // day's events, as scheduled.
+        // Without the table, before its first check fills it, or on a D1
+        // error, the snapshot still gives the day's events, as scheduled.
         let mut rows = match self.events.events_between(&day, &day).await {
-            Ok(r) => r,
-            Err(_) => planned(date, date)
+            Ok(r) if !r.is_empty() => r,
+            _ => planned(date, date)
                 .iter()
                 .map(|p| new_row(p, now))
                 .collect(),
@@ -136,6 +145,8 @@ impl WatchSource for StoreWatch<'_> {
                     note_zh: None,
                     status: c.status.clone(),
                     link: None,
+                    source_only: false,
+                    moved_from: None,
                 });
             }
         }
@@ -180,7 +191,7 @@ mod tests {
             };
             Ok(HttpResp {
                 status,
-                body: String::new(),
+                body: "<title>Consumer Price Index News Release</title>".into(),
                 set_cookie: None,
             })
         }
@@ -252,7 +263,7 @@ mod tests {
         assert_eq!(items[0].title, "October CPI");
         assert_eq!(items[0].title_zh, "10月消费者物价指数（CPI）");
         assert_eq!(items[0].time_et.as_deref(), Some("8:30 AM ET"));
-        assert_eq!(items[0].time_zh.as_deref(), Some("美东 8:30"));
+        assert_eq!(items[0].time_zh.as_deref(), Some("上午8:30（美东）"));
         assert_eq!(
             items[0].link.as_deref(),
             Some("https://www.bls.gov/schedule/news_release/cpi.htm")
@@ -307,6 +318,14 @@ mod tests {
                 .await,
             Field::Missing { .. }
         ));
+        // An empty table (0008 applied, no check yet) also reads the snapshot.
+        let Field::Value(items) = w
+            .watch_list(d("2026-11-10"), utc("2026-11-10T13:00:00Z"))
+            .await
+        else {
+            panic!("missing");
+        };
+        assert_eq!(items[0].id, "bls:cpi:2026-10");
         let broken = MemEventStore {
             fail: Some("no such table: macro_events".into()),
             ..Default::default()
