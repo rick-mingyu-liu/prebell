@@ -18,6 +18,11 @@ const PROMPT: &str = include_str!("../../prompts/earnings_extract_v1.md");
 /// Press releases with full statements run 20-60k characters.
 const MAX_DOC_CHARS: usize = 60_000;
 const MAX_NOTES: usize = 4;
+/// How far into the exhibit a headline naming the period may sit (contact
+/// blocks and a dateline can come first).
+const HEADLINE_CHARS: usize = 1500;
+const HEADLINE_WORDS: usize = 4;
+const HEADLINE_MAX_CHARS: usize = 160;
 /// Why a table amount from another period's column is rejected.
 const CURRENT_COLUMN: &str = "a table amount must be in the current period's column: the row's first number, or the column the year header above gives the latest year";
 
@@ -806,6 +811,26 @@ fn verify_period(text: &str, v: &Value) -> Result<FiscalPeriod, String> {
     })
 }
 
+/// The claimed quarter re-anchored to a line in the exhibit's opening that
+/// names it and the year ("Qualcomm Announces Fourth Quarter and Fiscal 2026
+/// Results"), for when the model's own quote does not verify. Only for a
+/// claimed quarter: a full-year claim would match a dateline. A line needs
+/// `HEADLINE_WORDS` words, so a file name ("ex99-pressreleaseq32026.htm")
+/// is not a headline, and at most `HEADLINE_MAX_CHARS`, so a paragraph is
+/// not one either (the period quote's numbers join the article's allow-list).
+fn period_from_headline(text: &str, v: &Value) -> Option<FiscalPeriod> {
+    let mut claim = v.as_object()?.clone();
+    claim.get("quarter")?.as_u64()?;
+    let opening: String = text.chars().take(HEADLINE_CHARS).collect();
+    let mut headlines = opening.lines().map(collapse).filter(|l| {
+        l.split_whitespace().count() >= HEADLINE_WORDS && l.chars().count() <= HEADLINE_MAX_CHARS
+    });
+    headlines.find_map(|line| {
+        claim.insert("quote".into(), Value::String(line));
+        verify_period(text, &Value::Object(claim.clone())).ok()
+    })
+}
+
 /// Notes whose quote is in the exhibit and whose summary uses only the
 /// quote's numbers and no markup.
 fn verify_notes(text: &str, v: Option<&Value>) -> Vec<Note> {
@@ -915,8 +940,11 @@ pub fn from_reply(text: &str, v: &Value) -> Extracted {
         },
         Some(p) => match verify_period(text, p) {
             Ok(p) => Field::Value(p),
-            Err(e) => Field::Missing {
-                reason: format!("unverified: {e}"),
+            Err(e) => match period_from_headline(text, p) {
+                Some(p) => Field::Value(p),
+                None => Field::Missing {
+                    reason: format!("unverified: {e}"),
+                },
             },
         },
     };
@@ -1849,6 +1877,51 @@ mod tests {
                 assert!(verify_period(&quote, &v).is_ok(), "{quote}");
             }
         }
+    }
+
+    #[test]
+    fn fiscal_period_falls_back_to_the_headline() {
+        let t = "EX-99.1 2 qcom092726erex991-fourth-quarter-2026.htm\n\
+                 Qualcomm Contact: Investor Relations\nPhone: 1-858-658-4813\n\
+                 Qualcomm Announces Fourth Quarter and Fiscal 2026 Results\n\
+                 Fiscal 2026 GAAP Revenues: $43.1 billion\n\
+                 SAN DIEGO - November 4, 2026 - Qualcomm today announced results";
+        let period = |q: Value, fy: i64| {
+            let v = json!({"fiscal_period": {"quarter": q, "fiscal_year": fy, "quote": "a quote that is not in the text"}});
+            from_reply(t, &v).fiscal_period
+        };
+        match period(json!(4), 2026) {
+            Field::Value(p) => {
+                assert_eq!((p.quarter, p.fiscal_year), (Some(4), 2026));
+                assert_eq!(
+                    p.quote,
+                    "Qualcomm Announces Fourth Quarter and Fiscal 2026 Results"
+                );
+            }
+            other => panic!("{other:?}"),
+        }
+        // The headline must name the claimed quarter and year.
+        assert!(matches!(period(json!(3), 2026), Field::Missing { .. }));
+        assert!(matches!(period(json!(4), 2027), Field::Missing { .. }));
+        // No fallback for a full-year claim: the dateline names the year.
+        assert!(matches!(period(json!(null), 2026), Field::Missing { .. }));
+        // A paragraph naming the period is not a headline.
+        let para = format!(
+            "Qualcomm today announced fourth quarter fiscal 2026 results {}\nrest of the release",
+            "with revenue of $10.3 billion and more ".repeat(5)
+        );
+        let v = json!({"fiscal_period": {"quarter": 4, "fiscal_year": 2026, "quote": "not in the text at all"}});
+        assert!(matches!(
+            from_reply(&para, &v).fiscal_period,
+            Field::Missing { .. }
+        ));
+        // Only the exhibit's opening counts as the headline.
+        let late = format!("{}\n{t}", "x ".repeat(HEADLINE_CHARS));
+        let v = json!({"fiscal_period": {"quarter": 4, "fiscal_year": 2026, "quote": "not in the text at all"}});
+        assert!(matches!(
+            from_reply(&late, &v).fiscal_period,
+            Field::Missing { .. }
+        ));
     }
 
     struct FailLlm;
