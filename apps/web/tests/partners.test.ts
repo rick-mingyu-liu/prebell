@@ -158,11 +158,11 @@ describe("next.config headers", () => {
 describe("PartnersStrip", () => {
   const PARTNER_HOSTS = ["moomoo.com", "okx.com", "crypto.com", "wealthsimple.com"];
 
-  it("renders the heading and the disclosure, no partner hosts server-side", () => {
+  it("renders the label as the disclosure, no partner hosts server-side", () => {
     const out = renderToStaticMarkup(createElement(PartnersStrip, { locale: "en" }));
-    expect(out).toContain('<aside class="partners-strip"');
-    expect(out).toContain("From our partners");
-    expect(out).toContain('<p class="partners-note">Affiliate links: PreBell may earn a reward if you sign up.</p>');
+    expect(out).toContain('<aside class="partners-strip" aria-label="Affiliate partners"');
+    expect(out).toContain('<span class="partners-label">Affiliate partners</span>');
+    expect(out).not.toContain("partners-note");
     expect(out).not.toContain('advice');
     for (const host of PARTNER_HOSTS) expect(out).not.toContain(host);
     expect(out).not.toContain("/logos/partners/");
@@ -170,8 +170,7 @@ describe("PartnersStrip", () => {
 
   it("uses the Chinese copy on ZH pages", () => {
     const out = renderToStaticMarkup(createElement(PartnersStrip, { locale: "zh" }));
-    expect(out).toContain("合作伙伴");
-    expect(out).toContain("推广链接：通过链接注册，PreBell 可能获得奖励。");
+    expect(out).toContain('<span class="partners-label">推广合作</span>');
     expect(out).not.toContain("投资建议");
   });
 
