@@ -189,7 +189,7 @@
     "calendarTitle": "Earnings calendar",
     "weekOf": "Week of {date}",
     "timesEt": "Times US Eastern",
-    "legend": "Confirmed: the company announced the date. Unconfirmed: the date comes from an aggregator and may change. Reported: the results are filed with the SEC.",
+    "legend": "Confirmed: the company announced the date. Unconfirmed: the date comes from an aggregator and may change. Reported: the results are filed with the SEC. The largest companies get an earnings check; for the rest, the calendar links to the SEC filing.",
     "bmo": "Before open",
     "amc": "After close",
     "timeUnknown": "Time n/a",
@@ -206,6 +206,8 @@
     "noChecks": "No earnings checks yet.",
     "dates": "Report dates",
     "readCheck": "Read the check",
+    "secFiling": "SEC filing",
+    "showMore": "Show {count} more",
     "charts": "Charts (GAAP)",
     "chartsNote": "Charts show GAAP figures from SEC filings; the last bar marked 8-K is this release. A gap means the company did not report that quarter separately.",
     "checkedFiling": "✓ Every figure traced to the filing"

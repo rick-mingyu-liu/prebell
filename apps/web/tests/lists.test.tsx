@@ -1,8 +1,8 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
-import CalendarWeek from "../src/components/CalendarWeek";
+import CalendarWeek, { ROWS_PER_SLOT } from "../src/components/CalendarWeek";
 import PostList from "../src/components/PostList";
-import type { CalendarDay } from "../src/lib/earnings";
+import type { CalendarDay, CalendarEntry, Slot } from "../src/lib/earnings";
 import type { PostListItem } from "../src/lib/posts";
 
 const post: PostListItem = {
@@ -70,14 +70,27 @@ describe("PostList", () => {
 });
 
 describe("CalendarWeek", () => {
+  const SEC = "https://www.sec.gov/Archives/edgar/data/1090872/000109087226000041/0001090872-26-000041-index.htm";
+  const entry = (ticker: string, slot: Slot, status: CalendarEntry["status"], more: Partial<CalendarEntry> = {}): CalendarEntry => ({
+    ticker,
+    name: null,
+    writeUps: true,
+    date: "2026-11-02",
+    slot,
+    status,
+    postSlug: null,
+    filingUrl: null,
+    ...more,
+  });
   const days: CalendarDay[] = [
     {
       date: "2026-11-02",
       entries: [
-        { ticker: "AMD", date: "2026-11-02", slot: "amc", status: "confirmed", postSlug: null },
-        { ticker: "UNH", date: "2026-11-02", slot: "bmo", status: "unconfirmed", postSlug: null },
-        { ticker: "INTC", date: "2026-11-02", slot: "bmo", status: "reported", postSlug: "intc-q3" },
-        { ticker: "UBER", date: "2026-11-02", slot: "unknown", status: "unconfirmed", postSlug: null },
+        entry("AMD", "amc", "confirmed", { name: "Advanced Micro Devices" }),
+        entry("UNH", "bmo", "unconfirmed", { name: "UnitedHealth Group" }),
+        entry("INTC", "bmo", "reported", { name: "Intel", postSlug: "intc-q3" }),
+        entry("A", "bmo", "reported", { name: "Agilent Technologies", writeUps: false, filingUrl: SEC }),
+        entry("UBER", "unknown", "unconfirmed"),
       ],
     },
     { date: "2026-11-03", entries: [] },
@@ -88,24 +101,40 @@ describe("CalendarWeek", () => {
     // Ruled day rows, no chips, badges or logos.
     expect(out).toContain('class="cal-day"');
     expect(out).not.toMatch(/badge|cal-chip|tlogo|<img/);
-    // Each entry: a ticker link to the company page and its slot label.
-    expect(out).toContain('<a class="cal-ticker" href="/en/t/UNH">UNH</a>');
+    // Each entry: a ticker link to the company page and the company name.
+    expect(out).toContain('<a class="cal-ticker" href="/en/t/UNH">UNH</a><span class="cal-name">UnitedHealth Group</span>');
     expect(out).toContain('<a class="cal-ticker" href="/en/t/AMD">AMD</a>');
     expect(out).toContain('<a class="cal-ticker" href="/en/t/INTC">INTC</a>');
-    expect(out).toContain('<span class="cal-slot">Before open</span>');
-    expect(out).toContain('<span class="cal-slot">After close</span>');
-    expect(out).toContain('<span class="cal-slot">Time n/a</span>');
-    // Slots stay in order: before open, after close, time not set.
+    // Each slot is a sub-heading with its count, in order: before open, after close, time not set.
+    expect(out).toContain('<h3 class="cal-slot">Before open <span class="num">3</span></h3>');
+    expect(out).toContain('<h3 class="cal-slot">After close <span class="num">1</span></h3>');
+    expect(out).toContain('<h3 class="cal-slot">Time n/a <span class="num">1</span></h3>');
     expect(out.indexOf(">UNH<")).toBeLessThan(out.indexOf(">AMD<"));
     expect(out.indexOf(">AMD<")).toBeLessThan(out.indexOf(">UBER<"));
     // The one coloured mark is the tick on a reported entry; the status is also in text for screen readers.
-    expect(out.match(/num up/g)).toHaveLength(1);
+    expect(out.match(/num up/g)).toHaveLength(2);
     expect(out).toMatch(/<li class="cal-entry cal-reported">.*?<span class="num up" aria-hidden="true">✓<\/span><span class="sr-only">Reported<\/span>/);
     // Unconfirmed entries are muted and say so in text.
     expect(out).toMatch(/<li class="cal-entry cal-unconfirmed">.*?<span class="sr-only">Unconfirmed<\/span>/);
-    // A reported entry with a post also links to the check.
+    // A reported entry with a post links to the check; a calendar-only one to its SEC filing.
     expect(out).toMatch(/<a class="cal-read" aria-label="Read the check: INTC" href="\/en\/p\/intc-q3">Read the check →<\/a>/);
+    expect(out).toContain(
+      `<a class="cal-read" href="${SEC}" rel="noopener noreferrer" aria-label="SEC filing: A">SEC filing ↗</a>`,
+    );
     expect(out).toContain("No reports.");
+    expect(out).not.toContain("<details");
+  });
+
+  it("folds a long slot into a native details element", () => {
+    const many = Array.from({ length: ROWS_PER_SLOT + 3 }, (_, i) => entry(`T${String(i).padStart(2, "0")}`, "bmo", "unconfirmed"));
+    const out = renderToStaticMarkup(<CalendarWeek days={[{ date: "2026-11-02", entries: many }]} locale="en" />);
+    expect(out).toContain(`<h3 class="cal-slot">Before open <span class="num">${ROWS_PER_SLOT + 3}</span></h3>`);
+    const [shown, folded] = out.split('<details class="cal-more">');
+    expect(shown.match(/class="cal-ticker"/g)).toHaveLength(ROWS_PER_SLOT);
+    expect(folded).toContain("<summary>Show 3 more</summary>");
+    expect(folded.match(/class="cal-ticker"/g)).toHaveLength(3);
+    const zh = renderToStaticMarkup(<CalendarWeek days={[{ date: "2026-11-02", entries: many }]} locale="zh" />);
+    expect(zh).toContain("<summary>展开其余3家</summary>");
   });
 
   it("names each day's region by its heading, once", () => {

@@ -18,7 +18,7 @@ use crate::earnings::extract::{extract, Extracted};
 use crate::earnings::facts::{missing_required, EarningsFacts, Metric, Metrics};
 use crate::earnings::store::{ChartRow, EarningsStore, FilingRow};
 use crate::earnings::xbrl::fetch_trend;
-use crate::earnings::{find, in_window, WatchEntry};
+use crate::earnings::{find, in_window, Tier, WatchEntry};
 use crate::edgar::{exhibit_991, filing_url, FeedEntry, Filings, FEED_PAGE};
 use crate::facts::{Field, NewsReason};
 use crate::jobs::alert_once_today;
@@ -47,6 +47,9 @@ pub const MAX_POLL_LAG_MINUTES: i64 = 5;
 /// Feed pages one poll reads at most (300 filings, far more than EDGAR
 /// accepts in 5 minutes even at the peak of earnings season).
 pub const MAX_FEED_PAGES: usize = 3;
+/// Build messages a poll sends for open filings when it detected nothing
+/// new, so a burst's retries drain three at a time.
+pub const MAX_RETRY_BUILDS: usize = 3;
 /// kv key: the newest feed acceptance time a poll read (RFC 3339).
 pub const KV_FEED_WATERMARK: &str = "edgar_feed_watermark";
 
@@ -159,19 +162,39 @@ pub async fn poll_tick(
         out.errors.push(msg.clone());
         alert_once_today(now, &format!("watchlist-cik:{ticker}"), "warn", &msg, store).await?;
     }
+    // Every page re-reads hours of filings, so each step is one D1 query
+    // for all of them (Free: 50 per invocation), whatever the count.
+    let mut rows: Vec<(FilingRow, Tier)> = Vec::new();
     for (f, w) in earnings_entries(&entries, &watch, now) {
-        let row = filing_row(f, &w, now);
-        let key = row.run_key.clone();
-        // Calendar first and on every sighting (idempotent), so a failed
-        // write after the insert cannot leave the calendar unmarked.
-        crate::earnings::calendar::record_filing(es, &row, now).await?;
-        if !es.insert_filing(&row).await? {
-            continue;
+        // An entry on two pages is one filing.
+        if !rows.iter().any(|(r, _)| r.accession == f.accession) {
+            rows.push((filing_row(f, &w, now), w.tier));
         }
-        if store.get_run(&key).await?.is_none() {
-            store.upsert_run(&new_run(&row, now)).await?;
+    }
+    let filings: Vec<FilingRow> = rows.iter().map(|(r, _)| r.clone()).collect();
+    // Calendar first and on every sighting (idempotent), so a failed write
+    // after the insert cannot leave the calendar unmarked.
+    crate::earnings::calendar::record_filings(es, &filings, now).await?;
+    // A calendar-tier report only marks its date reported.
+    let full: Vec<String> = rows
+        .iter()
+        .filter(|(_, t)| *t == Tier::Full)
+        .map(|(r, _)| r.accession.clone())
+        .collect();
+    if !full.is_empty() {
+        let known = es.known_accessions(&full).await?;
+        let new: Vec<(FilingRow, RunRow)> = filings
+            .into_iter()
+            .filter(|r| full.contains(&r.accession) && !known.contains(&r.accession))
+            .map(|r| {
+                let run = new_run(&r, now);
+                (r, run)
+            })
+            .collect();
+        if !new.is_empty() {
+            es.insert_new_filings(&new).await?;
         }
-        out.detected.push(key);
+        out.detected = new.into_iter().map(|(r, _)| r.run_key).collect();
     }
     let newest = entries.iter().map(|f| f.accepted_at).max();
     if let (true, Some(n)) = (complete, newest) {
@@ -184,8 +207,8 @@ pub async fn poll_tick(
 
 /// One `earnings` queue message: drops it when stale, else polls the feed,
 /// alerts once per ET day when SEC refuses (403/429), and lists the
-/// follow-up messages: one build per new filing (or one while any filing is
-/// still open, for retries and Chinese drafts) and the calendar refresh
+/// follow-up messages: one build per new filing (or, with none, see
+/// `retry_builds`: for retries and Chinese drafts) and the calendar refresh
 /// until it ran today.
 pub async fn poll_job(
     now: DateTime<Utc>,
@@ -213,7 +236,7 @@ pub async fn poll_job(
         return Ok(out);
     }
     let builds = match out.detected.len() {
-        0 => usize::from(!es.open_filings().await?.is_empty()),
+        0 => retry_builds(&es.open_runs().await?, now),
         n => n,
     };
     out.follow_ups = vec![EarningsStep::Build; builds];
@@ -261,6 +284,38 @@ fn since_update(r: &RunRow, now: DateTime<Utc>) -> Duration {
     parse_iso(&r.updated_at).map_or(Duration::MAX, |t| now - t)
 }
 
+/// A build is running: its lease has not run out.
+fn leased(run: &RunRow, now: DateTime<Utc>) -> bool {
+    run.status == "building" && since_update(run, now) < Duration::minutes(BUILD_LEASE_MINUTES)
+}
+
+/// `build_tick` would act on the filing now: close it, retry its Chinese
+/// draft, or (re)build it. Not while its build is leased or a failed attempt
+/// waits out `RETRY_MINUTES`.
+fn due(run: &RunRow, now: DateTime<Utc>) -> bool {
+    let waiting = run.attempts > 0
+        && run.status == "pending"
+        && since_update(run, now) < Duration::minutes(RETRY_MINUTES);
+    !leased(run, now) && !waiting
+}
+
+/// Build messages for open filings when a poll found nothing new: one per
+/// due filing, at most `MAX_RETRY_BUILDS`, and none while a build is leased
+/// (the serial build queue would only stack messages behind it that find
+/// nothing to do).
+fn retry_builds(open: &[(FilingRow, Option<RunRow>)], now: DateTime<Utc>) -> usize {
+    if open
+        .iter()
+        .any(|(_, r)| r.as_ref().is_some_and(|r| leased(r, now)))
+    {
+        return 0;
+    }
+    open.iter()
+        .filter(|(_, r)| r.as_ref().is_none_or(|r| due(r, now)))
+        .count()
+        .min(MAX_RETRY_BUILDS)
+}
+
 /// Works through the open filings, oldest first: closes finished ones,
 /// skips in-flight or recently retried ones, and does at most one piece of
 /// LLM work (a build or a Chinese retry) per tick. `log` receives the
@@ -277,8 +332,8 @@ pub async fn build_tick(
     // One build and one Chinese retry per tick, budgeted separately so a
     // Chinese draft that keeps failing never holds up new posts.
     let (mut built, mut zh_tried) = (false, false);
-    for f in es.open_filings().await? {
-        let run = match store.get_run(&f.run_key).await? {
+    for (f, run) in es.open_runs().await? {
+        let run = match run {
             Some(r) => r,
             None => {
                 let r = new_run(&f, now);
@@ -291,6 +346,7 @@ pub async fn build_tick(
                 es.set_filing_state(&f.accession, "done").await?;
                 continue;
             }
+            _ if !due(&run, now) => continue,
             "published" if zh_tried => continue,
             "published" => match retry_zh(now, es, store, llm, &f, &run).await? {
                 TickOutcome::Nothing => continue,
@@ -299,21 +355,12 @@ pub async fn build_tick(
                     o
                 }
             },
-            "building" if since_update(&run, now) < Duration::minutes(BUILD_LEASE_MINUTES) => {
-                continue
-            }
             // A build that never finishes (the Worker killed mid-build) must
             // not be retried forever.
             "building" if past_deadline(&f, &run, now) => {
                 give_up(now, es, store, &f, run, "the build never finished".into()).await?
             }
             _ if built => continue,
-            _ if run.attempts > 0
-                && run.status == "pending"
-                && since_update(&run, now) < Duration::minutes(RETRY_MINUTES) =>
-            {
-                continue
-            }
             _ => {
                 built = true;
                 if let Some(o) = reconcile(now, es, store, &f, &run).await? {
@@ -861,9 +908,10 @@ mod tests {
     use crate::earnings::facts::NOT_STATED;
     use crate::earnings::store::MemEarningsStore;
     use crate::earnings::xbrl::tests::aapl_concept;
+    use crate::earnings::Filer;
     use crate::edgar::tests::{EX991, FEED, INDEX};
     use crate::edgar::{html_to_text, parse_current_feed, parse_filing_index, Concept, FilingDoc};
-    use crate::store::MemStore;
+    use crate::store::{MemStore, PostRow, TranslationRow};
     use async_trait::async_trait;
     use serde_json::Value;
     use std::cell::{Cell, RefCell};
@@ -939,7 +987,7 @@ mod tests {
                 .collect();
             out.push_str(&format!(
                 "<entry>\n<title>8-K - {} (00{cik:08}) (Filer)</title>\n<link rel=\"alternate\" type=\"text/html\" href=\"https://www.sec.gov/Archives/edgar/data/{cik}/{nodash}/{acc}-index.htm\"/>\n<summary type=\"html\">\n &lt;b&gt;Filed:&lt;/b&gt; {} &lt;b&gt;AccNo:&lt;/b&gt; {acc}\n{lines}</summary>\n<updated>{}</updated>\n<id>urn:tag:sec.gov,2008:accession-number={acc}</id>\n</entry>\n",
-                crate::earnings::by_cik(*cik).map_or("Co", |w| w.name),
+                crate::earnings::by_cik(*cik).map_or("Co", |w| w.sec),
                 et(*at).format("%Y-%m-%d"),
                 at.to_rfc3339()
             ));
@@ -1204,7 +1252,7 @@ mod tests {
         f.accepted_at = utc("2026-10-31T00:45:00Z");
         let row = filing_row(&f, &find("AAPL").unwrap(), utc("2026-10-31T00:50:00Z"));
         assert_eq!(trading_date(&row), "2026-10-30");
-        crate::earnings::calendar::record_filing(&es, &row, utc("2026-10-31T00:50:00Z"))
+        crate::earnings::calendar::record_filings(&es, &[row], utc("2026-10-31T00:50:00Z"))
             .await
             .unwrap();
         let cal = es.calendar_for("AAPL").await.unwrap();
@@ -1268,12 +1316,166 @@ mod tests {
             .unwrap();
         assert!(o.detected.is_empty());
         assert_eq!(o.follow_ups, [EarningsStep::Build]);
+        // A burst's retries: one build per open filing, at most
+        // `MAX_RETRY_BUILDS` per firing.
+        for i in 0..5 {
+            let mut f = es.filings.borrow()[ACC].clone();
+            f.accession = format!("0000320193-26-00010{i}");
+            f.run_key = run_key("AAPL", &f.accession);
+            es.insert_filing(&f).await.unwrap();
+        }
+        let o = poll_job(t2, Some(t2), &es, base.as_ref(), &fl)
+            .await
+            .unwrap();
+        assert_eq!(o.follow_ups, [EarningsStep::Build; MAX_RETRY_BUILDS]);
+        for i in 0..5 {
+            es.set_filing_state(&format!("0000320193-26-00010{i}"), "done")
+                .await
+                .unwrap();
+        }
         // Nothing open, calendar done: no follow-ups.
         es.set_filing_state(ACC, "done").await.unwrap();
         let o = poll_job(t2, Some(t2), &es, base.as_ref(), &fl)
             .await
             .unwrap();
         assert!(o.follow_ups.is_empty(), "{o:?}");
+    }
+
+    #[tokio::test]
+    async fn a_calendar_tier_report_marks_the_calendar_and_queues_no_build() {
+        // Agilent: domestic filer, calendar tier.
+        let a = crate::earnings::find("A").unwrap();
+        assert_eq!((a.filer, a.tier), (Filer::Domestic, Tier::Calendar));
+        let (base, es) = stores();
+        let fl = FakeFilings::default();
+        let t = poll_time();
+        let acc = "0001090872-26-000041".to_string();
+        fl.pages.borrow_mut().insert(
+            0,
+            Ok(feed(&[(
+                a.cik,
+                acc.clone(),
+                t - Duration::minutes(10),
+                "2.02,9.01",
+            )])),
+        );
+        let o = poll_job(t, Some(t), &es, base.as_ref(), &fl).await.unwrap();
+        assert!(o.detected.is_empty());
+        assert!(es.filings.borrow().is_empty());
+        assert!(base.runs.borrow().is_empty());
+        assert_eq!(o.follow_ups, [EarningsStep::Calendar]);
+        let cal = es.calendar_for("A").await.unwrap();
+        assert_eq!(cal.len(), 1);
+        assert_eq!(
+            (cal[0].status.as_str(), cal[0].report_date.as_str()),
+            ("reported", "2026-10-30")
+        );
+        assert_eq!(
+            cal[0].proof_url.as_deref(),
+            Some(filing_url(a.cik, &acc).as_str())
+        );
+    }
+
+    #[tokio::test]
+    async fn a_busy_poll_uses_a_fixed_number_of_store_queries() {
+        // 40 watchlist reports on one page (a 16:00 ET burst at about 530
+        // rows): per-filing reads and writes would pass the Free plan's 50
+        // D1 queries per invocation.
+        let (base, es) = stores();
+        let fl = FakeFilings::default();
+        let t = poll_time();
+        let picks: Vec<_> = crate::earnings::watchlist()
+            .into_iter()
+            .filter(|e| e.filer == Filer::Domestic)
+            .take(40)
+            .collect();
+        let page: Vec<_> = picks
+            .iter()
+            .enumerate()
+            .map(|(i, e)| {
+                (
+                    e.cik,
+                    format!("{:010}-26-{:06}", e.cik, i),
+                    t - Duration::minutes(i as i64),
+                    "2.02,9.01",
+                )
+            })
+            .collect();
+        fl.pages.borrow_mut().insert(0, Ok(feed(&page)));
+        let o = poll_tick(t, &es, base.as_ref(), &fl).await.unwrap();
+        let full = picks.iter().filter(|e| e.tier == Tier::Full).count();
+        assert!(full > 0 && full < 40, "{full}");
+        assert_eq!(o.detected.len(), full);
+        assert_eq!(es.calendar.borrow().len(), 40);
+        // Watermark read, calendar read, calendar write, existence check,
+        // filings and runs insert, watermark write.
+        assert_eq!(es.calls.get(), 6);
+        // The next firing sees the same page: nothing to write.
+        es.calls.set(0);
+        let o = poll_tick(t + Duration::minutes(5), &es, base.as_ref(), &fl)
+            .await
+            .unwrap();
+        assert!(o.detected.is_empty());
+        assert_eq!(
+            es.calls.get(),
+            3,
+            "watermark read, calendar read, existence check"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_poll_never_resets_a_run_a_build_already_took() {
+        let (base, es) = stores();
+        let fl = FakeFilings::default();
+        let mut r = new_run(
+            &filing_row(
+                &parse_current_feed(FEED).unwrap()[0],
+                &find("AAPL").unwrap(),
+                poll_time(),
+            ),
+            poll_time(),
+        );
+        r.status = "building".into();
+        base.runs.borrow_mut().insert(KEY.into(), r);
+        let o = poll_tick(poll_time(), &es, base.as_ref(), &fl)
+            .await
+            .unwrap();
+        assert_eq!(o.detected, [KEY]);
+        assert_eq!(base.runs.borrow()[KEY].status, "building");
+    }
+
+    #[test]
+    fn retries_go_only_to_due_filings_and_wait_for_a_leased_build() {
+        let t = poll_time();
+        let f = filing_row(
+            &parse_current_feed(FEED).unwrap()[0],
+            &find("AAPL").unwrap(),
+            t,
+        );
+        let run = |status: &str, attempts: i64, mins_ago: i64| {
+            let mut r = new_run(&f, t);
+            r.status = status.into();
+            r.attempts = attempts;
+            r.updated_at = iso(t - Duration::minutes(mins_ago));
+            Some(r)
+        };
+        let open = |runs: Vec<Option<RunRow>>| -> Vec<(FilingRow, Option<RunRow>)> {
+            runs.into_iter().map(|r| (f.clone(), r)).collect()
+        };
+        // Just retried, so waiting; a Chinese draft to retry; no run yet.
+        let o = open(vec![run("pending", 1, 2), run("published", 1, 60), None]);
+        assert_eq!(retry_builds(&o, t), 2);
+        // A due pending one and an expired lease: both due, capped at 3.
+        let o = open(vec![
+            run("pending", 1, 6),
+            run("building", 1, 16),
+            None,
+            None,
+        ]);
+        assert_eq!(retry_builds(&o, t), MAX_RETRY_BUILDS);
+        // While a build holds its lease, nothing is sent.
+        let o = open(vec![run("building", 1, 3), run("pending", 0, 0)]);
+        assert_eq!(retry_builds(&o, t), 0);
     }
 
     #[tokio::test]
@@ -1376,6 +1578,136 @@ mod tests {
             .await
             .unwrap();
         (base, es, fl)
+    }
+
+    #[tokio::test]
+    async fn an_open_filing_still_builds_after_its_company_moves_to_the_calendar_tier() {
+        // A company dropped below the write-up line mid-season: its filing
+        // was already detected and finishes.
+        let (base, es, fl) = detected().await;
+        let mut f = es.filings.borrow()[ACC].clone();
+        f.ticker = "A".into();
+        es.filings.borrow_mut().insert(ACC.into(), f);
+        assert_eq!(find("A").unwrap().tier, Tier::Calendar);
+        let l = llm(true, true);
+        let o = build_tick(poll_time(), &es, base.as_ref(), &fl, &l, &|_| {})
+            .await
+            .unwrap();
+        assert_eq!(o.len(), 1, "{o:?}");
+        assert_eq!(base.runs.borrow()[KEY].attempts, 1);
+    }
+
+    /// `Store` that counts the calls D1 serves (R2 reads and writes are not
+    /// D1 queries).
+    struct D1Count<'a>(&'a MemStore, Cell<usize>);
+    impl D1Count<'_> {
+        fn tick(&self) {
+            self.1.set(self.1.get() + 1);
+        }
+    }
+    #[async_trait(?Send)]
+    impl Store for D1Count<'_> {
+        async fn get_run(&self, key: &str) -> Result<Option<RunRow>, String> {
+            self.tick();
+            self.0.get_run(key).await
+        }
+        async fn upsert_run(&self, r: &RunRow) -> Result<(), String> {
+            self.tick();
+            self.0.upsert_run(r).await
+        }
+        async fn get_post_by_run(&self, k: &str) -> Result<Option<PostRow>, String> {
+            self.tick();
+            self.0.get_post_by_run(k).await
+        }
+        async fn revise_post(
+            &self,
+            p: &PostRow,
+            t: &[TranslationRow],
+            s: &[NewsReason],
+        ) -> Result<(), String> {
+            self.tick();
+            self.0.revise_post(p, t, s).await
+        }
+        async fn upsert_translation_at_revision(
+            &self,
+            t: &TranslationRow,
+            revised_at: Option<&str>,
+        ) -> Result<bool, String> {
+            self.tick();
+            self.0.upsert_translation_at_revision(t, revised_at).await
+        }
+        async fn posts_on(&self, c: &str, d: &str) -> Result<Vec<PostRow>, String> {
+            self.tick();
+            self.0.posts_on(c, d).await
+        }
+        async fn upsert_post(&self, p: &PostRow) -> Result<i64, String> {
+            self.tick();
+            self.0.upsert_post(p).await
+        }
+        async fn get_translation(
+            &self,
+            id: i64,
+            l: &str,
+        ) -> Result<Option<TranslationRow>, String> {
+            self.tick();
+            self.0.get_translation(id, l).await
+        }
+        async fn upsert_translation(&self, t: &TranslationRow) -> Result<(), String> {
+            self.tick();
+            self.0.upsert_translation(t).await
+        }
+        async fn add_sources(&self, id: i64, s: &[crate::facts::NewsReason]) -> Result<(), String> {
+            self.tick();
+            self.0.add_sources(id, s).await
+        }
+        async fn add_alert(&self, k: &str, l: &str, m: &str) -> Result<(), String> {
+            self.tick();
+            self.0.add_alert(k, l, m).await
+        }
+        async fn has_alert(&self, k: &str) -> Result<bool, String> {
+            self.tick();
+            self.0.has_alert(k).await
+        }
+        async fn put_facts(&self, k: &str, j: &str) -> Result<(), String> {
+            self.0.put_facts(k, j).await
+        }
+        async fn get_facts(&self, k: &str) -> Result<Option<String>, String> {
+            self.0.get_facts(k).await
+        }
+        async fn put_bytes(&self, k: &str, b: &[u8], c: &str) -> Result<(), String> {
+            self.0.put_bytes(k, b, c).await
+        }
+        async fn kv_set(&self, k: &str, v: &str, n: &str) -> Result<(), String> {
+            self.tick();
+            self.0.kv_set(k, v, n).await
+        }
+    }
+
+    #[tokio::test]
+    async fn a_build_stays_far_under_50_d1_queries() {
+        // A build that publishes EN with ZH pending, then the next tick: a
+        // second filing's build plus the first one's Chinese retry, the
+        // busiest build invocation. Free allows 50 D1 queries per invocation.
+        let (base, es, fl) = detected().await;
+        let l = llm(true, false);
+        let d1 = D1Count(base.as_ref(), Cell::new(0));
+        es.calls.set(0);
+        build_tick(poll_time(), &es, &d1, &fl, &l, &|_| {})
+            .await
+            .unwrap();
+        let first = d1.1.get() + es.calls.get();
+        let mut second = es.filings.borrow()[ACC].clone();
+        second.accession = "0000320193-26-000099".into();
+        second.run_key = run_key("AAPL", &second.accession);
+        es.insert_filing(&second).await.unwrap();
+        let (d1, l) = (D1Count(base.as_ref(), Cell::new(0)), llm(true, true));
+        es.calls.set(0);
+        let t = poll_time() + Duration::minutes(10);
+        let o = build_tick(t, &es, &d1, &fl, &l, &|_| {}).await.unwrap();
+        assert_eq!(o.len(), 2, "{o:?}");
+        let both = d1.1.get() + es.calls.get();
+        println!("d1 queries: build {first}, build + zh retry {both}");
+        assert!(first <= 15 && both <= 25, "{first} {both}");
     }
 
     #[tokio::test]

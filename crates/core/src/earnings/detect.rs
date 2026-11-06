@@ -12,7 +12,7 @@ use crate::edgar::FeedEntry;
 /// enough to pick up a Saturday filing on Monday morning.
 pub const MAX_AGE_HOURS: i64 = 96;
 
-/// The domestic (8-K filing) watchlist companies by CIK.
+/// The domestic (8-K filing) watchlist companies by CIK, both tiers.
 pub fn domestic_by_cik() -> HashMap<u64, WatchEntry> {
     watchlist()
         .into_iter()
@@ -61,24 +61,21 @@ fn name_tokens(name: &str) -> Vec<String> {
         .collect()
 }
 
-/// The filer's name and ours start with the same significant word, also
-/// across a space ("EXXON MOBIL" = "ExxonMobil", "AMAZON COM" = "Amazon").
-pub fn same_company(filer: &str, ours: &str) -> bool {
-    let (a, b) = (name_tokens(filer), name_tokens(ours));
-    let (Some(a0), Some(b0)) = (a.first(), b.first()) else {
-        return false;
-    };
-    a0 == b0
-        || a.get(1).is_some_and(|a1| format!("{a0}{a1}") == *b0)
-        || b.get(1).is_some_and(|b1| format!("{b0}{b1}") == *a0)
+/// The filer's name is the row's SEC conformed name: the same significant
+/// words, ignoring case, punctuation, spacing and legal suffixes. Matching
+/// only the first word would, at about 530 rows, let a wrong CIK through
+/// between names that share it (American Express and American Tower). A
+/// company renamed on EDGAR fails until the watchlist is regenerated
+/// (`--refresh`), and the poller alerts about it.
+pub fn same_filer(filer: &str, sec: &str) -> bool {
+    let (a, b) = (name_tokens(filer).concat(), name_tokens(sec).concat());
+    !a.is_empty() && a == b
 }
 
 /// The watchlist entry for a feed entry, unless the filer's name is not
-/// the row's company (a wrong CIK in the data file).
+/// the row's SEC name (a wrong CIK in the data file).
 fn watched<'w>(f: &FeedEntry, watch: &'w HashMap<u64, WatchEntry>) -> Option<&'w WatchEntry> {
-    watch
-        .get(&f.cik)
-        .filter(|w| same_company(&f.company, w.name) || same_company(&f.company, w.sec_name()))
+    watch.get(&f.cik).filter(|w| same_filer(&f.company, w.sec))
 }
 
 /// Watchlist rows whose CIK files under another company's name, as
@@ -182,46 +179,66 @@ mod tests {
     }
 
     #[test]
-    fn filer_names_match_the_watchlist_name() {
-        for (filer, ours) in [
-            ("APPLE INC", "Apple"),
-            ("Apple Inc.", "Apple"),
-            ("META PLATFORMS, INC.", "Meta Platforms"),
-            ("EXXON MOBIL CORP", "ExxonMobil"),
-            ("ExxonMobil Holdings Corp", "ExxonMobil"),
-            ("AT&T INC.", "AT&T"),
-            ("COCA COLA CO", "Coca-Cola"),
-            ("LOWES COMPANIES INC", "Lowe's"),
-            ("AMAZON COM INC", "Amazon"),
-            ("The Walt Disney Company", "Walt Disney"),
+    fn filer_names_match_across_spelling() {
+        for (filer, sec) in [
+            ("APPLE INC", "Apple Inc."),
+            ("META PLATFORMS, INC.", "Meta Platforms, Inc."),
+            ("EXXON MOBIL HOLDINGS CORP", "ExxonMobil Holdings Corp"),
+            ("AT&T INC.", "AT&T INC."),
+            ("COCA COLA CO", "COCA COLA CO"),
+            ("LOWES COMPANIES INC", "LOWE'S COMPANIES INC"),
+            ("The Walt Disney Company", "Walt Disney Co"),
         ] {
-            assert!(same_company(filer, ours), "{filer} vs {ours}");
+            assert!(same_filer(filer, sec), "{filer} vs {sec}");
         }
-        for (filer, ours) in [
-            ("Estrella Immunopharma, Inc.", "Apple"),
-            ("Apple Hospitality REIT, Inc.", "Intuit"),
-            ("INC", "Apple"),
+        for (filer, sec) in [
+            ("Estrella Immunopharma, Inc.", "Apple Inc."),
+            ("Apple Hospitality REIT, Inc.", "Apple Inc."),
+            ("COCA COLA CONSOLIDATED, INC.", "COCA COLA CO"),
+            ("INC", "INC"),
         ] {
-            assert!(!same_company(filer, ours), "{filer} vs {ours}");
+            assert!(!same_filer(filer, sec), "{filer} vs {sec}");
         }
     }
 
     #[test]
-    fn every_watchlist_name_matches_its_sec_name() {
-        // The SEC's conformed names (company_tickers.json, 2026-10-29) of
-        // rows whose display name differs most.
-        for (ticker, sec) in [
+    fn feed_names_match_the_sec_name() {
+        // Feed spellings of the conformed names in watchlist.tsv.
+        for (ticker, feed) in [
+            ("AAPL", "Apple Inc."),
+            ("AAPL", "APPLE INC"),
             ("BNY", "Bank of New York Mellon Corp"),
             ("BRK.B", "BERKSHIRE HATHAWAY INC"),
             ("GOOGL", "Alphabet Inc."),
             ("XOM", "ExxonMobil Holdings Corp"),
+            ("XOM", "EXXON MOBIL HOLDINGS CORP"),
+            ("USB", "US BANCORP \\DE\\"),
+            ("KO", "COCA COLA CO"),
         ] {
             let w = crate::earnings::find(ticker).unwrap();
-            assert!(
-                same_company(sec, w.sec_name()),
-                "{ticker}: {sec} vs {}",
-                w.sec_name()
-            );
+            assert!(same_filer(feed, w.sec), "{ticker}: {feed} vs {}", w.sec);
+        }
+        for (ticker, feed) in [
+            ("AAPL", "Apple Hospitality REIT, Inc."),
+            ("AXP", "AMERICAN TOWER CORP /MA/"),
+            ("GM", "GENERAL MILLS INC"),
+            ("AAPL", "INC"),
+        ] {
+            let w = crate::earnings::find(ticker).unwrap();
+            assert!(!same_filer(feed, w.sec), "{ticker}: {feed} vs {}", w.sec);
+        }
+    }
+
+    #[test]
+    fn no_two_rows_share_an_sec_name() {
+        let w = crate::earnings::watchlist();
+        let mut seen = HashMap::new();
+        for e in &w {
+            let key = name_tokens(e.sec).concat();
+            assert!(!key.is_empty(), "{}", e.ticker);
+            if let Some(other) = seen.insert(key, e.ticker) {
+                panic!("{other} and {} have the same SEC name", e.ticker);
+            }
         }
     }
 
@@ -232,7 +249,7 @@ mod tests {
         let mut wrong = w.remove(&320193).unwrap();
         wrong.ticker = "INTU";
         wrong.name = "Intuit";
-        wrong.sec = None;
+        wrong.sec = "INTUIT INC.";
         w.insert(320193, wrong);
         let f = parse_current_feed(FEED).unwrap();
         let now = utc("2026-10-30T21:00:00Z");

@@ -9,16 +9,14 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use prebell_core::earnings::calendar::{refresh_tick, yahoo_seeding, CalendarSource};
 use prebell_core::earnings::run::{build_tick, poll_job};
-use prebell_core::edgar::Edgar;
+use prebell_core::edgar::{Edgar, BUILD_GAP_MS};
 use prebell_core::jobs::{redact, run_job, JobRunner};
 use prebell_core::llm::{api_key_var, llm_from_env, unknown_provider};
 use prebell_core::providers::CountingHttp;
 use prebell_core::providers::LlmProvider;
 use prebell_core::recap;
 use prebell_core::run::{tick_with_hooks, update, Hooks, TickOutcome};
-use prebell_core::schedule::{
-    jobs_for_cron, queue_for, ContentJob, EarningsStep, EARNINGS_QUEUE, JOBS,
-};
+use prebell_core::schedule::{jobs_for_cron, queue_for, ContentJob, EarningsStep, JOBS};
 use prebell_core::tavily::Tavily;
 use prebell_core::yahoo::Yahoo;
 use prebell_core::yahoo_calendar::YahooCalendar;
@@ -92,9 +90,8 @@ async fn scheduled(event: ScheduledEvent, env: Env, _ctx: ScheduleContext) {
     });
     let at = now(&env).to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
     for job in jobs {
-        // Earnings go to their own queue (one consumer, one message at a
-        // time) so EDGAR is never hit in parallel and a build never delays
-        // the premarket brief.
+        // Earnings go to their own queues (one consumer, one message at a
+        // time each) so a build never delays the premarket brief.
         let binding = queue_for(job);
         let queue = match env.queue(binding) {
             Ok(q) => q,
@@ -214,9 +211,9 @@ impl JobRunner for Runner<'_> {
                 for e in &o.errors {
                     console_warn!("earnings poll: {e}");
                 }
-                let queue = env.queue(EARNINGS_QUEUE).map_err(|e| e.to_string());
                 for next in &o.follow_ups {
-                    let sent = match &queue {
+                    // Builds go to their own queue, the calendar to this one.
+                    let sent = match env.queue(queue_for(next.job())) {
                         Ok(q) => q
                             .send(Job {
                                 job: next.job().into(),
@@ -224,7 +221,7 @@ impl JobRunner for Runner<'_> {
                             })
                             .await
                             .map_err(|e| e.to_string()),
-                        Err(e) => Err(e.clone()),
+                        Err(e) => Err(e.to_string()),
                     };
                     if let Err(e) = sent {
                         console_error!("earnings: queue send for {} failed: {e}", next.job());
@@ -241,6 +238,8 @@ impl JobRunner for Runner<'_> {
             EarningsStep::Build => {
                 let llm = self.llm(&[])?;
                 let log = |m: &str| console_log!("{m}");
+                // Beside a poll on the other queue: slower, to stay under 10/s.
+                let edgar = edgar.paced(BUILD_GAP_MS);
                 let o = build_tick(t, store, store, &edgar, llm.as_ref(), &log).await?;
                 Ok(format!("{o:?}"))
             }
@@ -260,18 +259,17 @@ impl JobRunner for Runner<'_> {
 
 #[event(queue)]
 async fn queue(batch: MessageBatch<Job>, env: Env, _ctx: Context) -> Result<()> {
-    let store = D1Store {
-        db: env.d1("DB")?,
-        facts: env.bucket("FACTS")?,
-    };
+    let store = D1Store::new(env.d1("DB")?, env.bucket("FACTS")?);
     let http = CountingHttp::new(WorkerHttp);
-    // Fetch subrequests this invocation has used (Free plan: 50).
-    let mut used = 0;
+    // Fetch subrequests and D1 queries this invocation has used (Free plan:
+    // 50 each).
+    let (mut used, mut used_d1) = (0, 0);
 
     for msg in batch.messages()? {
         let body = msg.body();
         let job = body.job.as_str();
         http.reset();
+        store.reset_queries();
         let runner = Runner {
             env: &env,
             store: &store,
@@ -289,15 +287,18 @@ async fn queue(batch: MessageBatch<Job>, env: Env, _ctx: Context) -> Result<()> 
             Ok(line) => console_log!("{line}"),
             Err(line) => console_error!("{line}"),
         }
-        // Free plan: fetch subrequests this job used (limit 50 per invocation).
-        console_log!("subrequests={} job={job}", http.count());
+        // Free plan: fetch subrequests and D1 queries this job used (50 each
+        // per invocation).
+        let d1 = store.reset_queries();
+        console_log!("subrequests={} d1={d1} job={job}", http.count());
         used += http.count();
+        used_d1 += d1;
         msg.ack();
     }
 
     http.reset();
     // Whatever the jobs left of the budget; the rest wait for the next invocation.
-    let budget = alerts::delivery_budget(used);
+    let budget = alerts::delivery_budget(used, used_d1);
     alerts::deliver(
         &store,
         &http,
@@ -305,6 +306,10 @@ async fn queue(batch: MessageBatch<Job>, env: Env, _ctx: Context) -> Result<()> 
         budget,
     )
     .await;
-    console_log!("subrequests={} job=alerts", http.count());
+    console_log!(
+        "subrequests={} d1={} job=alerts",
+        http.count(),
+        store.reset_queries()
+    );
     Ok(())
 }

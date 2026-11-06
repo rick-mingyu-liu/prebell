@@ -24,6 +24,9 @@ const _: () = assert!(
     GAP_MS >= 100,
     "EDGAR fair access: at most 10 requests/second"
 );
+/// The build queue's pause: a build runs beside a poll (its own queue), so
+/// the two together stay under 10 requests/second.
+pub const BUILD_GAP_MS: u64 = 250;
 const ARCHIVES: &str = "https://www.sec.gov/Archives/edgar/data/";
 /// Largest EDGAR response read; a bigger body fails as `TooLarge` without
 /// being read (and parsed) in full. A press release is the exception: its
@@ -113,6 +116,7 @@ pub struct Edgar<H: Http, T: Timer> {
     pub timer: T,
     user_agent: String,
     used: Cell<bool>,
+    gap_ms: u64,
 }
 
 impl<H: Http, T: Timer> Edgar<H, T> {
@@ -127,7 +131,14 @@ impl<H: Http, T: Timer> Edgar<H, T> {
             timer,
             user_agent: format!("PreBell/0.1 (+https://prebell.site; {contact})"),
             used: Cell::new(false),
+            gap_ms: GAP_MS,
         })
+    }
+
+    /// A longer pause between requests (never shorter than `GAP_MS`).
+    pub fn paced(mut self, gap_ms: u64) -> Self {
+        self.gap_ms = gap_ms.max(GAP_MS);
+        self
     }
 
     async fn get(&self, url: &str) -> Result<String, ProviderError> {
@@ -138,7 +149,7 @@ impl<H: Http, T: Timer> Edgar<H, T> {
     async fn fetch(&self, url: &str, prefix: bool) -> Result<String, ProviderError> {
         if self.used.replace(true) {
             self.timer
-                .sleep(std::time::Duration::from_millis(GAP_MS))
+                .sleep(std::time::Duration::from_millis(self.gap_ms))
                 .await;
         }
         let headers = [
@@ -580,6 +591,19 @@ pub(crate) mod tests {
         }
         // No pause before the first request, one before each later one.
         assert_eq!(*e.timer.0.borrow(), vec![GAP_MS, GAP_MS]);
+    }
+
+    #[tokio::test]
+    async fn a_build_client_paces_slower() {
+        let e = edgar(&[(IDX_URL, 200, INDEX), (EX_URL, 200, EX991)]).paced(BUILD_GAP_MS);
+        e.filing_docs(320193, "0000320193-26-000070").await.unwrap();
+        e.document_text(EX_URL).await.unwrap();
+        assert_eq!(*e.timer.0.borrow(), vec![BUILD_GAP_MS]);
+        // Never faster than fair access allows.
+        let e = edgar(&[(IDX_URL, 200, INDEX), (EX_URL, 200, EX991)]).paced(10);
+        e.filing_docs(320193, "0000320193-26-000070").await.unwrap();
+        e.document_text(EX_URL).await.unwrap();
+        assert_eq!(*e.timer.0.borrow(), vec![GAP_MS]);
     }
 
     #[tokio::test]

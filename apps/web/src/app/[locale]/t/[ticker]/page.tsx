@@ -5,7 +5,14 @@ import { getTranslations, setRequestLocale } from "next-intl/server";
 import PostList from "@/components/PostList";
 import type { Locale } from "@/i18n/routing";
 import { getDb } from "@/lib/db";
-import { listTickerCalendar, listTickerPosts, normalizeTicker, tickerKnown } from "@/lib/earnings";
+import {
+  companyName,
+  listTickerCalendar,
+  listTickerPosts,
+  normalizeTicker,
+  tickerHasCheck,
+  tickerKnown,
+} from "@/lib/earnings";
 import { pairedAlternates } from "@/lib/seo";
 import { formatDate } from "@/lib/time";
 
@@ -14,9 +21,12 @@ export async function generateMetadata({ params }: PageProps<"/[locale]/t/[ticke
   const ticker = normalizeTicker(raw);
   if (!ticker) return {};
   const t = await getTranslations({ locale, namespace: "earnings" });
+  // A calendar-only company's page is a list of dates: not indexed until it has a check.
+  const checked = await tickerHasCheck(getDb(), ticker);
   return {
     title: t("tickerTitle", { ticker }),
     alternates: pairedAlternates(locale, `/t/${encodeURIComponent(ticker)}`),
+    ...(checked ? {} : { robots: { index: false } }),
   };
 }
 
@@ -38,10 +48,12 @@ export default async function TickerArchive({ params }: PageProps<"/[locale]/t/[
     reported: t("reported"),
   };
   const slot: Record<string, string> = { bmo: t("bmo"), amc: t("amc"), unknown: t("timeUnknown") };
+  const name = companyName(ticker);
 
   return (
     <div className="list-page">
       <h1>{t("tickerTitle", { ticker })}</h1>
+      {name && <p className="meta">{name}</p>}
       <section aria-labelledby="checks">
         <h2 className="section-title" id="checks">
           {t("checks")}
@@ -71,7 +83,7 @@ export default async function TickerArchive({ params }: PageProps<"/[locale]/t/[
                     )}
                     {status[d.status]}
                   </span>
-                  {d.postSlug && (
+                  {d.postSlug ? (
                     <Link
                       className="more"
                       href={`/${locale}/p/${d.postSlug}`}
@@ -79,6 +91,17 @@ export default async function TickerArchive({ params }: PageProps<"/[locale]/t/[
                     >
                       {t("readCheck")} →
                     </Link>
+                  ) : (
+                    d.filingUrl && (
+                      <a
+                        className="more"
+                        href={d.filingUrl}
+                        rel="noopener noreferrer"
+                        aria-label={`${t("secFiling")}: ${formatDate(d.date, locale)}`}
+                      >
+                        {t("secFiling")} ↗
+                      </a>
+                    )
                   )}
                 </span>
               </li>
