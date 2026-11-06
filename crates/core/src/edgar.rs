@@ -26,7 +26,9 @@ const _: () = assert!(
 );
 const ARCHIVES: &str = "https://www.sec.gov/Archives/edgar/data/";
 /// Largest EDGAR response read; a bigger body fails as `TooLarge` without
-/// being read (and parsed) in full.
+/// being read (and parsed) in full. A press release is the exception: its
+/// first `MAX_BYTES` are kept (filings styled inline run past 3 MB, mostly
+/// `style` attributes, and the extraction reads only the opening text).
 pub const MAX_BYTES: usize = 2 * 1024 * 1024;
 
 /// One entry of EDGAR's current-filings feed (`getcurrent`, Atom).
@@ -129,6 +131,11 @@ impl<H: Http, T: Timer> Edgar<H, T> {
     }
 
     async fn get(&self, url: &str) -> Result<String, ProviderError> {
+        self.fetch(url, false).await
+    }
+
+    /// `prefix`: keep the first `MAX_BYTES` of a bigger body instead of failing.
+    async fn fetch(&self, url: &str, prefix: bool) -> Result<String, ProviderError> {
         if self.used.replace(true) {
             self.timer
                 .sleep(std::time::Duration::from_millis(GAP_MS))
@@ -138,12 +145,34 @@ impl<H: Http, T: Timer> Edgar<H, T> {
             ("User-Agent", self.user_agent.as_str()),
             ("Accept-Encoding", "gzip, deflate"),
         ];
-        let r = self.http.get_capped(url, &headers, MAX_BYTES).await?;
+        let r = if prefix {
+            self.http.get_prefix(url, &headers, MAX_BYTES).await?
+        } else {
+            self.http.get_capped(url, &headers, MAX_BYTES).await?
+        };
         if r.status != 200 {
             return Err(ProviderError::Http(r.status));
         }
         Ok(r.body)
     }
+}
+
+/// A press release cut at `MAX_BYTES` ends mid-element, possibly mid-number
+/// ("Total revenues 8,8"), and a cut cell must never verify. A body that
+/// reached the cap is trimmed to its last complete paragraph, row or block.
+fn whole_blocks(mut html: String) -> String {
+    // `get_prefix` drops at most 3 bytes of a split character.
+    if html.len() + 4 <= MAX_BYTES {
+        return html;
+    }
+    let lower = html.to_ascii_lowercase();
+    let end = ["</p>", "</tr>", "</div>", "</table>"]
+        .iter()
+        .filter_map(|tag| lower.rfind(tag).map(|i| i + tag.len()))
+        .max()
+        .unwrap_or(0);
+    html.truncate(end);
+    html
 }
 
 /// `0000320193-26-000070` -> `000032019326000070`.
@@ -368,7 +397,7 @@ impl<H: Http, T: Timer> Filings for Edgar<H, T> {
                 "not an EDGAR archive url: {url}"
             )));
         }
-        let text = html_to_text(&self.get(url).await?);
+        let text = html_to_text(&whole_blocks(self.fetch(url, true).await?));
         if text.is_empty() {
             return Err(ProviderError::Empty);
         }
@@ -537,7 +566,10 @@ pub(crate) mod tests {
         assert_eq!(seen.len(), 3);
         for (_, h) in seen.iter() {
             let ua = h.iter().find(|(k, _)| k == "User-Agent").unwrap();
-            assert_eq!(ua.1, "PreBell/0.1 (+https://prebell.site; ops@prebell.site)");
+            assert_eq!(
+                ua.1,
+                "PreBell/0.1 (+https://prebell.site; ops@prebell.site)"
+            );
         }
         // No pause before the first request, one before each later one.
         assert_eq!(*e.timer.0.borrow(), vec![GAP_MS, GAP_MS]);
@@ -637,6 +669,33 @@ pub(crate) mod tests {
             e.filing_docs(320193, "0000320193-26-000070").await,
             Err(ProviderError::Empty)
         );
+    }
+
+    #[tokio::test]
+    async fn a_large_press_release_keeps_its_opening() {
+        let url = "https://www.sec.gov/Archives/edgar/data/1063761/000110465926123325/ex99-1.htm";
+        let body = format!(
+            "<p>Simon Property Group Reports Third Quarter 2026 Results</p>{}",
+            format!("<p style=\"{}\">x</p>", "margin:0;".repeat(40)).repeat(MAX_BYTES / 300)
+        );
+        assert!(body.len() > MAX_BYTES);
+        let e = edgar(&[(url, 200, &body)]);
+        let text = e.document_text(url).await.unwrap();
+        assert!(text.starts_with("Simon Property Group Reports Third Quarter 2026 Results"));
+    }
+
+    #[test]
+    fn a_cut_press_release_ends_on_a_whole_row() {
+        // The cap falls inside "8,893": the half row is dropped, not "8,8".
+        let head = "<table><tr><td>Total revenues</td><td>1,234</td></tr>".to_string();
+        let filler = "x".repeat(MAX_BYTES - head.len() - "<tr><td>Net income</td><td>8,8".len());
+        let cut = format!("{head}{filler}<tr><td>Net income</td><td>8,8");
+        assert_eq!(cut.len(), MAX_BYTES);
+        let kept = whole_blocks(cut);
+        assert!(kept.ends_with("</tr>"), "{}", &kept[kept.len() - 20..]);
+        assert!(!html_to_text(&kept).contains("8,8"));
+        // A body under the cap is untouched.
+        assert_eq!(whole_blocks("<p>a 8,8".into()), "<p>a 8,8");
     }
 
     #[tokio::test]

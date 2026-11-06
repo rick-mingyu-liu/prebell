@@ -65,6 +65,41 @@ pub trait Http {
         }
         Ok(resp)
     }
+    /// `get` that keeps the first `max_bytes` of the body (cut at a character
+    /// boundary) and drops the rest. Real clients should stop reading at the
+    /// cap; this default trims only after the whole body is in memory.
+    async fn get_prefix(
+        &self,
+        url: &str,
+        headers: &[(&str, &str)],
+        max_bytes: usize,
+    ) -> Result<HttpResp, ProviderError> {
+        let mut resp = self.get(url, headers).await?;
+        let mut end = resp.body.len().min(max_bytes);
+        while !resp.body.is_char_boundary(end) {
+            end -= 1;
+        }
+        resp.body.truncate(end);
+        Ok(resp)
+    }
+}
+
+/// The first `max` bytes of `buf` as text, with a character cut by the cap
+/// dropped. Bytes that are not UTF-8 before the cap are an error.
+pub fn utf8_prefix(mut buf: Vec<u8>, max: usize) -> Result<String, ProviderError> {
+    buf.truncate(max);
+    // At most three bytes of a split character hang past the last boundary.
+    for _ in 0..4 {
+        match String::from_utf8(buf) {
+            Ok(s) => return Ok(s),
+            Err(e) if e.utf8_error().error_len().is_none() => {
+                buf = e.into_bytes();
+                buf.pop();
+            }
+            Err(e) => return Err(ProviderError::Parse(e.to_string())),
+        }
+    }
+    Err(ProviderError::Parse("invalid UTF-8 at the cap".into()))
 }
 
 /// `Http` that counts the requests it sends (failed ones too), shared by
@@ -117,6 +152,15 @@ impl<H: Http> Http for CountingHttp<H> {
     ) -> Result<HttpResp, ProviderError> {
         self.bump();
         self.inner.get_capped(url, headers, max_bytes).await
+    }
+    async fn get_prefix(
+        &self,
+        url: &str,
+        headers: &[(&str, &str)],
+        max_bytes: usize,
+    ) -> Result<HttpResp, ProviderError> {
+        self.bump();
+        self.inner.get_prefix(url, headers, max_bytes).await
     }
 }
 
@@ -232,6 +276,22 @@ mod tests {
         }
     }
 
+    #[test]
+    fn utf8_prefix_drops_a_character_split_by_the_cap() {
+        let s = "ab€".as_bytes().to_vec(); // '€' is 3 bytes
+        assert_eq!(utf8_prefix(s.clone(), 10).unwrap(), "ab€");
+        assert_eq!(utf8_prefix(s.clone(), 5).unwrap(), "ab€");
+        assert_eq!(utf8_prefix(s.clone(), 4).unwrap(), "ab");
+        assert_eq!(utf8_prefix(s, 2).unwrap(), "ab");
+        assert!(utf8_prefix(vec![b'a', 0xff, b'b'], 3).is_err());
+        // A 4-byte character split after any of its first three bytes.
+        let s = "a😀".as_bytes().to_vec();
+        for cap in 2..=4 {
+            assert_eq!(utf8_prefix(s.clone(), cap).unwrap(), "a");
+        }
+        assert_eq!(utf8_prefix(s, 5).unwrap(), "a😀");
+    }
+
     #[tokio::test]
     async fn counting_http_counts_every_request_across_clones() {
         let h = CountingHttp::new(Echo);
@@ -248,7 +308,12 @@ mod tests {
             .is_err());
         // The capped default calls `get` on the inner client once.
         assert!(h2.get_capped("https://c.test", &[], 2).await.is_err());
-        assert_eq!((h.count(), h2.count()), (3, 3));
+        // The prefix keeps the first bytes instead of failing.
+        assert_eq!(
+            h2.get_prefix("https://d.test", &[], 9).await.unwrap().body,
+            "https://d"
+        );
+        assert_eq!((h.count(), h2.count()), (4, 4));
         h.reset();
         assert_eq!(h2.count(), 0);
     }

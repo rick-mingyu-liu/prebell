@@ -36,6 +36,9 @@ const RETRY_MINUTES: i64 = 5;
 const BUILD_DEADLINE_HOURS: i64 = 6;
 /// A filing detected late still gets this long of retries.
 const LATE_DETECTION_HOURS: i64 = 1;
+/// No run gives up before this many builds, so a backlog (one build per
+/// tick) cannot spend a filing's whole window before its first try.
+const MIN_ATTEMPTS: i64 = 3;
 /// Chinese retries stop this long after acceptance.
 const ZH_DEADLINE_HOURS: i64 = 24;
 /// A poll message older than one firing interval is dropped: after a
@@ -245,10 +248,12 @@ fn age(f: &FilingRow, now: DateTime<Utc>) -> Duration {
 }
 
 /// `BUILD_DEADLINE_HOURS` after acceptance, but at least `LATE_DETECTION_HOURS`
-/// after detection, so a filing found late (weekend, outage) still gets retries.
-fn past_deadline(f: &FilingRow, now: DateTime<Utc>) -> bool {
+/// after detection, so a filing found late (weekend, outage) still gets
+/// retries, and never before `MIN_ATTEMPTS` builds.
+fn past_deadline(f: &FilingRow, run: &RunRow, now: DateTime<Utc>) -> bool {
     let detected = parse_iso(&f.detected_at).map_or(Duration::zero(), |t| now - t);
-    age(f, now) >= Duration::hours(BUILD_DEADLINE_HOURS)
+    run.attempts >= MIN_ATTEMPTS
+        && age(f, now) >= Duration::hours(BUILD_DEADLINE_HOURS)
         && detected >= Duration::hours(LATE_DETECTION_HOURS)
 }
 
@@ -299,7 +304,7 @@ pub async fn build_tick(
             }
             // A build that never finishes (the Worker killed mid-build) must
             // not be retried forever.
-            "building" if past_deadline(&f, now) => {
+            "building" if past_deadline(&f, &run, now) => {
                 give_up(now, es, store, &f, run, "the build never finished".into()).await?
             }
             _ if built => continue,
@@ -482,7 +487,7 @@ async fn not_ready(
     if superseded(store, &row.run_key).await? {
         return Ok(TickOutcome::Nothing);
     }
-    if past_deadline(f, now) {
+    if past_deadline(f, &row, now) {
         return give_up(now, es, store, f, row, err).await;
     }
     row.last_error = Some(err.clone());
@@ -852,6 +857,7 @@ mod tests {
     use super::*;
     use crate::cover::{earnings_graphic, earnings_lines};
     use crate::earnings::draft::tests::reply;
+    use crate::earnings::facts::NOT_STATED;
     use crate::earnings::store::MemEarningsStore;
     use crate::earnings::xbrl::tests::aapl_concept;
     use crate::edgar::tests::{EX991, FEED, INDEX};
@@ -881,6 +887,8 @@ mod tests {
         no_exhibit: Cell<bool>,
         /// No XBRL concepts: the facts carry no quarterly trend.
         no_trend: Cell<bool>,
+        /// The exhibit's text, when not the AAPL fixture's.
+        exhibit_text: RefCell<Option<String>>,
     }
     #[async_trait(?Send)]
     impl Filings for FakeFilings {
@@ -900,7 +908,11 @@ mod tests {
             Ok(parse_filing_index(INDEX))
         }
         async fn document_text(&self, _: &str) -> Result<String, ProviderError> {
-            Ok(html_to_text(EX991))
+            Ok(self
+                .exhibit_text
+                .borrow()
+                .clone()
+                .unwrap_or_else(|| html_to_text(EX991)))
         }
         async fn company_concept(
             &self,
@@ -954,12 +966,18 @@ mod tests {
         en_ok: Cell<bool>,
         zh_ok: Cell<bool>,
         drafts: Cell<usize>,
+        /// The release states no revenue (the extraction leaves it out).
+        no_revenue: Cell<bool>,
     }
     #[async_trait(?Send)]
     impl LlmProvider for FakeLlm {
         async fn complete_json(&self, system: &str, _user: &str) -> Result<Value, ProviderError> {
             if system.starts_with("You extract reported figures") {
-                return Ok(serde_json::from_str(EXTRACT_REPLY).unwrap());
+                let mut v: Value = serde_json::from_str(EXTRACT_REPLY).unwrap();
+                if self.no_revenue.get() {
+                    v["metrics"].as_object_mut().unwrap().remove("revenue");
+                }
+                return Ok(v);
             }
             self.drafts.set(self.drafts.get() + 1);
             let (lang, ok) = if system.starts_with("你负责撰写财报速评") {
@@ -968,12 +986,23 @@ mod tests {
                 (Lang::En, self.en_ok.get())
             };
             // 13% is not in the facts.
-            let body = match (lang, ok) {
-                (_, false) => "Services grew 13%.",
-                (Lang::En, true) => "Revenue was $102.5 billion.",
-                (Lang::Zh, true) => "营收1025亿美元。",
+            let body = match (lang, ok, self.no_revenue.get()) {
+                (_, false, _) => "Services grew 13%.",
+                (Lang::En, true, false) => "Revenue was $102.5 billion.",
+                (Lang::Zh, true, false) => "营收1025亿美元。",
+                (Lang::En, true, true) => "GAAP diluted EPS was $1.85.",
+                (Lang::Zh, true, true) => "GAAP摊薄每股收益为1.85美元。",
             };
-            Ok(reply(lang, body))
+            let mut r = reply(lang, body);
+            if self.no_revenue.get() {
+                // The headline and summary cannot cite a revenue figure either.
+                r["title"] = match lang {
+                    Lang::En => "Apple fiscal Q4 2026: GAAP EPS $1.85".into(),
+                    Lang::Zh => "苹果2026财年第四季度GAAP每股收益1.85美元".into(),
+                };
+                r["summary"] = r["sections"][0]["markdown"].clone();
+            }
+            Ok(r)
         }
     }
     fn llm(en_ok: bool, zh_ok: bool) -> FakeLlm {
@@ -981,6 +1010,7 @@ mod tests {
             en_ok: Cell::new(en_ok),
             zh_ok: Cell::new(zh_ok),
             drafts: Cell::new(0),
+            no_revenue: Cell::new(false),
         }
     }
 
@@ -1186,6 +1216,10 @@ mod tests {
         // Accepted 20:30:41Z (16:30 ET); the 6 h build deadline is 02:30:41Z.
         let (base, es, fl) = detected().await;
         fl.no_exhibit.set(true);
+        // One earlier build, so the 02:31 build is the third (`MIN_ATTEMPTS`).
+        let mut r = base.runs.borrow()[KEY].clone();
+        r.attempts = 1;
+        base.runs.borrow_mut().insert(KEY.into(), r);
         let l = llm(true, true);
         let o = build_tick(
             utc("2026-10-31T02:25:00Z"),
@@ -1402,6 +1436,45 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_release_that_states_no_revenue_still_publishes() {
+        let (base, es, fl) = detected().await;
+        // The AAPL release with every revenue line renamed: none left to state.
+        let text = regex::Regex::new(r"(?i)revenues?|net sales")
+            .unwrap()
+            .replace_all(&html_to_text(EX991), "turnover")
+            .into_owned();
+        *fl.exhibit_text.borrow_mut() = Some(text);
+        let l = llm(true, true);
+        l.no_revenue.set(true);
+        let t = poll_time() + Duration::minutes(1);
+        let o = build_tick(t, &es, base.as_ref(), &fl, &l, &|_| {})
+            .await
+            .unwrap();
+        assert_eq!(o, vec![(KEY.to_string(), TickOutcome::Published)]);
+        let f = stored_facts(&base);
+        assert!(matches!(&f.metrics.revenue, Field::Missing { reason } if reason == NOT_STATED));
+        let en = base.translations.borrow()[&(1, "en".to_string())].clone();
+        assert!(!en.body_md.contains("| Revenue |"), "{}", en.body_md);
+    }
+
+    #[tokio::test]
+    async fn a_model_that_skips_a_stated_revenue_retries() {
+        // The AAPL release states revenue; a reply without it is not "not stated".
+        let (base, es, fl) = detected().await;
+        let l = llm(true, true);
+        l.no_revenue.set(true);
+        let t = poll_time() + Duration::minutes(1);
+        let o = build_tick(t, &es, base.as_ref(), &fl, &l, &|_| {})
+            .await
+            .unwrap();
+        assert!(
+            matches!(&o[0].1, TickOutcome::Retrying(e) if e.starts_with("missing revenue")),
+            "{o:?}"
+        );
+        assert!(base.posts.borrow().is_empty());
+    }
+
+    #[tokio::test]
     async fn rebuild_reuses_the_post() {
         let (base, es, fl) = detected().await;
         let l = llm(true, true);
@@ -1461,6 +1534,7 @@ mod tests {
         .await
         .unwrap();
         assert!(o.is_empty());
+        // Past the deadline but only the second build: it keeps retrying.
         let o = build_tick(
             utc("2026-10-31T02:31:00Z"),
             &es,
@@ -1471,8 +1545,21 @@ mod tests {
         )
         .await
         .unwrap();
+        assert!(matches!(o[0].1, TickOutcome::Retrying(_)), "{o:?}");
+        assert!(base.alerts.borrow().is_empty());
+        let o = build_tick(
+            utc("2026-10-31T02:37:00Z"),
+            &es,
+            base.as_ref(),
+            &fl,
+            &l,
+            &|_| {},
+        )
+        .await
+        .unwrap();
         assert_eq!(o[0].1, TickOutcome::Skipped);
         assert_eq!(base.runs.borrow()[KEY].status, "failed");
+        assert_eq!(base.runs.borrow()[KEY].attempts, 3);
         assert_eq!(base.alerts.borrow().len(), 1);
         assert_eq!(base.alerts.borrow()[0].1, "error");
         assert!(
@@ -1816,6 +1903,41 @@ mod tests {
         // The facts are unreadable: the lines come from the pending row.
         assert_eq!(zh_lines(&base), want);
         assert_eq!(es.filings.borrow()[ACC].state, "done");
+    }
+
+    #[tokio::test]
+    async fn a_backlog_still_gets_three_builds() {
+        // Detected promptly, but the first build only ran 7 h later (one
+        // build per tick behind a queue): past every window, yet it retries
+        // until its third build.
+        let (base, es, fl) = detected().await;
+        fl.no_exhibit.set(true);
+        let l = llm(true, true);
+        for (i, at) in ["2026-10-31T03:30:00Z", "2026-10-31T03:36:00Z"]
+            .iter()
+            .enumerate()
+        {
+            let o = build_tick(utc(at), &es, base.as_ref(), &fl, &l, &|_| {})
+                .await
+                .unwrap();
+            assert!(
+                matches!(o[0].1, TickOutcome::Retrying(_)),
+                "build {}: {o:?}",
+                i + 1
+            );
+        }
+        let o = build_tick(
+            utc("2026-10-31T03:42:00Z"),
+            &es,
+            base.as_ref(),
+            &fl,
+            &l,
+            &|_| {},
+        )
+        .await
+        .unwrap();
+        assert_eq!(o[0].1, TickOutcome::Skipped);
+        assert_eq!(base.runs.borrow()[KEY].attempts, 3);
     }
 
     #[tokio::test]

@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use futures::StreamExt;
-use prebell_core::providers::{Http, HttpResp, ProviderError, Timer};
+use prebell_core::providers::{utf8_prefix, Http, HttpResp, ProviderError, Timer};
 use worker::{
     wasm_bindgen::JsValue, AbortController, Delay, Fetch, Headers, Method, Request, RequestInit,
 };
@@ -45,15 +45,17 @@ impl WorkerHttp {
         self.send_capped(method, url, headers, body, None).await
     }
 
-    /// With `max_bytes`, a body over the cap (by `Content-Length` or while
-    /// streaming) fails with `TooLarge` without reading the rest.
+    /// With `Cap::Fail`, a body over the cap (by `Content-Length` or while
+    /// streaming) fails with `TooLarge` without reading the rest; with
+    /// `Cap::Keep`, the first bytes up to the cap are kept and the rest is
+    /// not read.
     async fn send_capped(
         &self,
         method: Method,
         url: &str,
         headers: &[(&str, &str)],
         body: Option<String>,
-        max_bytes: Option<usize>,
+        cap: Option<Cap>,
     ) -> Result<HttpResp, ProviderError> {
         let h = Headers::new();
         for (k, v) in headers {
@@ -76,9 +78,9 @@ impl WorkerHttp {
             .map_err(net)?;
         let status = resp.status_code();
         let set_cookie = resp.headers().get("set-cookie").map_err(net)?;
-        let body = match max_bytes {
+        let body = match cap {
             None => resp.text().await.map_err(net)?,
-            Some(max) => {
+            Some(Cap::Fail(max)) => {
                 let declared = resp.headers().get("content-length").map_err(net)?;
                 if declared.is_some_and(|n| n.parse::<usize>().is_ok_and(|n| n > max)) {
                     return Err(ProviderError::TooLarge(max));
@@ -92,6 +94,22 @@ impl WorkerHttp {
                     }
                 }
                 String::from_utf8(buf).map_err(|e| ProviderError::Parse(e.to_string()))?
+            }
+            Some(Cap::Keep(max)) => {
+                let mut stream = resp.stream().map_err(net)?;
+                let mut buf = Vec::new();
+                while let Some(chunk) = stream.next().await {
+                    buf.extend_from_slice(&chunk.map_err(net)?);
+                    if buf.len() >= max {
+                        // Dropping the guard below aborts the rest of the body.
+                        return Ok(HttpResp {
+                            status,
+                            body: utf8_prefix(buf, max)?,
+                            set_cookie,
+                        });
+                    }
+                }
+                utf8_prefix(buf, max)?
             }
         };
         guard.disarm();
@@ -125,9 +143,26 @@ impl Http for WorkerHttp {
         headers: &[(&str, &str)],
         max_bytes: usize,
     ) -> Result<HttpResp, ProviderError> {
-        self.send_capped(Method::Get, url, headers, None, Some(max_bytes))
+        self.send_capped(Method::Get, url, headers, None, Some(Cap::Fail(max_bytes)))
             .await
     }
+
+    async fn get_prefix(
+        &self,
+        url: &str,
+        headers: &[(&str, &str)],
+        max_bytes: usize,
+    ) -> Result<HttpResp, ProviderError> {
+        self.send_capped(Method::Get, url, headers, None, Some(Cap::Keep(max_bytes)))
+            .await
+    }
+}
+
+/// How `send_capped` treats a body over its size limit.
+#[derive(Clone, Copy)]
+enum Cap {
+    Fail(usize),
+    Keep(usize),
 }
 
 #[derive(Clone, Copy, Default)]

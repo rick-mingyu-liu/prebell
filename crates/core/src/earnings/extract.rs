@@ -8,7 +8,7 @@ use serde::Deserialize;
 use serde_json::Value;
 
 use crate::anchor::{has_word, verify_quote, verify_reason};
-use crate::earnings::facts::{Figure, FiscalPeriod, Metric, Metrics, Note, Unit};
+use crate::earnings::facts::{Figure, FiscalPeriod, Metric, Metrics, Note, Unit, NOT_STATED};
 use crate::facts::{Field, NewsReason};
 use crate::numbers::{extract as extract_numbers, Lang};
 use crate::premarket::draft::reject_markup;
@@ -178,8 +178,18 @@ pub fn verify_figure(text: &str, metric: Metric, raw: &RawFigure) -> Result<Figu
     if extract_numbers(&amount, Lang::En).len() != 1 {
         return Err(format!("amount {amount:?} must hold exactly one number"));
     }
-    let at = whole_match(&quote, &amount)
-        .ok_or_else(|| format!("amount {amount:?} is not in its quote"))?;
+    // A statement often prints "$" on its first row only ("Total revenues
+    // 8,893 9,008"); "$8,893" then names that bare cell.
+    let (amount, at) = match whole_match(&quote, &amount) {
+        Some(at) => (amount, at),
+        None => {
+            let bare = amount.trim_start_matches('$').trim_start().to_string();
+            match whole_match(&quote, &bare) {
+                Some(at) if bare != amount => (bare, at),
+                _ => return Err(format!("amount {amount:?} is not in its quote")),
+            }
+        }
+    };
     let label = &quote[..at];
     if !label.chars().any(char::is_alphabetic) {
         return Err("the quote must start with the row label, not mid-row".into());
@@ -811,6 +821,19 @@ fn verify_period(text: &str, v: &Value) -> Result<FiscalPeriod, String> {
     })
 }
 
+/// The text has a revenue or sales label with a number soon after it, in
+/// the same sentence ("Total revenues 8,893", "Revenue for the third
+/// quarter was a record $8.9 billion"); boilerplate such as "projected
+/// revenues, costs and plans" does not count. Erring towards a match only
+/// keeps revenue required.
+fn states_revenue(text: &str) -> bool {
+    static R: OnceLock<Regex> = OnceLock::new();
+    R.get_or_init(|| {
+        Regex::new(r"(?i)\b(?:revenues?|sales)\b[^.\d]{0,60}\d").expect("valid built-in regex")
+    })
+    .is_match(text)
+}
+
 /// The claimed quarter re-anchored to a line in the exhibit's opening that
 /// names it and the year ("Qualcomm Announces Fourth Quarter and Fiscal 2026
 /// Results"), for when the model's own quote does not verify. Only for a
@@ -912,7 +935,7 @@ pub async fn extract(llm: &dyn LlmProvider, text: &str, company: &str, ticker: &
 
 /// The verification half of `extract`, on an LLM reply.
 pub fn from_reply(text: &str, v: &Value) -> Extracted {
-    let mut metrics = Metrics::all_missing("not stated in the press release");
+    let mut metrics = Metrics::all_missing(NOT_STATED);
     let m = v.get("metrics");
     for metric in Metric::ALL {
         let field = match m.and_then(|m| m.get(metric.key())) {
@@ -934,9 +957,22 @@ pub fn from_reply(text: &str, v: &Value) -> Extracted {
         };
         metrics.set(metric, field);
     }
+    // "Not stated" waives revenue (`missing_required`), so it must mean the
+    // release has none, not that the model skipped it: only when the model
+    // saw the whole release and no revenue line with a number is in it.
+    if matches!(&metrics.revenue, Field::Missing { reason } if reason == NOT_STATED)
+        && (text.chars().count() > MAX_DOC_CHARS || states_revenue(text))
+    {
+        metrics.set(
+            Metric::Revenue,
+            Field::Missing {
+                reason: "the release names a revenue figure the extraction did not give".into(),
+            },
+        );
+    }
     let fiscal_period = match v.get("fiscal_period") {
         None | Some(Value::Null) => Field::Missing {
-            reason: "not stated in the press release".into(),
+            reason: NOT_STATED.into(),
         },
         Some(p) => match verify_period(text, p) {
             Ok(p) => Field::Value(p),
@@ -1004,6 +1040,64 @@ mod tests {
             ),
         )
         .is_ok());
+    }
+
+    #[test]
+    fn revenue_is_not_stated_only_when_the_release_has_none() {
+        let none = json!({"metrics": {}});
+        let reason = |t: &str| match from_reply(t, &none).metrics.revenue {
+            Field::Missing { reason } => reason,
+            Field::Value(_) => panic!("no figure was given"),
+        };
+        // AIG-style: no revenue line; boilerplate without a figure.
+        let aig = "AIG reports third quarter 2026 results. Net income per diluted share $1.92. \
+                   Statements about projected revenues, costs and plans are forward-looking.";
+        assert_eq!(reason(aig), NOT_STATED);
+        // The release has a revenue figure the model left out: still required.
+        assert_ne!(
+            reason("(In millions) Total revenues 8,893 9,008"),
+            NOT_STATED
+        );
+        assert_ne!(reason("Revenue of $102.5 billion, up 8%."), NOT_STATED);
+        assert_ne!(
+            reason("Revenue for the third quarter was a record $8.9 billion."),
+            NOT_STATED
+        );
+        assert_ne!(reason("Net sales\n$4,210"), NOT_STATED);
+        // The model saw only the opening: revenue may sit further down.
+        let long = format!("{aig} {}", "x ".repeat(MAX_DOC_CHARS));
+        assert_ne!(reason(&long), NOT_STATED);
+    }
+
+    #[test]
+    fn a_dollar_amount_matches_a_table_cell_printed_without_the_sign() {
+        // Booking's statement prints "$" on the first row only; the model
+        // still writes the amount as "$8,893".
+        let t = "(In millions) Merchant revenues $ 6,998 $ 6,131\nTotal revenues 8,893 9,008 21,777 20,568";
+        let f = verify_figure(
+            t,
+            Metric::Revenue,
+            &raw(
+                "$8,893",
+                "millions",
+                false,
+                "Total revenues 8,893 9,008 21,777 20,568",
+            ),
+        )
+        .unwrap();
+        assert_eq!(f.value, 8_893e6);
+        // The sign is only dropped to find the cell: the column rule still holds.
+        let e = verify_figure(
+            t,
+            Metric::Revenue,
+            &raw(
+                "$9,008",
+                "millions",
+                false,
+                "Total revenues 8,893 9,008 21,777 20,568",
+            ),
+        );
+        assert!(e.is_err());
     }
 
     #[test]

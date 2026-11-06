@@ -190,7 +190,7 @@ pub fn render_markdown(d: &Draft, f: &EarningsFacts) -> String {
         Lang::En => "| Key figure | This quarter |\n|---|---:|\n",
         Lang::Zh => "| 关键数据 | 本季度 |\n|---|---:|\n",
     });
-    // Only the figures the release gave; revenue and an EPS are required.
+    // Only the figures the release gave; an EPS is required, and revenue is unless the release has none.
     for m in Metric::ALL {
         let Some(fig) = f.metrics.value(m) else {
             continue;
