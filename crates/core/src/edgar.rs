@@ -241,9 +241,26 @@ pub fn head_text(html: &str) -> String {
     quick_text(&html[..html.rfind('>').map_or(0, |i| i + 1)])
 }
 
+/// Tags that style text inside a word or line, not separate it.
+const INLINE_TAGS: [&str; 19] = [
+    "a", "abbr", "b", "big", "code", "del", "em", "font", "i", "ins", "s", "small", "span",
+    "strike", "strong", "sub", "sup", "tt", "u",
+];
+
+/// `tag` (lowercase, from its `<`) opens or closes an inline tag.
+fn is_inline_tag(tag: &str) -> bool {
+    let name = tag
+        .trim_start_matches('<')
+        .trim_start_matches('/')
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .next()
+        .unwrap_or("");
+    INLINE_TAGS.contains(&name)
+}
+
 /// Plain text of HTML on one line, without regexes: scripts, styles,
-/// comments, the head and the hidden inline-XBRL header dropped, every tag a
-/// space, entities decoded, whitespace collapsed. For text that is matched
+/// comments, the head and the hidden inline-XBRL header dropped, every tag
+/// but an inline one a space, entities decoded, whitespace collapsed. For text that is matched
 /// against, not quoted: a cold Worker spends several ms compiling
 /// `html_to_text`'s patterns, and the 6-K reader has 10 ms of CPU in all.
 pub fn quick_text(html: &str) -> String {
@@ -255,8 +272,12 @@ pub fn quick_text(html: &str) -> String {
     while let Some(off) = html[i..].find('<') {
         let at = i + off;
         out.push_str(&html[text_from..at]);
-        out.push(' ');
         let rest = &lower[at..];
+        // Inline tags join their text ("L<span>ondon</span>" is "London");
+        // any other tag separates words.
+        if !is_inline_tag(rest) {
+            out.push(' ');
+        }
         let skip_to = |close: &str| {
             rest.find(close)
                 .map_or(html.len(), |e| at + e + close.len())
@@ -695,6 +716,23 @@ pub(crate) mod tests {
     fn feed_url_pages() {
         assert_eq!(current_feed_url(0), FEED_URL);
         assert!(current_feed_url(200).contains("&start=200&count=100&"));
+    }
+
+    #[test]
+    fn quick_text_joins_inline_tags_and_splits_blocks() {
+        assert_eq!(
+            quick_text("<p>L<span style=\"x\">ondon</span>, <b>August 26</b>, 2026</p><p>Next</p>"),
+            "London, August 26, 2026 Next"
+        );
+        assert_eq!(
+            quick_text("<td>Revenue</td><td>RMB 1,234</td>"),
+            "Revenue RMB 1,234"
+        );
+        assert_eq!(
+            quick_text("a<br>b<div>c</div><!-- x -->d<script>e</script>f"),
+            "a b c d f"
+        );
+        assert_eq!(quick_text("<header>x</header><a href='y>z'>k</a>"), "x k");
     }
 
     #[tokio::test]
