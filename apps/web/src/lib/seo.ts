@@ -29,3 +29,119 @@ export function pairedAlternates(locale: string, path: string): Metadata["altern
     languages: { en: `/en${path}`, "zh-Hans": `/zh${path}`, "x-default": `/en${path}` },
   };
 }
+
+/** The share card for pages without one of their own (1200×630, `public/og-default.png`). */
+export const DEFAULT_CARD = "/og-default.png";
+
+/**
+ * A post's share card: the generator renders `covers/<stem>.svg` to `og/<stem>.png` in R2 (served by
+ * the /og route, which falls back to the default card until it exists). Older raster covers and posts
+ * without a cover use the default card.
+ */
+export function cardPath(coverKey: string | null): string {
+  const stem = coverKey && /^covers\/([a-z0-9-]{1,80})\.svg$/.exec(coverKey)?.[1];
+  return stem ? `/og/${stem}.png` : DEFAULT_CARD;
+}
+
+/** Open Graph locale tags. */
+const OG_LOCALE = { en: "en_US", zh: "zh_CN" } as const;
+
+export interface ShareInput {
+  locale: "en" | "zh";
+  /** Path after the origin, e.g. "/en/p/premarket-2026-10-29"; omitted only by the layout's fallback. */
+  url?: string;
+  title: string;
+  description: string;
+  siteName: string;
+  /** Site path of the card image; the default card when absent. */
+  image?: string;
+  /** Set on posts: og:type article with its times (UTC ISO). */
+  article?: { publishedTime: string | null; modifiedTime: string | null };
+}
+
+/** Open Graph and Twitter card tags in the page's language. Relative URLs resolve against `metadataBase`. */
+export function shareMetadata(s: ShareInput): Pick<Metadata, "openGraph" | "twitter"> {
+  const images = [{ url: s.image ?? DEFAULT_CARD, width: 1200, height: 630, alt: s.title }];
+  const base = {
+    ...(s.url ? { url: s.url } : {}),
+    title: s.title,
+    description: s.description,
+    siteName: s.siteName,
+    locale: OG_LOCALE[s.locale],
+    alternateLocale: OG_LOCALE[s.locale === "en" ? "zh" : "en"],
+    images,
+  };
+  return {
+    openGraph: s.article
+      ? {
+          ...base,
+          type: "article",
+          ...(s.article.publishedTime ? { publishedTime: s.article.publishedTime } : {}),
+          ...(s.article.modifiedTime ? { modifiedTime: s.article.modifiedTime } : {}),
+        }
+      : { ...base, type: "website" },
+    twitter: { card: "summary_large_image", title: s.title, description: s.description, images },
+  };
+}
+
+/** The site owner, as the About page names them (a test keeps the name in step with `author.name`). */
+export const AUTHOR = { name: "Rick Liu", url: "https://rickmingyuliu.com" };
+
+/** The publisher block shared by the article and home markup. */
+function publisher(origin: URL) {
+  return {
+    "@type": "Organization",
+    name: "PreBell",
+    url: new URL("/", origin).href,
+    logo: { "@type": "ImageObject", url: new URL("/apple-icon.png", origin).href, width: 180, height: 180 },
+  };
+}
+
+/** schema.org NewsArticle for a published post. */
+export function newsArticleLd(
+  origin: URL,
+  p: {
+    url: string;
+    headline: string;
+    description: string;
+    image: string;
+    lang: string;
+    publishedAt: string | null;
+    revisedAt: string | null;
+  },
+) {
+  return {
+    "@context": "https://schema.org",
+    "@type": "NewsArticle",
+    mainEntityOfPage: new URL(p.url, origin).href,
+    headline: p.headline,
+    description: p.description,
+    image: [new URL(p.image, origin).href],
+    inLanguage: p.lang,
+    ...(p.publishedAt ? { datePublished: p.publishedAt, dateModified: p.revisedAt ?? p.publishedAt } : {}),
+    author: { "@type": "Person", ...AUTHOR },
+    publisher: publisher(origin),
+  };
+}
+
+/** schema.org Organization and WebSite for the home page. */
+export function homeLd(origin: URL, p: { url: string; name: string; description: string; lang: string }) {
+  return [
+    { "@context": "https://schema.org", ...publisher(origin), founder: { "@type": "Person", ...AUTHOR } },
+    {
+      "@context": "https://schema.org",
+      "@type": "WebSite",
+      name: p.name,
+      ...(p.name === "PreBell" ? {} : { alternateName: "PreBell" }),
+      url: new URL(p.url, origin).href,
+      description: p.description,
+      inLanguage: p.lang,
+      publisher: { "@type": "Organization", name: "PreBell", url: new URL("/", origin).href },
+    },
+  ];
+}
+
+/** JSON for a `<script type="application/ld+json">`: `<` is escaped so text can never close the script. */
+export function jsonLd(data: unknown): string {
+  return JSON.stringify(data).replace(/</g, "\\u003c");
+}

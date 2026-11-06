@@ -187,6 +187,7 @@
   },
   "earnings": {
     "calendarTitle": "Earnings calendar",
+    "calendarDescription": "US earnings dates for the S&P 500 and Nasdaq-100, with confirmed dates, reported results and links to the SEC filings.",
     "weekOf": "Week of {date}",
     "timesEt": "Times US Eastern",
     "legend": "Confirmed: the company announced the date. Unconfirmed: the date comes from an aggregator and may change. Reported: the results are filed with the SEC. The largest companies get an earnings check; for the rest, the calendar links to the SEC filing.",
@@ -202,6 +203,7 @@
     "prevWeek": "Previous week",
     "nextWeek": "Next week",
     "tickerTitle": "{ticker} earnings",
+    "tickerDescription": "{ticker} earnings dates and PreBell earnings checks, with links to the SEC filings.",
     "checks": "Earnings checks",
     "noChecks": "No earnings checks yet.",
     "dates": "Report dates",

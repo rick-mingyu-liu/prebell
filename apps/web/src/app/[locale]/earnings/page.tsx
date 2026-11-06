@@ -5,7 +5,7 @@ import CalendarWeek from "@/components/CalendarWeek";
 import type { Locale } from "@/i18n/routing";
 import { getDb } from "@/lib/db";
 import { addDays, INDEXED_WEEKS, isDate, listCalendarWeek, todayEt, weekStart } from "@/lib/earnings";
-import { pairedAlternates } from "@/lib/seo";
+import { pairedAlternates, shareMetadata } from "@/lib/seo";
 import { formatDate } from "@/lib/time";
 
 function monday(raw: string | string[] | undefined): string {
@@ -16,14 +16,21 @@ function monday(raw: string | string[] | undefined): string {
 export async function generateMetadata({ params, searchParams }: PageProps<"/[locale]/earnings">): Promise<Metadata> {
   const { locale } = await params;
   const week = (await searchParams).week;
-  const t = await getTranslations({ locale, namespace: "earnings" });
+  const t = await getTranslations({ locale });
   const start = monday(week);
   const query = isDate(Array.isArray(week) ? week[0] : week) ? `?week=${start}` : "";
   // The week links go on forever; only weeks near today are worth indexing.
   const distance = Math.abs(Date.parse(start) - Date.parse(weekStart(todayEt()))) / (7 * 86_400_000);
   return {
-    title: t("calendarTitle"),
+    title: t("earnings.calendarTitle"),
     alternates: pairedAlternates(locale, `/earnings${query}`),
+    ...shareMetadata({
+      locale: locale as Locale,
+      url: `/${locale}/earnings${query}`,
+      title: t("earnings.calendarTitle"),
+      description: t("earnings.calendarDescription"),
+      siteName: t("site.name"),
+    }),
     ...(distance > INDEXED_WEEKS ? { robots: { index: false } } : {}),
   };
 }

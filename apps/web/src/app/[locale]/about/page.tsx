@@ -4,13 +4,23 @@ import AuthorBlock from "@/components/AuthorBlock";
 import SignupForm from "@/components/SignupForm";
 import type { Locale } from "@/i18n/routing";
 import { TERMPOCKET_URL } from "@/lib/partners";
-import { pairedAlternates } from "@/lib/seo";
+import { pairedAlternates, shareMetadata } from "@/lib/seo";
 import { signupEnabled } from "@/lib/signup";
 
 export async function generateMetadata({ params }: PageProps<"/[locale]/about">): Promise<Metadata> {
   const { locale } = await params;
-  const t = await getTranslations({ locale, namespace: "about" });
-  return { title: t("title"), alternates: pairedAlternates(locale, "/about") };
+  const t = await getTranslations({ locale });
+  return {
+    title: t("about.title"),
+    alternates: pairedAlternates(locale, "/about"),
+    ...shareMetadata({
+      locale: locale as Locale,
+      url: `/${locale}/about`,
+      title: t("about.title"),
+      description: t("site.tagline"),
+      siteName: t("site.name"),
+    }),
+  };
 }
 
 export default async function About({ params }: PageProps<"/[locale]/about">) {

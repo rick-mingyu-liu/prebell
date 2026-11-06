@@ -187,6 +187,7 @@
   },
   "earnings": {
     "calendarTitle": "财报日历",
+    "calendarDescription": "标普 500 与纳斯达克 100 成分股的美股财报日期，标注已确认日期与已发布业绩，并附 SEC 文件链接。",
     "weekOf": "{date}当周",
     "timesEt": "时间均为美东时间",
     "legend": "已确认：公司已公布日期。未确认：日期来自第三方汇总，可能变动。已发布：业绩已向美国证监会提交。规模最大的公司有财报速评；其余公司在日历中链接至其 SEC 申报文件。",
@@ -202,6 +203,7 @@
     "prevWeek": "上一周",
     "nextWeek": "下一周",
     "tickerTitle": "{ticker} 财报",
+    "tickerDescription": "{ticker} 的财报日期与盘前铃财报速评，并附 SEC 文件链接。",
     "checks": "财报速评",
     "noChecks": "暂无财报速评。",
     "dates": "财报日期",

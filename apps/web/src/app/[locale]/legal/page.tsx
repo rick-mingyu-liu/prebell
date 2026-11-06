@@ -2,7 +2,7 @@ import type { Metadata } from "next";
 import { Fragment } from "react";
 import { getTranslations, setRequestLocale } from "next-intl/server";
 import type { Locale } from "@/i18n/routing";
-import { pairedAlternates } from "@/lib/seo";
+import { pairedAlternates, shareMetadata } from "@/lib/seo";
 import { translator } from "@/lib/translator";
 
 type Section = { h: string; p: string[]; ul?: string[] };
@@ -10,7 +10,18 @@ type Section = { h: string; p: string[]; ul?: string[] };
 export async function generateMetadata({ params }: PageProps<"/[locale]/legal">): Promise<Metadata> {
   const { locale } = await params;
   const t = await getTranslations({ locale, namespace: "legal" });
-  return { title: t("title"), alternates: pairedAlternates(locale, "/legal") };
+  const site = translator(locale as Locale);
+  return {
+    title: t("title"),
+    alternates: pairedAlternates(locale, "/legal"),
+    ...shareMetadata({
+      locale: locale as Locale,
+      url: `/${locale}/legal`,
+      title: t("title"),
+      description: site("site.tagline"),
+      siteName: site("site.name"),
+    }),
+  };
 }
 
 export default async function Legal({ params }: PageProps<"/[locale]/legal">) {

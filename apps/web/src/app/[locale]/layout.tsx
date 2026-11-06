@@ -9,7 +9,7 @@ import { getDb } from "@/lib/db";
 import { todayEt } from "@/lib/earnings";
 import { inter, newsreader } from "@/lib/fonts";
 import { type IndexLineView, loadIndexLine } from "@/lib/indexline";
-import { siteOrigin } from "@/lib/seo";
+import { shareMetadata, siteOrigin } from "@/lib/seo";
 import { datelineAt, formatDate } from "@/lib/time";
 import { translator } from "@/lib/translator";
 import { htmlLang, routing, type Locale } from "@/i18n/routing";
@@ -26,6 +26,8 @@ export async function generateMetadata({ params }: LayoutProps<"/[locale]">): Pr
     metadataBase: await siteOrigin(),
     title: { default: t("name"), template: `%s · ${t("name")}` },
     description: t("tagline"),
+    // The fallback card; every page sets its own.
+    ...shareMetadata({ locale, title: t("name"), description: t("tagline"), siteName: t("name") }),
   };
 }
 

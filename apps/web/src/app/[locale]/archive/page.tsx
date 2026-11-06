@@ -6,7 +6,7 @@ import type { Locale } from "@/i18n/routing";
 import { getDb } from "@/lib/db";
 import { typeLabel } from "@/lib/labels";
 import { CONTENT_TYPES, type ContentType, listPosts, PAGE_SIZE, parseContentType } from "@/lib/posts";
-import { pairedAlternates } from "@/lib/seo";
+import { pairedAlternates, shareMetadata } from "@/lib/seo";
 
 function pageNumber(raw: string | string[] | undefined): number {
   const n = Number(Array.isArray(raw) ? raw[0] : raw);
@@ -29,7 +29,18 @@ export async function generateMetadata({ params, searchParams }: PageProps<"/[lo
   const type = parseContentType(sp.type);
   const t = await getTranslations({ locale });
   const title = type ? `${t("archive.title")} · ${typeLabel(t, type)}` : t("archive.title");
-  return { title, alternates: pairedAlternates(locale, archivePath(type, page)) };
+  const path = archivePath(type, page);
+  return {
+    title,
+    alternates: pairedAlternates(locale, path),
+    ...shareMetadata({
+      locale: locale as Locale,
+      url: `/${locale}${path}`,
+      title,
+      description: t("site.tagline"),
+      siteName: t("site.name"),
+    }),
+  };
 }
 
 export default async function Archive({ params, searchParams }: PageProps<"/[locale]/archive">) {
