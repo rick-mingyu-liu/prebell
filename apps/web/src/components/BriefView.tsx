@@ -11,7 +11,7 @@ import type { Locale } from "../i18n/routing";
 import { briefKind, type BriefData } from "../lib/brief";
 import { pendingTitle, typeLabel } from "../lib/labels";
 import type { PostListItem } from "../lib/posts";
-import { formatDate, formatDayShort, formatEt, formatMonthDay } from "../lib/time";
+import { formatDate, formatDayShort, formatEt, formatEtTime, formatMonthDay } from "../lib/time";
 import { translator } from "../lib/translator";
 import { splitAtMovers, splitTail, trimHead, trimStory } from "../lib/trim";
 
@@ -23,8 +23,8 @@ export interface BriefViewProps {
 }
 
 /**
- * A post page as one reading column: kicker, serif headline, publish time with the checked tag, cover,
- * then the body. A brief with facts leads with its summary, its body loses the tables the facts
+ * A post page as one reading column: kicker, serif headline, publish time (and the update time once
+ * the premarket update rewrote it) with the checked tag, cover, then the body. A brief with facts leads with its summary, its body loses the tables the facts
  * replace, and the movers table sits under the body's movers heading, right before the movers prose;
  * a body without that heading (an older post) and a pending page show the table first under a generic
  * heading. Without facts, and for an earnings check, the body keeps its tables
@@ -78,6 +78,10 @@ export default function BriefView({ data, locale, signup }: BriefViewProps) {
             <time dateTime={post.publishedAt ?? undefined}>
               {t("post.published", { time: formatEt(post.publishedAt, locale) })}
             </time>
+          )}
+          {/* The premarket update rewrites the brief the same morning, so its time of day is enough. */}
+          {!pending && post.revisedAt && (
+            <time dateTime={post.revisedAt}>{t("post.updated", { time: formatEtTime(post.revisedAt, locale) })}</time>
           )}
           <span className="checked">{kind ? t("brief.checked") : t("earnings.checkedFiling")}</span>
         </p>

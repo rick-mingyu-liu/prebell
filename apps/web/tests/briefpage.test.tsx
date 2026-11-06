@@ -26,6 +26,7 @@ const post = (over: Partial<PostView> = {}): PostView => ({
   sources: sourcesEn,
   hasOtherLang: true,
   factsKey: "premarket/2026-10-30.json",
+  revisedAt: null,
   coverKey: null,
   coverLines: null,
   ticker: null,
@@ -319,6 +320,22 @@ describe("BriefView", () => {
     expect(out).not.toContain('id="signup-email-post"');
     expect(out).toContain('class="author"');
     expect(out).toContain('class="adjacent"');
+  });
+
+  it("shows the update time next to the publish time once the brief was updated", () => {
+    const updated = { post: post({ publishedAt: "2026-10-30T12:00:00Z", revisedAt: "2026-10-30T12:35:00Z" }) };
+    const en = render(updated);
+    const meta = en.slice(at(en, '<p class="story-meta">'), at(en, '<span class="checked">'));
+    expect(meta).toBe(
+      '<p class="story-meta"><time dateTime="2026-10-30T12:00:00Z">Published Oct 30, 2026, 8:00 AM ET</time>' +
+        '<time dateTime="2026-10-30T12:35:00Z">Updated 8:35 AM ET</time>',
+    );
+    const zh = render(updated, "zh");
+    expect(zh).toContain('<time dateTime="2026-10-30T12:00:00Z">发布于 2026年10月30日 上午8:00（美东）</time>');
+    expect(zh).toContain('<time dateTime="2026-10-30T12:35:00Z">更新于 上午8:35（美东）</time>');
+    // Not updated: no update line.
+    expect(render()).not.toContain("Updated");
+    expect(render({}, "zh")).not.toContain("更新于");
   });
 
   it("drops the adjacent links when there are no neighbours", () => {
