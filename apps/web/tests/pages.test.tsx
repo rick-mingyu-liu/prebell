@@ -79,9 +79,9 @@ describe("list pages are one paper column", () => {
     const out = renderToStaticMarkup(await pages[1][1]());
     expect(out).toContain('<div class="cal-board">');
     expect(out).toMatch(/<a class="cal-card-link" title="Intel" href="\/en\/p\/earnings-intc-2026-10-29">/);
-    expect(out).toContain('<span class="cal-card-name">Intel</span>');
+    expect(out).toContain('alt="Intel"');
     expect(out).toContain('<span class="cal-card-tick" aria-hidden="true">✓</span>');
-    expect(out).toContain('<span class="cal-card-name">Agilent Technologies</span>');
+    expect(out).toContain('alt="Agilent Technologies"');
     expect(out).toContain("Confirmed: the company announced the date.");
     expect(out).toContain("Times US Eastern. Economy &amp; Fed:");
     expect(out).toContain('<nav class="pager">');
