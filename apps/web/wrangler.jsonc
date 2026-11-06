@@ -23,9 +23,17 @@
       "bucket_name": "prebell-facts"
     }
   ],
+  // prebell.site must be an active zone on this account before this deploys. www is served here too
+  // and redirected to the apex in next.config.ts. The workers.dev URL stays up for links shared before
+  // the domain.
+  "routes": [
+    { "pattern": "prebell.site", "custom_domain": true },
+    { "pattern": "www.prebell.site", "custom_domain": true }
+  ],
+  "workers_dev": true,
   "vars": {
-    // Origin for canonical and hreflang URLs; https://prebell.ai is a placeholder until the domain is bought.
-    "SITE_URL": "https://prebell.ai"
+    // Origin for canonical and hreflang URLs.
+    "SITE_URL": "https://prebell.site"
     // CF_BEACON_TOKEN (Cloudflare Web Analytics) is optional; set it as a var to enable the beacon.
   }
 }

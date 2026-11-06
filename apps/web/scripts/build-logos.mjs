@@ -35,7 +35,7 @@ const SI_VERSION = JSON.parse(readFileSync(join(SI_ROOT, "package.json"), "utf8"
 const SI_DATA = require("simple-icons/icons.json");
 /** The day the pinned simple-icons version was installed; bump together with the package. */
 const FETCHED = "2026-10-30";
-const UA = "PreBell logo build (https://prebell.ai)";
+const UA = "PreBell logo build (https://prebell.site)";
 
 /**
  * Watchlist ticker -> simple-icons slug. Only the company's own corporate mark (or, where noted,
