@@ -653,7 +653,7 @@ fn attempt(
     known: &[&str],
     allowed: &[f64],
     names: &[&str],
-    figure_free: &[&str],
+    figure_free: (&[&str], &[f64]),
 ) -> Result<Draft, Problem> {
     let v = v.map_err(Problem::Llm)?;
     let d = parse(&v, lang, want, known).map_err(Problem::Malformed)?;
@@ -667,19 +667,15 @@ fn attempt(
     };
     check(&blank_names(&text, names), lang, allowed).map_err(numbers)?;
     // Sections that may cite no figure from the facts (a consensus number in
-    // a macro item is allowed elsewhere, never here): only the years the
-    // facts allow; times, dates and month labels are never figures.
-    let years: Vec<f64> = allowed
-        .iter()
-        .copied()
-        .filter(|v| v.fract() == 0.0 && (1900.0..=2100.0).contains(v))
-        .collect();
+    // a macro item is allowed elsewhere, never here): only `figure_free.1`;
+    // times, dates and month labels are never figures.
+    let (free, only) = figure_free;
     for (h, m) in d
         .sections
         .iter()
-        .filter(|(h, _)| figure_free.contains(&h.as_str()))
+        .filter(|(h, _)| free.contains(&h.as_str()))
     {
-        check(&blank_names(m, names), lang, &years)
+        check(&blank_names(m, names), lang, only)
             .map_err(|bad| numbers(bad.into_iter().map(|n| format!("{h}: {n}")).collect()))?;
     }
     Ok(d)
@@ -744,12 +740,19 @@ pub async fn write(
             has_items(&f.watch_list),
         ),
         &all_headings(lang),
-        // "What to watch" states no figure: never a consensus or a result.
-        &[all_headings(lang)[WATCH]],
+        // "What to watch" states no figure, never a consensus or a result:
+        // only the trading year and its neighbours.
+        (&[all_headings(lang)[WATCH]], &trading_years(f)),
         lang,
         |d| render_markdown(d, f),
     )
     .await
+}
+
+/// The trading year and its neighbours ("2026's last quarter").
+fn trading_years(f: &PremarketFacts) -> [f64; 3] {
+    let y = f64::from(chrono::Datelike::year(&f.trading_date));
+    [y - 1.0, y, y + 1.0]
 }
 
 /// Watch-list titles and notes, whose digits ("Apple (AAPL)" aside, "3M
@@ -776,7 +779,7 @@ fn watch_names(w: &Field<Vec<WatchItem>>) -> impl Iterator<Item = &str> {
 /// and the facts JSON plus the `sections_line`, require exactly `headings`
 /// (dropping any other section of `known`), reject markup, check every
 /// number against `allowed` (ignoring the digits of known `names`; the
-/// `figure_free` sections' against the years in `allowed` only), and
+/// `figure_free.0` sections' against `figure_free.1` only), and
 /// retry once with the problems appended. On success returns the draft and
 /// `render(draft)`.
 #[allow(clippy::too_many_arguments)]
@@ -788,7 +791,7 @@ pub(crate) async fn write_with(
     names: &[&str],
     headings: &[&str],
     known: &[&str],
-    figure_free: &[&str],
+    figure_free: (&[&str], &[f64]),
     lang: Lang,
     render: impl Fn(&Draft) -> String,
 ) -> Result<(Draft, String), Vec<String>> {
@@ -1258,6 +1261,59 @@ pub(crate) mod tests {
             "title": "October CPI", "title_zh": "10月CPI", "status": "scheduled"});
         let w: WatchItem = serde_json::from_value(item).unwrap();
         assert!(!w.source_only && w.moved_from.is_none() && w.link.is_none());
+    }
+
+    #[tokio::test]
+    async fn what_to_watch_in_chinese_takes_times_and_months_but_no_figures() {
+        let mut f = facts();
+        f.macro_items = Field::Value(vec![NewsReason {
+            quote: "Economists expect CPI rose 0.3% in October".into(),
+            ..reason("https://news.test/cpi", "CPI preview")
+        }]);
+        f.watch_list = Field::Value(vec![cpi_item("scheduled", None)]);
+        let heads = headings(Lang::Zh, true, false, true);
+        let with_watch = |watch: &str| {
+            Ok(json!({
+                "title": "期货走稳",
+                "summary": "市场等待CPI。",
+                "sections": heads.iter().map(|h| {
+                    let body = if *h == "今日关注" { watch } else { "平静。" };
+                    json!({"heading": h, "markdown": body})
+                }).collect::<Vec<_>>(),
+            }))
+        };
+        let l = llm(vec![
+            with_watch("市场预期10月CPI上涨0.3%。"),
+            with_watch("10月CPI将于上午8:30（美东）公布，是开盘前的关键数据。"),
+        ]);
+        let (d, _) = write(&l, &f, Lang::Zh).await.unwrap();
+        assert_eq!(l.prompts.borrow().len(), 2);
+        assert!(
+            l.prompts.borrow()[1].1.contains("今日关注: 0.3"),
+            "{}",
+            l.prompts.borrow()[1].1
+        );
+        assert!(d
+            .sections
+            .iter()
+            .any(|(h, m)| h == "今日关注" && m.contains("上午8:30（美东）")));
+    }
+
+    #[test]
+    fn figure_free_sections_allow_only_the_trading_years() {
+        // 2000.0 is a figure in the facts (a level), not a year to allow here.
+        let v = json!({"title": "T", "summary": "S", "sections": [
+            {"heading": "A", "markdown": "Futures near 2000 points."}]});
+        let p = attempt(
+            Ok(v),
+            Lang::En,
+            &["A"],
+            &["A"],
+            &[2000.0],
+            &[],
+            (&["A"], &[2025.0, 2026.0, 2027.0]),
+        );
+        assert!(matches!(p, Err(Problem::Numbers(_))));
     }
 
     fn cpi_item(status: &str, release: Option<&str>) -> WatchItem {
@@ -1753,7 +1809,7 @@ pub(crate) mod tests {
             &[],
             &["A", "B"],
             &["A", "B"],
-            &[],
+            (&[], &[]),
             Lang::En,
             |d: &Draft| format!("rendered {}", d.sections.len()),
         )

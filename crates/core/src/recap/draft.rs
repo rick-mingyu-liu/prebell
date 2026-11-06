@@ -254,7 +254,7 @@ pub async fn write(
         &names,
         &wanted(f, lang),
         &headings(lang),
-        &[],
+        (&[], &[]),
         lang,
         |d| render_markdown(d, f),
     )

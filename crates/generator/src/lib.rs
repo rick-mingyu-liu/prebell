@@ -11,7 +11,7 @@ use chrono::{DateTime, Utc};
 use prebell_core::earnings::calendar::{refresh_tick, yahoo_seeding, CalendarSource};
 use prebell_core::earnings::run::{build_tick, poll_job};
 use prebell_core::edgar::{Edgar, BUILD_GAP_MS};
-use prebell_core::events::check::{check_tick, missing_table};
+use prebell_core::events::check::{check_tick, mark_checked, missing_table};
 use prebell_core::events::watch::StoreWatch;
 use prebell_core::jobs::{redact, run_job, JobRunner};
 use prebell_core::llm::{api_key_var, llm_from_env, unknown_provider};
@@ -223,8 +223,10 @@ impl JobRunner for Runner<'_> {
                         Ok(format!("{o:?}"))
                     }
                     // Before migration 0008: nothing to alert, the site and the
-                    // brief run on the snapshot.
+                    // brief run on the snapshot. Marked done for the day, so
+                    // polls stop queuing it until tomorrow.
                     Err(e) if missing_table(&e) => {
+                        mark_checked(store, t).await?;
                         Ok("events: macro_events missing (apply migration 0008); skipped".into())
                     }
                     Err(e) => Err(e),

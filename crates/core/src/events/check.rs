@@ -6,8 +6,8 @@
 //! after an event's time, for the released check alone.
 //!
 //! Free plan per run: 3 schedule fetches plus at most `MAX_RELEASE_CHECKS`
-//! release fetches; 4 D1 queries (marker read and write, one ranged read,
-//! one batch write).
+//! release fetches; 5 D1 queries (marker read and write, one ranged read,
+//! one batch write, the loaded marker).
 
 use std::collections::{BTreeMap, HashMap};
 
@@ -47,6 +47,8 @@ pub const RELEASE_LOOKBACK_DAYS: i64 = 3;
 pub const MAX_RELEASE_CHECKS: usize = 4;
 
 const KV_CHECKED: &str = "events_checked_on";
+/// Set once a daily check has loaded the table (not by the pre-0008 skip).
+const KV_LOADED: &str = "events_loaded_on";
 
 fn iso(t: DateTime<Utc>) -> String {
     t.to_rfc3339_opts(SecondsFormat::Secs, true)
@@ -216,14 +218,18 @@ pub fn reconcile(
         if prev.is_some_and(|r| r.status == "released") {
             continue;
         }
-        // Where the date comes from: a sighting on its page; for kinds no
-        // page is re-read for (minutes, elections, closures), the snapshot.
-        // A page-read kind not sighted (its page failed, or BLS dropped a
-        // past row) keeps the stored date and status, never the snapshot's.
+        // Where the date comes from: a sighting on its page; else the
+        // snapshot, for kinds no page is re-read for (minutes, elections,
+        // closures) and for a page-read row a sighting never moved (so a
+        // snapshot rerun still moves it while its page is unreachable). A
+        // row a sighting moved keeps its date when unsighted (its page
+        // failed, or BLS dropped it once past), never the snapshot's.
         let src = match (sight, prev) {
             (Some(s), _) => Some(s),
             (None, None) => plan.get(id).copied(),
-            (None, Some(_)) => plan.get(id).copied().filter(|p| !read_live(&p.series)),
+            (None, Some(p)) => plan.get(id).copied().filter(|pl| {
+                !read_live(&pl.series) || (p.status != "moved" && p.moved_from.is_none())
+            }),
         };
         let mut r = match (prev, src) {
             (Some(p), _) => p.clone(),
@@ -313,10 +319,12 @@ pub async fn fetch_live(http: &dyn Http, errors: &mut Vec<String>) -> Live {
 /// title or `og:title`).
 fn release_marker(series: &str) -> Option<&'static str> {
     match series {
-        "jobs" => Some("Employment Situation"),
-        "cpi" => Some("Consumer Price Index"),
-        "fomc" => Some("FOMC statement"),
-        "fomc_minutes" => Some("FOMC Minutes"),
+        // Title forms: "Consumer Price Index" alone is also in the BLS site
+        // navigation (its 404 page too).
+        "jobs" => Some("Employment Situation News Release"),
+        "cpi" => Some("Consumer Price Index News Release"),
+        "fomc" => Some("issues FOMC statement"),
+        "fomc_minutes" => Some("FOMC Minutes, "),
         _ => None,
     }
 }
@@ -380,6 +388,18 @@ pub fn missing_table(err: &str) -> bool {
     err.contains("no such table: macro_events")
 }
 
+/// Records the daily check as done for `now`'s ET date (the Worker also
+/// calls it when the table is missing, so polls stop queuing the check).
+pub async fn mark_checked(es: &dyn EarningsStore, now: DateTime<Utc>) -> Result<(), String> {
+    es.kv_set(KV_CHECKED, &ymd(et(now).date_naive()), &iso(now))
+        .await
+}
+
+/// The ET date a daily check last loaded the table, `None` if none ever did.
+pub async fn last_loaded(es: &dyn EarningsStore) -> Result<Option<String>, String> {
+    es.kv_get(KV_LOADED).await
+}
+
 /// Whether the daily check already ran on `now`'s ET date.
 pub async fn checked_today(es: &dyn EarningsStore, now: DateTime<Utc>) -> Result<bool, String> {
     let today = ymd(et(now).date_naive());
@@ -415,7 +435,7 @@ pub async fn check_tick(
     if out.daily {
         // Marked before the pages: a failing page must not be fetched again
         // every poll. After the read, so a D1 failure retries the day.
-        es.kv_set(KV_CHECKED, &ymd(today), &iso(now)).await?;
+        mark_checked(es, now).await?;
     }
     let mut changed: BTreeMap<String, EventRow> = BTreeMap::new();
     if out.daily {
@@ -457,6 +477,9 @@ pub async fn check_tick(
     if !changed.is_empty() {
         let rows: Vec<EventRow> = changed.into_values().collect();
         ev.write_events(&rows).await?;
+    }
+    if out.daily {
+        es.kv_set(KV_LOADED, &ymd(today), &iso(now)).await?;
     }
     Ok(out)
 }
@@ -735,6 +758,15 @@ mod tests {
             .await
             .is_empty());
         assert_eq!(http.urls().len(), 1);
+        // A soft error page that only names the index in its navigation.
+        let nav = FakeHttp::with(&[(
+            cpi_release,
+            200,
+            "<nav>Consumer Price Index</nav> Page Not Found",
+        )]);
+        assert!(check_releases(utc("2026-11-10T13:31:00Z"), &rows, &nav, 4)
+            .await
+            .is_empty());
         // A 200 that is not the release (a bot wall) marks nothing.
         let wall = FakeHttp::with(&[(cpi_release, 200, "<title>Access Denied</title>")]);
         assert!(check_releases(utc("2026-11-10T13:31:00Z"), &rows, &wall, 4)
@@ -768,6 +800,33 @@ mod tests {
         let later = live_cpi(vec![plan("bls:cpi:2026-12", "cpi", "2027-01-13", None)]);
         let out = reconcile(utc("2026-12-16T11:00:00Z"), &snap, &later, &moved);
         assert!(out.iter().all(|r| r.id != "bls:cpi:2026-11"), "{out:?}");
+    }
+
+    #[test]
+    fn an_unreachable_page_still_lets_a_snapshot_rerun_move_a_row() {
+        let old_snap = vec![plan(
+            "bls:cpi:2026-11",
+            "cpi",
+            "2026-12-10",
+            Some("2026-12-10T13:30:00Z"),
+        )];
+        let rows = reconcile(utc(NOW), &old_snap, &Live::default(), &[]);
+        // A shutdown: the rerun snapshot says Dec 17; BLS still answers 403.
+        let new_snap = vec![plan(
+            "bls:cpi:2026-11",
+            "cpi",
+            "2026-12-17",
+            Some("2026-12-17T13:30:00Z"),
+        )];
+        let out = reconcile(utc(NOW), &new_snap, &Live::default(), &rows);
+        assert_eq!(
+            (
+                out[0].status.as_str(),
+                out[0].et_date.as_str(),
+                out[0].moved_from.as_deref()
+            ),
+            ("moved", "2026-12-17", Some("2026-12-10"))
+        );
     }
 
     #[test]
@@ -831,8 +890,12 @@ mod tests {
             assert!(rows.contains_key("us:election:2028-11-07"));
             assert_eq!(rows["bls:cpi:2026-10"].status, "confirmed");
         }
-        // One ranged read and one batch write.
+        // One ranged read and one batch write; the brief now trusts the table.
         assert_eq!(ev.calls.get(), 2);
+        assert_eq!(
+            last_loaded(&es).await.unwrap().as_deref(),
+            Some("2026-11-06")
+        );
 
         // Later the same day: no pages, releases only.
         let http = FakeHttp::default();

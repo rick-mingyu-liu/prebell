@@ -7,7 +7,7 @@ use async_trait::async_trait;
 use chrono::{DateTime, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
 
-use super::check::{check_releases, new_row};
+use super::check::{check_releases, last_loaded, new_row};
 use super::store::{EventRow, EventStore};
 use super::{et_time, has_release, note, planned, title, TIER_NOTABLE};
 use crate::budget::allows;
@@ -111,14 +111,22 @@ impl WatchSource for StoreWatch<'_> {
         budget: &dyn Fn() -> usize,
     ) -> Field<Vec<WatchItem>> {
         let day = date.format("%Y-%m-%d").to_string();
-        // Without the table, before its first check fills it, or on a D1
-        // error, the snapshot still gives the day's events, as scheduled.
-        let mut rows = match self.events.events_between(&day, &day).await {
-            Ok(r) if !r.is_empty() => r,
-            _ => planned(date, date)
+        // Without the table, on a D1 error, or before the first check filled
+        // it, the snapshot still gives the day's events, as scheduled. Once a
+        // check has run, an empty day is empty (an event may have moved away).
+        let snapshot = || {
+            planned(date, date)
                 .iter()
                 .map(|p| new_row(p, now))
-                .collect(),
+                .collect()
+        };
+        let mut rows = match self.events.events_between(&day, &day).await {
+            Ok(r) if !r.is_empty() => r,
+            Ok(r) => match last_loaded(self.earnings).await {
+                Ok(None) => snapshot(),
+                _ => r,
+            },
+            Err(_) => snapshot(),
         };
         let used = budget();
         let fetches = (0..=BRIEF_RELEASE_CHECKS)
@@ -363,6 +371,42 @@ mod tests {
             items[0].link.as_deref(),
             Some("https://www.bls.gov/schedule/news_release/cpi.htm")
         );
+    }
+
+    #[tokio::test]
+    async fn an_event_moved_away_is_not_listed_on_its_old_day() {
+        // CPI moved from Nov 10 to Nov 13; the check has run.
+        let ev = seeded();
+        {
+            let mut rows = ev.rows.borrow_mut();
+            let r = rows.get_mut("bls:cpi:2026-10").unwrap();
+            r.et_date = "2026-11-13".into();
+            r.starts_at = Some("2026-11-13T13:30:00Z".into());
+            r.status = "moved".into();
+            r.moved_from = Some("2026-11-10".into());
+        }
+        let es = MemEarningsStore::default();
+        es.kv_set("events_loaded_on", "2026-11-09", "x")
+            .await
+            .unwrap();
+        let http = Http200::default();
+        let w = StoreWatch {
+            events: &ev,
+            earnings: &es,
+            http: &http,
+        };
+        assert!(matches!(
+            w.watch_list(d("2026-11-10"), utc("2026-11-10T13:00:00Z"), &|| 0)
+                .await,
+            Field::Missing { .. }
+        ));
+        let Field::Value(items) = w
+            .watch_list(d("2026-11-13"), utc("2026-11-13T13:00:00Z"), &|| 0)
+            .await
+        else {
+            panic!("missing");
+        };
+        assert_eq!(items[0].moved_from.as_deref(), Some("2026-11-10"));
     }
 
     #[tokio::test]
