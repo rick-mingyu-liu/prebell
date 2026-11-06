@@ -108,10 +108,83 @@ pub fn label_keywords(m: Metric) -> &'static [&'static str] {
     }
 }
 
+/// Words naming a part of the company or a share of it held by others: a
+/// segment, a consolidating (by-entity) table, joint ventures and other
+/// investees, a pro-rata share, the noncontrolling interests.
+const PARTS: &[&str] = &[
+    "segment",
+    "segments",
+    "intersegment",
+    "eliminations",
+    "consolidating",
+    "joint venture",
+    "joint ventures",
+    "unconsolidated",
+    "equity method",
+    "equity-method",
+    "pro-rata",
+    "pro rata",
+    "our share",
+    "noncontrolling",
+    "non-controlling",
+    "minority interest",
+    "minority interests",
+];
+
+/// The part of the company `s` names, if any. A row's own label or group
+/// line (`row`) also may not name discontinued operations, "NCI", or (but
+/// for a per-share figure: "Earnings per share of common stock") a "share
+/// of" something; a table title may, as a statement covers those rows too.
+fn part_named(m: Metric, s: &str, row: bool) -> Option<&'static str> {
+    let per_share = matches!(m, Metric::EpsGaap | Metric::EpsNonGaap);
+    let row_parts: &[&'static str] = match (row, per_share) {
+        (false, _) => &[],
+        (true, true) => &["discontinued", "nci"],
+        (true, false) => &["discontinued", "nci", "share of"],
+    };
+    PARTS
+        .iter()
+        .chain(row_parts)
+        .find(|w| has_word(s, w))
+        .copied()
+}
+
+/// A line longer than this is prose, not a table's label.
+const PROSE_CHARS: usize = 200;
+
+/// A line with words and no figures: digits only in years, month days,
+/// footnote markers ("(1)", "(a)") and words such as "Q3" or "Ohio(a)";
+/// not prose.
+fn label_only(s: &str) -> bool {
+    static R: OnceLock<Regex> = OnceLock::new();
+    let r = R.get_or_init(|| {
+        Regex::new(r"(?i)\b(?:19|20)\d\d\b|'\d\d\b|\b(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?\s+\d{1,2}\b|\(\w{1,2}\)|\w*[a-z]\d+\w*|\b\d+[a-z]\w*")
+            .expect("valid built-in regex")
+    });
+    s.len() <= PROSE_CHARS
+        && s.chars().any(char::is_alphabetic)
+        && !r.replace_all(s, "").contains(|c: char| c.is_ascii_digit())
+}
+
 /// The quote names the metric: its label holds one of `label_keywords`
-/// (per-share figures may say "per share" right after the amount), and a
-/// per-share quote is never about a dividend.
+/// (per-share figures may say "per share" right after the amount), a
+/// per-share quote is never about a dividend, and the label names no part
+/// of the company (`part_named`) and is no "Less:"/"Add:" adjustment row.
 fn names_metric(m: Metric, label: &str, after: &str) -> Result<(), String> {
+    static ADJUSTMENT: OnceLock<Regex> = OnceLock::new();
+    let adjustment = ADJUSTMENT
+        .get_or_init(|| Regex::new(r"(?i)^\s*(?:less|add|plus)\b").expect("valid built-in regex"));
+    if let Some(w) = part_named(m, label, true) {
+        return Err(format!(
+            "the quote's label names {w:?}, a part of the company"
+        ));
+    }
+    if adjustment.is_match(label) {
+        return Err(
+            "a \"Less:\" or \"Add:\" row adjusts a total; it is a part of the company's figure"
+                .into(),
+        );
+    }
     let lower = label.to_ascii_lowercase();
     if matches!(m, Metric::EpsGaap | Metric::EpsNonGaap)
         && (lower.contains("dividend") || after.to_ascii_lowercase().contains("dividend"))
@@ -223,6 +296,9 @@ pub fn verify_figure(text: &str, metric: Metric, raw: &RawFigure) -> Result<Figu
             if !col.is_some_and(|col| current_column(table.as_ref(), &quote, &cells, col)) {
                 return Err(CURRENT_COLUMN.into());
             }
+            if let Some(e) = table.as_ref().and_then(|t| t.part_of_company(metric, true)) {
+                return Err(e);
+            }
             // The row's label, without the earlier columns.
             let row = &label[..label
                 .find(|c: char| c.is_ascii_digit())
@@ -272,12 +348,17 @@ pub fn verify_figure(text: &str, metric: Metric, raw: &RawFigure) -> Result<Figu
                         .is_some_and(|&(s, _)| no_words(at + amount.len(), s)),
                     _ => no_words(cells[col - 1].1, at),
                 };
-                if in_row {
-                    let lines = Lines::new(text);
-                    let table = Table::find(&lines, &quote);
-                    if !current_column(table.as_ref(), &quote, &cells, col) {
-                        return Err(CURRENT_COLUMN.into());
-                    }
+                let lines = Lines::new(text);
+                let table = Table::find(&lines, &quote);
+                if in_row && !current_column(table.as_ref(), &quote, &cells, col) {
+                    return Err(CURRENT_COLUMN.into());
+                }
+                // A lone per-share cell may be prose: only its group counts.
+                if let Some(e) = table
+                    .as_ref()
+                    .and_then(|t| t.part_of_company(metric, in_row))
+                {
+                    return Err(e);
                 }
             }
             1.0
@@ -466,6 +547,98 @@ impl<'a> Table<'a> {
             [] => None,
             [first, rest @ ..] => Some(*first && rest.iter().all(|&q| q)),
         }
+    }
+
+    /// Why the quote's table or row group is about a part of the company,
+    /// if it is. The table's head is the nearest period line above the
+    /// quote (a year header or period labels), else its scale heading. Its
+    /// title (up to six label lines right above the head) and the head may
+    /// not name a part (`PARTS`: SPG's "Joint Venture Combined Statements",
+    /// DUK's "Consolidating" tables, CVS's "... segment" and segment
+    /// reconciliation, QCOM's "Segment Results"); the column labels right
+    /// below the head may not name one either, but for "segment": AMD's
+    /// "Segment and Disaggregated Revenue Information" lists segments as
+    /// rows over the company's total. The label line right above the row,
+    /// its group, may not name a part (`part_named` for a row: DUK's
+    /// "Income (loss) from discontinued operations ..." over "Basic and
+    /// Diluted $0.02"), nor per-share rows for a figure that is not one.
+    /// Not `whole`: the group only, of a quote that starts its line.
+    fn part_of_company(&self, m: Metric, whole: bool) -> Option<String> {
+        static LENGTH: OnceLock<Regex> = OnceLock::new();
+        let length = LENGTH.get_or_init(|| {
+            Regex::new(r"(?i)\b(?:months|weeks|quarters?|years?|q[1-4]|ytd|year-to-date)\b")
+                .expect("valid built-in regex")
+        });
+        let l = self.lines;
+        let (top, at) = (l.line_of(self.heading_at), l.line_of(self.quote_at));
+        if !whole && l.starts[at] != self.quote_at {
+            return None;
+        }
+        let line = |i: usize| l.line(i, self.quote_at);
+        if whole {
+            // A lone "September 30, 2025" heads a block within the table.
+            let period_line = |s: &str| {
+                header_years(s, false).is_some()
+                    || (label_only(s) && period_words_only(s) && length.is_match(&strip_parens(s)))
+            };
+            let head_above = |below: usize| {
+                (top..below)
+                    .rev()
+                    .find(|&i| i == top || period_line(line(i)))
+                    .unwrap_or(top)
+            };
+            // A period label right under a row ("Nine Months Ended" in CVS's
+            // segment reconciliation) starts a block of the table above.
+            let mut head = head_above(at);
+            for _ in 0..4 {
+                let block = head > top
+                    && header_years(line(head), false).is_none()
+                    && line(head - 1).len() <= PROSE_CHARS
+                    && !label_only(line(head - 1));
+                if !block {
+                    break;
+                }
+                head = head_above(head);
+            }
+            // Up to a row of figures; a description in between is skipped.
+            let title = (0..head)
+                .rev()
+                .take(6)
+                .map(line)
+                .filter(|s| s.len() <= PROSE_CHARS)
+                .take_while(|s| label_only(s))
+                .chain(Some(line(head)).filter(|s| label_only(s)))
+                .find_map(|s| part_named(m, s, false));
+            let columns = (head + 1..at)
+                .map(line)
+                .take_while(|s| label_only(s))
+                .find_map(|s| part_named(m, s, false).filter(|w| !w.starts_with("segment")));
+            if let Some(w) = title.or(columns) {
+                return Some(format!("the table is about {w:?}, a part of the company"));
+            }
+        }
+        let group = at
+            .checked_sub(1)
+            .filter(|&i| i > top)
+            .map(line)
+            .filter(|s| label_only(s))?;
+        if let Some(w) = part_named(m, group, true) {
+            return Some(format!(
+                "the row's group {group:?} names {w:?}, a part of the company"
+            ));
+        }
+        let per_share = [
+            "per share",
+            "per common share",
+            "per diluted share",
+            "earnings per",
+        ];
+        if !matches!(m, Metric::EpsGaap | Metric::EpsNonGaap)
+            && per_share.iter().any(|w| has_word(group, w))
+        {
+            return Some(format!("the row's group {group:?} lists per-share figures"));
+        }
+        None
     }
 }
 
@@ -1262,6 +1435,241 @@ mod tests {
             let r = verify_figure(&t, Metric::Revenue, &raw(amount, "millions", false, q));
             assert_eq!(r.is_ok(), ok, "{q}: {r:?}");
         }
+    }
+
+    #[test]
+    fn rows_naming_a_part_of_the_company_are_rejected() {
+        // DUK's statement: the noncontrolling interests' share, a "Less:"
+        // row and the discontinued operations' EPS are not the company's.
+        let periods =
+            "Three Months Ended September 30, Nine Months Ended September 30,\n2026 2025 2026 2025";
+        let duk = format!("DUKE ENERGY CORPORATION\nCONDENSED CONSOLIDATED STATEMENTS OF OPERATIONS\n(Unaudited)\n(In millions, except per share amounts)\n{periods}\nOperating Revenues\nTotal operating revenues 9,104 8,542 25,874 24,299\nNet Income 1,650 1,454 4,372 3,865\nLess: Net Income Attributable to NCI 85 33 165 81\nNet Income Attributable to Duke Energy Corporation 1,565 1,421 4,207 3,784\nNet Income Available to Duke Energy Corporation Common Stockholders $1,551 $1,407 $4,164 $3,743\nEarnings Per Share – Basic and Diluted\nIncome from continuing operations available to Duke Energy Corporation common stockholders\nBasic and Diluted $1.99 $1.81 $5.32 $4.81\nIncome (loss) from discontinued operations attributable to Duke Energy Corporation common stockholders\nBasic and Diluted $ — $ — $0.02 $ —\nNet income available to Duke Energy Corporation common stockholders\nBasic and Diluted $1.99 $1.81 $5.34 $4.81");
+        let ok = |t: &str, m: Metric, amount: &str, scale: &str, q: &str| {
+            let r = verify_figure(t, m, &raw(amount, scale, false, q));
+            assert!(r.is_ok(), "{m:?} {q:?}: {r:?}");
+        };
+        let bad = |t: &str, m: Metric, amount: &str, scale: &str, negative: bool, q: &str| {
+            let r = verify_figure(t, m, &raw(amount, scale, negative, q));
+            assert!(
+                r.unwrap_err().contains("part of the company"),
+                "{m:?} {q:?}"
+            );
+        };
+        ok(
+            &duk,
+            Metric::Revenue,
+            "9,104",
+            "millions",
+            "Total operating revenues 9,104 8,542 25,874 24,299",
+        );
+        ok(
+            &duk,
+            Metric::NetIncome,
+            "1,650",
+            "millions",
+            "Net Income 1,650 1,454 4,372 3,865",
+        );
+        ok(
+            &duk,
+            Metric::NetIncome,
+            "1,565",
+            "millions",
+            "Net Income Attributable to Duke Energy Corporation 1,565 1,421 4,207 3,784",
+        );
+        ok(&duk, Metric::NetIncome, "$1,551", "millions", "Net Income Available to Duke Energy Corporation Common Stockholders $1,551 $1,407 $4,164 $3,743");
+        ok(
+            &duk,
+            Metric::EpsGaap,
+            "$1.99",
+            "units",
+            "Basic and Diluted $1.99 $1.81 $5.32 $4.81",
+        );
+        ok(
+            &duk,
+            Metric::EpsGaap,
+            "$1.99",
+            "units",
+            "Basic and Diluted $1.99 $1.81 $5.34 $4.81",
+        );
+        bad(
+            &duk,
+            Metric::NetIncome,
+            "85",
+            "millions",
+            false,
+            "Less: Net Income Attributable to NCI 85 33 165 81",
+        );
+        bad(
+            &duk,
+            Metric::EpsGaap,
+            "$0.02",
+            "units",
+            false,
+            "Basic and Diluted $ — $ — $0.02 $ —",
+        );
+        // SO and SPG: the noncontrolling interests' net income.
+        let so = format!("(In millions)\n{periods}\nNet income attributable to noncontrolling interests 28 (4) 32 24\nNet income attributable to Southern Company $2,046 $1,711 $4,577 $3,925");
+        bad(
+            &so,
+            Metric::NetIncome,
+            "28",
+            "millions",
+            false,
+            "Net income attributable to noncontrolling interests 28 (4) 32 24",
+        );
+        ok(
+            &so,
+            Metric::NetIncome,
+            "$2,046",
+            "millions",
+            "Net income attributable to Southern Company $2,046 $1,711 $4,577 $3,925",
+        );
+        // SPG: "Our Share" and third parties' share of a joint venture's net
+        // income; a per-share row under its group label is not net income.
+        let spg = format!("(Dollars in thousands, except per share amounts)\n{periods}\nNet loss (gain) attributable to noncontrolling interest holders in properties 20,716 (1,231) 8,695 34\nThird-Party Investors’ Share of Net Income $257,552 $110,051 $516,134 $314,298\nOur Share of Net Income 247,391 107,526 495,157 302,181\nNET INCOME ATTRIBUTABLE TO COMMON STOCKHOLDERS $498,959 $606,174 $1,461,668 $1,576,006\nBASIC AND DILUTED EARNINGS PER COMMON SHARE:\nNet income attributable to common stockholders $1.54 $1.86 $4.51 $4.83");
+        for (amount, q) in [
+            ("20,716", "Net loss (gain) attributable to noncontrolling interest holders in properties 20,716 (1,231) 8,695 34"),
+            ("$257,552", "Third-Party Investors’ Share of Net Income $257,552 $110,051 $516,134 $314,298"),
+            ("247,391", "Our Share of Net Income 247,391 107,526 495,157 302,181"),
+            ("$1.54", "Net income attributable to common stockholders $1.54 $1.86 $4.51 $4.83"),
+        ] {
+            let r = verify_figure(&spg, Metric::NetIncome, &raw(amount, "thousands", false, q));
+            assert!(r.is_err(), "{q}: {r:?}");
+        }
+        ok(&spg, Metric::NetIncome, "$498,959", "thousands", "NET INCOME ATTRIBUTABLE TO COMMON STOCKHOLDERS $498,959 $606,174 $1,461,668 $1,576,006");
+        // AMD: a segment's revenue in prose.
+        let t = "•Data Center segment revenue was a record $8.5 billion, up 97% year-over-year.";
+        bad(t, Metric::Revenue, "$8.5 billion", "units", false, t);
+    }
+
+    #[test]
+    fn tables_of_a_part_of_the_company_are_rejected() {
+        let periods =
+            "Three Months Ended September 30, Nine Months Ended September 30,\n2026 2025 2026 2025";
+        let bad = |t: &str, m: Metric, amount: &str, scale: &str, negative: bool, q: &str| {
+            let r = verify_figure(t, m, &raw(amount, scale, negative, q));
+            assert!(
+                r.unwrap_err().contains("part of the company"),
+                "{m:?} {q:?}"
+            );
+        };
+        // SPG's joint ventures' combined statement, and its pro-rata table
+        // whose columns are the noncontrolling interests and "Our Share".
+        let jv = format!("EARNINGS RELEASE\nSimon Property Group, Inc.\nUnaudited Joint Venture Combined Statements of Operations\n(Dollars in thousands)\n{periods}\nREVENUE:\nLease income $954,138 $758,148 $2,813,583 $2,265,844\nTotal revenue 1,056,910 868,249 3,125,244 2,582,952\nNET INCOME $504,943 $217,577 $1,011,291 $616,479");
+        bad(
+            &jv,
+            Metric::Revenue,
+            "1,056,910",
+            "thousands",
+            false,
+            "Total revenue 1,056,910 868,249 3,125,244 2,582,952",
+        );
+        bad(
+            &jv,
+            Metric::NetIncome,
+            "$504,943",
+            "thousands",
+            false,
+            "NET INCOME $504,943 $217,577 $1,011,291 $616,479",
+        );
+        let pro_rata = "Table of Contents\nNON-GAAP PRO-RATA FINANCIAL INFORMATION\n(In thousands)\nThree Months Ended September 30, 2026 Three Months Ended September 30, 2025\nNoncontrolling Interests (1) Our Share of Joint Ventures Noncontrolling Interests (1) Our Share of Joint Ventures\nREVENUE:\nLease income $(28,490) $440,899 $(17,604) $357,737\nTotal revenue (30,716) 491,726 (19,776) 413,656";
+        bad(
+            pro_rata,
+            Metric::Revenue,
+            "(30,716)",
+            "thousands",
+            true,
+            "Total revenue (30,716) 491,726 (19,776) 413,656",
+        );
+        // DUK's consolidating statement and segment income tables: by-entity
+        // columns, the first a segment or a subsidiary.
+        let duk = "DUKE ENERGY CORPORATION\nCONDENSED CONSOLIDATING STATEMENTS OF OPERATIONS\n(Unaudited)\nThree Months Ended September 30, 2026\n(In millions) Electric Utilities and Infrastructure Gas Utilities and Infrastructure Other Eliminations/Adjustments Duke Energy\nOperating Revenues\nRegulated electric $8,691 $ — $ — $(14) $8,677\nTotal operating revenues 8,747 390 41 (74) 9,104";
+        bad(
+            duk,
+            Metric::Revenue,
+            "8,747",
+            "millions",
+            false,
+            "Total operating revenues 8,747 390 41 (74) 9,104",
+        );
+        let duk = "22\nELECTRIC UTILITIES AND INFRASTRUCTURE\nCONDENSED CONSOLIDATING SEGMENT INCOME\n(Unaudited)\nThree Months Ended September 30, 2026\n(In millions) Duke Energy Carolinas Duke Energy Progress Duke Energy Florida Duke Energy Ohio(a) Duke Energy Indiana Eliminations/ Other Electric Utilities and Infrastructure\nOperating Revenues $3,055 $2,242 $1,867 $591 $1,108 $(116) $8,747";
+        bad(
+            duk,
+            Metric::Revenue,
+            "$3,055",
+            "millions",
+            false,
+            "Operating Revenues $3,055 $2,242 $1,867 $591 $1,108 $(116) $8,747",
+        );
+        // CVS's segment reconciliation, under the previous table's heading.
+        let cvs = "In millions, except per share amounts Total Company Per Common Share Total Company Per Common Share\nAdjusted income attributable to CVS Health (2) $9,313 $7.24 $7,185 $5.66\n14\nSupplemental Information\n(Unaudited)\nThe following are reconciliations of financial measures of the Company’s segments to the consolidated totals:\nIn millions Health Care Benefits Health Services Pharmacy & Consumer Wellness Corporate/ Other Intersegment Eliminations (a) Consolidated Totals\nThree Months Ended\nSeptember 30, 2026\nTotal revenues $36,855 $53,964 $35,498 $205 $(18,123) $108,399";
+        bad(
+            cvs,
+            Metric::Revenue,
+            "$36,855",
+            "millions",
+            false,
+            "Total revenues $36,855 $53,964 $35,498 $205 $(18,123) $108,399",
+        );
+        // CVS's own segment tables, a description between title and
+        // periods, and its reconciliation's later blocks, which do not
+        // repeat the column labels.
+        let cvs_segment = "•Days claims payable were 41.9 days as of September 30, 2026, an increase of 0.2 days compared to June 30, 2026.\n3\nHealth Services segment\nThe Health Services segment provides a full range of pharmacy benefit management solutions, delivers health care services in its medical clinics, virtually, and in the home, and offers specialty pharmacy, infusion and other services.\nThree Months Ended September 30, Nine Months Ended September 30,\nIn millions 2026 2025 Change 2026 2025 Change\nTotal revenues $53,964 $49,266 $4,698 $153,996 $139,181 $14,815";
+        let t = format!("(In millions, except per share amounts)\n{cvs_segment}");
+        bad(
+            &t,
+            Metric::Revenue,
+            "$53,964",
+            "millions",
+            false,
+            "Total revenues $53,964 $49,266 $4,698 $153,996 $139,181 $14,815",
+        );
+        let t = format!("{cvs}\nAdjusted operating income (loss) (1) 912 2,106 1,635 (459) — 4,194\nSeptember 30, 2025\nTotal revenues $35,993 $49,266 $36,214 $133 $(18,735) $102,871");
+        bad(
+            &t,
+            Metric::Revenue,
+            "$35,993",
+            "millions",
+            false,
+            "Total revenues $35,993 $49,266 $36,214 $133 $(18,735) $102,871",
+        );
+        let t = format!("{t}\nAdjusted operating income (loss) (1) 314 2,050 1,478 (383) — 3,459\nNine Months Ended\nSeptember 30, 2026\nTotal revenues $110,364 $153,996 $101,303 $478 $(51,220) $314,921");
+        bad(
+            &t,
+            Metric::Revenue,
+            "$110,364",
+            "millions",
+            false,
+            "Total revenues $110,364 $153,996 $101,303 $478 $(51,220) $314,921",
+        );
+        // QCOM's segment results.
+        let qcom = "Segment Results\nFourth Quarter\nQCT QTL\n(in millions, except percentages) Q4 Fiscal 2026 Q4 Fiscal 2025 Change Q4 Fiscal 2026 Q4 Fiscal 2025 Change\nRevenues $9,015 $9,821 (8%) $1,304 $1,409 (7%)";
+        bad(
+            qcom,
+            Metric::Revenue,
+            "$9,015",
+            "millions",
+            false,
+            "Revenues $9,015 $9,821 (8%) $1,304 $1,409 (7%)",
+        );
+        // The company's own statements still verify.
+        let spg = format!("EARNINGS RELEASE\nSimon Property Group, Inc.\nUnaudited Consolidated Statements of Operations\n(Dollars in thousands, except per share amounts)\n{periods}\nREVENUE:\nLease income $1,681,393 $1,452,930 $4,969,633 $4,199,812\nTotal revenue 1,814,556 1,601,572 5,362,247 4,573,043");
+        let q = "Total revenue 1,814,556 1,601,572 5,362,247 4,573,043";
+        let f = verify_figure(
+            &spg,
+            Metric::Revenue,
+            &raw("1,814,556", "thousands", false, q),
+        );
+        assert_eq!(f.unwrap().value, 1.814556e9);
+        let qcom = "Reconciliations of GAAP Results to Non-GAAP Results\nGAAP to Non-GAAP Reconciliation\n(in millions, except per share data and percentages) GAAP Results Less QSI Less Share-Based Compensation Less Other Items1, 2 Non-GAAP Results\nQ4 Fiscal 2026\nRevenues $10,322 $— $— ($120) $10,442";
+        let q = "Revenues $10,322 $— $— ($120) $10,442";
+        let f = verify_figure(qcom, Metric::Revenue, &raw("$10,322", "millions", false, q));
+        assert_eq!(f.unwrap().value, 10.322e9);
+        // AMD lists its segments as rows over the company's total.
+        let amd = "(In millions, except per share amounts)\nCash and cash equivalents $7,404 $4,808 $7,404 $4,808\n10\nADVANCED MICRO DEVICES, INC.\nSELECTED CORPORATE DATA\n(Millions) (Unaudited)\nThree Months Ended Nine Months Ended\nSeptember 26, 2026 June 27, 2026 September 27, 2025 September 26, 2026 September 27, 2025\nSegment and Disaggregated Revenue Information (1)\nNet Revenue:\nData Center Segment $8,546 $6,718 $4,341 $21,039 $11,255\nClient and Gaming Segment\nClient 2,949 3,062 2,750 8,896 7,543\nGaming 773 779 1,298 2,272 3,067\nTotal Client and Gaming 3,722 3,841 4,048 11,168 10,610\nEmbedded Segment 1,109 977 857 2,959 2,504\nTotal net revenue $13,377 $11,536 $9,246 $35,166 $24,369";
+        let q = "Total net revenue $13,377 $11,536 $9,246 $35,166 $24,369";
+        let f = verify_figure(amd, Metric::Revenue, &raw("$13,377", "millions", false, q));
+        assert_eq!(f.unwrap().value, 13.377e9);
     }
 
     #[test]
