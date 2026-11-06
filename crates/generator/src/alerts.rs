@@ -9,10 +9,24 @@ pub use crate::store::AlertRec;
 /// Fetch subrequests an invocation may use before alert delivery stops:
 /// under the Free plan's 50, with room for redirects.
 pub const SUBREQUEST_CEILING: usize = 45;
+/// D1 queries per invocation on the Free plan (a batch is one).
+pub const D1_LIMIT: usize = 50;
+/// D1 queries one delivery makes, however many alerts it posts: the read and
+/// one update marking them all sent.
+pub const DELIVERY_D1: usize = 2;
+/// Alerts posted per invocation at most; the rest wait for the next one
+/// (every 5 minutes in the polling window). Also keeps the update's
+/// `IN (...)` list under D1's 100 bound values.
+pub const MAX_ALERTS: usize = 20;
 
-/// Webhook posts left for this invocation after `used` fetch subrequests.
-pub fn delivery_budget(used: usize) -> usize {
-    SUBREQUEST_CEILING.saturating_sub(used)
+/// Webhook posts left for this invocation after the jobs used `fetches`
+/// fetch subrequests and `d1` D1 queries: at most `MAX_ALERTS`, and none
+/// when delivery's own `DELIVERY_D1` queries would pass `D1_LIMIT`.
+pub fn delivery_budget(fetches: usize, d1: usize) -> usize {
+    if d1 + DELIVERY_D1 > D1_LIMIT {
+        return 0;
+    }
+    SUBREQUEST_CEILING.saturating_sub(fetches).min(MAX_ALERTS)
 }
 
 /// The unsent alert rows (D1 in production).
@@ -20,7 +34,8 @@ pub fn delivery_budget(used: usize) -> usize {
 pub trait AlertQueue {
     /// At most `limit` unsent alerts, oldest first.
     async fn unsent_alerts(&self, limit: usize) -> Result<Vec<AlertRec>, String>;
-    async fn mark_alert_sent(&self, id: i64) -> Result<(), String>;
+    /// Marks all of `ids` sent in one query.
+    async fn mark_alerts_sent(&self, ids: &[i64]) -> Result<(), String>;
 }
 
 /// Discord rejects `content` over 2000 characters; keep a margin.
@@ -44,9 +59,10 @@ fn payload(content: &str) -> serde_json::Value {
     })
 }
 
-/// Posts up to `max` unsent alerts (see `delivery_budget`), oldest first;
-/// marks each sent only on a 2xx response. The rest stay unsent for the
-/// next invocation, as do all of them without a webhook URL.
+/// Posts up to `max` unsent alerts (see `delivery_budget`), oldest first,
+/// then marks the ones that got a 2xx response sent, in one query. The rest
+/// stay unsent for the next invocation, as do all of them without a webhook
+/// URL.
 pub async fn deliver(store: &dyn AlertQueue, http: &dyn Http, webhook: Option<&str>, max: usize) {
     let Some(url) = webhook.filter(|u| !u.is_empty()) else {
         return;
@@ -58,7 +74,8 @@ pub async fn deliver(store: &dyn AlertQueue, http: &dyn Http, webhook: Option<&s
         Ok(a) => a,
         Err(e) => return console_error!("reading alerts failed: {e}"),
     };
-    for a in alerts {
+    let mut sent = Vec::new();
+    for a in alerts.into_iter().take(max.min(MAX_ALERTS)) {
         let content = format!(
             "{}: {}: {}",
             a.level,
@@ -67,14 +84,17 @@ pub async fn deliver(store: &dyn AlertQueue, http: &dyn Http, webhook: Option<&s
         );
         let body = payload(&content);
         match http.post_json(url, &[], &body).await {
-            Ok(r) if (200..300).contains(&r.status) => {
-                if let Err(e) = store.mark_alert_sent(a.id).await {
-                    console_error!("marking alert {} sent failed: {e}", a.id);
-                }
-            }
+            Ok(r) if (200..300).contains(&r.status) => sent.push(a.id),
             Ok(r) => console_warn!("alert {} webhook returned {}", a.id, r.status),
             Err(e) => console_warn!("alert {} webhook failed: {e}", a.id),
         }
+    }
+    if sent.is_empty() {
+        return;
+    }
+    // A failure here posts these alerts again next time: a duplicate, never a loss.
+    if let Err(e) = store.mark_alerts_sent(&sent).await {
+        console_error!("marking alerts {sent:?} sent failed: {e}");
     }
 }
 
@@ -85,11 +105,14 @@ mod tests {
     use prebell_core::providers::{HttpResp, ProviderError};
     use std::cell::RefCell;
 
-    /// `n` unsent alerts; records the limit asked for and the ids marked sent.
+    /// `n` unsent alerts; records the limit asked for, the ids marked sent
+    /// and each marking call.
+    #[derive(Default)]
     struct Queue {
         n: i64,
         limits: RefCell<Vec<usize>>,
         sent: RefCell<Vec<i64>>,
+        marks: RefCell<usize>,
     }
     #[async_trait(?Send)]
     impl AlertQueue for Queue {
@@ -106,8 +129,9 @@ mod tests {
                 })
                 .collect())
         }
-        async fn mark_alert_sent(&self, id: i64) -> Result<(), String> {
-            self.sent.borrow_mut().push(id);
+        async fn mark_alerts_sent(&self, ids: &[i64]) -> Result<(), String> {
+            *self.marks.borrow_mut() += 1;
+            self.sent.borrow_mut().extend(ids);
             Ok(())
         }
     }
@@ -132,31 +156,62 @@ mod tests {
         }
     }
 
+    fn queue(n: i64) -> Queue {
+        Queue {
+            n,
+            ..Default::default()
+        }
+    }
+
     #[tokio::test]
     async fn delivery_fits_the_invocation_budget() {
-        let q = Queue {
-            n: 10,
-            limits: RefCell::new(vec![]),
-            sent: RefCell::new(vec![]),
-        };
+        let q = queue(10);
         let hook = Hook(RefCell::new(0));
         // A poll used 40 fetches: 5 alerts go now, 5 wait for the next invocation.
-        deliver(&q, &hook, Some("https://hook.test"), delivery_budget(40)).await;
+        deliver(&q, &hook, Some("https://hook.test"), delivery_budget(40, 8)).await;
         assert_eq!(*hook.0.borrow(), 5);
         assert_eq!(*q.limits.borrow(), [5]);
         assert_eq!(*q.sent.borrow(), [1, 2, 3, 4, 5]);
-        deliver(&q, &hook, Some("https://hook.test"), delivery_budget(0)).await;
+        deliver(&q, &hook, Some("https://hook.test"), delivery_budget(0, 0)).await;
         assert_eq!(*q.sent.borrow(), (1..=10).collect::<Vec<_>>());
         // At or past 45 nothing is read or posted.
-        let q = Queue {
-            n: 3,
-            limits: RefCell::new(vec![]),
-            sent: RefCell::new(vec![]),
-        };
-        deliver(&q, &hook, Some("https://hook.test"), delivery_budget(45)).await;
-        deliver(&q, &hook, Some("https://hook.test"), delivery_budget(60)).await;
+        let q = queue(3);
+        deliver(&q, &hook, Some("https://hook.test"), delivery_budget(45, 0)).await;
+        deliver(&q, &hook, Some("https://hook.test"), delivery_budget(60, 0)).await;
         assert!(q.limits.borrow().is_empty() && q.sent.borrow().is_empty());
-        assert_eq!(delivery_budget(46), 0);
+        assert_eq!(delivery_budget(46, 0), 0);
+    }
+
+    #[tokio::test]
+    async fn a_backlog_goes_out_twenty_at_a_time_with_one_update_each() {
+        // 60 unsent alerts (a webhook outage) after a poll of 1 fetch and 8
+        // D1 queries: one-update-per-alert would have been 8 + 1 + 44 = 53 D1
+        // queries, over the Free plan's 50.
+        let q = queue(60);
+        let hook = Hook(RefCell::new(0));
+        for round in 1..=3 {
+            deliver(&q, &hook, Some("https://hook.test"), delivery_budget(1, 8)).await;
+            assert_eq!(q.sent.borrow().len(), 20 * round);
+            assert_eq!(*q.marks.borrow(), round, "one update per delivery");
+        }
+        assert_eq!(*q.limits.borrow(), [MAX_ALERTS; 3]);
+        assert_eq!(*q.sent.borrow(), (1..=60).collect::<Vec<_>>());
+        // With nothing posted, nothing is marked.
+        deliver(&q, &hook, Some("https://hook.test"), delivery_budget(1, 8)).await;
+        assert_eq!(*q.marks.borrow(), 3);
+    }
+
+    #[test]
+    fn delivery_never_passes_the_d1_limit() {
+        // The jobs' queries plus delivery's 2 stay at or under 50.
+        assert_eq!(delivery_budget(0, D1_LIMIT - DELIVERY_D1), MAX_ALERTS);
+        assert_eq!(delivery_budget(0, D1_LIMIT - DELIVERY_D1 + 1), 0);
+        assert_eq!(delivery_budget(0, 60), 0);
+        for d1 in 0..=60 {
+            if delivery_budget(0, d1) > 0 {
+                assert!(d1 + DELIVERY_D1 <= D1_LIMIT);
+            }
+        }
     }
 
     #[test]

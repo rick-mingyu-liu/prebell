@@ -258,8 +258,9 @@ impl JobRunner for Runner<'_> {
 async fn queue(batch: MessageBatch<Job>, env: Env, _ctx: Context) -> Result<()> {
     let store = D1Store::new(env.d1("DB")?, env.bucket("FACTS")?);
     let http = CountingHttp::new(WorkerHttp);
-    // Fetch subrequests this invocation has used (Free plan: 50).
-    let mut used = 0;
+    // Fetch subrequests and D1 queries this invocation has used (Free plan:
+    // 50 each).
+    let (mut used, mut used_d1) = (0, 0);
 
     for msg in batch.messages()? {
         let body = msg.body();
@@ -285,18 +286,16 @@ async fn queue(batch: MessageBatch<Job>, env: Env, _ctx: Context) -> Result<()> 
         }
         // Free plan: fetch subrequests and D1 queries this job used (50 each
         // per invocation).
-        console_log!(
-            "subrequests={} d1={} job={job}",
-            http.count(),
-            store.reset_queries()
-        );
+        let d1 = store.reset_queries();
+        console_log!("subrequests={} d1={d1} job={job}", http.count());
         used += http.count();
+        used_d1 += d1;
         msg.ack();
     }
 
     http.reset();
     // Whatever the jobs left of the budget; the rest wait for the next invocation.
-    let budget = alerts::delivery_budget(used);
+    let budget = alerts::delivery_budget(used, used_d1);
     alerts::deliver(
         &store,
         &http,

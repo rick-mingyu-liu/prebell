@@ -176,9 +176,14 @@ impl crate::alerts::AlertQueue for D1Store {
         r.results::<AlertRec>().map_err(|e| err(sql, e))
     }
 
-    async fn mark_alert_sent(&self, id: i64) -> Result<(), String> {
-        self.run("UPDATE alerts SET sent = 1 WHERE id = ?1", &[int(id)])
-            .await
+    async fn mark_alerts_sent(&self, ids: &[i64]) -> Result<(), String> {
+        let marks: Vec<String> = (1..=ids.len()).map(|i| format!("?{i}")).collect();
+        let sql = format!(
+            "UPDATE alerts SET sent = 1 WHERE id IN ({})",
+            marks.join(", ")
+        );
+        let args: Vec<JsValue> = ids.iter().map(|id| int(*id)).collect();
+        self.run(&sql, &args).await
     }
 }
 
