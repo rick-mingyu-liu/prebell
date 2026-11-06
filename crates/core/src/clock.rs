@@ -98,10 +98,19 @@ fn hm(h: u32, m: u32) -> NaiveTime {
     NaiveTime::from_hms_opt(h, m, 0).expect("valid built-in time")
 }
 
-/// Premarket brief: 08:30-09:25 ET on every trading day.
+/// Premarket brief: 08:00-09:25 ET on every trading day.
 pub fn premarket_window(_day: DayKind) -> Window {
     Window {
-        start: hm(8, 30),
+        start: hm(8, 0),
+        end: hm(9, 25),
+    }
+}
+
+/// Premarket update: 08:35-09:25 ET, once the 8:30 ET economic releases
+/// are out, on every trading day.
+pub fn premarket_update_window(_day: DayKind) -> Window {
+    Window {
+        start: hm(8, 35),
         end: hm(9, 25),
     }
 }
@@ -138,10 +147,16 @@ pub fn decide(now_utc: DateTime<Utc>, window: impl Fn(DayKind) -> Window) -> Slo
     }
 }
 
-/// Decides whether `now_utc` is inside the 08:30:00 <= ET < 09:25:00 premarket window
+/// Decides whether `now_utc` is inside the 08:00:00 <= ET < 09:25:00 premarket window
 /// on a trading day.
 pub fn premarket_decision(now_utc: DateTime<Utc>) -> SlotDecision {
     decide(now_utc, premarket_window)
+}
+
+/// Decides whether `now_utc` is inside the premarket update window on a
+/// trading day.
+pub fn premarket_update_decision(now_utc: DateTime<Utc>) -> SlotDecision {
+    decide(now_utc, premarket_update_window)
 }
 
 /// Decides whether `now_utc` is inside the recap window on a trading day.
@@ -182,17 +197,32 @@ mod tests {
     #[test]
     fn dst_day_only_one_cron_counts() {
         assert!(matches!(
-            premarket_decision(utc("2026-11-02T13:30:00Z")),
+            premarket_decision(utc("2026-11-02T13:00:00Z")),
             SlotDecision::InWindow { .. }
         ));
         assert_eq!(
-            premarket_decision(utc("2026-11-02T12:30:00Z")),
+            premarket_decision(utc("2026-11-02T12:00:00Z")),
             SlotDecision::TooEarly
         );
         assert!(matches!(
-            premarket_decision(utc("2026-10-30T12:30:00Z")),
+            premarket_decision(utc("2026-10-30T12:00:00Z")),
             SlotDecision::InWindow { .. }
         ));
+    }
+
+    #[test]
+    fn premarket_opens_at_8_et() {
+        // EDT: 08:00 ET = 12:00Z; EST: 08:00 ET = 13:00Z.
+        for (before, at) in [
+            ("2026-10-30T11:59:59Z", "2026-10-30T12:00:00Z"),
+            ("2026-11-02T12:59:59Z", "2026-11-02T13:00:00Z"),
+        ] {
+            assert_eq!(premarket_decision(utc(before)), SlotDecision::TooEarly);
+            assert!(matches!(
+                premarket_decision(utc(at)),
+                SlotDecision::InWindow { .. }
+            ));
+        }
     }
 
     #[test]
@@ -224,6 +254,42 @@ mod tests {
             premarket_decision(utc("2026-10-30T13:25:00Z")),
             SlotDecision::PastDeadline { .. }
         ));
+    }
+
+    #[test]
+    fn premarket_update_window_edt_and_est() {
+        // EDT: 08:35 ET = 12:35Z, 09:25 ET = 13:25Z.
+        assert_eq!(
+            premarket_update_decision(utc("2026-10-29T12:34:59Z")),
+            SlotDecision::TooEarly
+        );
+        assert_eq!(
+            premarket_update_decision(utc("2026-10-29T12:35:00Z")),
+            SlotDecision::InWindow {
+                trading_date: d("2026-10-29")
+            }
+        );
+        assert_eq!(
+            premarket_update_decision(utc("2026-10-29T13:25:00Z")),
+            SlotDecision::PastDeadline {
+                trading_date: d("2026-10-29")
+            }
+        );
+        // EST: 08:35 ET = 13:35Z; the early-close day keeps the same window.
+        assert_eq!(
+            premarket_update_decision(utc("2026-11-02T12:35:00Z")),
+            SlotDecision::TooEarly
+        );
+        for t in ["2026-11-02T13:35:00Z", "2026-11-27T14:20:00Z"] {
+            assert!(matches!(
+                premarket_update_decision(utc(t)),
+                SlotDecision::InWindow { .. }
+            ));
+        }
+        assert_eq!(
+            premarket_update_decision(utc("2026-11-26T13:35:00Z")),
+            SlotDecision::NotToday
+        );
     }
 
     #[test]

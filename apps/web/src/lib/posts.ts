@@ -48,6 +48,8 @@ export interface PostView extends PostCover {
   hasOtherLang: boolean;
   /** R2 key of the post's facts JSON (`FACTS` bucket), if the generator stored one. */
   factsKey: string | null;
+  /** When the premarket update rewrote the post (UTC ISO), or null; `publishedAt` stays the first publish. */
+  revisedAt: string | null;
 }
 
 /** A post's heading data: a `PostView` without the body and its sources. */
@@ -84,6 +86,7 @@ interface Row extends CoverRow {
   body_md?: string | null;
   other_status: string | null;
   facts_r2_key: string | null;
+  revised_at: string | null;
 }
 
 /** Columns every post SELECT adds; `f` is the LEFT JOINed `earnings_filings`. */
@@ -113,8 +116,8 @@ export function toCover(r: CoverRow): PostCover {
 // pending while the EN text is published — the page then links to English.
 const VISIBLE = `(t.status = 'published' OR (t.lang = 'zh' AND t.status = 'pending' AND o.status = 'published'))`;
 
-const HEAD_COLUMNS = `p.id, p.slug, p.content_type, p.trading_date, p.published_at, p.facts_r2_key, t.status, t.title,
-  t.summary, o.status AS other_status, ${COVER_COLUMNS}`;
+const HEAD_COLUMNS = `p.id, p.slug, p.content_type, p.trading_date, p.published_at, p.revised_at, p.facts_r2_key, t.status,
+  t.title, t.summary, o.status AS other_status, ${COVER_COLUMNS}`;
 const FROM_VIEW = `FROM posts p
 JOIN post_translations t ON t.post_id = p.id AND t.lang = ?
 LEFT JOIN post_translations o ON o.post_id = p.id AND o.lang = ?
@@ -154,6 +157,7 @@ function toHead(row: Row): PostHead {
     status: row.status === "pending" ? "pending" : "published",
     hasOtherLang: row.other_status === "published",
     factsKey: row.facts_r2_key,
+    revisedAt: row.revised_at,
     ...toCover(row),
   };
 }

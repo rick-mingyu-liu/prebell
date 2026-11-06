@@ -22,6 +22,7 @@ const lead = (over: Partial<PostHead> = {}): PostHead => ({
   status: "published",
   hasOtherLang: true,
   factsKey: "premarket/2026-10-30.json",
+  revisedAt: null,
   coverKey: "covers/premarket-2026-10-30.png",
   coverLines: ["S&P futures −1.14%", "Intel −26%"],
   ticker: null,

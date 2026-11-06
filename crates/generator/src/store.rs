@@ -52,6 +52,7 @@ struct PostRec {
     facts_r2_key: Option<String>,
     published_at: Option<String>,
     cover_key: Option<String>,
+    revised_at: Option<String>,
 }
 
 impl From<PostRec> for PostRow {
@@ -66,6 +67,7 @@ impl From<PostRec> for PostRow {
             facts_r2_key: p.facts_r2_key.unwrap_or_default(),
             published_at: p.published_at,
             cover_key: p.cover_key,
+            revised_at: p.revised_at,
         }
     }
 }
@@ -81,6 +83,87 @@ struct TrRec {
     updated_at: Option<String>,
     cover_line1: Option<String>,
     cover_line2: Option<String>,
+}
+
+/// A `post_translations` upsert of the row `$rows` gives (`?1`-`?9`).
+macro_rules! upsert_translation {
+    ($rows:literal) => {
+        concat!(
+            "INSERT INTO post_translations (post_id, lang, status, title, summary, body_md, updated_at, cover_line1, cover_line2) ",
+            $rows,
+            " ON CONFLICT(post_id, lang) DO UPDATE SET status = excluded.status, title = excluded.title, \
+             summary = excluded.summary, body_md = excluded.body_md, updated_at = excluded.updated_at, \
+             cover_line1 = excluded.cover_line1, cover_line2 = excluded.cover_line2"
+        )
+    };
+}
+
+const UPSERT_TRANSLATION: &str = upsert_translation!("VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)");
+/// Writes only while post `?1` exists with `revised_at IS ?10`. The WHERE
+/// also keeps SQLite from reading `ON CONFLICT` as a join constraint.
+const UPSERT_TRANSLATION_AT_REVISION: &str = upsert_translation!(
+    "SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9 \
+     WHERE EXISTS (SELECT 1 FROM posts WHERE id = ?1 AND revised_at IS ?10)"
+);
+
+fn translation_args(t: &TranslationRow) -> [JsValue; 9] {
+    [
+        int(t.post_id),
+        s(&t.lang),
+        s(&t.status),
+        s(&t.title),
+        s(&t.summary),
+        s(&t.body_md),
+        s(&t.updated_at),
+        opt(t.cover_line1.as_deref()),
+        opt(t.cover_line2.as_deref()),
+    ]
+}
+
+/// `UPSERT_TRANSLATION_AT_REVISION`'s arguments.
+fn at_revision_args(t: &TranslationRow, revised_at: Option<&str>) -> Vec<JsValue> {
+    let mut args = translation_args(t).to_vec();
+    args.push(opt(revised_at));
+    args
+}
+
+const INSERT_SOURCE: &str =
+    "INSERT INTO sources (post_id, url, title, quote) VALUES (?1, ?2, ?3, ?4)";
+/// `INSERT_SOURCE`, only while post `?1` exists.
+const INSERT_SOURCE_OF_POST: &str = "INSERT INTO sources (post_id, url, title, quote) \
+     SELECT ?1, ?2, ?3, ?4 WHERE EXISTS (SELECT 1 FROM posts WHERE id = ?1)";
+
+/// `upsert_post`. `revised_at` is written on insert and kept on conflict:
+/// only `revise_post` changes it.
+const UPSERT_POST: &str =
+    "INSERT INTO posts (run_key, content_type, template_id, trading_date, slug, facts_r2_key, published_at, cover_key, revised_at) \
+     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9) \
+     ON CONFLICT(run_key) DO UPDATE SET content_type = excluded.content_type, \
+     template_id = excluded.template_id, trading_date = excluded.trading_date, slug = excluded.slug, \
+     facts_r2_key = excluded.facts_r2_key, published_at = excluded.published_at, \
+     cover_key = excluded.cover_key \
+     RETURNING id";
+
+/// `revise_post`'s first statement; every other column, `published_at` included, is kept.
+const REVISE_POST: &str =
+    "UPDATE posts SET facts_r2_key = ?1, cover_key = ?2, revised_at = ?3 WHERE id = ?4";
+
+/// Rows a statement changed; 0 when D1 does not say.
+fn changes(r: &worker::D1Result) -> usize {
+    r.meta().ok().flatten().and_then(|m| m.changes).unwrap_or(0)
+}
+
+/// Runs `stmts` as one D1 batch, which is one transaction.
+async fn batch(
+    db: &D1Database,
+    ctx: &str,
+    stmts: Vec<worker::D1PreparedStatement>,
+) -> Result<Vec<worker::D1Result>, String> {
+    let results = db.batch(stmts).await.map_err(|e| err(ctx, e))?;
+    match results.iter().find(|r| !r.success()) {
+        Some(r) => Err(format!("{ctx}: {}", r.error().unwrap_or_default())),
+        None => Ok(results),
+    }
 }
 
 #[derive(Deserialize)]
@@ -200,7 +283,7 @@ impl Store for D1Store {
 
     async fn get_post_by_run(&self, run_key: &str) -> Result<Option<PostRow>, String> {
         let r: Option<PostRec> = self.first(
-            "SELECT id, run_key, content_type, template_id, trading_date, slug, facts_r2_key, published_at, cover_key \
+            "SELECT id, run_key, content_type, template_id, trading_date, slug, facts_r2_key, published_at, cover_key, revised_at \
              FROM posts WHERE run_key = ?1",
             &[s(run_key)],
         )
@@ -213,7 +296,7 @@ impl Store for D1Store {
         content_type: &str,
         trading_date: &str,
     ) -> Result<Vec<PostRow>, String> {
-        let sql = "SELECT id, run_key, content_type, template_id, trading_date, slug, facts_r2_key, published_at, cover_key \
+        let sql = "SELECT id, run_key, content_type, template_id, trading_date, slug, facts_r2_key, published_at, cover_key, revised_at \
                    FROM posts WHERE content_type = ?1 AND trading_date = ?2 AND published_at IS NOT NULL ORDER BY id";
         let r = self
             .db
@@ -230,13 +313,7 @@ impl Store for D1Store {
     async fn upsert_post(&self, p: &PostRow) -> Result<i64, String> {
         let r: Option<IdRec> = self
             .first(
-                "INSERT INTO posts (run_key, content_type, template_id, trading_date, slug, facts_r2_key, published_at, cover_key) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8) \
-                 ON CONFLICT(run_key) DO UPDATE SET content_type = excluded.content_type, \
-                 template_id = excluded.template_id, trading_date = excluded.trading_date, slug = excluded.slug, \
-                 facts_r2_key = excluded.facts_r2_key, published_at = excluded.published_at, \
-                 cover_key = excluded.cover_key \
-                 RETURNING id",
+                UPSERT_POST,
                 &[
                     s(&p.run_key),
                     s(&p.content_type),
@@ -246,11 +323,62 @@ impl Store for D1Store {
                     s(&p.facts_r2_key),
                     opt(p.published_at.as_deref()),
                     opt(p.cover_key.as_deref()),
+                    opt(p.revised_at.as_deref()),
                 ],
             )
             .await?;
         r.map(|r| r.id)
             .ok_or_else(|| "upsert_post returned no id".to_string())
+    }
+
+    async fn revise_post(
+        &self,
+        p: &PostRow,
+        t: &[TranslationRow],
+        src: &[NewsReason],
+    ) -> Result<(), String> {
+        let ctx = "revise_post";
+        let id = p.id.ok_or("revise_post: post has no id")?;
+        let mut stmts = vec![self
+            .db
+            .prepare(REVISE_POST)
+            .bind(&[
+                s(&p.facts_r2_key),
+                opt(p.cover_key.as_deref()),
+                opt(p.revised_at.as_deref()),
+                int(id),
+            ])
+            .map_err(|e| err(ctx, e))?];
+        // Every later statement is conditional on the post, so a post gone
+        // missing gets nothing written for it.
+        for tr in t {
+            stmts.push(
+                self.db
+                    .prepare(UPSERT_TRANSLATION_AT_REVISION)
+                    .bind(&at_revision_args(tr, p.revised_at.as_deref()))
+                    .map_err(|e| err(ctx, e))?,
+            );
+        }
+        stmts.push(
+            self.db
+                .prepare("DELETE FROM sources WHERE post_id = ?1")
+                .bind(&[int(id)])
+                .map_err(|e| err(ctx, e))?,
+        );
+        for r in src {
+            stmts.push(
+                self.db
+                    .prepare(INSERT_SOURCE_OF_POST)
+                    .bind(&[int(id), s(&r.url), s(&r.title), s(&r.quote)])
+                    .map_err(|e| err(ctx, e))?,
+            );
+        }
+        // One batch = one transaction: the post, its text and its sources land together.
+        let results = batch(&self.db, ctx, stmts).await?;
+        match results.first().map(changes) {
+            Some(1) => Ok(()),
+            _ => Err(format!("{ctx}: no post {id}")),
+        }
     }
 
     async fn get_translation(
@@ -279,25 +407,25 @@ impl Store for D1Store {
     }
 
     async fn upsert_translation(&self, t: &TranslationRow) -> Result<(), String> {
-        self.run(
-            "INSERT INTO post_translations (post_id, lang, status, title, summary, body_md, updated_at, cover_line1, cover_line2) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9) \
-             ON CONFLICT(post_id, lang) DO UPDATE SET status = excluded.status, title = excluded.title, \
-             summary = excluded.summary, body_md = excluded.body_md, updated_at = excluded.updated_at, \
-             cover_line1 = excluded.cover_line1, cover_line2 = excluded.cover_line2",
-            &[
-                int(t.post_id),
-                s(&t.lang),
-                s(&t.status),
-                s(&t.title),
-                s(&t.summary),
-                s(&t.body_md),
-                s(&t.updated_at),
-                opt(t.cover_line1.as_deref()),
-                opt(t.cover_line2.as_deref()),
-            ],
-        )
-        .await
+        self.run(UPSERT_TRANSLATION, &translation_args(t)).await
+    }
+
+    async fn upsert_translation_at_revision(
+        &self,
+        t: &TranslationRow,
+        revised_at: Option<&str>,
+    ) -> Result<bool, String> {
+        let sql = UPSERT_TRANSLATION_AT_REVISION;
+        let stmt = self
+            .db
+            .prepare(sql)
+            .bind(&at_revision_args(t, revised_at))
+            .map_err(|e| err(sql, e))?;
+        let r = stmt.run().await.map_err(|e| err(sql, e))?;
+        match r.error() {
+            Some(e) if !r.success() => Err(format!("{sql}: {e}")),
+            _ => Ok(changes(&r) > 0),
+        }
     }
 
     async fn add_sources(&self, post_id: i64, src: &[NewsReason]) -> Result<(), String> {
@@ -310,19 +438,13 @@ impl Store for D1Store {
         for r in src {
             stmts.push(
                 self.db
-                    .prepare(
-                        "INSERT INTO sources (post_id, url, title, quote) VALUES (?1, ?2, ?3, ?4)",
-                    )
+                    .prepare(INSERT_SOURCE)
                     .bind(&[int(post_id), s(&r.url), s(&r.title), s(&r.quote)])
                     .map_err(|e| err(ctx, e))?,
             );
         }
         // One batch = one transaction: delete and re-insert land together.
-        let results = self.db.batch(stmts).await.map_err(|e| err(ctx, e))?;
-        match results.iter().find(|r| !r.success()) {
-            Some(r) => Err(format!("{ctx}: {}", r.error().unwrap_or_default())),
-            None => Ok(()),
-        }
+        batch(&self.db, ctx, stmts).await.map(|_| ())
     }
 
     async fn add_alert(&self, run_key: &str, level: &str, msg: &str) -> Result<(), String> {
@@ -388,5 +510,62 @@ impl Store for D1Store {
 
     async fn kv_set(&self, key: &str, value: &str, now: &str) -> Result<(), String> {
         self.kv_upsert(key, value, now).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The column list of an `ON CONFLICT ... DO UPDATE SET` clause.
+    fn updated_columns(sql: &str) -> Vec<&str> {
+        let set = &sql[sql.find("DO UPDATE SET").expect("an upsert") + "DO UPDATE SET".len()..];
+        let set = set.split(" RETURNING").next().unwrap();
+        set.split(',')
+            .map(|a| a.split('=').next().unwrap().trim())
+            .collect()
+    }
+
+    #[test]
+    fn upsert_post_writes_revised_at_on_insert_and_keeps_it_on_conflict() {
+        let (insert, _) = UPSERT_POST.split_once("ON CONFLICT").unwrap();
+        assert!(insert.contains("cover_key, revised_at)"), "{insert}");
+        assert!(insert.contains("?8, ?9)"), "{insert}");
+        let cols = updated_columns(UPSERT_POST);
+        assert!(!cols.contains(&"revised_at"), "{cols:?}");
+        assert!(cols.contains(&"published_at") && cols.contains(&"cover_key"));
+        assert!(UPSERT_POST.ends_with("RETURNING id"));
+    }
+
+    #[test]
+    fn revise_post_sets_only_the_facts_key_cover_key_and_revised_at() {
+        assert_eq!(
+            REVISE_POST,
+            "UPDATE posts SET facts_r2_key = ?1, cover_key = ?2, revised_at = ?3 WHERE id = ?4"
+        );
+        // Its other statements write only while the post exists.
+        assert!(INSERT_SOURCE_OF_POST.ends_with("WHERE EXISTS (SELECT 1 FROM posts WHERE id = ?1)"));
+        assert!(UPSERT_TRANSLATION_AT_REVISION.contains(
+            "WHERE EXISTS (SELECT 1 FROM posts WHERE id = ?1 AND revised_at IS ?10) ON CONFLICT"
+        ));
+    }
+
+    #[test]
+    fn both_translation_upserts_replace_the_same_columns() {
+        let cols = [
+            "status",
+            "title",
+            "summary",
+            "body_md",
+            "updated_at",
+            "cover_line1",
+            "cover_line2",
+        ];
+        assert_eq!(updated_columns(UPSERT_TRANSLATION), cols);
+        assert_eq!(updated_columns(UPSERT_TRANSLATION_AT_REVISION), cols);
+        assert!(UPSERT_TRANSLATION
+            .contains(") VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9) ON CONFLICT"));
+        assert!(UPSERT_TRANSLATION_AT_REVISION
+            .contains(") SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9 WHERE"));
     }
 }

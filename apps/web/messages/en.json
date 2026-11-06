@@ -37,6 +37,7 @@
   "post": {
     "permalink": "Permalink",
     "published": "Published {time}",
+    "updated": "Updated {time}",
     "pendingTitle": "{type}, {date}",
     "pending": "The Chinese version is coming soon.",
     "readEnglish": "Read the English version",

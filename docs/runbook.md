@@ -24,7 +24,7 @@ Every LLM call goes through one provider: reason extraction while building facts
 1. `cd crates/generator && pnpm exec wrangler secret put ANTHROPIC_API_KEY` and paste the key.
 2. In `crates/generator/wrangler.toml`, `LLM_PROVIDER = "claude"` and `LLM_EFFORT = "low"` are already set. To use a different model, add `LLM_MODEL = "<model id>"`, for example `claude-opus-5-5`. If that model does not support effort, also set `LLM_EFFORT = "none"`.
 3. Deploy the generator (`pnpm exec wrangler deploy` in `crates/generator`). Vars take effect on deploy.
-4. Check the next run (and time it: compare `updated_at` with 08:30 ET): `pnpm exec wrangler d1 execute prebell --remote --command "select run_key,status,attempts,last_error from runs order by updated_at desc limit 3"`.
+4. Check the next run (and time it: compare `updated_at` with 08:00 ET): `pnpm exec wrangler d1 execute prebell --remote --command "select run_key,status,attempts,last_error from runs order by updated_at desc limit 3"`.
 
 Claude thinks before answering, so a build (up to 11 extraction calls plus the EN and ZH drafts) may take longer than on DeepSeek. Effort `low` keeps that short. A build older than 15 minutes counts as stale and a second one starts. If the first runs take more than about 10 minutes, tell the developer: a faster `LLM_MODEL` is the option. Raise `LLM_EFFORT` to `medium` or `high` only if draft quality needs it.
 
@@ -75,6 +75,22 @@ The `<error>` part:
 | `parse error: stop_reason: <x>` | The turn ended unfinished in some other way. It is never used. |
 | `parse error: ...` (other) | The reply was not a JSON object. |
 
+## Premarket brief and update
+
+- **The brief** (`job=premarket`, run `premarket:YYYY-MM-DD`) builds from 08:00 ET on trading days and retries every 5 minutes until 09:25 ET. At 09:25 an unpublished brief is skipped for the day and raises one `error` alert. A Chinese draft that fails after English published keeps retrying (every firing in the window, then hourly) until 18:00 ET.
+- **The update** (`job=premarket-update`, run `premarket-update:YYYY-MM-DD`) rebuilds the brief from 08:35 ET, after the 8:30 ET economic releases, and rewrites the same post at the same URL: fresh facts under their own key, `premarket/YYYY-MM-DD-update.json` (the 8:00 facts stay at `premarket/YYYY-MM-DD.json`; the post's `facts_r2_key` says which one the page reads), both translations, the sources, the front page's index line and a new cover at `covers/<slug>-update-<attempt>.svg` (covers are cached for a day, so no key the site may already serve, the 8:00 one or an earlier attempt's, is ever rewritten). `posts.published_at` keeps the 8:00 time and `posts.revised_at` gets the update's; the post page shows "Updated 8:35 AM ET" / "更新于 上午8:35（美东）". The post keeps the base run key: there is never a second post for the day.
+- The update writes only when the gate passes and both the EN and the ZH drafts pass the number check. Its facts and cover go to R2 first; then one D1 batch switches the post to them and writes both translations and the sources, so the post flips all at once. A failed batch leaves the post on the 8:00 facts and text, plus an unreferenced `-update.json` in R2, which the next attempt overwrites, and an unreferenced `-update-<attempt>.svg` cover, which stays (each attempt writes its own cover key). Anything less (a failed gate or draft, a failed cover or facts write, a failed batch) leaves the 8:00 brief exactly as it was, cover included; the update run goes back to `pending` with `last_error` (`cover: ...`, or the D1/R2 error) and retries on the next firing.
+- If the rewrite landed but the run write after it was lost (a CPU kill or a D1 error), the next firing after the 15-minute lease sees `posts.revised_at` set and marks the run `published` without building again.
+- A Chinese retry of the 8:00 brief that drafted from the 8:00 facts writes only while the post's `revised_at` is still the one it read, so it never overwrites the update's Chinese.
+- The update never alerts. Read its outcome on the run: `select run_key,status,attempts,last_error from runs where run_key like 'premarket-update:%' order by trading_date desc limit 5`.
+  - `published`: the brief was rewritten.
+  - `skipped` with `base published after 08:30`: the brief itself went out at or after 08:30 ET and already saw the releases; no build ran.
+  - `skipped` with `base not published`: the brief was not out by 09:25 ET (its own skip alert covers that).
+  - `skipped` with `published base run has no post` or `base post has no publish time`: the brief's rows are inconsistent (a hand edit?); the update gives up at once instead of retrying all day.
+  - `skipped` with any other `last_error` (`zh: ...`, `en: ...`, `movers | ...`, `cover: ...`): no attempt passed by 09:25 ET; the error is the last one. The 8:00 brief stands.
+  - Nothing before 08:35 ET, and nothing while the brief is still retrying.
+- **Cost:** one more full premarket build per trading day: up to 12 Tavily searches (8 movers, 3 macro, 1 theme) plus their extractions and the 2-4 draft calls on the LLM. That is about 230 more Tavily searches a month; check the Tavily plan's monthly quota.
+
 ## Free plan
 
 The generator runs on the Workers Free plan for now. The limits that matter:
@@ -85,13 +101,14 @@ The generator runs on the Workers Free plan for now. The limits that matter:
 | CPU time per invocation | 10 ms | Each queue message is its own invocation (`max_batch_size = 1`). Waiting on the network is not CPU time; JSON parsing and drafting checks are. |
 | Fetch subrequests per invocation | 50 | Yahoo, Tavily, the LLM, EDGAR and the alert webhook. |
 | Subrequests to internal services | 1,000 | D1 and R2 binding calls. The [limits page](https://developers.cloudflare.com/workers/platform/limits/) counts calls to R2, KV and D1 as subrequests and gives Free a separate 1,000 row for internal services, so they are not counted in `subrequests=`. |
-| Queue operations per day | 10,000 | About 650 cron messages on a weekday (premarket, recap and earnings every 5 minutes) plus earnings builds, at about 3 operations each. |
+| Queue operations per day | 10,000 | About 820 cron messages on a weekday (premarket, premarket update, recap and earnings every 5 minutes) plus earnings builds, at about 3 operations each. |
 
 ### Reading `subrequests=`
 
 After each queue message, `pnpm exec wrangler tail` in `crates/generator` shows one line like `subrequests=27 job=premarket`. Alert delivery logs its own line, `subrequests=N job=alerts`. Add the two lines to get the invocation's total. Delivery posts at most 45 minus what the job used; the other alerts stay unsent for the next invocation. Most firings show `subrequests=0`: the clock decides nothing is due, and only D1 is read.
 
 - A premarket build is: cookie 1, crumb 1, 11 v7 batches, 4 futures, at most 8 mover searches and at most 8 extractions, up to 3 macro searches and 1 extraction, at most 1 theme search and 1 extraction, 2-4 drafts. The facts stage stays at 40 or fewer (`BUDGET_SOFT` is 40); the whole invocation is at most 43, or 44 on the Yahoo 401-refresh path, where the guard drops the theme search to absorb the refresh. Four movers per side is the free-plan budget choice. 150-symbol Yahoo batches, which would bring back five per side, wait for a live check from another network.
+- A premarket update build (`job=premarket-update`) is the same as a premarket build, in its own message and so with its own 50.
 - A recap build is: 4 index charts, cookie 1, crumb 1, 11 v7 batches, at most 8 mover searches and at most 8 extractions, up to 3 macro searches and 1 extraction, the after-hours search and extraction, at most 1 theme search and 1 extraction (the recap usually has no room for it), 2-4 drafts. The facts stage stays at 40 or fewer with after hours included and the theme search skipped; the whole invocation is at most 43, or 44 on the Yahoo 401-refresh path, where the guard drops the second and third macro queries to absorb the refresh. It also reads which earnings checks were published that day: 1 D1 `posts` query plus 1 R2 facts read per earnings post. Those are internal-service subrequests, so they do not show in `subrequests=`.
 - An earnings poll (`job=earnings`) is 1-3 requests for EDGAR's current 8-K feed (usually 1: it reads back only to the previous poll). A build (`job=earnings:build`) is the filing index, the exhibit, up to 5 XBRL `companyconcept` documents, the extraction and 2-4 draft calls: about 11, at most about 13 with a Chinese retry. The calendar (`job=earnings:calendar`) is the Yahoo cookie, crumb and 3 v7 batches plus up to 5 announcement searches with an LLM call each: about 15.
 - When a run retries, `runs.last_error` ends with `subrequests=N`: the count when the facts were built, before the drafts. Read it with `pnpm exec wrangler d1 execute prebell --remote --command "select run_key,last_error from runs order by updated_at desc limit 3"`.
@@ -120,7 +137,7 @@ A theme is an industry group from `crates/core/data/universe.txt` whose members 
 
 A group also needs the counting members to be at least half of its members that moved more than 0.5%, and a group with 3 or more counting members on both sides is no theme. Dual share classes count once. Themes rank by median times members; `THEME_MAX` keeps 3, and each theme lists up to 6 members (`THEME_LIST_MEMBERS`) and "and N more".
 
-To see what nearly qualified, read the stored facts. Each brief's facts object is in the `prebell-facts` R2 bucket at `premarket/YYYY-MM-DD.json` or `recap/YYYY-MM-DD.json`, and its `theme_candidates` array has one entry for every group with at least two members beyond ±1.5% (`THEME_STAT_MOVE`), up to 15:
+To see what nearly qualified, read the stored facts. Each brief's facts object is in the `prebell-facts` R2 bucket at `premarket/YYYY-MM-DD.json` (`premarket/YYYY-MM-DD-update.json` for an updated brief) or `recap/YYYY-MM-DD.json`, and its `theme_candidates` array has one entry for every group with at least two members beyond ±1.5% (`THEME_STAT_MOVE`), up to 15:
 
 ```
 cd crates/generator
@@ -169,11 +186,11 @@ The site is the OpenNext Worker in `apps/web` (`wrangler.jsonc`, name `prebell-w
   4. Check: send a message to each address from another account and confirm it arrives.
   Do this before deploying the generator with `SEC_CONTACT = "support@prebell.site"`, so SEC can reach the address.
 - **Deploy order** (owner only): first apply any new D1 migrations, then deploy the generator, then the site.
-  1. `cd crates/generator && pnpm exec wrangler d1 migrations apply prebell --remote`. Migration `0006_covers.sql` adds `posts.cover_key` and `post_translations.cover_line1` / `cover_line2`; both Workers read them, so it must run before either deploys.
+  1. `cd crates/generator && pnpm exec wrangler d1 migrations apply prebell --remote`. Migration `0006_covers.sql` adds `posts.cover_key` and `post_translations.cover_line1` / `cover_line2`, and `0007_post_revised_at.sql` adds `posts.revised_at` (nullable; nothing existing changes). Both Workers read them, so they must run before either deploys: without 0007 every post query fails with a `no such column` error.
   2. `pnpm exec wrangler deploy` in `crates/generator`.
   3. `cd apps/web && pnpm exec opennextjs-cloudflare build && pnpm exec opennextjs-cloudflare deploy`.
 - **One-off for the data-graphic covers change:** deploy the site (step 3) before the generator (step 2) this one time. The new site serves `.svg` covers and draws them on paper. A new generator deployed first would point posts at `covers/<slug>.svg`, which the old site answers with a 404. Then run the graphics backfill above. Later deploys go back to the order above.
-- **Local preview:** the site's preview uses the generator's local state (`--persist-to ../../crates/generator/.wrangler/state`), so the local D1 needs the migrations too. From `crates/generator`: `pnpm exec wrangler d1 migrations apply prebell --local`, then `pnpm exec wrangler d1 execute prebell --local --file ../../db/seed-preview.sql` and `bash ../../db/load-preview-facts.sh`. Then `cd ../../apps/web && pnpm preview` (add `--port <n>` if 8787 is taken). Without migration 0006 the post queries fail with a `no such column` error.
+- **Local preview:** the site's preview uses the generator's local state (`--persist-to ../../crates/generator/.wrangler/state`), so the local D1 needs the migrations too. From `crates/generator`: `pnpm exec wrangler d1 migrations apply prebell --local`, then `pnpm exec wrangler d1 execute prebell --local --file ../../db/seed-preview.sql` and `bash ../../db/load-preview-facts.sh`. Then `cd ../../apps/web && pnpm preview` (add `--port <n>` if 8787 is taken). Without migrations 0006 and 0007 the post queries fail with a `no such column` error.
 
 ## Earnings
 

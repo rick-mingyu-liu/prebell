@@ -20,6 +20,8 @@ use crate::premarket::draft::{source_reasons, write, Draft, TEMPLATE_ID};
 use crate::providers::{LlmProvider, MarketData, NewsSearch};
 use crate::store::{PostRow, RunRow, Store, TranslationRow};
 
+pub mod update;
+
 /// One scheduled content type (premarket brief, recap): its window, facts,
 /// gate, drafting and sources. Everything else is the shared state machine.
 #[async_trait(?Send)]
@@ -99,7 +101,7 @@ impl Content for Premarket<'_> {
     fn zh_give_up(&self) -> NaiveTime {
         NaiveTime::from_hms_opt(18, 0, 0).expect("valid built-in time")
     }
-    /// Every firing inside the 08:30-09:25 ET window, then hourly on the
+    /// Every firing inside the 08:00-09:25 ET window, then hourly on the
     /// hour: the cron fires every 5 minutes all day.
     fn zh_retry_due(&self, t: NaiveTime) -> bool {
         let w = premarket_window(DayKind::Full);
@@ -312,7 +314,7 @@ async fn reconcile<C: Content>(
     if let Some(facts) = &facts {
         store.add_sources(post_id, &c.sources(facts)).await?;
     }
-    let mut row = run.unwrap_or_else(|| new_run(now, c, date));
+    let mut row = run.unwrap_or_else(|| new_run(now, c.run_key(date), c.content_type(), date));
     row.status = "published".into();
     row.updated_at = ts;
     store.upsert_run(&row).await?;
@@ -336,7 +338,7 @@ async fn skip<C: Content>(
     if run.as_ref().is_some_and(|r| r.status == "skipped") {
         return Ok(TickOutcome::Nothing);
     }
-    let mut row = run.unwrap_or_else(|| new_run(now, c, date));
+    let mut row = run.unwrap_or_else(|| new_run(now, c.run_key(date), c.content_type(), date));
     row.status = "skipped".into();
     row.updated_at = iso(now);
     let why = row
@@ -358,10 +360,11 @@ async fn skip<C: Content>(
     Ok(TickOutcome::Skipped)
 }
 
-fn new_run<C: Content>(now: DateTime<Utc>, c: &C, date: NaiveDate) -> RunRow {
+/// A `pending` run with no attempts yet.
+fn new_run(now: DateTime<Utc>, run_key: String, content_type: &str, date: NaiveDate) -> RunRow {
     RunRow {
-        run_key: c.run_key(date),
-        content_type: c.content_type().into(),
+        run_key,
+        content_type: content_type.into(),
         trading_date: date.format("%Y-%m-%d").to_string(),
         status: "pending".into(),
         attempts: 0,
@@ -380,7 +383,7 @@ async fn build<C: Content>(
     run: Option<RunRow>,
 ) -> Result<TickOutcome, String> {
     let ts = iso(now);
-    let mut row = run.unwrap_or_else(|| new_run(now, c, date));
+    let mut row = run.unwrap_or_else(|| new_run(now, c.run_key(date), c.content_type(), date));
     row.status = "building".into();
     row.attempts += 1;
     row.updated_at = ts;
@@ -410,13 +413,7 @@ async fn publish<C: Content>(
     lines: &[String],
 ) -> Result<TickOutcome, String> {
     let ts = iso(now);
-    let missing = c.missing_required(facts);
-    if !missing.is_empty() {
-        let diagnostics = lines.join("; ");
-        let mut err = missing.join(", ");
-        if !diagnostics.is_empty() {
-            err = format!("{err} | {diagnostics}");
-        }
+    if let Some(err) = gate_error(&c.missing_required(facts), lines) {
         return retry_later(store, row, err).await;
     }
 
@@ -452,6 +449,7 @@ async fn publish<C: Content>(
             facts_r2_key: facts_key,
             published_at: Some(ts.clone()),
             cover_key,
+            revised_at: None,
         })
         .await?;
     // The front page's index line; a failed write keeps the previous one.
@@ -514,6 +512,21 @@ async fn publish<C: Content>(
         TickOutcome::PublishedEnOnly
     } else {
         TickOutcome::Published
+    })
+}
+
+/// The `last_error` of a build whose facts lack the `missing` required
+/// sections, with the diagnostics `lines`; `None` when nothing is missing.
+fn gate_error(missing: &[&str], lines: &[String]) -> Option<String> {
+    if missing.is_empty() {
+        return None;
+    }
+    let diagnostics = lines.join("; ");
+    let err = missing.join(", ");
+    Some(if diagnostics.is_empty() {
+        err
+    } else {
+        format!("{err} | {diagnostics}")
     })
 }
 
@@ -607,19 +620,27 @@ async fn retry_zh<C: Content>(
     let facts: C::Facts = serde_json::from_str(&json).map_err(|e| format!("facts json: {e}"))?;
     let ts = iso(now);
     let lines = c.cover_lines(&facts).zh;
+    // The premarket update may rewrite the post, ZH included, while this
+    // draft runs from the older facts: each write below lands only at the
+    // revision read above, and otherwise writes nothing.
+    let revision = post.revised_at.as_deref();
     match c.write(&facts, Lang::Zh).await {
         Ok((d, body)) => {
-            store
-                .upsert_translation(&translation_zh(
-                    post_id,
-                    "published",
-                    d.title,
-                    d.summary,
-                    body,
-                    Some(lines),
-                    &ts,
-                ))
-                .await?;
+            let published = translation_zh(
+                post_id,
+                "published",
+                d.title,
+                d.summary,
+                body,
+                Some(lines),
+                &ts,
+            );
+            if !store
+                .upsert_translation_at_revision(&published, revision)
+                .await?
+            {
+                return Ok(TickOutcome::Nothing);
+            }
             Ok(TickOutcome::Published)
         }
         Err(e) => {
@@ -634,7 +655,12 @@ async fn retry_zh<C: Content>(
                     Some(lines),
                     &ts,
                 );
-                store.upsert_translation(&failed).await?;
+                if !store
+                    .upsert_translation_at_revision(&failed, revision)
+                    .await?
+                {
+                    return Ok(TickOutcome::Nothing);
+                }
                 store
                     .add_alert(
                         &run.run_key,
@@ -665,10 +691,10 @@ mod tests {
 
     const ARTICLE: &str = "Apple shares jumped 8% in premarket trading after the company reported record iPhone sales for the quarter.";
     const QUOTE: &str = "Apple shares jumped 8% in premarket trading";
-    const URL: &str = "https://news.test/aapl";
-    const KEY: &str = "premarket:2026-10-29";
+    pub(super) const URL: &str = "https://news.test/aapl";
+    pub(super) const KEY: &str = "premarket:2026-10-29";
 
-    fn utc(s: &str) -> DateTime<Utc> {
+    pub(super) fn utc(s: &str) -> DateTime<Utc> {
         s.parse().unwrap()
     }
 
@@ -683,9 +709,9 @@ mod tests {
     }
 
     /// `ok = false` makes every call fail with HTTP 429.
-    struct FakeMd {
+    pub(super) struct FakeMd {
         ok: bool,
-        calls: Cell<usize>,
+        pub(super) calls: Cell<usize>,
     }
     #[async_trait(?Send)]
     impl MarketData for FakeMd {
@@ -718,14 +744,14 @@ mod tests {
                 .collect()
         }
     }
-    fn md(ok: bool) -> FakeMd {
+    pub(super) fn md(ok: bool) -> FakeMd {
         FakeMd {
             ok,
             calls: Cell::new(0),
         }
     }
 
-    struct FakeNs;
+    pub(super) struct FakeNs;
     #[async_trait(?Send)]
     impl NewsSearch for FakeNs {
         async fn search(&self, query: &str, _max: usize) -> Result<Vec<SearchHit>, ProviderError> {
@@ -744,10 +770,10 @@ mod tests {
 
     /// Reason extraction always answers with the anchored Apple reason;
     /// drafts answer clean or bad per language.
-    struct FakeLlm {
-        en_ok: Cell<bool>,
-        zh_ok: Cell<bool>,
-        calls: Cell<usize>,
+    pub(super) struct FakeLlm {
+        pub(super) en_ok: Cell<bool>,
+        pub(super) zh_ok: Cell<bool>,
+        pub(super) calls: Cell<usize>,
     }
     #[async_trait(?Send)]
     impl LlmProvider for FakeLlm {
@@ -764,7 +790,7 @@ mod tests {
             }
         }
     }
-    fn llm(en_ok: bool, zh_ok: bool) -> FakeLlm {
+    pub(super) fn llm(en_ok: bool, zh_ok: bool) -> FakeLlm {
         FakeLlm {
             en_ok: Cell::new(en_ok),
             zh_ok: Cell::new(zh_ok),
@@ -902,6 +928,7 @@ mod tests {
             facts_r2_key: "premarket/2026-10-29.json".into(),
             published_at: None,
             cover_key: None,
+            revised_at: None,
         });
         s.runs
             .borrow_mut()
@@ -1334,7 +1361,7 @@ mod tests {
     async fn too_early_is_nothing() {
         let s = MemStore::default();
         let out = tick(
-            utc("2026-10-29T12:25:00Z"),
+            utc("2026-10-29T11:55:00Z"),
             &s,
             &md(true),
             &FakeNs,
@@ -1357,6 +1384,9 @@ mod tests {
         /// `(call number, status)`: on that `get_run` call, first set the
         /// stored run to `status`, as a concurrent tick finishing would.
         race_on_get_run: Cell<Option<(usize, &'static str)>>,
+        /// Sets post 1's `revised_at` right before a revision-checked
+        /// translation write, as the premarket update landing then would.
+        revise_before_zh_write: Cell<Option<&'static str>>,
     }
     #[async_trait(?Send)]
     impl Store for FailStore {
@@ -1388,6 +1418,14 @@ mod tests {
         async fn upsert_post(&self, p: &PostRow) -> Result<i64, String> {
             self.inner.upsert_post(p).await
         }
+        async fn revise_post(
+            &self,
+            p: &PostRow,
+            t: &[TranslationRow],
+            s: &[NewsReason],
+        ) -> Result<(), String> {
+            self.inner.revise_post(p, t, s).await
+        }
         async fn get_translation(
             &self,
             post_id: i64,
@@ -1400,6 +1438,29 @@ mod tests {
                 return Err("d1: zh row failed".into());
             }
             self.inner.upsert_translation(t).await
+        }
+        async fn upsert_translation_at_revision(
+            &self,
+            t: &TranslationRow,
+            revised_at: Option<&str>,
+        ) -> Result<bool, String> {
+            if let Some(at) = self.revise_before_zh_write.take() {
+                if let Some(p) = self
+                    .inner
+                    .posts
+                    .borrow_mut()
+                    .iter_mut()
+                    .find(|p| p.id == Some(1))
+                {
+                    p.revised_at = Some(at.into());
+                }
+            }
+            if t.lang == "zh" && self.fail_zh_row.replace(false) {
+                return Err("d1: zh row failed".into());
+            }
+            self.inner
+                .upsert_translation_at_revision(t, revised_at)
+                .await
         }
         async fn add_sources(&self, post_id: i64, s: &[NewsReason]) -> Result<(), String> {
             self.inner.add_sources(post_id, s).await
@@ -1510,6 +1571,37 @@ mod tests {
         RunRow {
             status: "published".into(),
             ..building_run("2026-10-29T12:30:00Z")
+        }
+    }
+
+    #[tokio::test]
+    async fn zh_retry_writes_nothing_once_the_post_was_revised() {
+        // The update lands between the ZH draft and its write: neither the
+        // published nor the 18:00 failed row overwrites it, and no alert.
+        for (zh_ok, at) in [
+            (true, "2026-10-29T12:35:00Z"),
+            (false, "2026-10-29T22:05:00Z"),
+        ] {
+            let s = FailStore::default();
+            let (m, l) = (md(true), llm(true, false));
+            let out = tick(utc("2026-10-29T12:30:00Z"), &s, &m, &FakeNs, &l).await;
+            assert_eq!(out, TickOutcome::PublishedEnOnly);
+            let before = s.inner.translations.borrow()[&(1, "zh".to_string())].clone();
+            l.zh_ok.set(zh_ok);
+            s.revise_before_zh_write.set(Some("2026-10-29T12:40:00Z"));
+            let calls = l.calls.get();
+            assert_eq!(
+                tick(utc(at), &s, &m, &FakeNs, &l).await,
+                TickOutcome::Nothing,
+                "{at}"
+            );
+            assert!(l.calls.get() > calls, "{at}: the draft ran");
+            assert_eq!(
+                s.inner.translations.borrow()[&(1, "zh".to_string())],
+                before,
+                "{at}"
+            );
+            assert!(s.inner.alerts.borrow().is_empty(), "{at}");
         }
     }
 
