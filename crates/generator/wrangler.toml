@@ -78,8 +78,9 @@ CF_ACCOUNT_ID = "ed6569531d89c3e00705807340c7b75f"
 # Earnings calendar seeding: "yahoo" (Yahoo v7 quote earnings dates, the default)
 # or "off" (only company announcements and EDGAR filings).
 EARNINGS_CALENDAR_SEED = "yahoo"
-# Weekly digest (docs/runbook.md "Weekly digest"): "draft" (the default) saves
-# next week's EN and ZH emails in Buttondown as drafts on Friday evening for the
-# owner to send; "scheduled" schedules them for Sunday 18:00 ET instead. Needs the
-# secret BUTTONDOWN_API_KEY; without it the digest job does nothing.
+# Weekly digest (docs/runbook.md "Weekly digest"): off. DIGEST_ENABLED unset (or
+# "false") means no digest message is queued; "true" queues a dry run on Friday
+# evenings that gathers and renders and sends nothing, because no sender is
+# wired until the language split is decided (docs/decisions.md). DIGEST_MODE:
+# "draft" (the default) or "scheduled" (Sunday 18:00 ET), for a future sender.
 DIGEST_MODE = "draft"

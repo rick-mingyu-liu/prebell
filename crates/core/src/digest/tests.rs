@@ -4,10 +4,11 @@ use std::rc::Rc;
 
 use serde_json::{json, Value};
 
+use super::buttondown::Buttondown;
 use super::*;
 use crate::earnings::store::{CalendarRow, MemEarningsStore};
 use crate::events::store::MemEventStore;
-use crate::providers::{HttpResp, ProviderError};
+use crate::providers::{Http, HttpResp, ProviderError};
 use crate::store::MemStore;
 
 const KEY: &str = "bd-SECRETKEY";
@@ -268,19 +269,19 @@ fn world() -> World {
     }
 }
 
+/// `digest_tick` with the Buttondown sender over `http`.
 async fn tick(w: &World, http: &Fake, now: &str, mode: Mode, key: &str) -> String {
     let logs = RefCell::new(Vec::<String>::new());
     let log = |m: &str| logs.borrow_mut().push(m.to_string());
+    let bd = Buttondown::new(http, key, &log);
     let line = digest_tick(
         utc(now),
         &w.es,
         &w.ev,
         &w.posts,
         w.base.as_ref(),
-        http,
-        key,
+        Some(&bd),
         mode,
-        &log,
     )
     .await
     .unwrap();
@@ -650,15 +651,95 @@ async fn a_dropped_audience_is_never_scheduled_and_alerts() {
 }
 
 #[tokio::test]
-async fn without_the_key_it_does_nothing() {
+async fn without_a_sender_it_is_a_dry_run() {
+    // The Worker today: it gathers and renders, sends and marks nothing.
     let w = world();
-    let http = fake();
-    let line = tick(&w, &http, FRI_EVENING, Mode::Draft, "").await;
-    assert_eq!(line, "no BUTTONDOWN_API_KEY on the generator; skipped");
-    assert!(http.seen.borrow().is_empty());
-    assert_eq!(w.es.calls.get(), 0);
-    assert_eq!(w.posts.calls.get(), 0);
+    let line = digest_tick(
+        utc(FRI_EVENING),
+        &w.es,
+        &w.ev,
+        &w.posts,
+        w.base.as_ref(),
+        None,
+        Mode::Scheduled,
+    )
+    .await
+    .unwrap();
+    assert!(
+        line.starts_with(
+            "2026-11-09 (scheduled 2026-11-08T23:00:00Z): dry run, no sender: en \"Week ahead: Nov 9–13\" ("
+        ),
+        "{line}"
+    );
+    assert!(line.contains(", zh \"一周前瞻：11月9日–13日\" ("), "{line}");
     assert!(w.es.kv.borrow().get(KV_BUILT).is_none());
+    assert!(w.base.alerts.borrow().is_empty());
+}
+
+#[test]
+fn enabled_only_when_true() {
+    assert_eq!(parse_enabled(None), Ok(false));
+    assert_eq!(parse_enabled(Some("")), Ok(false));
+    assert_eq!(parse_enabled(Some("false")), Ok(false));
+    assert_eq!(parse_enabled(Some("true")), Ok(true));
+    let e = parse_enabled(Some("yes")).unwrap_err();
+    assert!(e.contains("DIGEST_ENABLED") && e.contains("yes"), "{e}");
+}
+
+/// A sender that answers from a script, for the core loop alone.
+struct Scripted {
+    answers: RefCell<VecDeque<Result<Sent, String>>>,
+    emails: RefCell<Vec<Email>>,
+}
+
+#[async_trait(?Send)]
+impl Sender for Scripted {
+    async fn send(&self, email: &Email) -> Result<Sent, String> {
+        self.emails.borrow_mut().push(email.clone());
+        self.answers.borrow_mut().pop_front().unwrap()
+    }
+}
+
+#[tokio::test]
+async fn any_sender_gets_both_languages_with_stable_idempotency_keys() {
+    let w = world();
+    let s = Scripted {
+        answers: RefCell::new(VecDeque::from([
+            Err("http 503".into()),
+            Ok(Sent::Done("saved".into())),
+            Ok(Sent::Done("saved again".into())),
+        ])),
+        emails: RefCell::new(vec![]),
+    };
+    let run = |at: &'static str| {
+        digest_tick(
+            utc(at),
+            &w.es,
+            &w.ev,
+            &w.posts,
+            w.base.as_ref(),
+            Some(&s),
+            Mode::Draft,
+        )
+    };
+    let line = run(FRI_EVENING).await.unwrap();
+    assert_eq!(line, "2026-11-09 (draft): en failed: http 503, zh saved");
+    let line = run("2026-11-06T23:35:00Z").await.unwrap();
+    assert_eq!(line, "2026-11-09 (draft): en saved again");
+    let emails = s.emails.borrow();
+    let keys: Vec<&str> = emails.iter().map(|e| e.idempotency_key.as_str()).collect();
+    assert_eq!(
+        keys,
+        [
+            "prebell-digest-2026-11-09-en",
+            "prebell-digest-2026-11-09-zh",
+            "prebell-digest-2026-11-09-en"
+        ]
+    );
+    assert_eq!(emails[1].lang, Lang::Zh);
+    assert_eq!(emails[1].subject, "一周前瞻：11月9日–13日");
+    assert!(emails.iter().all(|e| e.send_at.is_none()));
+    assert_eq!(w.es.kv.borrow()[KV_BUILT], "2026-11-09");
 }
 
 #[tokio::test]
@@ -713,7 +794,7 @@ async fn buttondown_errors_alert_and_leave_the_language_for_the_next_poll() {
     assert!(w.es.kv.borrow().get(KV_BUILT).is_none());
     assert_eq!(w.base.alerts.borrow().len(), 2);
 
-    // The tag list fails (403, then the network): no email is attempted.
+    // The tag list fails (403, then the network): no email is created.
     for network in [false, true] {
         let w = world();
         let mut http = fake();
@@ -721,9 +802,14 @@ async fn buttondown_errors_alert_and_leave_the_language_for_the_next_poll() {
         http.network = network;
         let line = tick(&w, &http, FRI_EVENING, Mode::Draft, KEY).await;
         let want = if network { "network error" } else { "http 403" };
-        assert_eq!(line, format!("2026-11-09: tags {want}"));
-        assert_eq!(http.methods(), ["GET"]);
-        assert_eq!(w.base.alerts.borrow()[0].0, "digest:2026-11-06");
+        assert_eq!(
+            line,
+            format!("2026-11-09 (draft): en failed: tags {want}, zh failed: tags {want}")
+        );
+        assert_eq!(http.methods(), ["GET", "GET"]);
+        let keys: Vec<String> = w.base.alerts.borrow().iter().map(|a| a.0.clone()).collect();
+        assert_eq!(keys, ["digest:en:2026-11-06", "digest:zh:2026-11-06"]);
+        assert!(w.es.kv.borrow().get(KV_BUILT).is_none());
     }
 
     // Scheduling fails: the draft exists but stays pending, and the retry
@@ -807,16 +893,15 @@ async fn the_job_stays_within_the_free_plan_budget() {
     let w = world();
     let http = crate::providers::CountingHttp::new(fake());
     let log = |_: &str| {};
+    let bd = Buttondown::new(&http, KEY, &log);
     digest_tick(
         utc(FRI_EVENING),
         &w.es,
         &w.ev,
         &w.posts,
         w.base.as_ref(),
-        &http,
-        KEY,
+        Some(&bd),
         Mode::Scheduled,
-        &log,
     )
     .await
     .unwrap();

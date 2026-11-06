@@ -1,13 +1,19 @@
 //! The weekly digest email (Rick, 2026-11-06): next week's earnings calendar
-//! and economy & Fed dates, with links to last week's earnings checks, as
-//! two Buttondown emails, English to `lang:en` subscribers and Chinese to
-//! `lang:zh`. Each is saved as a draft that the owner reviews and sends;
-//! `DIGEST_MODE=scheduled` schedules them for Sunday 18:00 ET instead.
+//! and economy & Fed dates, with links to last week's earnings checks, one
+//! email per language. Each is saved as a draft that the owner reviews and
+//! sends; `DIGEST_MODE=scheduled` asks for Sunday 18:00 ET instead.
 //!
 //! No cron of its own: a Friday evening earnings poll (after that day's
 //! calendar refresh) queues one `digest` message until kv `digest_built_for`
-//! holds next week's Monday. Everything shown comes from D1, the events
-//! snapshot and `clock`; the wording is in `copy`.
+//! holds next week's Monday, and only while `DIGEST_ENABLED` is `true`.
+//! Everything shown comes from D1, the events snapshot and `clock`; the
+//! wording is in `copy`.
+//!
+//! Off for now: Buttondown's free tier has no tag targeting, and how to
+//! split the languages is undecided (Rick, 2026-11-06: "maybe let's design
+//! that in the future"; `docs/decisions.md`). Sending is behind `Sender`;
+//! `buttondown::Buttondown` is one, tested but not wired into the Worker,
+//! which runs `digest_tick` without a sender (a dry run).
 
 pub mod buttondown;
 pub mod copy;
@@ -28,10 +34,7 @@ use crate::events::store::{EventRow, EventStore};
 use crate::events::{closures, planned, TIER_NOTABLE};
 use crate::jobs::alert_once_today;
 use crate::numbers::Lang;
-use crate::providers::Http;
 use crate::store::Store;
-
-use buttondown::Failure;
 
 /// kv key: next week's Monday (`YYYY-MM-DD`) once both emails are done;
 /// `<monday>:en` (or `:zh`) while only that one is.
@@ -63,6 +66,18 @@ pub fn parse_mode(raw: Option<&str>) -> Result<Mode, String> {
         Some("scheduled") => Ok(Mode::Scheduled),
         Some(other) => Err(format!(
             "unknown DIGEST_MODE: {other} (use draft or scheduled)"
+        )),
+    }
+}
+
+/// `DIGEST_ENABLED`: only `true` turns the digest on; unset, empty or
+/// `false` leaves it off, anything else is a config error.
+pub fn parse_enabled(raw: Option<&str>) -> Result<bool, String> {
+    match raw.map(str::trim).filter(|v| !v.is_empty()) {
+        None | Some("false") => Ok(false),
+        Some("true") => Ok(true),
+        Some(other) => Err(format!(
+            "unknown DIGEST_ENABLED: {other} (use true or false)"
         )),
     }
 }
@@ -315,12 +330,6 @@ pub async fn gather(
     })
 }
 
-/// The `X-Idempotency-Key` of one email: a retry after a lost kv write gets
-/// Buttondown's first answer back instead of a second draft.
-fn idempotency_key(monday: NaiveDate, lang: Lang) -> String {
-    format!("prebell-digest-{}-{}", ymd(monday), lang_code(lang))
-}
-
 fn lang_code(lang: Lang) -> &'static str {
     match lang {
         Lang::En => "en",
@@ -328,22 +337,61 @@ fn lang_code(lang: Lang) -> &'static str {
     }
 }
 
-/// What happened to one language's email.
-enum Done {
-    /// Saved as a draft (`scheduled`: and scheduled), with its id.
-    Created(String, &'static str),
-    /// No such tag: nobody to send it to, and never sent unfiltered.
-    NoTag,
+/// One language's email, as rendered.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Email {
+    pub lang: Lang,
+    pub subject: String,
+    /// Markdown.
+    pub body: String,
+    /// The same for every attempt at this week and language, so a provider
+    /// that honours it answers a retry with the first email, not a second.
+    pub idempotency_key: String,
+    /// `Some` in `Scheduled` mode: send then. `None`: a draft only.
+    pub send_at: Option<DateTime<Utc>>,
 }
 
-/// One `digest` queue message. Without a key it does nothing (no D1 read).
-/// Otherwise, unless next week's digest is done, it gathers the week, reads
-/// Buttondown's tag ids, and saves each language not yet done as a draft
-/// for its `lang:` tag (scheduled for Sunday 18:00 ET in `Scheduled` mode,
-/// once Buttondown shows the audience filter on the draft). A language is
-/// marked done in kv as soon as its email is; a Buttondown failure leaves
-/// it for the next poll and alerts once per ET day. Logs only status codes.
-/// `Err` is a store error.
+/// What a `Sender` did with one email.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Sent {
+    /// Saved (and scheduled, when asked): a short note for the log line,
+    /// e.g. `draft em_01`.
+    Done(String),
+    /// Nobody to send it to (no subscriber in that language yet); never
+    /// sent to everyone instead.
+    Skipped(String),
+    /// Saved, but it must not go out until the owner looks: the log note
+    /// and the alert text.
+    NeedsOwner { note: String, alert: String },
+}
+
+/// Where the emails go. The choice of provider and of how the languages
+/// are split lives entirely behind this (`docs/decisions.md`, "Digest
+/// language split").
+#[async_trait(?Send)]
+pub trait Sender {
+    /// Saves `email` for its language's readers. `Err` is a failure to
+    /// retry on the next poll, as text free of keys and response bodies.
+    async fn send(&self, email: &Email) -> Result<Sent, String>;
+}
+
+/// The email for `lang`.
+pub fn email(week: &Week, lang: Lang, send_at: Option<DateTime<Utc>>) -> Email {
+    Email {
+        lang,
+        subject: render::subject(week.monday, lang),
+        body: render::body(week, lang),
+        idempotency_key: format!("prebell-digest-{}-{}", ymd(week.monday), lang_code(lang)),
+        send_at,
+    }
+}
+
+/// One `digest` queue message. Unless next week's digest is done, it
+/// gathers the week and renders both languages. Without a `sender` that is
+/// all (a dry run: nothing is sent or marked). With one, each language not
+/// yet done is sent (for `send_at`, Sunday 18:00 ET, in `Scheduled` mode)
+/// and marked done in kv at once; a failure leaves it for the next poll and
+/// alerts once per ET day per language. `Err` is a store error.
 #[allow(clippy::too_many_arguments)]
 pub async fn digest_tick(
     now: DateTime<Utc>,
@@ -351,14 +399,9 @@ pub async fn digest_tick(
     events: &dyn EventStore,
     posts: &dyn DigestStore,
     store: &dyn Store,
-    http: &dyn Http,
-    key: &str,
+    sender: Option<&dyn Sender>,
     mode: Mode,
-    log: &dyn Fn(&str),
 ) -> Result<String, String> {
-    if key.is_empty() {
-        return Ok("no BUTTONDOWN_API_KEY on the generator; skipped".into());
-    }
     let monday = week_ahead(now);
     let week = ymd(monday);
     let progress = es.kv_get(KV_BUILT).await?.unwrap_or_default();
@@ -371,20 +414,31 @@ pub async fn digest_tick(
         .unwrap_or_default();
 
     let data = gather(now, monday, es, events, posts).await?;
-    let tags = match buttondown::tag_ids(http, key, log).await {
-        Ok(t) => t,
-        Err(f) => {
-            let msg = format!(
-                "digest: Buttondown tag list failed ({f}); the next poll retries until 22:00 ET"
-            );
-            alert_once_today(now, "digest", "error", &msg, store).await?;
-            return Ok(format!("{week}: tags {f}"));
-        }
-    };
     // Past Sunday 18:00 ET (a late run), a schedule would send at once.
     let send = match mode {
         Mode::Scheduled => send_at(monday).filter(|t| *t > now),
         Mode::Draft => None,
+    };
+    let how = match (mode, send) {
+        (Mode::Draft, _) => "draft".to_string(),
+        (Mode::Scheduled, Some(t)) => {
+            format!("scheduled {}", t.to_rfc3339_opts(SecondsFormat::Secs, true))
+        }
+        (Mode::Scheduled, None) => "scheduled, send time passed: draft".to_string(),
+    };
+
+    let Some(sender) = sender else {
+        let parts: Vec<String> = [Lang::En, Lang::Zh]
+            .iter()
+            .map(|l| {
+                let e = email(&data, *l, send);
+                format!("{} {:?} ({} bytes)", lang_code(*l), e.subject, e.body.len())
+            })
+            .collect();
+        return Ok(format!(
+            "{week} ({how}): dry run, no sender: {}",
+            parts.join(", ")
+        ));
     };
 
     let mut parts = Vec::new();
@@ -393,42 +447,19 @@ pub async fn digest_tick(
         if done.contains(&code) {
             continue;
         }
-        let tag = format!("lang:{code}");
-        let result = match tags.get(&tag) {
-            None => Ok(Done::NoTag),
-            Some(tag_id) => {
-                send_one(
-                    http,
-                    key,
-                    &data,
-                    lang,
-                    tag_id,
-                    &idempotency_key(monday, lang),
-                    send,
-                    log,
-                )
-                .await
-            }
-        };
-        let (part, alert) = match result {
-            Ok(Done::Created(id, what)) => (format!("{code} {what} {id}"), None),
-            Ok(Done::NoTag) => (format!("{code} skipped: no {tag} tag"), None),
+        let (part, alert) = match sender.send(&email(&data, lang, send)).await {
+            Ok(Sent::Done(note)) => (format!("{code} {note}"), None),
+            Ok(Sent::Skipped(why)) => (format!("{code} skipped: {why}"), None),
+            Ok(Sent::NeedsOwner { note, alert }) => (format!("{code} {note}"), Some(alert)),
             // Left for the next poll.
-            Err(SendError::Failed(f)) => {
-                parts.push(format!("{code} failed: {f}"));
+            Err(e) => {
+                parts.push(format!("{code} failed: {e}"));
                 let msg = format!(
-                    "digest: Buttondown {code} draft failed ({f}); the next poll retries until 22:00 ET"
+                    "digest: the {code} email failed ({e}); the next poll retries until 22:00 ET"
                 );
                 alert_once_today(now, &format!("digest:{code}"), "error", &msg, store).await?;
                 continue;
             }
-            // Never scheduled; the owner sets the audience before sending.
-            Err(SendError::NoAudience(id)) => (
-                format!("{code} draft {id} without its audience"),
-                Some(format!(
-                    "digest: Buttondown dropped the {tag} audience filter on the {code} draft {id}; left as a draft, set its audience before sending"
-                )),
-            ),
         };
         parts.push(part);
         if let Some(msg) = alert {
@@ -443,55 +474,7 @@ pub async fn digest_tick(
         let at = now.to_rfc3339_opts(SecondsFormat::Secs, true);
         es.kv_set(KV_BUILT, &value, &at).await?;
     }
-    let how = match (mode, send) {
-        (Mode::Draft, _) => "draft".to_string(),
-        (Mode::Scheduled, Some(t)) => {
-            format!("scheduled {}", t.to_rfc3339_opts(SecondsFormat::Secs, true))
-        }
-        (Mode::Scheduled, None) => "scheduled, send time passed: draft".to_string(),
-    };
     Ok(format!("{week} ({how}): {}", parts.join(", ")))
-}
-
-enum SendError {
-    Failed(Failure),
-    /// The draft was saved but Buttondown's answer lacks the tag filter.
-    NoAudience(String),
-}
-
-/// Saves `lang`'s email as a draft for `tag_id` and, with `send`, schedules
-/// it once the draft shows the filter.
-#[allow(clippy::too_many_arguments)]
-async fn send_one(
-    http: &dyn Http,
-    key: &str,
-    week: &Week,
-    lang: Lang,
-    tag_id: &str,
-    idempotency: &str,
-    send: Option<DateTime<Utc>>,
-    log: &dyn Fn(&str),
-) -> Result<Done, SendError> {
-    let email = buttondown::draft(
-        &render::subject(week.monday, lang),
-        &render::body(week, lang),
-        tag_id,
-    );
-    let created = buttondown::create(http, key, idempotency, &email, log)
-        .await
-        .map_err(SendError::Failed)?;
-    if !created.targets(tag_id) {
-        return Err(SendError::NoAudience(created.id));
-    }
-    match send {
-        None => Ok(Done::Created(created.id, "draft")),
-        Some(t) => {
-            buttondown::schedule(http, key, &created.id, t, log)
-                .await
-                .map_err(SendError::Failed)?;
-            Ok(Done::Created(created.id, "scheduled"))
-        }
-    }
 }
 
 #[cfg(test)]

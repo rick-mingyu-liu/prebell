@@ -9,7 +9,7 @@ mod store;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use prebell_core::cover::card::{cards_tick, wants_card};
-use prebell_core::digest::{digest_tick, parse_mode};
+use prebell_core::digest::{digest_tick, parse_enabled, parse_mode};
 use prebell_core::earnings::calendar::{refresh_tick, yahoo_seeding, CalendarSource};
 use prebell_core::earnings::foreign::foreign_read;
 use prebell_core::earnings::run::{build_tick, poll_job};
@@ -240,12 +240,17 @@ impl JobRunner for Runner<'_> {
             }
             EarningsStep::Poll => {
                 let edgar = self.edgar()?;
-                let o = poll_job(t, self.fired, store, store, &edgar).await?;
+                let mut o = poll_job(t, self.fired, store, store, &edgar).await?;
                 if o.stale {
                     return Ok(("stale message, dropped".into(), false));
                 }
                 for e in &o.errors {
                     console_warn!("earnings poll: {e}");
+                }
+                // The digest only while DIGEST_ENABLED is true (a bad value
+                // is queued, so its message raises the config alert).
+                if !parse_enabled(text(env, "DIGEST_ENABLED").as_deref()).unwrap_or(true) {
+                    o.follow_ups.retain(|s| *s != EarningsStep::Digest);
                 }
                 for next in &o.follow_ups {
                     // Builds go to their own queue, the calendar to this one.
@@ -310,17 +315,17 @@ impl JobRunner for Runner<'_> {
                 Ok((format!("{o:?}"), false))
             }
             EarningsStep::Digest => {
-                // Neither EDGAR nor an LLM; without the key a logged no-op.
+                if !parse_enabled(text(env, "DIGEST_ENABLED").as_deref())? {
+                    return Ok((
+                        "disabled (DIGEST_ENABLED is not true); skipped".into(),
+                        false,
+                    ));
+                }
                 let mode = parse_mode(text(env, "DIGEST_MODE").as_deref())?;
-                let key = env
-                    .secret("BUTTONDOWN_API_KEY")
-                    .map(|v| v.to_string())
-                    .unwrap_or_default();
-                let log = |m: &str| console_log!("{m}");
-                let line = digest_tick(t, store, store, store, store, &self.http, &key, mode, &log)
-                    .await
-                    .map_err(|e| redact(&e, &[&key]))?;
-                Ok((redact(&line, &[&key]), false))
+                // No sender until the language split is decided
+                // (docs/decisions.md): a dry run that gathers and renders.
+                let line = digest_tick(t, store, store, store, store, None, mode).await?;
+                Ok((line, false))
             }
         }
     }
