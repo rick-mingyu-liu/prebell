@@ -226,7 +226,8 @@
     "past": "Past",
     "days": "Days of the week",
     "emptySlot": "None",
-    "weeks": "Weeks"
+    "weeks": "Weeks",
+    "keyDashed": "dashed card: date not confirmed"
   },
   "events": {
     "group": "Economy & Fed",

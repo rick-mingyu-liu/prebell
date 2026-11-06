@@ -73,6 +73,36 @@ export default function CalendarWeek({
 
   return (
     <div className="cal-week">
+      {/* The key to the marks: icons, tick and swatch are decoration; the words carry the meaning. */}
+      <p className="cal-key">
+        <span className="cal-key-item">
+          <SlotIcon slot="bmo" />
+          {slotLabel.bmo}
+        </span>
+        <span className="cal-key-sep" aria-hidden="true">
+          ·
+        </span>
+        <span className="cal-key-item">
+          <SlotIcon slot="amc" />
+          {slotLabel.amc}
+        </span>
+        <span className="cal-key-sep" aria-hidden="true">
+          ·
+        </span>
+        <span className="cal-key-item">
+          <span className="cal-key-tick" aria-hidden="true">
+            ✓
+          </span>
+          {t("earnings.reported")}
+        </span>
+        <span className="cal-key-sep" aria-hidden="true">
+          ·
+        </span>
+        <span className="cal-key-item">
+          <span className="cal-key-dash" aria-hidden="true" />
+          {t("earnings.keyDashed")}
+        </span>
+      </p>
       <nav className="cal-chips" aria-label={t("earnings.days")}>
         {days.map((d) => (
           <a key={d.date} className="cal-chip-day" href={`#${dayId(d.date)}`} aria-current={d.date === today ? "date" : undefined}>

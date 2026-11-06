@@ -325,6 +325,12 @@ html:lang(zh-Hans) .cal-title .kicker { letter-spacing: 0.04em; }
 .cal-share-msg:empty { display: none; }
 .cal-share-url { user-select: all; color: var(--ink); overflow-wrap: anywhere; }
 
+/* The key: one quiet line above the board, each mark drawn as on the cards. */
+.cal-key { display: flex; flex-wrap: wrap; align-items: center; gap: 0.15rem 0.45rem; max-width: none; margin: 0 0 0.6rem; color: var(--muted); font-size: 12.5px; line-height: 1.5; }
+.cal-key-item { display: inline-flex; align-items: center; gap: 0.3rem; white-space: nowrap; }
+.cal-key-tick { color: var(--up); font-size: 11px; font-weight: 700; line-height: 1; }
+.cal-key-dash { display: inline-block; width: 20px; height: 11px; border: 1px dashed var(--muted); border-radius: 3px; background: color-mix(in srgb, var(--card) 55%, var(--paper)); }
+
 /* Day chips: the phone's way to jump between columns, held at the top of the screen while the board scrolls
    by (a jump lands the column just under them); hidden where the whole board shows. */
 .cal-chips { position: sticky; top: 0; z-index: 2; display: flex; gap: 6px; margin: 0 0 0.35rem; padding: 6px 0; background: var(--paper); }

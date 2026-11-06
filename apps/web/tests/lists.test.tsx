@@ -142,6 +142,23 @@ describe("CalendarWeek", () => {
     expect(other.match(/is-past/g)).toHaveLength(5);
   });
 
+  it("keys the marks in one line above the chips and the board, the words carrying the meaning", () => {
+    const key = (html: string) => html.slice(html.indexOf('<p class="cal-key">'), html.indexOf("</p>", html.indexOf('<p class="cal-key">')) + 4);
+    const words = (html: string) => key(html).replace(/<[^>]+>/g, "");
+    const en = renderToStaticMarkup(<CalendarWeek days={days} locale="en" today="2026-11-04" />);
+    expect(en.indexOf('<p class="cal-key">')).toBeLessThan(en.indexOf("cal-chips"));
+    expect(en.indexOf("cal-chips")).toBeLessThan(en.indexOf("cal-board"));
+    expect(words(en)).toBe("Before open·After close·✓Reported·dashed card: date not confirmed");
+    // The sun and moon are the sub-headings' icons; the tick is the cards' tick; the swatch is a dashed card.
+    expect(key(en)).toMatch(/<span class="cal-key-item"><svg class="cal-slot-icon"[^>]*aria-hidden="true"[^>]*>.*?<\/svg>Before open<\/span>/);
+    expect(key(en)).toContain('<span class="cal-key-tick" aria-hidden="true">✓</span>Reported</span>');
+    expect(key(en)).toContain('<span class="cal-key-dash" aria-hidden="true"></span>dashed card: date not confirmed</span>');
+    expect(key(en).match(/<span class="cal-key-sep" aria-hidden="true">·<\/span>/g)).toHaveLength(3);
+    const zh = renderToStaticMarkup(<CalendarWeek days={days} locale="zh" today="2026-11-04" />);
+    expect(words(zh)).toBe("盘前·盘后·✓已发布·虚线框：日期未确认");
+    expect(key(zh)).toContain('<span class="cal-key-dash" aria-hidden="true"></span>虚线框：日期未确认</span>');
+  });
+
   it("puts day chips above the board, linking to each column and marking today", () => {
     const out = renderToStaticMarkup(<CalendarWeek days={days} locale="en" today="2026-11-04" />);
     expect(out.indexOf('<nav class="cal-chips" aria-label="Days of the week">')).toBeLessThan(out.indexOf("cal-board"));

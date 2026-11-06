@@ -206,6 +206,12 @@ describe("globals.css", () => {
     expect(boardBlocks().join("\n")).toMatch(/\.cal-col\.is-today \{ scroll-initial-target: none; \}/);
   });
 
+  it("draws the key's marks as on the cards: the tick in the up green, a dashed swatch like an unconfirmed card", () => {
+    expect(css).toMatch(/\.cal-key-tick \{ color: var\(--up\);/);
+    expect(css).toMatch(/\.cal-key-dash \{[^}]*border: 1px dashed var\(--muted\);/);
+    expect(css).toMatch(/\.cal-unconfirmed \.cal-card-link \{ border-style: dashed; border-color: var\(--muted\);/);
+  });
+
   it("keeps the day chips on screen above a column the reader jumps to", () => {
     expect(css).toMatch(/\.cal-chips \{ position: sticky; top: 0;[^}]*background: var\(--paper\);/);
     // A jump lands the column below the stuck chips (about 40px tall), not under them.

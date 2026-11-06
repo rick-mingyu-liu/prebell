@@ -226,7 +226,8 @@
     "past": "已过",
     "days": "本周各日",
     "emptySlot": "无",
-    "weeks": "切换周次"
+    "weeks": "切换周次",
+    "keyDashed": "虚线框：日期未确认"
   },
   "events": {
     "group": "经济与美联储",
