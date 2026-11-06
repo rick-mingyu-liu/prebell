@@ -49,3 +49,8 @@ they are never asked twice. Things decided *not* to do go in `declined.md`.
 - **Author photo in colour, not greyscale.** Rick, 2026-11-05: "do not make my photo black and white, original colorful". The `.author-photo` grayscale filter is gone; the file itself was always colour.
 - **The site's domain is `prebell.site`**, served by the `prebell-web` Worker as a custom domain. www redirects to the apex (a second custom domain plus a Next redirect, no dashboard rule), and the old workers.dev URL stays up. Rick, 2026-11-05: "i purchased the domain name: prebell.site".
 - **Contact addresses are on the domain, as with TermPocket**: `privacy@prebell.site` (privacy requests), `support@prebell.site` (terms questions, EDGAR `SEC_CONTACT`), forwarded to the owner's Gmail by Cloudflare Email Routing. Rick, 2026-11-05: "do the email address into the same way we handle as termpocket, use the site one".
+
+## 2026-11-06
+
+- **The affiliate disclosure is the partner strip's label**: "Affiliate partners" / "推广合作" replaces "From our partners" plus the sentence on the right, and the terms ("sources and links") say PreBell may earn a referral fee through those links. Rick asked "can we remove this note?"; the disclosure must stay where readers see the links, so it was folded into the label (Rick chose "Fold into the label").
+- **Earnings: fix the failures first, then widen coverage** beyond the S&P 100: all ~520 companies (S&P 500 ∪ Nasdaq-100) on the calendar, full write-ups only for the largest. Rick chose "Fix failures, then widen" on 2026-11-06 after a week where 6 of 14 detected reports did not publish.

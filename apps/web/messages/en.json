@@ -139,7 +139,8 @@
       {
         "h": "Terms: sources and links",
         "p": [
-          "Each post lists its sources. Sites we link to are not ours."
+          "Each post lists its sources. Sites we link to are not ours.",
+          "The links under “Affiliate partners” are affiliate links: PreBell may earn a referral fee if you sign up through them."
         ]
       },
       {
@@ -228,8 +229,7 @@
     "close": "Close"
   },
   "partners": {
-    "from": "From our partners",
-    "disclosure": "Affiliate links: PreBell may earn a reward if you sign up."
+    "from": "Affiliate partners"
   },
   "termpocket": {
     "copy": "From the PreBell team. Plan your goals and habits with Pocky, your AI assistant.",
