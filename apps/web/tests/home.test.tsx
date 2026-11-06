@@ -105,7 +105,7 @@ describe("HomeView front page", () => {
     // Earnings checks: a small cover with the company logo, a serif headline linking to the check.
     expect(out).toContain('<h2 class="section-title">Earnings checks</h2>');
     expect(out).toContain('class="cover cover-small"');
-    expect(out).toContain('<img src="/logos/companies/AAPL.svg" alt="AAPL" loading="lazy"/>');
+    expect(out).toMatch(/<img src="\/logos\/companies\/AAPL\.(svg|png)" alt="AAPL" loading="lazy"\/>/);
     expect(out).toContain('href="/en/p/aapl-2026-10-29-earnings"');
     expect(out).toContain("Apple Q4: revenue up 8%");
 

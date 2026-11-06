@@ -1,17 +1,26 @@
-// Regenerates the bundled logos. Sources, in order of preference per write-up watchlist ticker:
-//   1. the pinned `simple-icons` devDependency (CC0 glyphs)             -> companies/{TICKER}.svg
-//   2. Wikidata (the SEC CIK in watchlist.tsv -> item -> P8972 small logo, else P154 logo) ->
-//      Wikimedia Commons, freely licensed files only                    -> companies/{TICKER}.png
-//   3. the company's own site icon (apple-touch-icon / icon link)       -> companies/{TICKER}.png
+// Regenerates the bundled logos for every watchlist ticker (both tiers; a rerun picks up new rows).
+// Company cards are wide (about 128x48), so a horizontal wordmark is preferred. Sources, in order:
+//   1. Wikidata (the SEC CIK in watchlist.tsv -> item -> P154 logo) -> Wikimedia Commons, freely
+//      licensed files only                                        -> companies/{TICKER}.png
+//   2. COMMONS_FALLBACK: hand-picked Commons files for a few tickers whose Wikidata logo is unusable
+//   3. the pinned `simple-icons` devDependency (CC0 glyphs, symbol only) -> companies/{TICKER}.svg
+//   4. Wikidata P8972 small logo (a square icon), Commons again    -> companies/{TICKER}.png
+//   5. the company's own site icon (apple-touch-icon / icon link), last resort -> companies/{TICKER}.png
+// A file is rejected when blank, wider than MAX_WORDMARK:1, or a raster too small to look sharp.
 // plus the partner marks in PARTNERS. It writes:
 //   public/logos/companies/*, public/logos/partners/*
-//   src/lib/logos.generated.ts            the ticker -> file manifest read by src/lib/logos.ts
+//   src/lib/logos.generated.ts            ticker -> file and ticker -> natural size, read by src/lib/logos.ts
 //   public/logos/LICENSES.md              source, date and licence for every file
+// Company PNGs are 2x: a wordmark fits 256x96 px (128x48 CSS px) with no padding or tile, so it sits on
+// the card's own background; a full-bleed app icon is a 96px rounded square; a mark too pale for a white
+// card is set on a dark pill. The natural CSS size of each file is the manifest's COMPANY_LOGO_SIZES.
 // Everything is built in node_modules/.cache/logos-build and moved into place only when the whole run
 // succeeds, so a failed run leaves the committed files alone. Definitive answers (2xx, and 4xx other
-// than 408/429) are cached in node_modules/.cache/logos; delete it to refetch. Requests go out one per
-// second with a User-Agent naming the project, per the Wikimedia policy. Run `pnpm logos` in apps/web
-// after changing a mapping below or bumping simple-icons. See docs/runbook.md.
+// than 408/429) are cached in node_modules/.cache/logos, so a run that stopped (a Wikimedia timeout,
+// say) resumes where it was on the next run; delete the cache to refetch. Requests go out at most two a
+// second to Wikimedia and one a second elsewhere, with a User-Agent naming the project and
+// support@prebell.site, per the Wikimedia policy. Run `pnpm logos` in apps/web after changing a mapping
+// below, bumping simple-icons or adding watchlist rows. See docs/runbook.md.
 //   --offline       use only the cache (no requests)
 //   --allow-shrink  accept a manifest that drops tickers the committed one has
 import { createHash } from "node:crypto";
@@ -35,7 +44,7 @@ const SI_VERSION = JSON.parse(readFileSync(join(SI_ROOT, "package.json"), "utf8"
 const SI_DATA = require("simple-icons/icons.json");
 /** The day the pinned simple-icons version was installed; bump together with the package. */
 const FETCHED = "2026-10-30";
-const UA = "PreBell logo build (https://prebell.site)";
+const UA = "PreBell logo build (https://prebell.site; support@prebell.site)";
 
 /**
  * Watchlist ticker -> simple-icons slug. Only the company's own corporate mark (or, where noted,
@@ -92,37 +101,79 @@ const COMPANIES = {
 /** Tickers kept as a text chip on purpose, with the reason (shown in LICENSES.md). */
 const SKIP = {
   AVGO: "Broadcom licenses its logo only on request (logorequest.broadcom.com)",
-  ISRG: "its only free logo is a light grey wordmark, blank at 18px; its site has no usable icon",
-  STX: "its only free logo is a pale green wordmark, illegible at tile size; its site has no usable icon",
-  AMAT: "its only free logo is a wide wordmark, illegible at 48px; its site has no usable icon",
-  ADI: "its only free logo is a wide wordmark, illegible at 48px; its site has no usable icon",
-  AMT: "its only free logo is a wide wordmark, illegible at 48px; its site has no usable icon",
-  IBM: "its site icon is a grey bee-like glyph that does not read as IBM; no free logo is square",
-  MDT: "its site icon is a figure graphic, not the Medtronic mark; its Commons logo is a wide wordmark",
+  VMRK: "renamed from Equity Residential; Wikidata still holds the old company's logo",
+};
+
+/** Tickers whose site icon is not the company's mark (it would be wrong, not just small): Commons and simple-icons only. */
+const NO_SITE_ICON = {
+  IBM: "its site icon is a grey bee-like glyph that does not read as IBM",
+  MDT: "its site icon is a figure graphic, not the Medtronic mark",
   MAR: "its site icon is an orange ring that does not read as Marriott",
+  IEX: "its site icon is a blurry raster",
+};
+
+/**
+ * Tickers whose Wikidata/Commons logo is the wrong company, a subsidiary, a product or an old brand (found
+ * in review): no Commons file is used; simple-icons, then the site icon, then a text tile.
+ */
+const NO_COMMONS = {
+  BKNG: "its Commons logo is a cramped stacked lockup; the simple-icons glyph reads better",
+  "BRK.B": "its Commons logo is Berkshire Hathaway Energy, a subsidiary",
+  BRO: "Commons search finds Brown Bears Athletics",
+  DOW: "Commons search finds Martin Dow, a different company",
+  EIX: "Commons search finds Edison State Community College",
+  GRMN: "its Commons logo is the Garmin-ASUS joint brand",
+  HIG: "Commons search finds a 1968 railroad logo",
+  HONA: "its Commons logo is the 1946 Minneapolis-Honeywell one",
+  JCI: "its Commons logo is an old, blurred one",
+  JNJ: "Commons search finds a presidential campaign logo",
+  KR: "its Commons logo is the 1961-2019 one",
+  MGM: "Commons search finds a casino-tower logo, not MGM Resorts",
+  PGR: "Commons names a political party with the same initials",
+  PRU: "Commons names Prudential do Brasil",
+  TRI: "Commons names the Thomson Reuters Foundation, a charity",
+  UNH: "its Commons logo is UnitedHealthcare, a subsidiary",
 };
 
 /** Wikidata items for tickers whose watchlist CIK has no Wikidata match (new holding companies, foreign issuers). */
 const WIKIDATA = { BLK: "Q219635", XOM: "Q156238", NVO: "Q818846", SAN: "Q6496310" };
 
-/** Commons files tried before the Wikidata ones: the company's own square mark, where Wikidata only names a wide logo. */
+/** Commons files used instead of the Wikidata logo (which is wrong or the wrong shape); nothing else from Commons is tried. */
 const COMMONS = {
-  ANET: "Arista-networks-logo.svg",
-  APH: "Amphenol Logo.svg",
+  BLK: "BlackRock wordmark.svg", // Wikidata names Aladdin, a product
+  GD: "General Dynamics logo 2020.svg", // Wikidata names General Dynamics Mission Systems
+  MS: "Morgan Stanley Logo 2024.svg", // Wikidata names MSCI's old name
+  ORCL: "Oracle logo.svg", // Commons search finds Oracle Solaris
+  ADSK: "Autodesk logo.svg", // Wikidata names Autodesk Maya, a product
+  AXON: "AXON Company logo.svg",
+  CTSH: "Cognizant logo 2022.svg", // Commons search found a photo of an office
+  EMR: "EmersonElectricLogo.png", // its Wikidata logo is the 1945 one
+  FERG: "Ferguson plc logo.svg", // Commons search found Massey Ferguson
+  GLW: "Corning Incorporated Logo.svg", // Commons search found SUNY Corning Community College
+  IR: "Ingersoll Rand logo.svg", // its Wikidata logo is from 1925
+  KDP: "Keurig Dr Pepper.svg",
+  LUV: "Southwest Airlines logo 2014.svg", // its Wikidata logo is the 1971 one
+  TPR: "Tapestry logo.svg", // its Wikidata logo is Coach, one of its brands
+  TT: "TraneTechnologieslogo.svg", // its Wikidata logo is Ingersoll Rand, the old name
+};
+
+/** Commons files tried when the company's Wikidata logo is missing, not free or unusable (before simple-icons). */
+const COMMONS_FALLBACK = {
   CVS: "CVS Health heart.png", // the CVS Health heart, as on its app icons
-  DHR: "Danaher logo.svg",
-  ORCL: "Oracle Corporation logo.svg", // the Oracle "O", as on its app icons
-  TMUS: "T from T Mobile logo.svg",
-  XOM: "XOM square.svg",
 };
 
 /**
- * Commons logos wider than MAX_ASPECT (after trimming) get small at 18px, so a square site icon wins
- * over them; one is still used when there is no site icon, unless it is wider than MAX_WORDMARK, where
- * it would be an unreadable strip and the text chip is better.
+ * Logos wider than MAX_WORDMARK (after trimming) are unreadable strips on a 128px card; below that the
+ * wordmark is used as it is. A raster wordmark must be at least MIN_WIDE_RASTER px wide, any other raster
+ * at least MIN_RASTER px on its short side; vectors have no minimum.
  */
-const MAX_ASPECT = 2.2;
-const MAX_WORDMARK = 4.5;
+const MAX_WORDMARK = 6.5;
+/** A wordmark wider than MAX_WORDMARK but not wider than this is used only when nothing else works (it is small on a card). */
+const MAX_WIDE_LAST_RESORT = 9;
+const MIN_WIDE_RASTER = 120;
+const MIN_RASTER = 64;
+/** CSS size of the slot a logo fits (files are 2x): width, height. */
+const SLOT = [128, 48];
 
 /**
  * Partner marks, each a square tile shown beside the partner's name. `slug` is a simple-icons glyph;
@@ -173,7 +224,7 @@ async function get(url, required = false) {
   if (retryable.includes(url)) return null; // already failed this run
   let why = "not cached (--offline)";
   if (!OFFLINE) {
-    await new Promise((r) => setTimeout(r, Math.max(0, lastRequest + 1000 - Date.now())));
+    await new Promise((r) => setTimeout(r, Math.max(0, lastRequest + (/(^|\.)(wikimedia|wikidata|wikipedia)\.org$/.test(new URL(url).hostname) ? 500 : 1000) - Date.now())));
     lastRequest = Date.now();
     try {
       const res = await fetch(url, { headers: { "User-Agent": UA }, signal: AbortSignal.timeout(20_000) });
@@ -207,11 +258,13 @@ const getJson = async (url) => {
 
 /** Ticker -> Wikidata item, matched on the SEC CIK (P5531, stored zero-padded to 10 digits). */
 async function wikidataItems(rows) {
-  const ciks = rows.map((r) => `"${r.cik.padStart(10, "0")}"`).join(" ");
-  const query = `SELECT ?cik ?item WHERE { VALUES ?cik { ${ciks} } ?item wdt:P5531 ?cik. }`;
-  const res = await getJson(`https://query.wikidata.org/sparql?format=json&query=${encodeURIComponent(query)}`);
   const byCik = {};
-  for (const b of res.results.bindings) byCik[b.cik.value] ??= b.item.value.split("/").pop();
+  for (let i = 0; i < rows.length; i += 80) {
+    const ciks = rows.slice(i, i + 80).map((r) => `"${r.cik.padStart(10, "0")}"`).join(" ");
+    const query = `SELECT ?cik ?item WHERE { VALUES ?cik { ${ciks} } ?item wdt:P5531 ?cik. }`;
+    const res = await getJson(`https://query.wikidata.org/sparql?format=json&query=${encodeURIComponent(query)}`);
+    for (const b of res.results.bindings) byCik[b.cik.value] ??= b.item.value.split("/").pop();
+  }
   return Object.fromEntries(rows.map((r) => [r.ticker, WIKIDATA[r.ticker] ?? byCik[r.cik.padStart(10, "0")]]));
 }
 
@@ -253,7 +306,7 @@ async function commonsInfo(names) {
     const batch = names.slice(i, i + 50);
     const titles = encodeURIComponent(batch.map((n) => `File:${n}`).join("|"));
     const res = await getJson(
-      "https://commons.wikimedia.org/w/api.php?action=query&format=json&prop=imageinfo&iiprop=url|extmetadata" +
+      "https://commons.wikimedia.org/w/api.php?action=query&format=json&prop=imageinfo&iiprop=url|size|mime|extmetadata&iiurlwidth=800" +
         `&iiextmetadatafilter=LicenseShortName|LicenseUrl|Artist|Attribution&titles=${titles}`,
     );
     const tags = {};
@@ -273,7 +326,8 @@ async function commonsInfo(names) {
       if (!info || !name) continue;
       const m = info.extmetadata ?? {};
       out[name] = {
-        url: info.url,
+        // A raster wider than 800px is fetched as an 800px thumbnail (a 2x wordmark never needs more).
+        url: info.mime !== "image/svg+xml" && info.width > 800 && info.thumburl ? info.thumburl : info.url,
         page: info.descriptionurl,
         licence: plain(m.LicenseShortName?.value),
         licenceUrl: m.LicenseUrl?.value,
@@ -343,7 +397,7 @@ async function siteIcon(homepages) {
     for (const { url } of iconLinks(page.body.toString("utf8"), page.url)) {
       const file = await get(url);
       const art = file && (await artwork(file.body).catch((e) => console.warn(`  ${url}: ${e.message}`)));
-      if (art && !art.blank && (art.svg || Math.min(art.srcWidth, art.srcHeight) >= 48))
+      if (art && !art.blank && (art.svg || (Math.min(art.srcWidth, art.srcHeight) >= 48 && Math.min(art.width, art.height) >= MIN_RASTER)))
         return { art, url: file.url, home: page.url, fetched: file.fetched };
     }
   }
@@ -426,6 +480,8 @@ async function artwork(file) {
     svg,
     srcWidth: meta.width,
     srcHeight: meta.height,
+    width: info.width,
+    height: info.height,
     aspect: info.width / info.height,
     fullBleed,
     pale: !fullBleed && light > opaque * 0.75,
@@ -458,6 +514,31 @@ async function pngTile(art) {
   return out.png({ palette: true, quality: 95, effort: 10, compressionLevel: 9 }).toBuffer();
 }
 
+/**
+ * A company mark -> { png, w, h }: the 2x PNG and its natural CSS size. A wordmark (or any mark that is
+ * not full-bleed) is trimmed and fitted inside SLOT with no tile, so the card's background shows around
+ * it; a full-bleed app icon is a rounded square; a mark too pale for white is set on a dark pill.
+ */
+async function renderMark(art) {
+  const [sw, sh] = SLOT.map((v) => v * 2);
+  const out = (img) => img.png({ palette: true, quality: 90, effort: 10, compressionLevel: 9 }).toBuffer({ resolveWithObject: true });
+  const done = ({ data, info }) => ({ png: data, w: Math.max(1, Math.round(info.width / 2)), h: Math.max(1, Math.round(info.height / 2)) });
+  const svg = (w, h, body) => Buffer.from(`<svg xmlns="http://www.w3.org/2000/svg" width="${w}" height="${h}">${body}</svg>`);
+  if (art.fullBleed) {
+    const S = sh;
+    return done(await out(sharp(art.png).resize(S, S, { fit: "cover" }).composite([{ input: svg(S, S, `<rect width="${S}" height="${S}" rx="${S / 4.5}"/>`), blend: "dest-in" }])));
+  }
+  const pad = art.pale ? 16 : 0;
+  const glyph = await sharp(art.png)
+    .resize(sw - 2 * pad, sh - 2 * pad, { fit: "inside", withoutEnlargement: true })
+    .png()
+    .toBuffer({ resolveWithObject: true });
+  if (!art.pale) return done(await out(sharp(glyph.data)));
+  const [w, h] = [glyph.info.width + 2 * pad, glyph.info.height + 2 * pad];
+  const back = svg(w, h, `<rect width="${w}" height="${h}" rx="${pad}" fill="#111"/>`);
+  return done(await out(sharp(back).composite([{ input: glyph.data, gravity: "centre" }])));
+}
+
 const icon = (slug) => {
   const data = SI_DATA.find((i) => i.slug === slug);
   if (!data) throw new Error(`simple-icons ${SI_VERSION} has no "${slug}"`);
@@ -470,9 +551,6 @@ const icon = (slug) => {
 // ---------------------------------------------------------------------------------------------
 // Build.
 
-// Logos show on earnings-check covers and as the earnings calendar's tile grid, so only write-up ("full" tier) companies get one, plus any ticker
-// the committed manifest already has (the calendar-only rows from before the tiers).
-const kept = existsSync(MANIFEST) ? Object.keys(JSON.parse(readFileSync(MANIFEST, "utf8").match(/= (\{[\s\S]*\});/)[1])) : [];
 const watchRows = readFileSync(WATCHLIST, "utf8")
   .split("\n")
   .filter((l) => l.trim() && !l.startsWith("#"))
@@ -481,9 +559,8 @@ const watchRows = readFileSync(WATCHLIST, "utf8")
     return { ticker, cik, name, domains: domains.split(",").filter(Boolean), tier };
   });
 const tickers = watchRows.map((w) => w.ticker);
-const watchlist = watchRows.filter((w) => w.tier === "full" || kept.includes(w.ticker) || w.ticker in COMPANIES || w.ticker in SKIP);
-for (const t of [...Object.keys(COMPANIES), ...Object.keys(SKIP), ...Object.keys(WIKIDATA)])
-  if (!tickers.includes(t)) throw new Error(`${t} is not on the watchlist`);
+for (const t of [...Object.keys(COMPANIES), ...Object.keys(SKIP), ...Object.keys(NO_SITE_ICON), ...Object.keys(NO_COMMONS), ...Object.keys(COMMONS), ...Object.keys(WIKIDATA), ...Object.keys(COMMONS_FALLBACK)])
+  if (!tickers.includes(t)) console.warn(`  ${t} is in a mapping but not on the watchlist (ignored)`);
 
 // Built here, moved into public/logos and src/lib at the very end.
 rmSync(BUILD, { recursive: true, force: true });
@@ -497,78 +574,129 @@ const siLicence = (i) =>
   i.license ? `${i.license.type}${i.license.url ? ` (${i.license.url})` : ""}` : "CC0-1.0 (Simple Icons)";
 const siSource = (i) =>
   `simple-icons@${SI_VERSION} \`${i.slug}\` (upstream source: ${i.source}; brand guidelines: ${i.guidelines ?? "none listed"})`;
-const tier = { simpleIcons: [], commons: [], site: [] };
+const tier = { commons: [], hand: [], simpleIcons: [], icon: [], search: [], wide: [], site: [] };
+/** Why each ticker's rejected candidates lost, printed for the tickers that end up without a logo. */
+const why = {};
 
 const manifest = {};
-for (const [ticker, slug] of Object.entries(COMPANIES)) {
-  const i = icon(slug);
-  const file = `${ticker}.svg`;
-  writeFileSync(join(companiesDir, file), tile(i));
-  manifest[ticker] = `/logos/companies/${file}`;
-  row(`companies/${file}`, i.title, siSource(i), FETCHED, siLicence(i));
-  tier.simpleIcons.push(ticker);
-}
-
-const rest = watchlist.filter((w) => !(w.ticker in COMPANIES) && !(w.ticker in SKIP));
-const items = await wikidataItems(rest);
+const sizes = {};
+const todo = watchRows.filter((w) => !(w.ticker in SKIP));
+const items = await wikidataItems(todo);
 const claims = await entities([...new Set(Object.values(items).filter(Boolean))]);
 const commons = await commonsInfo([
-  ...new Set([...Object.values(COMMONS), ...Object.values(claims).flatMap((c) => [...c.icons, ...c.logos])]),
+  ...new Set([...Object.values(COMMONS), ...Object.values(COMMONS_FALLBACK), ...Object.values(claims).flatMap((c) => [...c.logos, ...c.icons])]),
 ]);
 
-for (const w of rest) {
+/** Null when the artwork is fit to show, else the reason it is not. */
+function reject(art) {
+  if (art.blank) return "blank";
+  if (art.aspect > MAX_WORDMARK) return `too wide (${art.aspect.toFixed(1)}:1)`;
+  if (art.aspect < 0.5) return `too tall (1:${(1 / art.aspect).toFixed(1)})`;
+  if (!art.svg && art.aspect > 1.5 && art.width < MIN_WIDE_RASTER) return `low-res (${art.width}px wide)`;
+  if (!art.svg && art.aspect <= 1.5 && Math.min(art.width, art.height) < MIN_RASTER) return `low-res (${art.width}x${art.height})`;
+  return null;
+}
+
+/** Commons file names that look like the company's logo: "<first word of its name> ... logo", best match first. */
+async function searchLogos(w) {
+  // The title must hold the company's whole core name ("brownbrown"), or a distinctive first word (7+ letters).
+  const words = w.name.replace(/^the\s+/i, "").split(/[\s,.&-]+/).map((x) => x.toLowerCase().replace(/[^a-z0-9]/g, "")).filter(Boolean);
+  const core = words.filter((x) => !/^(inc|corp|corporation|company|co|group|holdings|plc|ltd|limited|and)$/.test(x));
+  const full = core.join("");
+  const first = core[0] ?? "";
+  if (full.length < 3) return [];
+  const q = encodeURIComponent(`${w.name} logo`);
+  const res = await getJson(`https://commons.wikimedia.org/w/api.php?action=query&format=json&list=search&srnamespace=6&srlimit=8&srsearch=${q}`);
+  return res.query.search
+    .map((r) => r.title.replace(/^File:/, ""))
+    .filter((n) => /\.(svg|png)$/i.test(n) && /logo/i.test(n))
+    .filter((n) => {
+      const t = n.toLowerCase().replace(/[^a-z0-9]/g, "");
+      return t.includes(full) || (first.length >= 7 && t.includes(first));
+    })
+    .filter((n) => !/icon|favicon|history|old|building|store|brand guide|president|campaign|college|university|school|party|athletics|foundation|church|product/i.test(n));
+}
+
+for (const w of todo) {
   const qid = items[w.ticker];
   const c = claims[qid] ?? { icons: [], logos: [], sites: [] };
-  let pick = null;
-  let wide = null;
-  const candidates = [
-    ...(COMMONS[w.ticker] ? [["hand", COMMONS[w.ticker]]] : []),
-    ...c.icons.map((n) => ["P8972", n]),
-    ...c.logos.map((n) => ["P154", n]),
-  ];
-  for (const [prop, name] of candidates) {
+  const notes = (why[w.ticker] = []);
+  /** A free Commons file that passes reject(), as a pick; null otherwise (the reason is noted). */
+  const fromCommons = async (prop, name) => {
     const info = commons[name];
-    if (!info || !FREE.test(info.licence)) {
-      console.warn(`  ${w.ticker}: skip ${name} (${info?.licence || "no licence"})`);
-      continue;
-    }
+    if (!info) return notes.push(`${name}: not on Commons`), null;
+    if (!FREE.test(info.licence)) return notes.push(`${name}: ${info.licence || "no licence"}`), null;
     const file = await get(info.url, true);
-    const art = file && (await artwork(file.body).catch((e) => console.warn(`  ${info.url}: ${e.message}`)));
-    if (!art || art.blank) continue;
-    const found = { kind: "commons", art, info, name, prop, fetched: file.fetched };
-    if (prop !== "P154" || art.aspect <= MAX_ASPECT) {
-      pick = found;
-      break;
+    const art = file && (await artwork(file.body).catch((e) => notes.push(`${name}: ${e.message}`)));
+    const bad = art && reject(art);
+    const found = art && { kind: "commons", art, info, name, prop, fetched: file.fetched };
+    if (bad && art.aspect > MAX_WORDMARK && art.aspect <= MAX_WIDE_LAST_RESORT && !reject({ ...art, aspect: MAX_WORDMARK })) wide ??= found;
+    if (!art || bad) return bad && notes.push(`${name}: ${bad}`), null;
+    return found;
+  };
+  let wide = null;
+  const fromSearch = async (w) => {
+    const names = await searchLogos(w);
+    Object.assign(commons, await commonsInfo(names.filter((n) => !commons[n])));
+    for (const name of names) {
+      const found = await fromCommons("search", name);
+      if (found) return found;
     }
-    if (art.aspect <= MAX_WORDMARK) wide ??= found;
-    else console.warn(`  ${w.ticker}: ${name} is too wide (${art.aspect.toFixed(1)}:1)`);
-  }
-  if (!pick) {
+    return null;
+  };
+  let pick = null;
+  const noCommons = w.ticker in NO_COMMONS;
+  if (COMMONS[w.ticker]) pick = await fromCommons("hand", COMMONS[w.ticker]);
+  else if (!noCommons) for (const name of c.logos) if ((pick = await fromCommons("P154", name))) break;
+  if (!pick && !noCommons && COMMONS_FALLBACK[w.ticker]) pick = await fromCommons("hand", COMMONS_FALLBACK[w.ticker]);
+  if (!pick && w.ticker in COMPANIES) pick = { kind: "simple-icons", icon: icon(COMPANIES[w.ticker]) };
+  if (!pick && !noCommons && !COMMONS[w.ticker]) for (const name of c.icons) if ((pick = await fromCommons("P8972", name))) break;
+  if (!pick && !noCommons && !COMMONS[w.ticker]) pick = await fromSearch(w);
+  if (!pick && !(w.ticker in NO_SITE_ICON)) {
     const site = await siteIcon([...new Set([...w.domains.map((d) => `https://${d}/`), ...c.sites])]);
     if (site) pick = { kind: "site", ...site };
+    else notes.push("no site icon (none linked, blocked, or under 48px)");
   }
-  pick ??= wide;
+  if (!pick && wide) {
+    pick = { ...wide, wide: true };
+    tier.wide.push(w.ticker);
+  }
   if (!pick) continue;
-  if (pick === wide) console.warn(`  ${w.ticker}: wide Commons logo ${pick.name} (${pick.art.aspect.toFixed(1)}:1), no site icon`);
-  const file = `${w.ticker}.png`;
-  writeFileSync(join(companiesDir, file), await pngTile(pick.art));
-  manifest[w.ticker] = `/logos/companies/${file}`;
-  if (pick.kind === "commons") {
-    const { info } = pick;
-    const by = /^cc by/i.test(info.licence) ? `; by ${info.attribution || info.artist || "see the file page"}` : "";
-    row(
-      `companies/${file}`,
-      w.name,
-      `Wikimedia Commons [${pick.name}](${info.page}) (${pick.prop === "hand" ? "chosen by hand in the script" : `Wikidata [${qid}](https://www.wikidata.org/wiki/${qid}) ${pick.prop}`})`,
-      pick.fetched,
-      `${info.licence}${/^public domain/i.test(info.licence) && info.tags.length ? ` (${info.tags.join(", ")})` : ""}` +
-        `${info.licenceUrl ? ` (${info.licenceUrl})` : ""}${by}`,
-    );
-    tier.commons.push(w.ticker);
+  let file;
+  if (pick.kind === "simple-icons") {
+    const i = pick.icon;
+    file = `${w.ticker}.svg`;
+    // A glyph is drawn bare on the card; one too pale for white goes on the dark tile.
+    const svg = pale(i.hex)
+      ? tile(i).replace("<svg ", '<svg width="48" height="48" ')
+      : `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="48" height="48"><path fill="#${i.hex}" d="${i.path}"/></svg>\n`;
+    writeFileSync(join(companiesDir, file), svg);
+    sizes[w.ticker] = [48, 48];
+    row(`companies/${file}`, i.title, siSource(i), FETCHED, siLicence(i));
+    tier.simpleIcons.push(w.ticker);
   } else {
-    row(`companies/${file}`, w.name, `site icon ${pick.url} (linked from ${pick.home})`, pick.fetched, "site icon, trademark of owner, nominative use");
-    tier.site.push(w.ticker);
+    file = `${w.ticker}.png`;
+    const m = await renderMark(pick.art);
+    writeFileSync(join(companiesDir, file), m.png);
+    sizes[w.ticker] = [m.w, m.h];
+    if (pick.kind === "commons") {
+      const { info } = pick;
+      const by = /^cc by/i.test(info.licence) ? `; by ${info.attribution || info.artist || "see the file page"}` : "";
+      row(
+        `companies/${file}`,
+        w.name,
+        `Wikimedia Commons [${pick.name}](${info.page}) (${pick.prop === "hand" ? "chosen by hand in the script" : pick.prop === "search" ? "found by searching Commons for the company name" : `Wikidata [${qid}](https://www.wikidata.org/wiki/${qid}) ${pick.prop}`})`,
+        pick.fetched,
+        `${info.licence}${/^public domain/i.test(info.licence) && info.tags.length ? ` (${info.tags.join(", ")})` : ""}` +
+          `${info.licenceUrl ? ` (${info.licenceUrl})` : ""}${by}`,
+      );
+      (pick.prop === "P154" ? tier.commons : pick.prop === "hand" ? tier.hand : pick.prop === "search" ? tier.search : tier.icon).push(w.ticker);
+    } else {
+      row(`companies/${file}`, w.name, `site icon ${pick.url} (linked from ${pick.home})`, pick.fetched, "site icon, trademark of owner, nominative use");
+      tier.site.push(w.ticker);
+    }
   }
+  manifest[w.ticker] = `/logos/companies/${file}`;
 }
 
 for (const [id, p] of Object.entries(PARTNERS)) {
@@ -593,7 +721,9 @@ for (const [id, p] of Object.entries(PARTNERS)) {
 writeFileSync(
   join(BUILD, "logos.generated.ts"),
   `// Generated by scripts/build-logos.mjs. Do not edit; run \`pnpm logos\`.\n` +
-    `export const COMPANY_LOGOS: Readonly<Record<string, string>> = ${JSON.stringify(manifest, null, 2)};\n`,
+    `export const COMPANY_LOGOS: Readonly<Record<string, string>> = ${JSON.stringify(manifest, null, 2)};\n` +
+    `/** Natural size of each file in CSS px (the file itself is 2x): [width, height]. */\n` +
+    `export const COMPANY_LOGO_SIZES: Readonly<Record<string, readonly [number, number]>> = ${JSON.stringify(sizes)};\n`,
 );
 
 const missing = tickers.filter((t) => !(t in manifest));
@@ -607,20 +737,21 @@ writeFileSync(
 Generated by \`apps/web/scripts/build-logos.mjs\`; edit the script, not this file. Every file below is
 bundled with the site; pages never load a logo from a third party.
 
-Sources, in order of preference per ticker:
+Sources, in order of preference per ticker (company cards are wide, so a horizontal wordmark comes first):
 
-1. **Simple Icons** (\`.svg\` tiles, ${tier.simpleIcons.length} tickers): the npm package, pinned at
-   simple-icons@${SI_VERSION}. Its icon data is
+1. **Wikimedia Commons via Wikidata** (\`.png\`, ${tier.commons.length} tickers by the logo property P154, ${tier.hand.length} chosen
+   by hand in the script, ${tier.icon.length} by the small-logo property P8972): the logo file named on the
+   company's Wikidata item (matched on its SEC CIK). Only files Commons lists as public domain (mostly
+   PD-textlogo), CC0, CC BY or CC BY-SA are used, and CC BY rows name the author. The file is trimmed and
+   fitted inside 128x48 CSS px (stored at 2x) with no other change to its shape. Logos wider than
+   ${MAX_WORDMARK}:1 and rasters under ${MIN_WIDE_RASTER}px wide are not used.
+2. **Simple Icons** (\`.svg\` glyphs, ${tier.simpleIcons.length} tickers): the npm package, pinned at
+   simple-icons@${SI_VERSION}, for companies with no usable Commons logo. Its icon data is
    [CC0-1.0](https://github.com/simple-icons/simple-icons/blob/develop/LICENSE.md); its
    [disclaimer](https://github.com/simple-icons/simple-icons/blob/develop/DISCLAIMER.md) notes that a
-   per-icon licence, where one is listed, takes precedence. The script only recolours and frames the
-   glyph (a 32px rounded tile); it never changes the shape.
-2. **Wikimedia Commons via Wikidata** (\`.png\` tiles, ${tier.commons.length} tickers): the logo file
-   named on the company's Wikidata item (matched on its SEC CIK; P8972 small logo, else P154 logo).
-   Only files Commons lists as public domain (mostly PD-textlogo), CC0, CC BY or CC BY-SA are used, and
-   CC BY rows name the author. The file is trimmed and drawn on a 64px tile; its shape is not changed.
-3. **The company's own site icon** (\`.png\` tiles, ${tier.site.length} tickers): for companies whose
-   Commons logo is missing, not freely licensed or too wide to read at 18px. The largest
+   per-icon licence, where one is listed, takes precedence. The script only sets the glyph's colour (on a
+   dark tile when the brand colour is too pale for white); it never changes the shape.
+3. **The company's own site icon** (\`.png\`, ${tier.site.length} tickers), last resort: the largest
    \`apple-touch-icon\` / \`icon\` linked from the company's homepage, fetched once at build time.
 
 **Copyright vs trademark.** A free licence covers copyright in the drawing. Every logo remains a
@@ -640,7 +771,7 @@ Total size of the files above: ${bytes} bytes.
 );
 
 // A regeneration must not quietly lose logos (a site that was down, a file renamed upstream).
-const committed = existsSync(MANIFEST) ? JSON.parse(readFileSync(MANIFEST, "utf8").match(/= (\{[\s\S]*\});/)[1]) : {};
+const committed = existsSync(MANIFEST) ? JSON.parse(readFileSync(MANIFEST, "utf8").match(/COMPANY_LOGOS[^=]*= (\{[\s\S]*?\n\});/)[1]) : {};
 const lost = Object.keys(committed).filter((t) => !(t in manifest));
 if (lost.length && !ALLOW_SHRINK)
   throw new Error(`these tickers would lose their logo: ${lost.join(" ")}. Nothing was written; pass --allow-shrink if that is intended.`);
@@ -653,10 +784,11 @@ renameSync(join(BUILD, "LICENSES.md"), join(LOGOS, "LICENSES.md"));
 renameSync(join(BUILD, "logos.generated.ts"), MANIFEST);
 
 console.log(
-  `${Object.keys(manifest).length} company logos (simple-icons ${tier.simpleIcons.length}, Commons ${tier.commons.length}, ` +
-    `site icon ${tier.site.length}), ${missing.length} without: ${missing.join(" ")}; ${bytes} bytes`,
+  `${Object.keys(manifest).length} of ${tickers.length} tickers have a logo (Commons P154 ${tier.commons.length}, Commons by hand ${tier.hand.length}, ` +
+    `simple-icons ${tier.simpleIcons.length}, Commons P8972 ${tier.icon.length}, Commons search ${tier.search.length}, site icon ${tier.site.length}); ${bytes} bytes`,
 );
-console.log(`Commons: ${tier.commons.join(" ")}\nSite icon: ${tier.site.join(" ")}`);
+console.log(`Very wide, last resort (${tier.wide.length}): ${tier.wide.join(" ")}\nCommons search (${tier.search.length}): ${tier.search.join(" ")}\nSite icon (${tier.site.length}): ${tier.site.join(" ")}`);
+console.log(`Without (${missing.length}):\n${missing.map((t) => `  ${t}: ${SKIP[t] ?? (why[t] ?? []).join("; ") ?? ""}`).join("\n")}`);
 if (lost.length) console.warn(`Dropped (--allow-shrink): ${lost.join(" ")}`);
 if (retryable.length)
   console.warn(`${retryable.length} company-site requests failed in a way a retry could fix (not cached); run again to retry them.`);

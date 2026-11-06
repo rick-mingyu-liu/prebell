@@ -118,7 +118,7 @@ describe("CalendarWeek", () => {
     const order = [...bmo.matchAll(/href="\/en\/(?:t\/([^"]+)|p\/([^"]+))"/g)].map((m) => m[1] ?? m[2]);
     expect(order).toEqual(["UNH", "intc-q3", "AVGO", "A"]);
     // A tile shows the logo with the company name as its alt text, the ticker beneath, and the name on hover and below.
-    expect(out).toMatch(/<img src="\/logos\/companies\/AMD\.svg" alt="Advanced Micro Devices" width="48" height="48" loading="(eager|lazy)"/);
+    expect(out).toMatch(/<img src="\/logos\/companies\/AMD\.(?:svg|png)" alt="Advanced Micro Devices" width="48" height="48" loading="(eager|lazy)"/);
     expect(out).toContain('<span class="cal-sym-t">AMD</span>');
     expect(out).toContain('title="Advanced Micro Devices"');
     expect(out).toContain('<span class="cal-tile-name" aria-hidden="true">Agilent Technologies</span>');
@@ -156,10 +156,10 @@ describe("CalendarWeek", () => {
 
   it("shows a slot of calendar-only companies as ticker tiles, with no logos", () => {
     const out = renderToStaticMarkup(
-      <CalendarWeek days={[{ date: "2026-11-02", entries: [entry("A", "bmo", "confirmed", { writeUps: false, name: "Agilent Technologies" })] }]} locale="en" />,
+      <CalendarWeek days={[{ date: "2026-11-02", entries: [entry("HAL", "bmo", "confirmed", { writeUps: false, name: "Halliburton" })] }]} locale="en" />,
     );
     expect(out).toContain('<ul class="cal-tiles">');
-    expect(out).toContain('<span class="cal-chip"><span class="sr-only">Agilent Technologies</span>A</span>');
+    expect(out).toContain('<span class="cal-chip"><span class="sr-only">Halliburton</span>HAL</span>');
     expect(out).not.toContain("<img");
   });
 

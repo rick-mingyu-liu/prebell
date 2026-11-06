@@ -1,7 +1,7 @@
 import { readFileSync, readdirSync, statSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { companyLogo } from "../src/lib/logos";
-import { COMPANY_LOGOS } from "../src/lib/logos.generated";
+import { companyLogo, companyLogoInfo } from "../src/lib/logos";
+import { COMPANY_LOGOS, COMPANY_LOGO_SIZES } from "../src/lib/logos.generated";
 
 const publicFile = (path: string) => new URL(`../public${path}`, import.meta.url);
 const watchlist = readFileSync(new URL("../../../crates/core/data/watchlist.tsv", import.meta.url), "utf8")
@@ -11,17 +11,34 @@ const watchlist = readFileSync(new URL("../../../crates/core/data/watchlist.tsv"
 
 describe("companyLogo", () => {
   it("finds a bundled tile by ticker, in any case", () => {
-    expect(companyLogo("AAPL")).toBe("/logos/companies/AAPL.svg");
-    expect(companyLogo(" aapl ")).toBe("/logos/companies/AAPL.svg");
+    expect(companyLogo("AAPL")).toMatch(/^\/logos\/companies\/AAPL\.(svg|png)$/);
+    expect(companyLogo(" aapl ")).toBe(companyLogo("AAPL"));
   });
   it("is null for tickers without a logo, unknown tickers and odd input", () => {
     expect(companyLogo("AVGO")).toBeNull();
-    expect(companyLogo("BRK.B")).toBeNull();
-    for (const t of ["ISRG", "STX", "IBM", "MDT", "MAR", "AMAT", "ADI", "AMT"]) expect(companyLogo(t)).toBeNull(); // the script's SKIP list
+    expect(companyLogo("VMRK")).toBeNull(); // the script's SKIP list
     expect(companyLogo("ZZZZ")).toBeNull();
     expect(companyLogo("")).toBeNull();
     expect(companyLogo("constructor")).toBeNull();
     expect(companyLogo("__proto__")).toBeNull();
+  });
+});
+
+describe("companyLogoInfo", () => {
+  it("returns the file with its natural size, which fits a 128x48 slot", () => {
+    const info = companyLogoInfo(" aapl ");
+    expect(info).toEqual({ src: companyLogo("AAPL"), width: COMPANY_LOGO_SIZES.AAPL[0], height: COMPANY_LOGO_SIZES.AAPL[1] });
+    for (const [width, height] of Object.values(COMPANY_LOGO_SIZES)) {
+      expect(width).toBeGreaterThan(0);
+      expect(height).toBeGreaterThan(0);
+      expect(width).toBeLessThanOrEqual(128);
+      expect(height).toBeLessThanOrEqual(48);
+    }
+  });
+  it("is null where companyLogo is", () => {
+    expect(companyLogoInfo("AVGO")).toBeNull();
+    expect(companyLogoInfo("ZZZZ")).toBeNull();
+    expect(companyLogoInfo("__proto__")).toBeNull();
   });
 });
 
@@ -34,9 +51,15 @@ describe("logo manifest", () => {
       if (path.endsWith(".svg")) expect(file.toString("utf8")).toMatch(/^<svg xmlns="http:\/\/www\.w3\.org\/2000\/svg"/);
       else {
         expect(file.subarray(0, 8).toString("hex")).toBe("89504e470d0a1a0a");
-        expect([file.readUInt32BE(16), file.readUInt32BE(20)]).toEqual([64, 64]); // the IHDR size
+        // The IHDR size is twice the natural size recorded for the card (rounded).
+        const [w, h] = COMPANY_LOGO_SIZES[ticker];
+        expect(Math.abs(file.readUInt32BE(16) - 2 * w)).toBeLessThanOrEqual(1);
+        expect(Math.abs(file.readUInt32BE(20) - 2 * h)).toBeLessThanOrEqual(1);
       }
     }
+  });
+  it("records a natural size for every logo and no others", () => {
+    expect(Object.keys(COMPANY_LOGO_SIZES).sort()).toEqual(Object.keys(COMPANY_LOGOS).sort());
   });
   it("has no stray files and every file has a licence entry", () => {
     const licences = readFileSync(publicFile("/logos/LICENSES.md"), "utf8");
@@ -54,6 +77,6 @@ describe("logo manifest", () => {
         if (f.endsWith(".svg")) expect(readFileSync(path, "utf8")).not.toMatch(/<script|href=|on\w+=/i);
         else expect(f).toMatch(/\.png$/);
       }
-    expect(bytes).toBeLessThan(500_000);
+    expect(bytes).toBeLessThan(2_500_000);
   });
 });
