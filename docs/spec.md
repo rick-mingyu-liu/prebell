@@ -8,7 +8,7 @@ Name: PreBell (盘前铃), domain prebell.site (bought 2026-11-05; planned as pr
 Build an automated investing-news site, in **English and Simplified Chinese**, that does the daily reading for people who follow US stocks but don't want to read filings and news themselves. They should come back every day.
 
 What defines it:
-- **North America first.** All schedules run on US Eastern time. It leads with a premarket brief at ~8:30 AM ET, which also lands at ~8:30–9:30 PM in Beijing for Chinese readers.
+- **North America first.** All schedules run on US Eastern time. It leads with a premarket brief at ~8:00 AM ET, which also lands at ~8:00–9:00 PM in Beijing for Chinese readers, updated at ~8:35 AM ET once the 8:30 economic releases are out.
 - **Source-backed earnings.** We detect earnings releases from SEC EDGAR filings (8-K Item 2.02) as they are filed.
 - **Numbers that are checked.** Every number in every published text is checked against the stored data before publishing.
 
@@ -19,12 +19,14 @@ What defines it:
 
 ## 3. Goals
 
-1. **Premarket brief** (the headline product), weekdays ~8:30 AM ET. Sections in this order, macro first because the order follows the story:
+1. **Premarket brief** (the headline product), weekdays ~8:00 AM ET, rebuilt once from ~8:35 AM ET (the update, below). Sections in this order, macro first because the order follows the story:
    - "Futures" / "期货": index futures (ES, NQ, YM, RTY) and their changes;
    - "Macro & overnight" / "宏观与隔夜": up to five overnight macro and market news items;
    - "Themes" / "板块动向": industry groups whose members moved together, each as a code-rendered list line ("**Semiconductors** ▼ median −4.20%: NVDA −5.20%, AMD −4.80%, AVGO −4.50%, MRVL −4.30%, ON −4.10%, MCHP −3.90%, and 2 more", with up to six members listed before the count) and a short paragraph;
    - "Biggest premarket movers" / "盘前异动": top premarket gainers and losers among liquid US stocks, each with the news behind the move;
    - "What to watch" / "今日关注": a short list (scheduled data releases, earnings before the open).
+
+   **The update (owner, 2026-11-06: "8:00 brief + 8:35 update").** 8:30 ET is when CPI, the jobs report, jobless claims, GDP and retail sales come out, so the 8:00 brief is written before the number. From 8:35 ET a second build rebuilds the whole brief from fresh facts and rewrites the same post at the same URL, EN and ZH together, and the post page shows "Updated 8:35 AM ET" next to its publish time. It writes only when the number check passes in both languages; otherwise the 8:00 brief stands, with no alert. It is not needed, and skipped, when the brief itself went out at or after 8:30 ET. Design: `docs/superpowers/specs/2026-11-06-premarket-update-design.md`.
 2. **After-close recap**, weekdays ~4:45 PM ET: "Index closes" / "指数收盘", "Macro & after the close" / "宏观与盘后", "Themes" / "板块动向" (same list line and paragraphs), "Notable movers" / "个股异动" with reasons, "After-hours earnings to watch" / "盘后财报关注". Shorter than the premarket brief. (Kept by default; owner hasn't objected.)
 3. **Earnings health checks** for a watchlist of large companies: triggered when the company's 8-K Item 2.02 appears on EDGAR. Covers revenue, margins, EPS (GAAP vs non-GAAP), cash flow, guidance, with charts, citing the filing and press release.
 4. **Earnings calendar page** (upcoming dates, before open / after close / unknown), confirmed from primary sources.
@@ -96,7 +98,7 @@ EDGAR poller (every 2–5 min, market hours) ─┤
 4. **Missing data stays missing.** If a source returns nothing for a field, the facts JSON marks it missing; the prompt forbids filling it. A missing required field keeps the post from publishing. A missing optional field or section is **omitted** from the page, never shown as "n/a" / "暂缺", and the prose does not mention it. Code, not the LLM, decides which sections exist and lists them at the end of the drafting prompt. The futures and index tables have fixed rows, so a missing contract or index keeps its "n/a" / "暂缺" cell.
    - **Required sections (designer's call).** A post only publishes if its required sections have data; optional sections are left out when empty. Premarket brief: required = movers (with at least one news reason) and futures; optional = macro, themes, watch list. Recap: required = index closes; optional = macro, themes, movers, after-hours. Earnings check: required = revenue (unless the release states none, as insurers' and some energy companies' do; ruled 2026-11-06), EPS, a link to the filing; optional = segments, cash flow, guidance. The earnings key-figures table lists only the figures the release gave.
    - **Already reported (recap).** When our earnings check for a filing accepted after today's close is already published, the recap's after-hours section ends with a code-rendered line, "Already reported after the close: [Apple (AAPL)](/en/p/aapl-q4-fy2026-earnings)." (ZH "已于盘后发布财报：…"), and the after-hours news extraction skips that company, so the recap never says it is still to report.
-   - **Late, not thin (owner).** If required data is missing at the scheduled time, the job keeps retrying (every ~5 min). The premarket brief may publish up to **9:25 AM ET**; after that it is skipped for the day and an alert is sent. The recap may publish up to 7 PM ET under the same rule.
+   - **Late, not thin (owner).** If required data is missing at the scheduled time, the job keeps retrying (every ~5 min). The premarket brief may publish up to **9:25 AM ET**; after that it is skipped for the day and an alert is sent. The premarket update retries the same way until 9:25 AM ET, then is skipped without an alert, since the brief already stands. The recap may publish up to 7 PM ET under the same rule.
    - **One language can go first (owner).** If English passes the number check and Chinese still fails after its retry, English publishes on time. The Chinese page for that post shows a "translation coming / 中文版稍后推出" notice (excluded from search and from the hreflang pair until filled), and the job keeps retrying Chinese until it passes, then fills it in. The reverse case (Chinese passes, English fails) holds both and alerts, since English is primary. Posts therefore have a per-language status (`published`, `pending`, `failed`).
 5. **Cite sources.** Every news claim links its URL; every earnings post links the EDGAR filing and the press release.
 6. **Versioned templates.** Each content type has a template ID and version (e.g., `premarket:v1`) stored on the post, so changes can be traced.
@@ -106,7 +108,7 @@ EDGAR poller (every 2–5 min, market hours) ─┤
 ## 9. Pages
 
 - Home (per language): today's premarket brief at the top; latest recap; latest earnings checks; link to the calendar.
-- Post page: title, ET timestamp, body, charts, sources, disclaimer, language switch.
+- Post page: title, ET timestamp (and the update time once the premarket update rewrote it), body, charts, sources, disclaimer, language switch.
 - Archives: by type (premarket / recap / earnings) and by ticker.
 - Earnings calendar: week view with navigation, confirmed vs unconfirmed marked.
 - About + disclaimer.
