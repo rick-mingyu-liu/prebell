@@ -44,8 +44,8 @@ const DOMESTIC_DAYS = 456;
 /** The Nasdaq screener refuses non-browser clients. */
 const BROWSER_UA =
   "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0 Safari/537.36";
-/** watchlist.rs reads every row; 11 Yahoo batches of 50 in the calendar refresh. */
-const MAX_ROWS = 550;
+/** watchlist.rs reads every row; 12 Yahoo batches of 50 in the calendar refresh. */
+const MAX_ROWS = 600;
 
 /**
  * Rows whose display name does not start with a word of their SEC name, checked by hand. Any

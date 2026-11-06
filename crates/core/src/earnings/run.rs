@@ -1395,6 +1395,49 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn foreign_and_chinese_filers_never_queue_a_build() {
+        // An 8-K with Item 2.02 under every 20-F/6-K filer's CIK (none should
+        // exist; a test feed can send one anyway) and under Yum China's.
+        let (base, es) = stores();
+        let fl = FakeFilings::default();
+        let t = poll_time();
+        let rows: Vec<_> = crate::earnings::watchlist()
+            .into_iter()
+            .filter(|e| {
+                e.filer == Filer::Foreign
+                    || crate::earnings::watchlist::tests::CHINA.contains(&e.ticker)
+            })
+            .collect();
+        assert!(rows.len() >= 50, "{}", rows.len());
+        let page: Vec<_> = rows
+            .iter()
+            .enumerate()
+            .map(|(i, e)| {
+                (
+                    e.cik,
+                    format!("{:010}-26-{:06}", e.cik, i),
+                    t - Duration::minutes(i as i64 % 60),
+                    "2.02,9.01",
+                )
+            })
+            .collect();
+        fl.pages.borrow_mut().insert(0, Ok(feed(&page)));
+        let o = poll_job(t, Some(t), &es, base.as_ref(), &fl).await.unwrap();
+        assert!(o.detected.is_empty(), "{:?}", o.detected);
+        assert!(
+            !o.follow_ups.contains(&EarningsStep::Build),
+            "{:?}",
+            o.follow_ups
+        );
+        assert!(es.filings.borrow().is_empty() && base.runs.borrow().is_empty());
+        // Foreign filers are not watched for 8-Ks at all; Yum China's marks
+        // its calendar date only.
+        let cal = es.calendar.borrow();
+        assert_eq!(cal.len(), 1, "{cal:?}");
+        assert_eq!(cal.keys().next().unwrap().0, "YUMC");
+    }
+
+    #[tokio::test]
     async fn a_calendar_tier_report_marks_the_calendar_and_queues_no_build() {
         // Agilent: domestic filer, calendar tier.
         let a = crate::earnings::find("A").unwrap();
@@ -1431,7 +1474,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_busy_poll_uses_a_fixed_number_of_store_queries() {
-        // 40 watchlist reports on one page (a 16:00 ET burst at about 530
+        // 40 watchlist reports on one page (a 16:00 ET burst at about 560
         // rows): per-filing reads and writes would pass the Free plan's 50
         // D1 queries per invocation.
         let (base, es) = stores();

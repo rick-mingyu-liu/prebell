@@ -63,7 +63,7 @@ fn name_tokens(name: &str) -> Vec<String> {
 
 /// The filer's name is the row's SEC conformed name: the same significant
 /// words, ignoring case, punctuation, spacing and legal suffixes. Matching
-/// only the first word would, at about 530 rows, let a wrong CIK through
+/// only the first word would, at about 560 rows, let a wrong CIK through
 /// between names that share it (American Express and American Tower). A
 /// company renamed on EDGAR fails until the watchlist is regenerated
 /// (`--refresh`), and the poller alerts about it.

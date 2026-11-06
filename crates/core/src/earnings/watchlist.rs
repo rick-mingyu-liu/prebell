@@ -82,7 +82,7 @@ fn parse(line: &'static str) -> Option<WatchEntry> {
     })
 }
 
-/// The parsed file, once per isolate (about 530 rows).
+/// The parsed file, once per isolate (about 560 rows).
 fn entries() -> &'static [WatchEntry] {
     static ALL: OnceLock<Vec<WatchEntry>> = OnceLock::new();
     ALL.get_or_init(|| {
@@ -121,7 +121,7 @@ pub fn in_window(now: DateTime<Utc>) -> bool {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use std::collections::HashSet;
 
@@ -133,8 +133,13 @@ mod tests {
     fn watchlist_shape() {
         let w = watchlist();
         // S&P 500 ∪ Nasdaq-100, one row per CIK, plus the hand-picked
-        // foreign companies; at most 11 Yahoo batches of 50.
-        assert!((520..=550).contains(&w.len()), "{}", w.len());
+        // foreign companies; the calendar's Yahoo read stays at 12 batches.
+        assert!((550..=600).contains(&w.len()), "{}", w.len());
+        assert!(
+            w.len().div_ceil(crate::yahoo::QUOTE_BATCH) <= 12,
+            "{}",
+            w.len()
+        );
         let tickers: HashSet<_> = w.iter().map(|e| e.ticker).collect();
         let ciks: HashSet<_> = w.iter().map(|e| e.cik).collect();
         assert_eq!(tickers.len(), w.len(), "duplicate ticker");
@@ -175,6 +180,32 @@ mod tests {
         }
         assert_eq!(find("TEVA").unwrap().filer, Filer::Domestic);
         assert_eq!(find("A").unwrap().tier, Tier::Calendar);
+    }
+
+    /// Large Chinese companies listed in the US (Rick, 2026-11-06, "Yes,
+    /// ~30 of them"): calendar only, and all but Yum China (a Delaware
+    /// company filing 10-Q/8-K) are 20-F/6-K filers.
+    pub(crate) const CHINA: [&str; 30] = [
+        "BABA", "PDD", "JD", "BIDU", "NTES", "TCOM", "TME", "BILI", "NIO", "XPEV", "LI", "FUTU",
+        "TIGR", "BZ", "YMM", "VIPS", "ZTO", "HTHT", "BEKE", "TAL", "EDU", "YUMC", "QFIN", "LU",
+        "HSAI", "WB", "IQ", "GDS", "MNSO", "ATAT",
+    ];
+
+    #[test]
+    fn chinese_companies_are_calendar_only() {
+        for t in CHINA {
+            let e = find(t).unwrap_or_else(|| panic!("{t} missing"));
+            assert_eq!(e.tier, Tier::Calendar, "{t}");
+            let filer = if t == "YUMC" {
+                Filer::Domestic
+            } else {
+                Filer::Foreign
+            };
+            assert_eq!(e.filer, filer, "{t}");
+        }
+        // Not US-exchange listed (Luckin trades OTC) or no longer listed
+        // (Zeekr was taken private).
+        assert!(find("LKNCY").is_none() && find("ZK").is_none());
     }
 
     #[test]
