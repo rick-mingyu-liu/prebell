@@ -53,7 +53,8 @@ describe("list pages are one paper column", () => {
   for (const [name, page] of pages) {
     it(`${name}: one column with no sidebar and no in-page language pill`, async () => {
       const out = renderToStaticMarkup(await page());
-      expect(out.startsWith('<div class="list-page">')).toBe(true);
+      // React hoists a preload link for each eager image (the calendar's first logos); it comes ahead of the page.
+      expect(out.replace(/^(<link [^>]*\/>)+/, "").startsWith('<div class="list-page">')).toBe(true);
       expect(out).not.toContain("sidebar");
       expect(out).not.toContain("grid-article");
       expect(out).not.toContain("lang-pill");
@@ -73,7 +74,8 @@ describe("list pages are one paper column", () => {
 
   it("the calendar page renders the week from D1", async () => {
     const out = renderToStaticMarkup(await pages[1][1]());
-    expect(out).toContain('<a class="cal-ticker" href="/en/t/INTC">INTC</a>');
+    expect(out).toContain('<a class="cal-tile-link" href="/en/p/earnings-intc-2026-10-29">');
+    expect(out).toContain('alt="Intel"');
     expect(out).toContain('<span class="num up" aria-hidden="true">✓</span>');
     expect(out).toContain("Confirmed: the company announced the date.");
     expect(out).toContain('<nav class="pager">');

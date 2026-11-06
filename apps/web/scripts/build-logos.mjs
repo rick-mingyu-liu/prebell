@@ -93,6 +93,13 @@ const COMPANIES = {
 const SKIP = {
   AVGO: "Broadcom licenses its logo only on request (logorequest.broadcom.com)",
   ISRG: "its only free logo is a light grey wordmark, blank at 18px; its site has no usable icon",
+  STX: "its only free logo is a pale green wordmark, illegible at tile size; its site has no usable icon",
+  AMAT: "its only free logo is a wide wordmark, illegible at 48px; its site has no usable icon",
+  ADI: "its only free logo is a wide wordmark, illegible at 48px; its site has no usable icon",
+  AMT: "its only free logo is a wide wordmark, illegible at 48px; its site has no usable icon",
+  IBM: "its site icon is a grey bee-like glyph that does not read as IBM; no free logo is square",
+  MDT: "its site icon is a figure graphic, not the Medtronic mark; its Commons logo is a wide wordmark",
+  MAR: "its site icon is an orange ring that does not read as Marriott",
 };
 
 /** Wikidata items for tickers whose watchlist CIK has no Wikidata match (new holding companies, foreign issuers). */
@@ -100,6 +107,9 @@ const WIKIDATA = { BLK: "Q219635", XOM: "Q156238", NVO: "Q818846", SAN: "Q649631
 
 /** Commons files tried before the Wikidata ones: the company's own square mark, where Wikidata only names a wide logo. */
 const COMMONS = {
+  ANET: "Arista-networks-logo.svg",
+  APH: "Amphenol Logo.svg",
+  CVS: "CVS Health heart.png", // the CVS Health heart, as on its app icons
   DHR: "Danaher logo.svg",
   ORCL: "Oracle Corporation logo.svg", // the Oracle "O", as on its app icons
   TMUS: "T from T Mobile logo.svg",
@@ -460,7 +470,7 @@ const icon = (slug) => {
 // ---------------------------------------------------------------------------------------------
 // Build.
 
-// Logos show on earnings-check covers, so only write-up ("full" tier) companies get one, plus any ticker
+// Logos show on earnings-check covers and as the earnings calendar's tile grid, so only write-up ("full" tier) companies get one, plus any ticker
 // the committed manifest already has (the calendar-only rows from before the tiers).
 const kept = existsSync(MANIFEST) ? Object.keys(JSON.parse(readFileSync(MANIFEST, "utf8").match(/= (\{[\s\S]*\});/)[1])) : [];
 const watchRows = readFileSync(WATCHLIST, "utf8")
