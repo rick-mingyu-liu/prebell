@@ -13,6 +13,7 @@ use crate::numbers::Lang;
 use crate::recap::RecapFacts;
 use crate::store::Store;
 
+pub mod card;
 pub mod graphic;
 pub use graphic::{brief_graphic, cover_movers, earnings_graphic, CoverMover, Session};
 

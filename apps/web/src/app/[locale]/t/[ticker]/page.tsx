@@ -13,19 +13,27 @@ import {
   tickerHasCheck,
   tickerKnown,
 } from "@/lib/earnings";
-import { pairedAlternates } from "@/lib/seo";
+import { pairedAlternates, shareMetadata } from "@/lib/seo";
 import { formatDate } from "@/lib/time";
 
 export async function generateMetadata({ params }: PageProps<"/[locale]/t/[ticker]">): Promise<Metadata> {
   const { locale, ticker: raw } = await params;
   const ticker = normalizeTicker(raw);
   if (!ticker) return {};
-  const t = await getTranslations({ locale, namespace: "earnings" });
+  const t = await getTranslations({ locale });
+  const path = `/t/${encodeURIComponent(ticker)}`;
   // A calendar-only company's page is a list of dates: not indexed until it has a check.
   const checked = await tickerHasCheck(getDb(), ticker);
   return {
-    title: t("tickerTitle", { ticker }),
-    alternates: pairedAlternates(locale, `/t/${encodeURIComponent(ticker)}`),
+    title: t("earnings.tickerTitle", { ticker }),
+    alternates: pairedAlternates(locale, path),
+    ...shareMetadata({
+      locale: locale as Locale,
+      url: `/${locale}${path}`,
+      title: t("earnings.tickerTitle", { ticker }),
+      description: t("earnings.tickerDescription", { ticker }),
+      siteName: t("site.name"),
+    }),
     ...(checked ? {} : { robots: { index: false } }),
   };
 }

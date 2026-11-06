@@ -28,6 +28,11 @@ const nextConfig: NextConfig = {
         headers: [{ key: "Cache-Control", value: "public, s-maxage=60" }],
       },
       {
+        // robots.txt reads SITE_URL per request and rarely changes. (The sitemap sets its own header.)
+        source: "/robots.txt",
+        headers: [{ key: "Cache-Control", value: "public, s-maxage=3600" }],
+      },
+      {
         // Partner links depend on the visitor's country, so no shared cache may keep them.
         source: "/api/partners",
         headers: [{ key: "Cache-Control", value: "private, no-store" }],

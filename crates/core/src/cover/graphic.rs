@@ -14,7 +14,6 @@ use crate::earnings::facts::{numbers_in_facts, EarningsFacts};
 use crate::facts::Mover;
 use crate::numbers::{check, Lang};
 
-const PAPER: &str = "#faf8f3";
 const INK: &str = "#1a1a1a";
 const UP: &str = "#15803d";
 const DOWN: &str = "#b91c1c";
@@ -76,17 +75,15 @@ pub(crate) fn escape(s: &str) -> String {
     out
 }
 
+/// The root element every graphic opens with (the share card strips it).
+pub(crate) const ROOT: &str = r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 360" width="640" height="360" font-family="Inter, system-ui, sans-serif">"#;
+/// The paper background, the root's first child.
+pub(crate) const BACKGROUND: &str =
+    r##"<rect x="0" y="0" width="640" height="360" fill="#faf8f3"/>"##;
+
 /// The root element and the paper background.
 fn open_svg() -> String {
-    let mut out = String::from(
-        r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 360" width="640" height="360" font-family="Inter, system-ui, sans-serif">"#,
-    );
-    write!(
-        out,
-        r#"<rect x="0" y="0" width="640" height="360" fill="{PAPER}"/>"#
-    )
-    .unwrap();
-    out
+    format!("{ROOT}{BACKGROUND}")
 }
 
 /// One rect in the shape the tests parse.
