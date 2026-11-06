@@ -17,6 +17,7 @@ describe("companyLogo", () => {
   it("is null for tickers without a logo, unknown tickers and odd input", () => {
     expect(companyLogo("AVGO")).toBeNull();
     expect(companyLogo("VMRK")).toBeNull(); // the script's SKIP list
+    expect(companyLogo("ATAT")).toBeNull(); // its site icon was another company's crest
     expect(companyLogo("ZZZZ")).toBeNull();
     expect(companyLogo("")).toBeNull();
     expect(companyLogo("constructor")).toBeNull();

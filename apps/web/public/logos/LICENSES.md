@@ -5,13 +5,13 @@ bundled with the site; pages never load a logo from a third party.
 
 Sources, in order of preference per ticker (company cards are wide, so a horizontal wordmark comes first):
 
-1. **Wikimedia Commons via Wikidata** (`.png`, 348 tickers by the logo property P154, 25 chosen
+1. **Wikimedia Commons via Wikidata** (`.png`, 347 tickers by the logo property P154, 25 chosen
    by hand in the script, 2 by the small-logo property P8972): the logo file named on the
    company's Wikidata item (matched on its SEC CIK). Only files Commons lists as public domain (mostly
    PD-textlogo), CC0, CC BY or CC BY-SA are used, and CC BY rows name the author. The file is trimmed and
    fitted inside 128x48 CSS px (stored at 2x) with no other change to its shape. Logos wider than
    6.5:1 and rasters under 120px wide are not used.
-2. **Simple Icons** (`.svg` glyphs, 10 tickers): the npm package, pinned at
+2. **Simple Icons** (`.svg` glyphs, 11 tickers): the npm package, pinned at
    simple-icons@16.36.0, for companies with no usable Commons logo. Its icon data is
    [CC0-1.0](https://github.com/simple-icons/simple-icons/blob/develop/LICENSE.md); its
    [disclaimer](https://github.com/simple-icons/simple-icons/blob/develop/DISCLAIMER.md) notes that a
@@ -32,7 +32,7 @@ partner's own site or newsroom; none of the partners publishes brand terms for t
 | `companies/AAPL.png` | Apple | Wikimedia Commons [Apple logo black.svg](https://commons.wikimedia.org/wiki/File:Apple_logo_black.svg) (Wikidata [Q312](https://www.wikidata.org/wiki/Q312) P154) | 2026-11-06 | Public domain (PD-US-no notice) |
 | `companies/ABBV.png` | AbbVie | Wikimedia Commons [AbbVie logo.svg](https://commons.wikimedia.org/wiki/File:AbbVie_logo.svg) (Wikidata [Q14662364](https://www.wikidata.org/wiki/Q14662364) P154) | 2026-11-06 | Public domain (PD-textlogo) |
 | `companies/ABNB.png` | Airbnb | Wikimedia Commons [Airbnb Logo Bélo.svg](https://commons.wikimedia.org/wiki/File:Airbnb_Logo_B%C3%A9lo.svg) (Wikidata [Q63327](https://www.wikidata.org/wiki/Q63327) P154) | 2026-11-06 | Public domain (PD-textlogo) |
-| `companies/ABT.png` | Abbott Laboratories | Wikimedia Commons [Abbott Laboratories 2025 logo.svg](https://commons.wikimedia.org/wiki/File:Abbott_Laboratories_2025_logo.svg) (Wikidata [Q306764](https://www.wikidata.org/wiki/Q306764) P154) | 2026-11-06 | Public domain (PD-textlogo) |
+| `companies/ABT.svg` | Abbott | simple-icons@16.36.0 `abbott` (upstream source: https://commons.wikimedia.org/wiki/File:Logo_Abbott_Laboratories.svg; brand guidelines: none listed) | 2026-10-30 | CC0-1.0 (Simple Icons) |
 | `companies/ACGL.png` | Arch Capital Group | site icon https://www.archgroup.com/wp-content/uploads/2020/11/cropped-Arch-site-icon-512-192x192.jpg (linked from https://www.archgroup.com/) | 2026-11-06 | site icon, trademark of owner, nominative use |
 | `companies/ACN.png` | Accenture | Wikimedia Commons [Accenture.svg](https://commons.wikimedia.org/wiki/File:Accenture.svg) (Wikidata [Q338825](https://www.wikidata.org/wiki/Q338825) P154) | 2026-11-06 | Public domain (PD-textlogo) |
 | `companies/ADBE.png` | Adobe | Wikimedia Commons [Adobe Corporate wordmark.svg](https://commons.wikimedia.org/wiki/File:Adobe_Corporate_wordmark.svg) (Wikidata [Q11463](https://www.wikidata.org/wiki/Q11463) P154) | 2026-10-30 | Public domain (PD-textlogo) |
@@ -517,4 +517,4 @@ partner's own site or newsroom; none of the partners publishes brand terms for t
 
 Watchlist tickers without a logo (text chip): AIZ, AJG, ALAB, APA, ARE, ARES, ATAT, AVGO (Broadcom licenses its logo only on request (logorequest.broadcom.com)), BEKE, BEN, BG, BRK.B, BRO, BZ, CHD, CI, CIEN, CINF, CMS, CNQ, CPT, CVNA, DGX, DOW, EIX, EME, EQT, ERIE, FANG, FFIV, FSLR, FUTU, GD, HAL, HIG, HONA, HTHT, IEX, INVH, IRM, JCI, KEYS, KMI, KR, LU, LVS, MGM, MLM, MNST, NI, NSC, NTES, NTRS, NVR, ODFL, P, PCG, PODD, PRU, Q, QFIN, RJF, RL, SNDK, STZ, TKO, TME, TPL, TRGP, TYL, UAL, UNH, VIPS, VMRK (renamed from Equity Residential; Wikidata still holds the old company's logo), VYLR, WEC, WRB, WTW, YUMC.
 
-Total size of the files above: 1411550 bytes.
+Total size of the files above: 1416026 bytes.

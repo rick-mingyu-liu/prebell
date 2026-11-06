@@ -487,10 +487,19 @@ async function artwork(file) {
   if (!buf) throw new Error("no PNG or 32-bit image in the .ico");
   const meta = await sharp(buf).metadata();
   const svg = meta.format === "svg";
-  const density = svg ? Math.min(2400, Math.max(1, (72 * 512) / Math.max(meta.width, meta.height))) : undefined;
-  let img = sharp(buf, svg ? { density } : {}).ensureAlpha();
-  if (!svg && Math.max(meta.width, meta.height) > 512) img = img.resize(512, 512, { fit: "inside" });
-  const flat = await img.png().toBuffer();
+  // A vector is drawn large (about 2048px on its long side) so a small mark on a big canvas stays sharp
+  // once trimmed; a file whose canvas is so big that it passes the pixel limit is drawn at 512 instead.
+  const draw = async (side) => {
+    const density = Math.min(2400, Math.max(1, (72 * side) / Math.max(meta.width, meta.height)));
+    return sharp(buf, { density }).ensureAlpha().png().toBuffer();
+  };
+  let flat;
+  if (svg) flat = await draw(2048).catch(() => draw(512));
+  else {
+    let img = sharp(buf).ensureAlpha();
+    if (Math.max(meta.width, meta.height) > 512) img = img.resize(512, 512, { fit: "inside" });
+    flat = await img.png().toBuffer();
+  }
   const trimmed = await sharp(flat)
     .trim({ threshold: 12 })
     .png()
@@ -671,7 +680,7 @@ for (const w of todo) {
     if (!info) return notes.push(`${name}: not on Commons`), null;
     if (!FREE.test(info.licence)) return notes.push(`${name}: ${info.licence || "no licence"}`), null;
     const file = await get(info.url, true);
-    const art = file && (await artwork(file.body).catch((e) => notes.push(`${name}: ${e.message}`)));
+    const art = file && (await artwork(file.body).catch((e) => (notes.push(`${name}: ${e.message}`), null)));
     const bad = art && reject(art);
     const found = art && { kind: "commons", art, info, name, prop, fetched: file.fetched };
     if (bad && art.aspect > MAX_WORDMARK && art.aspect <= MAX_WIDE_LAST_RESORT && !reject({ ...art, aspect: MAX_WORDMARK })) wide ??= found;
