@@ -301,49 +301,108 @@ html:lang(zh-Hans) .filters { font-variant-caps: normal; }
 .date-end { display: flex; align-items: baseline; gap: 0.75rem; font-size: 14px; }
 .date-end .more { margin: 0; }
 
-/* Calendar: ruled day rows, the date at the left and each report as a bold ticker link with its slot in
-   small caps. The only colour is the tick on a reported entry; an unconfirmed one is muted. */
-.legend { margin: 0.5rem 0 0; color: var(--muted); font-size: 13px; line-height: 1.5; }
-.cal-week { margin-top: 0.5rem; }
-.cal-day { display: grid; grid-template-columns: 8rem minmax(0, 1fr); gap: 0.4rem 1.5rem; padding: 1rem 0; border-bottom: 1px solid var(--rule); }
-.cal-date { font-size: 16px; margin: 0; }
-.cal-none { margin: 0; }
+/* Calendar: the week as a board of day columns on stone ground, each company a white card. The page
+   is wider than the paper column on a desktop (up to 1680px, still inside the 16px gutter). Colour
+   carries nothing alone: the tick on a reported card is the one coloured mark, an unconfirmed card is
+   dashed and muted, today's column is marked in words. Under 1000px the columns are a sideways
+   scroll-snap row, one day per screen, with day chips above to jump. */
+.legend { margin: 1rem 0 0; max-width: 90ch; color: var(--muted); font-size: 13px; line-height: 1.5; }
+.cal-page { --board: min(1680px, 100vw - 32px); }
+.cal-head { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: flex-end; gap: 0.75rem 1.5rem; margin: 0.25rem 0 1.1rem; }
+.cal-head-main { min-width: 0; }
+.cal-title { margin: 0; font-size: 34px; line-height: 1.1; }
+.cal-title .kicker { display: block; margin: 0 0 0.35rem; font-family: var(--sans); letter-spacing: 0.07em; }
+html:lang(zh-Hans) .cal-title .kicker { letter-spacing: 0.04em; }
+.cal-count { margin: 0.4rem 0 0; color: var(--muted); font-size: 14px; font-variant-numeric: tabular-nums; }
+.cal-tools { display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem; }
+.cal-weeks { display: flex; align-items: center; gap: 0.5rem; }
+.cal-btn { display: inline-flex; align-items: center; justify-content: center; gap: 0.4rem; min-height: 36px; padding: 0 0.85rem; border: 1px solid var(--muted); border-radius: 0; background: var(--card); color: var(--ink); font: inherit; font-size: 14px; font-weight: 600; line-height: 1; text-decoration: none; cursor: pointer; }
+.cal-btn:hover { border-color: var(--ink); background: var(--paper); }
+.cal-arrow { width: 36px; padding: 0; font-size: 17px; }
+.cal-share { display: inline-flex; align-items: center; gap: 0.5rem; }
+.cal-share-btn[hidden] { display: none; }
+.cal-share-msg { color: var(--muted); font-size: 13px; }
+.cal-share-msg:empty { display: none; }
+.cal-share-url { user-select: all; color: var(--ink); overflow-wrap: anywhere; }
+
+/* Day chips: the phone's way to jump between columns; hidden where the whole board shows. */
+.cal-chips { display: flex; gap: 6px; margin: 0 0 0.75rem; }
+.cal-chip-day { flex: 1 1 0; min-width: 0; padding: 0.3rem 0; border: 1px solid var(--rule); background: var(--card); color: var(--ink); font-size: 13px; font-weight: 600; line-height: 1.3; text-align: center; text-decoration: none; white-space: nowrap; }
+.cal-chip-day .num { font-weight: 400; color: var(--muted); }
+.cal-chip-day[aria-current] { border-color: var(--ink); background: var(--ink); color: var(--paper); }
+.cal-chip-day[aria-current] .num { color: var(--paper); }
+
+/* The board. Each column is its own container, so its two lists stack when the column is narrow. */
+.cal-board { position: relative; display: flex; align-items: flex-start; gap: 10px; margin: 0 -16px; padding: 2px 16px 12px; overflow-x: auto; overscroll-behavior-x: contain; scroll-snap-type: x mandatory; scroll-padding-inline: 16px; scrollbar-width: thin; }
+.cal-col { container: col / inline-size; flex: 0 0 calc(100% - 26px); min-width: 0; scroll-snap-align: start; scroll-margin-top: 1rem; padding: 0 10px 12px; border: 1px solid var(--rule); background: color-mix(in srgb, var(--cover-flat) 45%, var(--paper)); }
+.cal-col.is-today { border-color: var(--ink); border-top: 3px solid var(--cover-bar); background: var(--paper); scroll-initial-target: nearest; }
+.cal-date { display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; margin: 0 -10px 10px; padding: 0.7rem 10px 0.5rem; border-bottom: 1px solid var(--rule-strong); font-size: 18px; line-height: 1.2; }
+.is-past .cal-date { color: var(--muted); font-weight: 600; border-bottom-color: var(--rule); }
+.cal-today { padding: 0.15rem 0.45rem; background: var(--ink); color: var(--paper); font-family: var(--sans); font-size: 11px; font-weight: 600; letter-spacing: 0.08em; line-height: 1.3; text-transform: uppercase; }
+html:lang(zh-Hans) .cal-today { letter-spacing: 0.02em; }
+.cal-none { margin: 0.25rem 0 0; }
+.cal-halves { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px 8px; }
+@container col (max-width: 235px) { .cal-halves { grid-template-columns: minmax(0, 1fr); } }
+.cal-half { min-width: 0; }
+.cal-half-unknown { margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--rule); }
 .cal-slot { color: var(--muted); font-size: 12px; font-variant-caps: all-small-caps; letter-spacing: 0.08em; }
 html:lang(zh-Hans) .cal-slot { font-variant-caps: normal; letter-spacing: 0.02em; }
+h3.cal-slot { display: flex; align-items: center; gap: 0.3rem; margin: 0 0 0.4rem; font-family: var(--sans); font-size: 13px; font-weight: 600; line-height: 1.3; white-space: nowrap; }
+h3.cal-slot .num { margin-left: auto; color: var(--ink); font-variant-caps: normal; }
+.cal-slot-icon { flex: none; }
+.cal-empty { margin: 0; color: var(--muted); font-size: 13px; }
 .cal-read { flex-basis: 100%; font-size: 12px; font-weight: 600; }
-.cal-slots { display: grid; gap: 0.75rem; min-width: 0; }
-h3.cal-slot { margin: 0 0 0.3rem; font-weight: 600; }
-/* Every company: a grid of 48px logo tiles (a ticker chip when there is no logo), ticker and name beneath. */
-.cal-tiles { list-style: none; margin: 0 0 0.6rem; padding: 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(4.25rem, 1fr)); gap: 0.6rem 0.5rem; min-width: 0; }
-.cal-tile { min-width: 0; }
-.cal-tile-link { display: flex; flex-direction: column; align-items: center; gap: 0.2rem; min-width: 0; text-decoration: none; }
-.cal-mark { display: flex; align-items: center; justify-content: center; width: 48px; height: 48px; }
-.cal-mark img { display: block; width: 48px; height: 48px; }
-.cal-chip { box-sizing: border-box; display: flex; align-items: center; justify-content: center; width: 48px; height: 48px; border: 1px solid var(--rule); border-radius: 10px; background: var(--card); font-size: 12px; font-weight: 700; line-height: 1; }
-.cal-tile-link:hover .cal-mark, .cal-tile-link:focus-visible .cal-mark { opacity: 0.8; }
-.cal-sym { min-height: 1.2em; font-size: 12px; font-weight: 700; line-height: 1.2; }
-.cal-sym .num { margin-left: 0.2em; }
-.cal-tile-name { display: none; max-width: 100%; overflow: hidden; color: var(--muted); font-size: 11px; line-height: 1.25; text-align: center; overflow-wrap: break-word; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2; }
-@media (min-width: 720px) {
-  .cal-tiles { grid-template-columns: repeat(auto-fill, minmax(5.75rem, 1fr)); }
-  .cal-tile-name { display: -webkit-box; }
-}
-.cal-unconfirmed .cal-sym, .cal-unconfirmed .cal-chip { color: var(--muted); font-weight: 400; }
-.cal-more { margin-top: 0.4rem; }
-.cal-more > summary { cursor: pointer; color: var(--muted); font-size: 13px; }
+
+/* Cards: white, about 2:1, one company each. A wordmark fills the card (contained, so wide and narrow
+   marks both fit); a square icon sits beside the ticker and name; no logo sets the ticker in the serif. */
+.cal-cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(112px, 1fr)); gap: 6px; margin: 0; padding: 0; list-style: none; }
+.cal-card { min-width: 0; }
+.cal-card-link { position: relative; display: flex; align-items: center; gap: 7px; aspect-ratio: 25 / 12; min-height: 52px; max-height: 68px; width: 100%; padding: 6px 10px; overflow: hidden; border: 1px solid var(--rule); border-radius: 6px; background: var(--card); box-shadow: 0 1px 2px rgb(26 26 26 / 0.06); color: var(--ink); text-decoration: none; }
+.cal-card-link:hover { border-color: var(--muted); box-shadow: 0 3px 10px rgb(26 26 26 / 0.1); }
+.cal-card-link:focus-visible { outline: 2px solid var(--ink); outline-offset: 2px; }
+.cal-logo-wide { display: block; width: 100%; height: 28px; margin: 0 auto; object-fit: contain; } /* the height is set per mark */
+.cal-card-wide .cal-card-link { justify-content: center; padding: 8px 14px; }
+.cal-logo-icon { flex: none; display: block; width: 28px; height: 28px; object-fit: contain; }
+.cal-card-body { display: flex; flex-direction: column; min-width: 0; line-height: 1.2; }
+/* Tickers are Latin: the Latin serif on both locales (Songti would set them thin). */
+.cal-card-sym { font-family: var(--font-serif), Georgia, serif; font-size: 15px; font-weight: 700; letter-spacing: -0.005em; line-height: 1.15; }
+.cal-card-name { overflow: hidden; color: var(--muted); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.cal-card-text .cal-card-sym { font-size: 18px; letter-spacing: -0.01em; line-height: 1.1; }
+.cal-card-text .cal-card-name { margin-top: 2px; }
+.cal-card-tick { position: absolute; top: 3px; right: 5px; color: var(--up); font-size: 11px; font-weight: 700; line-height: 1; }
+.cal-unconfirmed .cal-card-link { border-style: dashed; border-color: var(--muted); background: color-mix(in srgb, var(--card) 55%, var(--paper)); box-shadow: none; }
+.cal-unconfirmed .cal-card-sym { color: var(--muted); }
+.cal-unconfirmed img { opacity: 0.6; filter: grayscale(0.4); }
+.cal-more { margin-top: 6px; }
+.cal-more > summary { cursor: pointer; padding: 0.2rem 0; color: var(--muted); font-size: 12.5px; font-weight: 600; }
 .cal-more > summary:hover, .cal-more > summary:focus-visible { color: var(--ink); }
-.cal-more[open] > summary { margin-bottom: 0.4rem; }
-/* Macro events, above the day's earnings in the same column. */
-.cal-econ, .cal-econ ~ .cal-slots, .cal-econ ~ .cal-none { grid-column: 2; }
-.cal-econ-list { display: grid; gap: 0.3rem; margin: 0; padding: 0; list-style: none; }
-.cal-event { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0 0.5rem; font-size: 14px; }
-.cal-event-time { flex: none; min-width: 4.5rem; font-weight: 600; }
+.cal-more[open] > summary { margin-bottom: 6px; }
+
+/* Economy & Fed: a compact strip at the top of its day's column, ruled in the kicker red. */
+.cal-econ { margin: 0 0 12px; padding: 6px 8px 7px; border: 1px solid var(--rule); border-left: 3px solid var(--kicker); background: var(--card); }
+.cal-econ > h3.cal-slot { margin-bottom: 0.25rem; color: var(--kicker); font-size: 12px; }
+.cal-econ-list { display: grid; gap: 0.4rem; margin: 0; padding: 0; list-style: none; }
+.cal-event { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0.05rem 0.4rem; font-size: 13px; line-height: 1.35; }
+.cal-event-time { flex: none; font-size: 12px; font-weight: 600; color: var(--muted); }
 .cal-event-title { font-weight: 600; }
-.cal-event-major { padding: 0 0.35rem; border: 1px solid var(--ink); font-size: 11px; font-weight: 600; letter-spacing: 0.04em; line-height: 1.5; }
+.cal-event-major { padding: 0 0.3rem; border: 1px solid var(--ink); font-size: 10.5px; font-weight: 600; letter-spacing: 0.04em; line-height: 1.45; }
 .cal-event-flag { color: var(--ink); font-size: 12px; font-weight: 600; }
 .cal-event-note { color: var(--muted); font-size: 12px; }
 .cal-event-postponed .cal-event-title { color: var(--muted); text-decoration: line-through; }
 .cal-event .cal-read { flex-basis: auto; }
+
+@media (prefers-reduced-motion: no-preference) {
+  .cal-board { scroll-behavior: smooth; }
+  .cal-card-link { transition: border-color 0.15s, box-shadow 0.15s, transform 0.15s; }
+  .cal-card-link:hover { transform: translateY(-1px); }
+}
+
+/* Desktop: the whole week side by side, wider than the paper column. */
+@media (min-width: 1000px) {
+  .cal-page { width: var(--board); margin-inline: calc((100% - var(--board)) / 2); }
+  .cal-chips { display: none; }
+  .cal-board { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); align-items: stretch; margin: 0; padding: 0; overflow: visible; scroll-snap-type: none; }
+}
 
 /* Not found: a kicker, the serif title and the way back, centred under the masthead. */
 .notfound { max-width: 680px; margin: 0 auto; padding: 3rem 0 2rem; text-align: center; }
@@ -353,7 +412,8 @@ h3.cal-slot { margin: 0 0 0.3rem; font-weight: 600; }
 .notfound [lang="zh-Hans"] { margin-top: 1.5rem; padding-top: 1.5rem; border-top: 1px solid var(--rule); }
 .notfound [lang="zh-Hans"] h1 { margin-top: 0; }
 
-/* Phones: the one breakpoint. Smaller type, stacked rows, and the index line scrolls in place. */
+/* Phones: the one site-wide breakpoint (the calendar board has its own at 1000px). Smaller type, stacked
+   rows, and the index line scrolls in place. */
 @media (max-width: 720px) {
   h1, .list-page h1, .story .story-title { font-size: 26px; }
   .masthead-name { font-size: 28px; }
@@ -377,8 +437,7 @@ h3.cal-slot { margin: 0 0 0.3rem; font-weight: 600; }
   .author { flex-wrap: wrap; }
   .author-all { margin-left: 0; align-self: auto; flex-basis: 100%; }
   .signup-form { max-width: none; }
-  .cal-day { grid-template-columns: minmax(0, 1fr); }
-  .cal-econ, .cal-econ ~ .cal-slots, .cal-econ ~ .cal-none { grid-column: auto; }
+  .cal-title { font-size: 26px; }
   .post-row { grid-template-columns: minmax(0, 1fr); gap: 0.6rem 0; }
   .post-row .cover { height: 130px; }
   .post-row .cover-stat { font-size: 13px; }

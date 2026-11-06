@@ -174,13 +174,24 @@ describe("globals.css", () => {
     expect(css).toMatch(/\.ix:first-child \{ margin-left: auto; \}/);
   });
 
-  it("uses no colour outside the palette, no shadows, and one mobile breakpoint at 720px", () => {
+  it("uses no colour outside the palette, shadows only on calendar cards, and one mobile breakpoint at 720px", () => {
     const allowed = new Set(["#faf8f3", "#1a1a1a", "#666", "#d9d5cc", "#222", "#15803d", "#b91c1c", "#8a1c1c", "#e8a317", "#e6e1d6", "#fff", "#000"]);
     const hexes = (css.toLowerCase().match(/#[0-9a-f]{3,8}\b/g) ?? []).filter((h) => !allowed.has(h));
     expect(hexes).toEqual([]);
-    expect(css).not.toMatch(/box-shadow|text-shadow/);
+    expect(css).not.toMatch(/text-shadow/);
+    // The calendar's company cards lift off the board with a soft ink shadow; nothing else casts one.
+    const shadowed = [...css.replace(/\/\*[\s\S]*?\*\//g, "").matchAll(/([^{}]+)\{[^}]*box-shadow:\s*([^;}]+)/g)]
+      .filter((m) => m[2].trim() !== "none")
+      .map((m) => m[1].trim());
+    expect(shadowed.length).toBeGreaterThan(0);
+    for (const sel of shadowed) expect(sel).toMatch(/^\.cal-card-link/);
     const widths = [...css.matchAll(/@media[^{]*\(\s*(?:max|min)-width:\s*([\d.]+px)/g)].map((m) => m[1]);
-    expect(new Set(widths)).toEqual(new Set(["720px"]));
+    expect(new Set(widths)).toEqual(new Set(["720px", "1000px"]));
+    // 1000px is the calendar board's own: everything under it is a calendar rule.
+    const board = css.slice(css.indexOf("@media (min-width: 1000px)"));
+    const rules = [...board.slice(0, board.indexOf("\n}\n")).matchAll(/^\s+([^{\s][^{]*)\{/gm)].map((m) => m[1].trim());
+    expect(rules.length).toBeGreaterThan(0);
+    for (const sel of rules) expect(sel).toMatch(/^\.cal-/);
   });
 });
 
