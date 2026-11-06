@@ -14,6 +14,7 @@
   --kicker: #8a1c1c;
   --cover-bar: #e8a317;
   --cover-flat: #e6e1d6;
+  --card: #fff;
   --sans: var(--font-inter), system-ui, -apple-system, "Segoe UI", Roboto, "PingFang SC", "Hiragino Sans GB",
     "Microsoft YaHei", "Noto Sans SC", sans-serif;
   --cjk: "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans SC", sans-serif;
@@ -101,7 +102,7 @@ html:lang(zh-Hans) .kicker { letter-spacing: 0.04em; }
 .cover-small { height: 130px; }
 .cover-bg { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; object-position: center bottom; }
 .cover-in { position: absolute; inset: 0; display: flex; flex-direction: column; justify-content: flex-start; align-items: flex-start; padding: 12px; }
-.cover-tag { display: flex; align-items: center; gap: 6px; margin-bottom: 8px; background: #fff; color: var(--ink); border: 1px solid var(--rule); padding: 3px 8px; font-size: 12px; font-weight: 600; line-height: 1.4; }
+.cover-tag { display: flex; align-items: center; gap: 6px; margin-bottom: 8px; background: var(--card); color: var(--ink); border: 1px solid var(--rule); padding: 3px 8px; font-size: 12px; font-weight: 600; line-height: 1.4; }
 .cover-tag img { display: block; height: 18px; width: auto; }
 .cover-stat { margin: 0; max-width: none; font-size: clamp(13px, 5.2cqw, 28px); font-weight: 800; line-height: 1.2; color: var(--ink); }
 .cover-bar { display: block; width: 44px; height: 3px; margin-top: 8px; background: var(--cover-bar); }
@@ -323,7 +324,7 @@ h3.cal-slot { margin: 0 0 0.3rem; font-weight: 600; }
 .cal-tile-link { display: flex; flex-direction: column; align-items: center; gap: 0.2rem; text-decoration: none; }
 .cal-mark { display: flex; align-items: center; justify-content: center; width: 48px; height: 48px; }
 .cal-mark img { display: block; width: 48px; height: 48px; }
-.cal-chip { box-sizing: border-box; display: flex; align-items: center; justify-content: center; width: 48px; height: 48px; border: 1px solid var(--rule); border-radius: 10px; background: #fff; font-size: 12px; font-weight: 700; line-height: 1; }
+.cal-chip { box-sizing: border-box; display: flex; align-items: center; justify-content: center; width: 48px; height: 48px; border: 1px solid var(--rule); border-radius: 10px; background: var(--card); font-size: 12px; font-weight: 700; line-height: 1; }
 .cal-tile-link:hover .cal-mark, .cal-tile-link:focus-visible .cal-mark { opacity: 0.8; }
 .cal-sym { min-height: 1.2em; font-size: 12px; font-weight: 700; line-height: 1.2; }
 .cal-sym .num { margin-left: 0.2em; }

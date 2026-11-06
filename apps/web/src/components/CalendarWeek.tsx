@@ -8,6 +8,8 @@ import { translator } from "../lib/translator";
 const SLOTS: Slot[] = ["bmo", "amc", "unknown"];
 /** Text rows (calendar-only companies) a slot shows before the rest fold into "Show N more" (a busy day has 60 reports). */
 export const ROWS_PER_SLOT = 12;
+/** Logos loaded eagerly: the first rows of tiles on the page (roughly the first screen); the rest are lazy. */
+export const EAGER_LOGOS = 6;
 
 type T = ReturnType<typeof translator>;
 
@@ -27,6 +29,13 @@ export default function CalendarWeek({ days, locale }: { days: CalendarDay[]; lo
     amc: t("earnings.amc"),
     unknown: t("earnings.timeUnknown"),
   };
+  // Tiles render in page order, so the first EAGER_LOGOS logos on the page are the ones above the fold.
+  const eager = new Set(
+    days
+      .flatMap((d) => SLOTS.flatMap((slot) => d.entries.filter((e) => e.slot === slot && e.writeUps)))
+      .filter((e) => companyLogo(e.ticker))
+      .slice(0, EAGER_LOGOS),
+  );
   return (
     <div className="cal-week">
       {days.map((d) => (
@@ -50,7 +59,7 @@ export default function CalendarWeek({ days, locale }: { days: CalendarDay[]; lo
                     <h3 className="cal-slot">
                       {slotLabel[slot]} <span className="num">{entries.length}</span>
                     </h3>
-                    {tiles.length > 0 && <Tiles entries={tiles} locale={locale} t={t} />}
+                    {tiles.length > 0 && <Tiles entries={tiles} locale={locale} t={t} eager={eager} />}
                     {shown.length > 0 && <Entries entries={shown} locale={locale} t={t} />}
                     {rest.length > 0 && (
                       <details className="cal-more">
@@ -70,7 +79,7 @@ export default function CalendarWeek({ days, locale }: { days: CalendarDay[]; lo
 }
 
 /** One write-up company: its logo (alt = the company name) or the ticker as a text tile, with the ticker beneath. */
-function Tiles({ entries, locale, t }: { entries: CalendarEntry[]; locale: Locale; t: T }) {
+function Tiles({ entries, locale, t, eager }: { entries: CalendarEntry[]; locale: Locale; t: T; eager: Set<CalendarEntry> }) {
   return (
     <ul className="cal-tiles">
       {entries.map((e) => {
@@ -84,10 +93,17 @@ function Tiles({ entries, locale, t }: { entries: CalendarEntry[]; locale: Local
             >
               <span className="cal-mark">
                 {logo ? (
-                  <img src={logo} alt={name} width={48} height={48} loading="lazy" decoding="async" />
+                  <img
+                    src={logo}
+                    alt={name}
+                    width={48}
+                    height={48}
+                    loading={eager.has(e) ? "eager" : "lazy"}
+                    decoding="async"
+                  />
                 ) : (
                   <span className="cal-chip">
-                    <span className="sr-only">{name} </span>
+                    <span className="sr-only">{name}</span>
                     {e.ticker}
                   </span>
                 )}

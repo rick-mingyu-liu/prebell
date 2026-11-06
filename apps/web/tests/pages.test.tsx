@@ -53,7 +53,8 @@ describe("list pages are one paper column", () => {
   for (const [name, page] of pages) {
     it(`${name}: one column with no sidebar and no in-page language pill`, async () => {
       const out = renderToStaticMarkup(await page());
-      expect(out.startsWith('<div class="list-page">')).toBe(true);
+      // React hoists a preload link for each eager image (the calendar's first logos); it comes ahead of the page.
+      expect(out.replace(/^(<link [^>]*\/>)+/, "").startsWith('<div class="list-page">')).toBe(true);
       expect(out).not.toContain("sidebar");
       expect(out).not.toContain("grid-article");
       expect(out).not.toContain("lang-pill");
