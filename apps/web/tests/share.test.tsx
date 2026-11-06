@@ -111,7 +111,7 @@ describe("share cards", () => {
   it("home, calendar, ticker and about pages are website cards with the default card", async () => {
     const pages: [string, Metadata, string, string][] = [
       ["home", await home.generateMetadata(props({ locale: "en" })), "/en", "PreBell"],
-      ["calendar", await calendar.generateMetadata(props({ locale: "zh" })), "/zh/earnings", "财报日历"],
+      ["calendar", await calendar.generateMetadata(props({ locale: "zh" })), "/zh/earnings", "市场日历"],
       ["ticker", await ticker.generateMetadata(props({ locale: "en", ticker: "intc" })), "/en/t/INTC", "INTC earnings"],
       ["about", await about.generateMetadata(props({ locale: "zh" })), "/zh/about", "关于"],
     ];

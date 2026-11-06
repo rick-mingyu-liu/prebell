@@ -1,9 +1,11 @@
 import Link from "next/link";
 import type { Locale } from "../i18n/routing";
 import type { CalendarDay, CalendarEntry, Slot } from "../lib/earnings";
+import type { MacroEvent } from "../lib/events";
 import { companyLogo } from "../lib/logos";
 import { formatDayShort } from "../lib/time";
 import { translator } from "../lib/translator";
+import EconomyEvents from "./EconomyEvents";
 
 const SLOTS: Slot[] = ["bmo", "amc", "unknown"];
 /** Text rows (calendar-only companies) a slot shows before the rest fold into "Show N more" (a busy day has 60 reports). */
@@ -22,7 +24,16 @@ type T = ReturnType<typeof translator>;
  * unconfirmed one is muted; both are also written as text for screen readers. Long lists of text rows
  * fold into a native <details>, so the page needs no client script.
  */
-export default function CalendarWeek({ days, locale }: { days: CalendarDay[]; locale: Locale }) {
+export default function CalendarWeek({
+  days,
+  locale,
+  events = {},
+}: {
+  days: CalendarDay[];
+  locale: Locale;
+  /** The week's macro events by date, shown above each day's earnings. */
+  events?: Record<string, MacroEvent[]>;
+}) {
   const t = translator(locale);
   const slotLabel: Record<Slot, string> = {
     bmo: t("earnings.bmo"),
@@ -43,8 +54,9 @@ export default function CalendarWeek({ days, locale }: { days: CalendarDay[]; lo
           <h2 className="cal-date" id={`cal-${d.date}`}>
             <time dateTime={d.date}>{formatDayShort(d.date, locale)}</time>
           </h2>
+          <EconomyEvents events={events[d.date] ?? []} locale={locale} />
           {d.entries.length === 0 ? (
-            <p className="muted cal-none">{t("earnings.none")}</p>
+            <p className="muted cal-none">{t(events[d.date]?.length ? "earnings.noneWithEvents" : "earnings.none")}</p>
           ) : (
             <div className="cal-slots">
               {SLOTS.map((slot) => {

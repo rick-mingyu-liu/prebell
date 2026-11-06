@@ -333,6 +333,17 @@ h3.cal-slot { margin: 0 0 0.3rem; font-weight: 600; }
 .cal-more > summary { cursor: pointer; color: var(--muted); font-size: 13px; }
 .cal-more > summary:hover, .cal-more > summary:focus-visible { color: var(--ink); }
 .cal-more[open] > summary { margin-bottom: 0.4rem; }
+/* Macro events, above the day's earnings in the same column. */
+.cal-econ, .cal-econ ~ .cal-slots, .cal-econ ~ .cal-none { grid-column: 2; }
+.cal-econ-list { display: grid; gap: 0.3rem; margin: 0; padding: 0; list-style: none; }
+.cal-event { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0 0.5rem; font-size: 14px; }
+.cal-event-time { flex: none; min-width: 4.5rem; font-weight: 600; }
+.cal-event-title { font-weight: 600; }
+.cal-event-major { padding: 0 0.35rem; border: 1px solid var(--ink); font-size: 11px; font-weight: 600; letter-spacing: 0.04em; line-height: 1.5; }
+.cal-event-flag { color: var(--ink); font-size: 12px; font-weight: 600; }
+.cal-event-note { color: var(--muted); font-size: 12px; }
+.cal-event-postponed .cal-event-title { color: var(--muted); text-decoration: line-through; }
+.cal-event .cal-read { flex-basis: auto; }
 
 /* Not found: a kicker, the serif title and the way back, centred under the masthead. */
 .notfound { max-width: 680px; margin: 0 auto; padding: 3rem 0 2rem; text-align: center; }
@@ -367,6 +378,7 @@ h3.cal-slot { margin: 0 0 0.3rem; font-weight: 600; }
   .author-all { margin-left: 0; align-self: auto; flex-basis: 100%; }
   .signup-form { max-width: none; }
   .cal-day { grid-template-columns: minmax(0, 1fr); }
+  .cal-econ, .cal-econ ~ .cal-slots, .cal-econ ~ .cal-none { grid-column: auto; }
   .post-row { grid-template-columns: minmax(0, 1fr); gap: 0.6rem 0; }
   .post-row .cover { height: 130px; }
   .post-row .cover-stat { font-size: 13px; }

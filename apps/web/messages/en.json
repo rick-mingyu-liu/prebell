@@ -187,7 +187,7 @@
     "earnings": "Earnings check"
   },
   "earnings": {
-    "calendarTitle": "Earnings calendar",
+    "calendarTitle": "Market calendar",
     "calendarDescription": "US earnings dates for the S&P 500 and Nasdaq-100, with confirmed dates, reported results and links to the SEC filings.",
     "weekOf": "Week of {date}",
     "timesEt": "Times US Eastern",
@@ -198,7 +198,8 @@
     "unconfirmed": "Unconfirmed",
     "confirmed": "Confirmed",
     "reported": "Reported",
-    "none": "No reports.",
+    "none": "No earnings reports.",
+    "noneWithEvents": "No earnings reports.",
     "stripAll": "Full calendar →",
     "stripMore": "+{count} more",
     "prevWeek": "Previous week",
@@ -214,6 +215,17 @@
     "charts": "Charts (GAAP)",
     "chartsNote": "Charts show GAAP figures from SEC filings; the last bar marked 8-K is this release. A gap means the company did not report that quarter separately.",
     "checkedFiling": "✓ Every figure traced to the filing"
+  },
+  "events": {
+    "group": "Economy & Fed",
+    "major": "Major",
+    "released": "Released",
+    "release": "Release",
+    "schedule": "Schedule",
+    "postponed": "Postponed",
+    "movedFrom": "Moved from {date}",
+    "legend": "Economy & Fed: official dates from the BLS, the Federal Reserve, US law (elections) and the NYSE (closures), linked to their source and, once out, to the release.",
+    "source": "Source"
   },
   "index": {
     "es": "S&P 500 futures",

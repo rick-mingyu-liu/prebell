@@ -215,7 +215,7 @@ fn calendar_args(r: &CalendarRow) -> Vec<JsValue> {
 }
 
 impl D1Store {
-    async fn all<T: DeserializeOwned>(
+    pub(crate) async fn all<T: DeserializeOwned>(
         &self,
         sql: &str,
         args: &[JsValue],

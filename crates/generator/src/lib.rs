@@ -2,6 +2,7 @@
 
 mod alerts;
 mod earnings_store;
+mod events_store;
 mod http;
 mod store;
 
@@ -11,12 +12,14 @@ use prebell_core::cover::card::{cards_tick, wants_card};
 use prebell_core::earnings::calendar::{refresh_tick, yahoo_seeding, CalendarSource};
 use prebell_core::earnings::run::{build_tick, poll_job};
 use prebell_core::edgar::{Edgar, BUILD_GAP_MS};
+use prebell_core::events::check::{check_tick, mark_checked, missing_table};
+use prebell_core::events::watch::StoreWatch;
 use prebell_core::jobs::{redact, run_job, JobRunner};
 use prebell_core::llm::{api_key_var, llm_from_env, unknown_provider};
 use prebell_core::providers::CountingHttp;
 use prebell_core::providers::LlmProvider;
 use prebell_core::recap;
-use prebell_core::run::{tick_with_hooks, update, Hooks, TickOutcome};
+use prebell_core::run::{tick_with_watch, update, Hooks, TickOutcome};
 use prebell_core::schedule::{jobs_for_cron, queue_for, ContentJob, EarningsStep, JOBS};
 use prebell_core::tavily::Tavily;
 use prebell_core::yahoo::Yahoo;
@@ -183,12 +186,20 @@ impl JobRunner for Runner<'_> {
         };
         let at = now(env);
         let store = self.store;
+        // "What to watch": today's macro events (and their released check)
+        // and the write-up earnings after the close.
+        let watch = StoreWatch {
+            events: store,
+            earnings: store,
+            http: &self.http,
+        };
         Ok(match job {
             ContentJob::Premarket => {
-                tick_with_hooks(at, store, &md, &ns, llm.as_ref(), &hooks).await
+                tick_with_watch(at, store, &md, &ns, llm.as_ref(), Some(&watch), &hooks).await
             }
             ContentJob::PremarketUpdate => {
-                update::tick_with_hooks(at, store, &md, &ns, llm.as_ref(), &hooks).await
+                update::tick_with_watch(at, store, &md, &ns, llm.as_ref(), Some(&watch), &hooks)
+                    .await
             }
             ContentJob::Recap => {
                 recap::tick_with_hooks(at, store, &md, &ns, llm.as_ref(), &hooks).await
@@ -202,9 +213,31 @@ impl JobRunner for Runner<'_> {
         let env = self.env;
         let store = self.store;
         let t = now(env);
-        let edgar = self.edgar()?;
         match step {
+            EarningsStep::Events => {
+                // The macro events check needs neither EDGAR nor an LLM.
+                match check_tick(t, store, store, &self.http).await {
+                    Ok(o) => {
+                        for e in &o.errors {
+                            console_warn!("events: {e}");
+                        }
+                        Ok((format!("{o:?}"), false))
+                    }
+                    // Before migration 0008: nothing to alert, the site and the
+                    // brief run on the snapshot. Marked done for the day, so
+                    // polls stop queuing it until tomorrow.
+                    Err(e) if missing_table(&e) => {
+                        mark_checked(store, t).await?;
+                        Ok((
+                            "events: macro_events missing (apply migration 0008); skipped".into(),
+                            false,
+                        ))
+                    }
+                    Err(e) => Err(e),
+                }
+            }
             EarningsStep::Poll => {
+                let edgar = self.edgar()?;
                 let o = poll_job(t, self.fired, store, store, &edgar).await?;
                 if o.stale {
                     return Ok(("stale message, dropped".into(), false));
@@ -240,6 +273,7 @@ impl JobRunner for Runner<'_> {
                 ))
             }
             EarningsStep::Build => {
+                let edgar = self.edgar()?;
                 let llm = self.llm(&[])?;
                 let log = |m: &str| console_log!("{m}");
                 // Beside a poll on the other queue: slower, to stay under 10/s.
@@ -249,6 +283,8 @@ impl JobRunner for Runner<'_> {
                 Ok((format!("{o:?}"), published))
             }
             EarningsStep::Calendar => {
+                // SEC_CONTACT gates every earnings step, as before.
+                self.edgar()?;
                 let news_key = secret_or_empty(env, "TAVILY_API_KEY");
                 let ns = Tavily::new(self.http.clone(), news_key.clone());
                 let llm = self.llm(&[&news_key])?;

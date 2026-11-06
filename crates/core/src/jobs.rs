@@ -60,6 +60,11 @@ pub async fn run_job(
             Ok((line, published)) => {
                 Ok(queue_card_if(runner, published, format!("job {job}: {line}")).await)
             }
+            // The events check shares the queue, not the config: its own
+            // alert, so it never uses up the earnings one.
+            Err(e) if step == EarningsStep::Events => {
+                Err(config_error(now, "events", &e, store).await)
+            }
             // One alert per day for every earnings step: they share the config.
             Err(e) => Err(config_error(now, "earnings", &e, store).await),
         },
@@ -174,6 +179,22 @@ mod tests {
     }
     fn utc(s: &str) -> DateTime<Utc> {
         s.parse().unwrap()
+    }
+
+    #[tokio::test]
+    async fn an_events_error_alerts_under_its_own_key() {
+        let s = MemStore::default();
+        let r = FakeRunner {
+            content_err: Some("events_between: D1 down".into()),
+            content_calls: RefCell::new(vec![]),
+            earnings_calls: RefCell::new(vec![]),
+        };
+        let now = utc("2026-11-10T13:35:00Z");
+        let line = run_job(now, "events:check", &s, &r).await.unwrap_err();
+        assert!(line.contains("events: config error"), "{line}");
+        assert!(s.has_alert("config:events:2026-11-10").await.unwrap());
+        // The earnings alert is still free for a real earnings config error.
+        assert!(!s.has_alert("config:earnings:2026-11-10").await.unwrap());
     }
 
     #[tokio::test]

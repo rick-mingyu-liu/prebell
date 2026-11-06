@@ -5,6 +5,7 @@ import CalendarWeek from "@/components/CalendarWeek";
 import type { Locale } from "@/i18n/routing";
 import { getDb } from "@/lib/db";
 import { addDays, INDEXED_WEEKS, isDate, listCalendarWeek, todayEt, weekStart } from "@/lib/earnings";
+import { listEvents } from "@/lib/events";
 import { pairedAlternates, shareMetadata } from "@/lib/seo";
 import { formatDate } from "@/lib/time";
 
@@ -40,7 +41,12 @@ export default async function EarningsCalendar({ params, searchParams }: PagePro
   setRequestLocale(locale);
   const start = monday((await searchParams).week);
   const t = await getTranslations("earnings");
-  const days = await listCalendarWeek(getDb(), start, locale);
+  const te = await getTranslations("events");
+  const db = getDb();
+  const [days, events] = await Promise.all([
+    listCalendarWeek(db, start, locale),
+    listEvents(db, start, addDays(start, 4), locale),
+  ]);
   const href = (d: string) => `/${locale}/earnings?week=${d}`;
 
   return (
@@ -49,8 +55,12 @@ export default async function EarningsCalendar({ params, searchParams }: PagePro
       <p className="meta">
         {t("weekOf", { date: formatDate(start, locale) })} · {t("timesEt")}
       </p>
-      <p className="legend">{t("legend")}</p>
-      <CalendarWeek days={days} locale={locale} />
+      <p className="legend">
+        {te("legend")}
+        {locale === "zh" ? "" : " "}
+        {t("legend")}
+      </p>
+      <CalendarWeek days={days} locale={locale} events={events} />
       <nav className="pager">
         <Link href={href(addDays(start, -7))}>← {t("prevWeek")}</Link>
         <Link href={href(addDays(start, 7))}>{t("nextWeek")} →</Link>

@@ -208,8 +208,9 @@ pub async fn poll_tick(
 /// One `earnings` queue message: drops it when stale, else polls the feed,
 /// alerts once per ET day when SEC refuses (403/429), and lists the
 /// follow-up messages: one build per new filing (or, with none, see
-/// `retry_builds`: for retries and Chinese drafts) and the calendar refresh
-/// until it ran today.
+/// `retry_builds`: for retries and Chinese drafts), the calendar refresh
+/// until it ran today, and the macro events check until it ran today or
+/// while an event's release may have just come out.
 pub async fn poll_job(
     now: DateTime<Utc>,
     fired: Option<DateTime<Utc>>,
@@ -242,6 +243,11 @@ pub async fn poll_job(
     out.follow_ups = vec![EarningsStep::Build; builds];
     if !crate::earnings::calendar::refreshed_today(es, now).await? {
         out.follow_ups.push(EarningsStep::Calendar);
+    }
+    if !crate::events::check::checked_today(es, now).await?
+        || crate::events::release_due(now, crate::events::check::RELEASE_WINDOW_MINUTES)
+    {
+        out.follow_ups.push(EarningsStep::Events);
     }
     Ok(out)
 }
@@ -1080,9 +1086,14 @@ mod tests {
         }
     }
 
+    /// The stores, with the macro events check already done on
+    /// `poll_time()`'s day (`polls_queue_the_events_check` covers it).
     fn stores() -> (Rc<MemStore>, MemEarningsStore) {
         let base = Rc::new(MemStore::default());
         let es = MemEarningsStore::new(base.clone());
+        es.kv
+            .borrow_mut()
+            .insert("events_checked_on".into(), "2026-10-30".into());
         (base, es)
     }
 
@@ -1356,6 +1367,31 @@ mod tests {
             .await
             .unwrap();
         assert!(o.follow_ups.is_empty(), "{o:?}");
+    }
+
+    #[tokio::test]
+    async fn polls_queue_the_events_check_daily_and_after_a_release_time() {
+        let (base, es) = stores();
+        es.kv.borrow_mut().clear();
+        es.kv_set("calendar_refreshed_on", "2026-11-10", "x")
+            .await
+            .unwrap();
+        let fl = FakeFilings::default();
+        // 06:00 ET on CPI day, not yet checked: queued.
+        let t = utc("2026-11-10T11:00:00Z");
+        let o = poll_job(t, Some(t), &es, base.as_ref(), &fl).await.unwrap();
+        assert!(o.follow_ups.contains(&EarningsStep::Events), "{o:?}");
+        es.kv_set("events_checked_on", "2026-11-10", "x")
+            .await
+            .unwrap();
+        // Checked, and no event just out: nothing.
+        let t = utc("2026-11-10T13:00:00Z");
+        let o = poll_job(t, Some(t), &es, base.as_ref(), &fl).await.unwrap();
+        assert!(!o.follow_ups.contains(&EarningsStep::Events), "{o:?}");
+        // 8:35 ET, CPI was due at 8:30: queued for the released check.
+        let t = utc("2026-11-10T13:35:00Z");
+        let o = poll_job(t, Some(t), &es, base.as_ref(), &fl).await.unwrap();
+        assert!(o.follow_ups.contains(&EarningsStep::Events), "{o:?}");
     }
 
     #[tokio::test]
