@@ -10,13 +10,16 @@ use serde::{Deserialize, Serialize};
 use super::check::{check_releases, new_row};
 use super::store::{EventRow, EventStore};
 use super::{et_time, has_release, note, planned, title, TIER_NOTABLE};
+use crate::budget::allows;
 use crate::earnings::store::EarningsStore;
 use crate::earnings::{find, Tier};
 use crate::facts::Field;
 use crate::numbers::Lang;
 use crate::providers::Http;
 
-/// Release-page fetches the brief may spend on today's events.
+/// Release-page fetches the brief may spend on today's events. Optional
+/// work: they run only while `budget::allows` them, and skipping them leaves
+/// an event as scheduled with its schedule link.
 pub const BRIEF_RELEASE_CHECKS: usize = 2;
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
@@ -62,7 +65,13 @@ pub struct WatchItem {
 /// Gives the brief its watch list. The Worker's is `StoreWatch`.
 #[async_trait(?Send)]
 pub trait WatchSource {
-    async fn watch_list(&self, date: NaiveDate, now: DateTime<Utc>) -> Field<Vec<WatchItem>>;
+    /// `budget` returns the subrequests used so far (see `Content::build_facts`).
+    async fn watch_list(
+        &self,
+        date: NaiveDate,
+        now: DateTime<Utc>,
+        budget: &dyn Fn() -> usize,
+    ) -> Field<Vec<WatchItem>>;
 }
 
 pub struct StoreWatch<'a> {
@@ -95,7 +104,12 @@ fn event_item(r: &EventRow) -> Option<WatchItem> {
 
 #[async_trait(?Send)]
 impl WatchSource for StoreWatch<'_> {
-    async fn watch_list(&self, date: NaiveDate, now: DateTime<Utc>) -> Field<Vec<WatchItem>> {
+    async fn watch_list(
+        &self,
+        date: NaiveDate,
+        now: DateTime<Utc>,
+        budget: &dyn Fn() -> usize,
+    ) -> Field<Vec<WatchItem>> {
         let day = date.format("%Y-%m-%d").to_string();
         // Without the table, before its first check fills it, or on a D1
         // error, the snapshot still gives the day's events, as scheduled.
@@ -106,7 +120,12 @@ impl WatchSource for StoreWatch<'_> {
                 .map(|p| new_row(p, now))
                 .collect(),
         };
-        let released = check_releases(now, &rows, self.http, BRIEF_RELEASE_CHECKS).await;
+        let used = budget();
+        let fetches = (0..=BRIEF_RELEASE_CHECKS)
+            .rev()
+            .find(|n| allows(used, *n))
+            .unwrap_or(0);
+        let released = check_releases(now, &rows, self.http, fetches).await;
         if !released.is_empty() {
             // Best effort: the brief's facts carry the status either way.
             let _ = self.events.write_events(&released).await;
@@ -254,7 +273,7 @@ mod tests {
         };
         // 8:00 ET: before the release, nothing is fetched.
         let Field::Value(items) = w
-            .watch_list(d("2026-11-10"), utc("2026-11-10T13:00:00Z"))
+            .watch_list(d("2026-11-10"), utc("2026-11-10T13:00:00Z"), &|| 0)
             .await
         else {
             panic!("missing");
@@ -293,7 +312,7 @@ mod tests {
             http: &http,
         };
         let Field::Value(items) = w
-            .watch_list(d("2026-11-10"), utc("2026-11-10T13:35:00Z"))
+            .watch_list(d("2026-11-10"), utc("2026-11-10T13:35:00Z"), &|| 0)
             .await
         else {
             panic!("missing");
@@ -301,6 +320,49 @@ mod tests {
         assert_eq!(items[0].status, "released");
         assert_eq!(items[0].link.as_deref(), Some(url));
         assert_eq!(ev.rows.borrow()["bls:cpi:2026-10"].status, "released");
+    }
+
+    #[tokio::test]
+    async fn near_the_subrequest_limit_the_release_fetch_is_skipped() {
+        let ev = seeded();
+        let es = MemEarningsStore::default();
+        let url = "https://www.bls.gov/news.release/archives/cpi_11102026.htm";
+        let http = Http200 {
+            ok: vec![url.into()],
+            ..Default::default()
+        };
+        let w = StoreWatch {
+            events: &ev,
+            earnings: &es,
+            http: &http,
+        };
+        let at = utc("2026-11-10T13:35:00Z");
+        // 39 used: one fetch fits under BUDGET_SOFT (40), not two.
+        let Field::Value(items) = w.watch_list(d("2026-11-10"), at, &|| 39).await else {
+            panic!("missing");
+        };
+        assert_eq!(http.seen.borrow().len(), 1);
+        assert_eq!(items[0].status, "released");
+        // At the limit: no fetch, and the event stays scheduled with its schedule link.
+        let ev = seeded();
+        let http = Http200 {
+            ok: vec![url.into()],
+            ..Default::default()
+        };
+        let w = StoreWatch {
+            events: &ev,
+            earnings: &es,
+            http: &http,
+        };
+        let Field::Value(items) = w.watch_list(d("2026-11-10"), at, &|| 40).await else {
+            panic!("missing");
+        };
+        assert!(http.seen.borrow().is_empty());
+        assert_eq!(items[0].status, "scheduled");
+        assert_eq!(
+            items[0].link.as_deref(),
+            Some("https://www.bls.gov/schedule/news_release/cpi.htm")
+        );
     }
 
     #[tokio::test]
@@ -314,13 +376,13 @@ mod tests {
             http: &http,
         };
         assert!(matches!(
-            w.watch_list(d("2026-11-12"), utc("2026-11-12T13:00:00Z"))
+            w.watch_list(d("2026-11-12"), utc("2026-11-12T13:00:00Z"), &|| 0)
                 .await,
             Field::Missing { .. }
         ));
         // An empty table (0008 applied, no check yet) also reads the snapshot.
         let Field::Value(items) = w
-            .watch_list(d("2026-11-10"), utc("2026-11-10T13:00:00Z"))
+            .watch_list(d("2026-11-10"), utc("2026-11-10T13:00:00Z"), &|| 0)
             .await
         else {
             panic!("missing");
@@ -336,7 +398,7 @@ mod tests {
             http: &http,
         };
         let Field::Value(items) = w
-            .watch_list(d("2026-11-10"), utc("2026-11-10T13:00:00Z"))
+            .watch_list(d("2026-11-10"), utc("2026-11-10T13:00:00Z"), &|| 0)
             .await
         else {
             panic!("missing");
@@ -360,7 +422,7 @@ mod tests {
             http: &http,
         };
         let Field::Value(items) = w
-            .watch_list(d("2026-12-09"), utc("2026-12-09T13:00:00Z"))
+            .watch_list(d("2026-12-09"), utc("2026-12-09T13:00:00Z"), &|| 0)
             .await
         else {
             panic!("missing");
@@ -372,7 +434,7 @@ mod tests {
         );
         assert_eq!(items[0].time_et.as_deref(), Some("2:00 PM ET"));
         let Field::Value(items) = w
-            .watch_list(d("2026-11-27"), utc("2026-11-27T13:00:00Z"))
+            .watch_list(d("2026-11-27"), utc("2026-11-27T13:00:00Z"), &|| 0)
             .await
         else {
             panic!("missing");

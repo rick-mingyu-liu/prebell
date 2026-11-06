@@ -119,7 +119,7 @@ impl Content for Premarket<'_> {
     ) -> PremarketFacts {
         let mut f = build_facts(self.md, self.ns, self.llm, date, now, budget).await;
         if let Some(w) = self.watch {
-            f.watch_list = w.watch_list(date, now).await;
+            f.watch_list = w.watch_list(date, now, budget).await;
         }
         f
     }
@@ -799,12 +799,12 @@ mod tests {
     }
     #[async_trait(?Send)]
     impl LlmProvider for FakeLlm {
-        async fn complete_json(&self, system: &str, _user: &str) -> Result<Value, ProviderError> {
+        async fn complete_json(&self, system: &str, user: &str) -> Result<Value, ProviderError> {
             self.calls.set(self.calls.get() + 1);
             if system.starts_with("You write the US premarket") {
-                Ok(draft_reply(false, self.en_ok.get()))
+                Ok(draft_reply(false, self.en_ok.get(), user))
             } else if system.starts_with("你负责撰写美股盘前晨报") {
-                Ok(draft_reply(true, self.zh_ok.get()))
+                Ok(draft_reply(true, self.zh_ok.get(), user))
             } else {
                 Ok(
                     json!({"reasons": [{"url": URL, "title": "x", "quote": QUOTE, "summary_en": "Apple rose on record iPhone sales."}]}),
@@ -819,13 +819,18 @@ mod tests {
             calls: Cell::new(0),
         }
     }
-    fn draft_reply(zh: bool, ok: bool) -> Value {
-        // The built facts have no watch list, so there is no watch section.
-        let heads: [&str; 3] = if zh {
-            ["期货", "宏观与隔夜", "盘前异动"]
+    fn draft_reply(zh: bool, ok: bool, user: &str) -> Value {
+        let mut heads: Vec<&str> = if zh {
+            vec!["期货", "宏观与隔夜", "盘前异动"]
         } else {
-            ["Futures", "Macro & overnight", "Biggest premarket movers"]
+            vec!["Futures", "Macro & overnight", "Biggest premarket movers"]
         };
+        // A watch section only when the facts have a watch list (the
+        // sections line at the end of the user message asks for it).
+        let watch = if zh { "今日关注" } else { "What to watch" };
+        if user.contains(&format!("\"{watch}\"")) {
+            heads.push(watch);
+        }
         // 7.5% is not in the facts, so a bad reply fails the number check.
         let body = if ok {
             "Futures were firm."
@@ -859,6 +864,7 @@ mod tests {
             &self,
             date: NaiveDate,
             now: DateTime<Utc>,
+            _budget: &dyn Fn() -> usize,
         ) -> Field<Vec<crate::events::watch::WatchItem>> {
             self.calls.borrow_mut().push((date, now));
             Field::Missing {
@@ -1159,6 +1165,89 @@ mod tests {
         };
         tick_content(utc("2026-10-29T12:30:00Z"), &s, &probe, &hooks).await;
         assert_eq!(probe.seen.get(), Some(37));
+    }
+
+    #[tokio::test]
+    async fn near_the_subrequest_limit_the_brief_skips_release_fetches_and_publishes() {
+        use crate::earnings::store::MemEarningsStore;
+        use crate::events::check::new_row;
+        use crate::events::store::MemEventStore;
+        use crate::events::watch::StoreWatch;
+        use crate::providers::{Http, HttpResp};
+
+        /// Answers every release page as out; counts requests.
+        #[derive(Default)]
+        struct Released(Cell<usize>);
+        #[async_trait(?Send)]
+        impl Http for Released {
+            async fn get(&self, _: &str, _: &[(&str, &str)]) -> Result<HttpResp, ProviderError> {
+                self.0.set(self.0.get() + 1);
+                Ok(HttpResp {
+                    status: 200,
+                    body: "<title>Consumer Price Index News Release</title>".into(),
+                    set_cookie: None,
+                })
+            }
+            async fn post_json(
+                &self,
+                _: &str,
+                _: &[(&str, &str)],
+                _: &Value,
+            ) -> Result<HttpResp, ProviderError> {
+                Err(ProviderError::Http(405))
+            }
+        }
+
+        // A CPI release at 8:30 ET on the brief's day, just past at 8:35.
+        let cpi = crate::events::Planned {
+            id: "bls:cpi:2026-09".into(),
+            series: "cpi".into(),
+            ref_period: Some("2026-09".into()),
+            variant: None,
+            starts_at: Some(utc("2026-10-29T12:30:00Z")),
+            et_date: "2026-10-29".parse().unwrap(),
+            tier: 1,
+            proof_url: "https://www.bls.gov/schedule/news_release/cpi.htm".into(),
+        };
+        let ev = MemEventStore::default();
+        ev.rows
+            .borrow_mut()
+            .insert(cpi.id.clone(), new_row(&cpi, utc("2026-10-29T10:00:00Z")));
+        let es = MemEarningsStore::default();
+        let http = Released::default();
+        let watch = StoreWatch {
+            events: &ev,
+            earnings: &es,
+            http: &http,
+        };
+        let s = MemStore::default();
+        let (m, l) = (md(true), llm(true, true));
+        let hooks = Hooks {
+            log: &|_| {},
+            extra: &Vec::new,
+            budget: &|| crate::budget::BUDGET_SOFT,
+        };
+        let out = tick_with_watch(
+            utc("2026-10-29T12:35:00Z"),
+            &s,
+            &m,
+            &FakeNs,
+            &l,
+            Some(&watch),
+            &hooks,
+        )
+        .await;
+        assert_eq!(out, TickOutcome::Published);
+        // No release fetch at the limit: the event stays scheduled, linked to its schedule.
+        assert_eq!(http.0.get(), 0);
+        assert_eq!(ev.rows.borrow()["bls:cpi:2026-09"].status, "scheduled");
+        let en = s.translations.borrow()[&(1, "en".to_string())]
+            .body_md
+            .clone();
+        assert!(
+            en.contains("- **8:30 AM ET** September CPI · [Schedule](https://www.bls.gov/schedule/news_release/cpi.htm)"),
+            "{en}"
+        );
     }
 
     #[tokio::test]
