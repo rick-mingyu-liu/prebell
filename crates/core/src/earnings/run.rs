@@ -15,7 +15,7 @@ use crate::earnings::charts::{charts, r2_key};
 use crate::earnings::detect::{domestic_by_cik, earnings_entries, name_mismatches};
 use crate::earnings::draft::{slug, write, CONTENT_TYPE, TEMPLATE_ID};
 use crate::earnings::extract::{extract, Extracted};
-use crate::earnings::facts::{missing_required, EarningsFacts, Metric, Metrics};
+use crate::earnings::facts::{missing_required, EarningsFacts, Metric, Metrics, NOT_STATED};
 use crate::earnings::store::{ChartRow, EarningsStore, FilingRow};
 use crate::earnings::xbrl::fetch_trend;
 use crate::earnings::{find, in_window, Tier, WatchEntry};
@@ -618,18 +618,39 @@ fn sources(f: &EarningsFacts) -> Vec<NewsReason> {
 }
 
 /// Why a field `missing_required` names is missing: the extraction, EDGAR
-/// or verifier reason (GAAP EPS's for "eps"), so the run error says which
-/// step failed.
+/// or verifier reason (for "eps", GAAP EPS's unless it is simply not
+/// stated, then non-GAAP EPS's), so the run error says which step failed.
 fn missing_reason<'a>(f: &'a EarningsFacts, field: &str) -> Option<&'a str> {
-    let metric = match field {
-        "revenue" => Metric::Revenue,
-        "eps" => Metric::EpsGaap,
-        _ => return None,
-    };
-    match f.metrics.get(metric) {
-        Field::Missing { reason } => Some(reason),
+    let reason = |m: Metric| match f.metrics.get(m) {
+        Field::Missing { reason } => Some(reason.as_str()),
         Field::Value(_) => None,
+    };
+    match field {
+        "revenue" => reason(Metric::Revenue),
+        "eps" => match reason(Metric::EpsGaap) {
+            Some(NOT_STATED) => reason(Metric::EpsNonGaap).or(Some(NOT_STATED)),
+            r => r,
+        },
+        _ => None,
     }
+}
+
+/// The run error for missing required fields: each one's reason (with the
+/// rejected quote, from `extract`), a reason already given not repeated.
+fn missing_error(f: &EarningsFacts, missing: &[&str]) -> String {
+    let mut reasons: Vec<String> = Vec::new();
+    let mut seen: Vec<&str> = Vec::new();
+    for field in missing {
+        if let Some(reason) = missing_reason(f, field).filter(|r| !seen.contains(r)) {
+            seen.push(reason);
+            reasons.push(format!("{field}: {reason}"));
+        }
+    }
+    let mut err = format!("missing {}", missing.join(", "));
+    if !reasons.is_empty() {
+        err.push_str(&format!(" ({})", reasons.join("; ")));
+    }
+    err
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -652,10 +673,7 @@ async fn build(
     let facts = gather(filings, llm, f).await?;
     let missing = missing_required(&facts);
     if !missing.is_empty() {
-        let mut err = format!("missing {}", missing.join(", "));
-        if let Some(reason) = missing_reason(&facts, missing[0]) {
-            err.push_str(&format!(" ({}: {reason})", missing[0]));
-        }
+        let err = missing_error(&facts, &missing);
         return not_ready(now, es, store, f, row, err).await;
     }
     let (en, en_md) = match write(llm, &facts, Lang::En).await {
@@ -905,7 +923,6 @@ mod tests {
     use super::*;
     use crate::cover::{earnings_graphic, earnings_lines};
     use crate::earnings::draft::tests::reply;
-    use crate::earnings::facts::NOT_STATED;
     use crate::earnings::store::MemEarningsStore;
     use crate::earnings::xbrl::tests::aapl_concept;
     use crate::earnings::Filer;
@@ -1833,6 +1850,30 @@ mod tests {
         .unwrap();
         assert_eq!(base.posts.borrow().len(), 1);
         assert_eq!(base.posts.borrow()[0].slug, "aapl-q4-fy2026-earnings");
+    }
+
+    #[test]
+    fn missing_error_names_each_field_once() {
+        let mut f = crate::earnings::facts::tests::facts();
+        let unverified = |r: &str| Field::Missing { reason: r.into() };
+        f.metrics.revenue = unverified("unverified: a [quote: \"Total revenues $1 $2\"]");
+        f.metrics.eps_gaap = unverified(NOT_STATED);
+        f.metrics.eps_non_gaap = unverified("unverified: b [quote: \"Diluted $1.54\"]");
+        assert_eq!(
+            missing_error(&f, &missing_required(&f)),
+            "missing revenue, eps (revenue: unverified: a [quote: \"Total revenues $1 $2\"]; eps: unverified: b [quote: \"Diluted $1.54\"])"
+        );
+        // GAAP EPS's reason when it has one; a reason the revenue gave is
+        // not repeated.
+        f.metrics.eps_gaap = unverified("unverified: c");
+        assert!(missing_error(&f, &missing_required(&f)).ends_with("; eps: unverified: c)"));
+        f.metrics.eps_gaap = unverified("extraction failed: x");
+        f.metrics.eps_non_gaap = unverified("extraction failed: x");
+        f.metrics.revenue = unverified("extraction failed: x");
+        assert_eq!(
+            missing_error(&f, &missing_required(&f)),
+            "missing revenue, eps (revenue: extraction failed: x)"
+        );
     }
 
     #[tokio::test]
