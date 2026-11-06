@@ -55,7 +55,7 @@ describe("Privacy & Terms page", () => {
     const out = await render("en");
     expect(out).toContain("<h1>Privacy &amp; Terms</h1>");
     expect(out).toContain("Last updated: November 5, 2026");
-    for (const fact of ["prebell-web.rickmyliu.workers.dev", "Buttondown", "Cloudflare Web Analytics", "Ontario, Canada", "rickmyliu@gmail.com", "under 16"]) {
+    for (const fact of ["prebell.site", "Buttondown", "Cloudflare Web Analytics", "Ontario, Canada", "rickmyliu@gmail.com", "under 16"]) {
       expect(out, fact).toContain(fact);
     }
   });

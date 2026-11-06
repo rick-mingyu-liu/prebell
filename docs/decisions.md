@@ -47,3 +47,4 @@ they are never asked twice. Things decided *not* to do go in `declined.md`.
   about the market instead of just the dark gray shadows". Design:
   `docs/superpowers/specs/2026-11-05-data-covers-design.md`.
 - **Author photo in colour, not greyscale.** Rick, 2026-11-05: "do not make my photo black and white, original colorful". The `.author-photo` grayscale filter is gone; the file itself was always colour.
+- **The site's domain is `prebell.site`**, served by the `prebell-web` Worker as a custom domain. www redirects to the apex, and the old workers.dev URL stays up. Rick, 2026-11-05: "i purchased the domain name: prebell.site".
