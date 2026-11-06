@@ -9,7 +9,7 @@ mod store;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use prebell_core::cover::card::{cards_tick, wants_card};
-use prebell_core::digest::{digest_tick, parse_enabled, parse_mode};
+use prebell_core::digest::{digest_tick, enabled, gate, parse_mode};
 use prebell_core::earnings::calendar::{refresh_tick, yahoo_seeding, CalendarSource};
 use prebell_core::earnings::foreign::foreign_read;
 use prebell_core::earnings::run::{build_tick, poll_job};
@@ -247,11 +247,8 @@ impl JobRunner for Runner<'_> {
                 for e in &o.errors {
                     console_warn!("earnings poll: {e}");
                 }
-                // The digest only while DIGEST_ENABLED is true (a bad value
-                // is queued, so its message raises the config alert).
-                if !parse_enabled(text(env, "DIGEST_ENABLED").as_deref()).unwrap_or(true) {
-                    o.follow_ups.retain(|s| *s != EarningsStep::Digest);
-                }
+                // The digest only while DIGEST_ENABLED is exactly "true".
+                gate(&mut o.follow_ups, text(env, "DIGEST_ENABLED").as_deref());
                 for next in &o.follow_ups {
                     // Builds go to their own queue, the calendar to this one.
                     let sent = match env.queue(queue_for(next.job())) {
@@ -315,7 +312,7 @@ impl JobRunner for Runner<'_> {
                 Ok((format!("{o:?}"), false))
             }
             EarningsStep::Digest => {
-                if !parse_enabled(text(env, "DIGEST_ENABLED").as_deref())? {
+                if !enabled(text(env, "DIGEST_ENABLED").as_deref()) {
                     return Ok((
                         "disabled (DIGEST_ENABLED is not true); skipped".into(),
                         false,

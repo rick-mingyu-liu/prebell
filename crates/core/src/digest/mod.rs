@@ -5,7 +5,8 @@
 //!
 //! No cron of its own: a Friday evening earnings poll (after that day's
 //! calendar refresh) queues one `digest` message until kv `digest_built_for`
-//! holds next week's Monday, and only while `DIGEST_ENABLED` is `true`.
+//! holds next week's Monday, and only while `DIGEST_ENABLED` is `true`
+//! (`gate`).
 //! Everything shown comes from D1, the events snapshot and `clock`; the
 //! wording is in `copy`.
 //!
@@ -70,15 +71,17 @@ pub fn parse_mode(raw: Option<&str>) -> Result<Mode, String> {
     }
 }
 
-/// `DIGEST_ENABLED`: only `true` turns the digest on; unset, empty or
-/// `false` leaves it off, anything else is a config error.
-pub fn parse_enabled(raw: Option<&str>) -> Result<bool, String> {
-    match raw.map(str::trim).filter(|v| !v.is_empty()) {
-        None | Some("false") => Ok(false),
-        Some("true") => Ok(true),
-        Some(other) => Err(format!(
-            "unknown DIGEST_ENABLED: {other} (use true or false)"
-        )),
+/// `DIGEST_ENABLED`: on only when it is exactly `true`; unset or anything
+/// else is off.
+pub fn enabled(raw: Option<&str>) -> bool {
+    raw.map(str::trim) == Some("true")
+}
+
+/// Drops the `digest` follow-up from a poll's list unless `DIGEST_ENABLED`
+/// (`raw`) is on, so the Friday trigger never queues it while off.
+pub fn gate(follow_ups: &mut Vec<crate::schedule::EarningsStep>, raw: Option<&str>) {
+    if !enabled(raw) {
+        follow_ups.retain(|s| *s != crate::schedule::EarningsStep::Digest);
     }
 }
 

@@ -1465,6 +1465,14 @@ mod tests {
             .unwrap();
         let o = poll_job(t, Some(t), &es, base.as_ref(), &fl).await.unwrap();
         assert!(digest(&o), "{o:?}");
+        // The Worker's gate: off by default (DIGEST_ENABLED unset), on
+        // only with "true".
+        let mut off = o.clone();
+        crate::digest::gate(&mut off.follow_ups, None);
+        assert!(!digest(&off), "{off:?}");
+        let mut on = o.clone();
+        crate::digest::gate(&mut on.follow_ups, Some("true"));
+        assert!(digest(&on), "{on:?}");
         // 17:55 ET Friday and Thursday evening: not yet.
         for early in ["2026-11-13T22:55:00Z", "2026-11-13T00:00:00Z"] {
             let t = utc(early);

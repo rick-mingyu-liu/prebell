@@ -677,15 +677,39 @@ async fn without_a_sender_it_is_a_dry_run() {
 }
 
 #[test]
-fn enabled_only_when_true() {
-    assert_eq!(parse_enabled(None), Ok(false));
-    assert_eq!(parse_enabled(Some("")), Ok(false));
-    assert_eq!(parse_enabled(Some("false")), Ok(false));
-    assert_eq!(parse_enabled(Some("true")), Ok(true));
-    let e = parse_enabled(Some("yes")).unwrap_err();
-    assert!(e.contains("DIGEST_ENABLED") && e.contains("yes"), "{e}");
+fn enabled_only_when_exactly_true() {
+    assert!(enabled(Some("true")));
+    assert!(enabled(Some(" true ")));
+    for off in [
+        None,
+        Some(""),
+        Some("false"),
+        Some("TRUE"),
+        Some("yes"),
+        Some("1"),
+    ] {
+        assert!(!enabled(off), "{off:?}");
+    }
 }
 
+#[test]
+fn the_gate_drops_the_digest_unless_enabled() {
+    use crate::schedule::EarningsStep;
+    let polled = [
+        EarningsStep::Build,
+        EarningsStep::Calendar,
+        EarningsStep::Digest,
+    ];
+    // Disabled by default: unset, and any value but "true".
+    for off in [None, Some("false"), Some("yes")] {
+        let mut f = polled.to_vec();
+        gate(&mut f, off);
+        assert_eq!(f, [EarningsStep::Build, EarningsStep::Calendar], "{off:?}");
+    }
+    let mut f = polled.to_vec();
+    gate(&mut f, Some("true"));
+    assert_eq!(f, polled);
+}
 /// A sender that answers from a script, for the core loop alone.
 struct Scripted {
     answers: RefCell<VecDeque<Result<Sent, String>>>,
