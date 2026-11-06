@@ -350,10 +350,14 @@ html:lang(zh-Hans) .cal-today { letter-spacing: 0.02em; }
 .cal-halves { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px 6px; }
 /* Side by side down to a 1000px window (a ~187px column); only a column narrower than that stacks them. */
 @container col (max-width: 160px) { .cal-halves { grid-template-columns: minmax(0, 1fr); } }
-/* Each half is a container too, so an English half label too long for a narrow half (a 1000-1199px window)
-   drops its icon; the words stay. The Chinese labels are short enough to keep it. */
+/* Each half is a container too, so in a narrow half (a 1000-1199px window) an English half label drops its
+   icon (the Chinese labels are short enough to keep it), and "Show N more" / "展开其余N家" sets a size smaller
+   on one line; the words stay. */
 .cal-half { container: half / inline-size; min-width: 0; }
-@container half (max-width: 95px) { html:not(:lang(zh-Hans)) .cal-half > h3.cal-slot .cal-slot-icon { display: none; } }
+@container half (max-width: 95px) {
+  html:not(:lang(zh-Hans)) .cal-half > h3.cal-slot .cal-slot-icon { display: none; }
+  .cal-half > .cal-more > summary { font-size: 11px; letter-spacing: -0.01em; white-space: nowrap; }
+}
 .cal-half-unknown { margin-top: 10px; padding-top: 8px; border-top: 1px solid var(--rule); }
 .cal-slot { color: var(--muted); font-size: 12px; font-variant-caps: all-small-caps; letter-spacing: 0.08em; }
 html:lang(zh-Hans) .cal-slot { font-variant-caps: normal; letter-spacing: 0.02em; }
@@ -429,12 +433,15 @@ h3.cal-slot .num { margin-left: auto; color: var(--ink); font-variant-caps: norm
   .cal-card-link { gap: 5px; aspect-ratio: 24 / 11; min-height: 38px; max-height: 44px; padding: 4px 6px; border-radius: 5px; }
   .cal-card-wide .cal-card-link { padding: 4px 8px; }
   .cal-logo-wide { max-width: 80px; height: 22px; }
+  /* A mark 5:1 and wider takes the card's whole inner width, so it keeps some height. */
+  .cal-card-wide .cal-card-link:has(.cal-logo-long) { padding-inline: 3px; }
+  .cal-logo-long { max-width: 100%; }
   .cal-logo-icon { width: 20px; height: 20px; }
   .cal-card-sym { font-size: 12px; }
   .cal-card-name { font-size: 10px; }
   .cal-card-text .cal-card-sym { font-size: 13px; }
   .cal-card-text .cal-card-name { font-size: 10.5px; }
-  .cal-card-tick { top: 2px; right: 3px; font-size: 9px; }
+  .cal-card-tick { top: 2px; right: 3px; font-size: 10px; }
   .cal-econ { padding: 4px 6px 5px; }
   .cal-event { font-size: 12px; }
 }

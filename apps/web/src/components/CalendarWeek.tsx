@@ -14,6 +14,8 @@ const HALVES: Slot[] = ["bmo", "amc"];
 export const CARDS_PER_SLOT = 8;
 /** Width over height from which a logo is a wordmark set across the card, not an icon beside the ticker. */
 export const WIDE_LOGO = 1.8;
+/** Width over height from which a wordmark is long enough to take the card's whole inner width on a desktop. */
+export const LONG_LOGO = 5;
 /**
  * A wordmark's height in its card's 80x28 logo box: about the same ink area for every mark, so a long one sits
  * lower and a stubby one does not shout (2:1 is 23px tall, 5:1 15px), never over 28px or under 12px. The box's
@@ -239,7 +241,7 @@ function Cards({ entries, locale, t, eager }: { entries: CalendarEntry[]; locale
         const kind = logo ? (wide ? "wide" : "icon") : "text";
         const img = logo && (
           <img
-            className={wide ? "cal-logo-wide" : "cal-logo-icon"}
+            className={wide ? (ratio >= LONG_LOGO ? "cal-logo-wide cal-logo-long" : "cal-logo-wide") : "cal-logo-icon"}
             src={logo.src}
             alt={wide ? name : ""}
             width={logo.width}

@@ -10,8 +10,9 @@ vi.mock("../src/lib/logos.generated", () => ({
     EDGE: "/logos/companies/EDGE.png",
     SMALLW: "/logos/companies/SMALLW.png",
     TINY: "/logos/companies/TINY.png",
+    LONGM: "/logos/companies/LONGM.png",
   },
-  COMPANY_LOGO_SIZES: { WIDE: [128, 32], EDGE: [86, 48], SMALLW: [45, 18], TINY: [17, 19] },
+  COMPANY_LOGO_SIZES: { WIDE: [128, 32], EDGE: [86, 48], SMALLW: [45, 18], TINY: [17, 19], LONGM: [120, 15] },
 }));
 
 const { default: CalendarWeek, WIDE_LOGO, wordmarkHeight } = await import("../src/components/CalendarWeek");
@@ -44,7 +45,7 @@ describe("calendar cards with wide logos", () => {
       days={[
         {
           date: "2026-11-02",
-          entries: [entry("WIDE", "Wide Corp"), entry("SQ", "Square Inc"), entry("EDGE", null), entry("SMALLW", "Small Wordmark"), entry("TINY", "Tiny Icon")],
+          entries: [entry("WIDE", "Wide Corp"), entry("SQ", "Square Inc"), entry("EDGE", null), entry("SMALLW", "Small Wordmark"), entry("TINY", "Tiny Icon"), entry("LONGM", "Long Mark Holdings")],
         },
       ]}
       locale="en"
@@ -67,6 +68,11 @@ describe("calendar cards with wide logos", () => {
     expect(wordmarkHeight(20)).toBe(12);
     // Never taller than the box, whatever the ratio.
     for (const r of [1.8, 1.9, 2, 3, 10]) expect(wordmarkHeight(r)).toBeLessThanOrEqual(28);
+  });
+
+  it("marks a long wordmark (5:1 and up) so it may take the card's whole inner width", () => {
+    expect(card("LONGM")).toContain('<img class="cal-logo-wide cal-logo-long" src="/logos/companies/LONGM.png" alt="Long Mark Holdings" width="120" height="15" style="height:12px"');
+    expect(card("WIDE")).toContain('<img class="cal-logo-wide" src=');
   });
 
   it("never draws a logo above its natural size", () => {
