@@ -10,8 +10,8 @@ use chrono::{DateTime, NaiveDate, NaiveTime, TimeZone, Utc};
 use chrono_tz::America::New_York;
 
 use super::{
-    gate_error, is_stale, iso, retry_later, superseded, translation_zh, Content, Hooks, Premarket,
-    TickOutcome,
+    gate_error, is_stale, iso, new_run, retry_later, superseded, translation_zh, Content, Hooks,
+    Premarket, TickOutcome,
 };
 use crate::clock::{decide, premarket_update_window, SlotDecision};
 use crate::cover::{store_graphic, INDEX_LINE_KEY};
@@ -94,12 +94,42 @@ async fn step(
             Ok(TickOutcome::Nothing)
         };
     }
-    let post = store
-        .get_post_by_run(&base_key)
-        .await?
-        .ok_or("published run has no post")?;
-    if published_after_releases(&post, date)? {
-        return skip(now, store, date, run, "base published after 08:30".into()).await;
+    // Data errors no later firing fixes: skip rather than retry all day.
+    let Some(post) = store.get_post_by_run(&base_key).await? else {
+        return skip(
+            now,
+            store,
+            date,
+            run,
+            "published base run has no post".into(),
+        )
+        .await;
+    };
+    // Only the update writes `revised_at`, so the rewrite landed and the run
+    // write after it was lost (a crash or a store error): no second build.
+    if post.revised_at.is_some() {
+        let mut row = run.unwrap_or_else(|| new_run(now, run_key(date), CONTENT_TYPE, date));
+        row.status = "published".into();
+        row.last_error = None;
+        row.updated_at = iso(now);
+        store.upsert_run(&row).await?;
+        return Ok(TickOutcome::Nothing);
+    }
+    match published_after_releases(&post, date) {
+        Some(true) => {
+            return skip(now, store, date, run, "base published after 08:30".into()).await;
+        }
+        Some(false) => {}
+        None => {
+            return skip(
+                now,
+                store,
+                date,
+                run,
+                "base post has no publish time".into(),
+            )
+            .await
+        }
     }
     if past {
         let why = run
@@ -112,19 +142,18 @@ async fn step(
 }
 
 /// Whether the base post went out at or after 08:30 ET on `date`, so its
-/// build already saw the 8:30 releases.
-fn published_after_releases(post: &PostRow, date: NaiveDate) -> Result<bool, String> {
+/// build already saw the 8:30 releases; `None` without a readable publish time.
+fn published_after_releases(post: &PostRow, date: NaiveDate) -> Option<bool> {
     let at = post
         .published_at
         .as_deref()
-        .and_then(|t| DateTime::parse_from_rfc3339(t).ok())
-        .ok_or("base post has no publish time")?;
+        .and_then(|t| DateTime::parse_from_rfc3339(t).ok())?;
     let releases = NaiveTime::from_hms_opt(8, 30, 0).expect("valid built-in time");
     let releases = New_York
         .from_local_datetime(&date.and_time(releases))
         .earliest()
         .expect("08:30 is never in a DST gap");
-    Ok(at >= releases)
+    Some(at >= releases)
 }
 
 /// Marks the update `skipped` with `why`, without an alert: the base brief stands.
@@ -135,25 +164,12 @@ async fn skip(
     run: Option<RunRow>,
     why: String,
 ) -> Result<TickOutcome, String> {
-    let mut row = run.unwrap_or_else(|| new_run(now, date));
+    let mut row = run.unwrap_or_else(|| new_run(now, run_key(date), CONTENT_TYPE, date));
     row.status = "skipped".into();
     row.last_error = Some(why);
     row.updated_at = iso(now);
     store.upsert_run(&row).await?;
     Ok(TickOutcome::Skipped)
-}
-
-fn new_run(now: DateTime<Utc>, date: NaiveDate) -> RunRow {
-    RunRow {
-        run_key: run_key(date),
-        content_type: CONTENT_TYPE.into(),
-        trading_date: date.format("%Y-%m-%d").to_string(),
-        status: "pending".into(),
-        attempts: 0,
-        last_error: None,
-        created_at: iso(now),
-        updated_at: iso(now),
-    }
 }
 
 /// Builds the brief again and, only when the gate and both drafts pass,
@@ -168,7 +184,7 @@ async fn build(
     post: PostRow,
 ) -> Result<TickOutcome, String> {
     let ts = iso(now);
-    let mut row = run.unwrap_or_else(|| new_run(now, date));
+    let mut row = run.unwrap_or_else(|| new_run(now, run_key(date), CONTENT_TYPE, date));
     row.status = "building".into();
     row.attempts += 1;
     row.updated_at = ts.clone();
@@ -193,19 +209,24 @@ async fn build(
         return Ok(TickOutcome::Nothing);
     }
 
-    // A new key: covers are cached for a day, so the base's must not change.
-    let cover_slug = format!("{}-update", post.slug);
+    // A new key per attempt: covers are cached for a day, so a key the site
+    // may already serve (the base's, or an earlier attempt's) never changes.
+    let cover_slug = format!("{}-update-{}", post.slug, row.attempts);
     let (cover_key, outcome, cover_err) =
         store_graphic(store, &cover_slug, c.cover_graphic(&facts)).await;
     (hooks.log)(&format!("cover={outcome}"));
     if let Some(e) = cover_err {
         (hooks.log)(&format!("cover write failed: {e}"));
+        // The post is untouched and keeps its 8:00 graphic; the next firing tries again.
+        return retry_later(store, row, format!("cover: {e}")).await;
     }
     // Its own facts key, written first and switched to in the rewrite below,
     // so the post and its facts change together; the 8:00 facts stay as they are.
     let facts_key = facts_key(date);
     let json = serde_json::to_string(&facts).map_err(|e| format!("facts json: {e}"))?;
-    store.put_facts(&facts_key, &json).await?;
+    if let Err(e) = store.put_facts(&facts_key, &json).await {
+        return retry_later(store, row, e).await;
+    }
 
     let post_id = post.id.ok_or("post has no id")?;
     let cover = c.cover_lines(&facts);
@@ -236,10 +257,14 @@ async fn build(
         revised_at: Some(ts.clone()),
         ..post
     };
-    // On failure nothing changed: the new facts and cover are unreferenced.
-    store
+    // On failure nothing changed (the new facts and cover are unreferenced),
+    // so the next firing retries.
+    let rewrite = store
         .revise_post(&revised, &[en_row, zh_row], &c.sources(&facts))
-        .await?;
+        .await;
+    if let Err(e) = rewrite {
+        return retry_later(store, row, e).await;
+    }
     // The front page's index line; a failed write keeps the previous one.
     let index_line = match serde_json::to_string(&c.index_snapshot(&facts)) {
         Ok(json) => store.kv_set(INDEX_LINE_KEY, &json, &ts).await,
@@ -424,6 +449,153 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn the_8_30_threshold_is_08_30_eastern_under_edt_and_est() {
+        // (base publish time, update firing, outcome): 08:29 builds, 08:30 skips.
+        for (base_at, at, want) in [
+            (
+                "2026-10-29T12:29:00Z",
+                "2026-10-29T12:35:00Z",
+                TickOutcome::Published,
+            ),
+            (
+                "2026-10-29T12:30:00Z",
+                "2026-10-29T12:35:00Z",
+                TickOutcome::Skipped,
+            ),
+            (
+                "2026-11-02T13:29:00Z",
+                "2026-11-02T13:35:00Z",
+                TickOutcome::Published,
+            ),
+            (
+                "2026-11-02T13:30:00Z",
+                "2026-11-02T13:35:00Z",
+                TickOutcome::Skipped,
+            ),
+        ] {
+            let s = MemStore::default();
+            let (m, l) = (md(true), llm(true, true));
+            assert_eq!(
+                base_tick(utc(base_at), &s, &m, &FakeNs, &l).await,
+                TickOutcome::Published,
+                "{base_at}"
+            );
+            assert_eq!(tick(utc(at), &s, &m, &FakeNs, &l).await, want, "{base_at}");
+        }
+    }
+
+    #[tokio::test]
+    async fn update_skips_a_base_with_no_post_or_no_publish_time() {
+        // A published base run with no post: skipped at once, not retried all day.
+        let s = MemStore::default();
+        let (m, l) = (md(true), llm(true, true));
+        let mut base = building(BASE_AT);
+        base.run_key = KEY.into();
+        base.content_type = "premarket".into();
+        base.status = "published".into();
+        s.runs.borrow_mut().insert(KEY.into(), base);
+        assert_eq!(
+            tick(utc(UPDATE_AT), &s, &m, &FakeNs, &l).await,
+            TickOutcome::Skipped
+        );
+        assert_eq!(
+            run(&s).unwrap().last_error.as_deref(),
+            Some("published base run has no post")
+        );
+        // A base post whose publish time is unreadable.
+        let s = base_brief(true).await;
+        s.posts.borrow_mut()[0].published_at = Some("not a time".into());
+        let before = snapshot(&s);
+        assert_eq!(
+            tick(utc(UPDATE_AT), &s, &m, &FakeNs, &l).await,
+            TickOutcome::Skipped
+        );
+        assert_eq!(
+            run(&s).unwrap().last_error.as_deref(),
+            Some("base post has no publish time")
+        );
+        assert_eq!(snapshot(&s), before);
+        assert_eq!((m.calls.get(), l.calls.get()), (0, 0));
+        assert!(s.alerts.borrow().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_landed_rewrite_whose_run_write_was_lost_is_marked_published_without_a_build() {
+        // The rewrite committed, then the invocation died before the run write.
+        for at in ["2026-10-29T12:55:00Z", "2026-10-29T13:30:00Z"] {
+            let s = base_brief(true).await;
+            let (m, l) = (md(true), llm(true, true));
+            assert_eq!(
+                tick(utc(UPDATE_AT), &s, &m, &FakeNs, &l).await,
+                TickOutcome::Published
+            );
+            s.runs
+                .borrow_mut()
+                .insert(UPDATE_KEY.into(), building(UPDATE_AT));
+            let after = snapshot(&s);
+            let calls = (m.calls.get(), l.calls.get());
+            // After the lease, in the window or past the deadline.
+            assert_eq!(
+                tick(utc(at), &s, &m, &FakeNs, &l).await,
+                TickOutcome::Nothing,
+                "{at}"
+            );
+            assert_eq!((m.calls.get(), l.calls.get()), calls, "{at}: no build");
+            let r = run(&s).unwrap();
+            assert_eq!(
+                (r.status.as_str(), r.last_error),
+                ("published", None),
+                "{at}"
+            );
+            // The served cover and the rest of the post are not rewritten.
+            assert_eq!(snapshot(&s), after, "{at}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_cover_write_error_retries_and_keeps_the_8_00_cover() {
+        let s = base_brief(true).await;
+        let before = snapshot(&s);
+        s.fail_put_bytes.set(true);
+        let (m, l) = (md(true), llm(true, true));
+        assert_eq!(
+            tick(utc(UPDATE_AT), &s, &m, &FakeNs, &l).await,
+            TickOutcome::Retrying("cover: r2: put_bytes failed".into())
+        );
+        assert_eq!(snapshot(&s), before);
+        let r = run(&s).unwrap();
+        assert_eq!(
+            (r.status.as_str(), r.last_error.as_deref()),
+            ("pending", Some("cover: r2: put_bytes failed"))
+        );
+        // Next firing the write works and the update lands.
+        s.fail_put_bytes.set(false);
+        assert_eq!(
+            tick(utc("2026-10-29T12:40:00Z"), &s, &m, &FakeNs, &l).await,
+            TickOutcome::Published
+        );
+        assert_eq!(
+            s.posts.borrow()[0].cover_key.as_deref(),
+            Some("covers/premarket-2026-10-29-update-2.svg")
+        );
+        // Still failing at 09:25: skipped, and the 8:00 brief with its cover stands.
+        let s = base_brief(true).await;
+        let before = snapshot(&s);
+        s.fail_put_bytes.set(true);
+        tick(utc(UPDATE_AT), &s, &m, &FakeNs, &l).await;
+        assert_eq!(
+            tick(utc("2026-10-29T13:25:00Z"), &s, &m, &FakeNs, &l).await,
+            TickOutcome::Skipped
+        );
+        assert_eq!(
+            run(&s).unwrap().last_error.as_deref(),
+            Some("cover: r2: put_bytes failed")
+        );
+        assert_eq!(snapshot(&s), before);
+        assert!(s.alerts.borrow().is_empty());
+    }
+
+    #[tokio::test]
     async fn update_rewrites_the_same_post() {
         let s = base_brief(true).await;
         let base_run = s.runs.borrow()[KEY].clone();
@@ -442,7 +614,7 @@ mod tests {
 
         // One post, same id, run key, slug and publish time; new revision,
         // facts key and cover.
-        let key = "covers/premarket-2026-10-29-update.svg";
+        let key = "covers/premarket-2026-10-29-update-1.svg";
         assert_eq!(
             *s.posts.borrow(),
             [PostRow {
@@ -543,6 +715,10 @@ mod tests {
             assert_eq!(
                 s.posts.borrow()[0].revised_at.as_deref(),
                 Some("2026-10-29T12:40:00Z")
+            );
+            assert_eq!(
+                s.posts.borrow()[0].cover_key.as_deref(),
+                Some("covers/premarket-2026-10-29-update-2.svg")
             );
         }
     }
@@ -648,14 +824,23 @@ mod tests {
                 .collect::<Vec<_>>(),
             [UPDATE_FACTS_KEY]
         );
-        assert_eq!(run(&s).unwrap().status, "building");
-        // After the lease the update rebuilds and lands.
+        // Back to pending with the error, so the next firing retries.
+        let r = run(&s).unwrap();
+        assert_eq!(
+            (r.status.as_str(), r.last_error.as_deref()),
+            ("pending", Some("d1: revise_post failed"))
+        );
         s.fail_revise_post.set(false);
         assert_eq!(
-            tick(utc("2026-10-29T12:50:00Z"), &s, &m, &FakeNs, &l).await,
+            tick(utc("2026-10-29T12:40:00Z"), &s, &m, &FakeNs, &l).await,
             TickOutcome::Published
         );
-        assert_eq!(stored_facts(&s).as_of_utc, utc("2026-10-29T12:50:00Z"));
+        assert_eq!(stored_facts(&s).as_of_utc, utc("2026-10-29T12:40:00Z"));
+        // Each attempt draws its own cover key.
+        assert_eq!(
+            s.posts.borrow()[0].cover_key.as_deref(),
+            Some("covers/premarket-2026-10-29-update-2.svg")
+        );
     }
 
     #[tokio::test]

@@ -83,9 +83,10 @@ pub const CRONS: &[(&str, &[&str])] = &[
     // 10:00-23:55Z weekdays. Earnings polling from 06:00 ET under both
     // offsets (10:00Z EDT, 11:00Z EST), on its own queue. Premarket
     // 08:00-09:25 ET (12:00Z EDT, 13:00Z EST) and its ZH retries to the
-    // 18:00 ET give-up; the premarket update 08:35-09:25 ET; the recap window from 13:45 ET (early close) or
-    // 16:45 ET to 19:00 ET EDT (23:00Z), with its ZH retries. The clock
-    // gates the earlier firings: they read D1 and do nothing.
+    // 18:00 ET give-up; the premarket update 08:35-09:25 ET; the recap
+    // window from 13:45 ET (early close) or 16:45 ET to 19:00 ET EDT
+    // (23:00Z), with its ZH retries. The clock gates the earlier firings:
+    // they read D1 and do nothing.
     (
         "*/5 10-23 * * MON-FRI",
         &["premarket", "premarket-update", "recap", "earnings"],

@@ -67,19 +67,24 @@ follows.
   `facts_r2_key` switched to it inside the same D1 batch as the text, so
   the post and its facts flip together and the 8:00 facts stay intact
   (a failed batch only leaves an unreferenced R2 object; ruled 2026-11-06,
-  replacing "same facts key, overwritten"), both translations, sources (replace), the front-page index line, and a new
-  cover at a **new key** `covers/<slug>-update.svg` with the post's
-  `cover_key` pointing to it (covers are served with a one-day cache, so the
-  old key must not be reused). `published_at` keeps the base time;
+  replacing "same facts key, overwritten"), both translations, sources
+  (replace), the front-page index line, and a new cover at a **new key**
+  per attempt, `covers/<slug>-update-<attempt>.svg`, with the post's
+  `cover_key` pointing to it (covers are served with a one-day cache, so a
+  key the site may serve must never be rewritten; ruled 2026-11-06). A
+  failed cover write retries like a failed draft, leaving the 8:00 cover. `published_at` keeps the base time;
   the new `posts.revised_at` gets the update time. The update run becomes
   `published`.
 - **Reconcile must not misfire:** the base post already exists and is
   published, so the base's "EN live but run not published" repair must not
-  mark the update published without building.
+  mark the update published without building. (`posts.revised_at` set is
+  the update's own proof: a rewrite that landed before its run write was
+  lost marks the run published with no second build; ruled 2026-11-06.)
 - **ZH race:** if the base ZH is still `pending` and the base's ZH retry is
   drafting from the 8:00 facts when the update lands, the retry must not
   overwrite the update's ZH (re-check the post's revision before writing,
-  or an equivalent guard).
+  or an equivalent guard). Implemented as a conditional write: the ZH row
+  lands only while the post's `revised_at` is the one the retry read.
 
 ### Schema
 Migration `0007_post_revised_at.sql`: `ALTER TABLE posts ADD COLUMN

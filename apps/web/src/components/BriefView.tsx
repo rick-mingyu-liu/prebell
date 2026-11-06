@@ -24,8 +24,9 @@ export interface BriefViewProps {
 
 /**
  * A post page as one reading column: kicker, serif headline, publish time (and the update time once
- * the premarket update rewrote it) with the checked tag, cover, then the body. A brief with facts leads with its summary, its body loses the tables the facts
- * replace, and the movers table sits under the body's movers heading, right before the movers prose;
+ * the premarket update rewrote it) with the checked tag, cover, then the body. A brief with facts
+ * leads with its summary, its body loses the tables the facts replace, and the movers table sits
+ * under the body's movers heading, right before the movers prose;
  * a body without that heading (an older post) and a pending page show the table first under a generic
  * heading. Without facts, and for an earnings check, the body keeps its tables
  * (the key-figure table exactly as written) and an earnings check adds its charts. Then the sources,

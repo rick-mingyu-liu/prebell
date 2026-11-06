@@ -314,7 +314,7 @@ async fn reconcile<C: Content>(
     if let Some(facts) = &facts {
         store.add_sources(post_id, &c.sources(facts)).await?;
     }
-    let mut row = run.unwrap_or_else(|| new_run(now, c, date));
+    let mut row = run.unwrap_or_else(|| new_run(now, c.run_key(date), c.content_type(), date));
     row.status = "published".into();
     row.updated_at = ts;
     store.upsert_run(&row).await?;
@@ -338,7 +338,7 @@ async fn skip<C: Content>(
     if run.as_ref().is_some_and(|r| r.status == "skipped") {
         return Ok(TickOutcome::Nothing);
     }
-    let mut row = run.unwrap_or_else(|| new_run(now, c, date));
+    let mut row = run.unwrap_or_else(|| new_run(now, c.run_key(date), c.content_type(), date));
     row.status = "skipped".into();
     row.updated_at = iso(now);
     let why = row
@@ -360,10 +360,11 @@ async fn skip<C: Content>(
     Ok(TickOutcome::Skipped)
 }
 
-fn new_run<C: Content>(now: DateTime<Utc>, c: &C, date: NaiveDate) -> RunRow {
+/// A `pending` run with no attempts yet.
+fn new_run(now: DateTime<Utc>, run_key: String, content_type: &str, date: NaiveDate) -> RunRow {
     RunRow {
-        run_key: c.run_key(date),
-        content_type: c.content_type().into(),
+        run_key,
+        content_type: content_type.into(),
         trading_date: date.format("%Y-%m-%d").to_string(),
         status: "pending".into(),
         attempts: 0,
@@ -382,7 +383,7 @@ async fn build<C: Content>(
     run: Option<RunRow>,
 ) -> Result<TickOutcome, String> {
     let ts = iso(now);
-    let mut row = run.unwrap_or_else(|| new_run(now, c, date));
+    let mut row = run.unwrap_or_else(|| new_run(now, c.run_key(date), c.content_type(), date));
     row.status = "building".into();
     row.attempts += 1;
     row.updated_at = ts;
@@ -619,26 +620,27 @@ async fn retry_zh<C: Content>(
     let facts: C::Facts = serde_json::from_str(&json).map_err(|e| format!("facts json: {e}"))?;
     let ts = iso(now);
     let lines = c.cover_lines(&facts).zh;
-    let draft = c.write(&facts, Lang::Zh).await;
-    // The premarket update may have rewritten the post, ZH included, while
-    // this draft ran from the older facts: then write nothing.
-    let current = store.get_post_by_run(&run.run_key).await?;
-    if current.is_none_or(|p| p.revised_at != post.revised_at) {
-        return Ok(TickOutcome::Nothing);
-    }
-    match draft {
+    // The premarket update may rewrite the post, ZH included, while this
+    // draft runs from the older facts: each write below lands only at the
+    // revision read above, and otherwise writes nothing.
+    let revision = post.revised_at.as_deref();
+    match c.write(&facts, Lang::Zh).await {
         Ok((d, body)) => {
-            store
-                .upsert_translation(&translation_zh(
-                    post_id,
-                    "published",
-                    d.title,
-                    d.summary,
-                    body,
-                    Some(lines),
-                    &ts,
-                ))
-                .await?;
+            let published = translation_zh(
+                post_id,
+                "published",
+                d.title,
+                d.summary,
+                body,
+                Some(lines),
+                &ts,
+            );
+            if !store
+                .upsert_translation_at_revision(&published, revision)
+                .await?
+            {
+                return Ok(TickOutcome::Nothing);
+            }
             Ok(TickOutcome::Published)
         }
         Err(e) => {
@@ -653,7 +655,12 @@ async fn retry_zh<C: Content>(
                     Some(lines),
                     &ts,
                 );
-                store.upsert_translation(&failed).await?;
+                if !store
+                    .upsert_translation_at_revision(&failed, revision)
+                    .await?
+                {
+                    return Ok(TickOutcome::Nothing);
+                }
                 store
                     .add_alert(
                         &run.run_key,
@@ -1377,6 +1384,9 @@ mod tests {
         /// `(call number, status)`: on that `get_run` call, first set the
         /// stored run to `status`, as a concurrent tick finishing would.
         race_on_get_run: Cell<Option<(usize, &'static str)>>,
+        /// Sets post 1's `revised_at` right before a revision-checked
+        /// translation write, as the premarket update landing then would.
+        revise_before_zh_write: Cell<Option<&'static str>>,
     }
     #[async_trait(?Send)]
     impl Store for FailStore {
@@ -1428,6 +1438,29 @@ mod tests {
                 return Err("d1: zh row failed".into());
             }
             self.inner.upsert_translation(t).await
+        }
+        async fn upsert_translation_at_revision(
+            &self,
+            t: &TranslationRow,
+            revised_at: Option<&str>,
+        ) -> Result<bool, String> {
+            if let Some(at) = self.revise_before_zh_write.take() {
+                if let Some(p) = self
+                    .inner
+                    .posts
+                    .borrow_mut()
+                    .iter_mut()
+                    .find(|p| p.id == Some(1))
+                {
+                    p.revised_at = Some(at.into());
+                }
+            }
+            if t.lang == "zh" && self.fail_zh_row.replace(false) {
+                return Err("d1: zh row failed".into());
+            }
+            self.inner
+                .upsert_translation_at_revision(t, revised_at)
+                .await
         }
         async fn add_sources(&self, post_id: i64, s: &[NewsReason]) -> Result<(), String> {
             self.inner.add_sources(post_id, s).await
@@ -1538,6 +1571,37 @@ mod tests {
         RunRow {
             status: "published".into(),
             ..building_run("2026-10-29T12:30:00Z")
+        }
+    }
+
+    #[tokio::test]
+    async fn zh_retry_writes_nothing_once_the_post_was_revised() {
+        // The update lands between the ZH draft and its write: neither the
+        // published nor the 18:00 failed row overwrites it, and no alert.
+        for (zh_ok, at) in [
+            (true, "2026-10-29T12:35:00Z"),
+            (false, "2026-10-29T22:05:00Z"),
+        ] {
+            let s = FailStore::default();
+            let (m, l) = (md(true), llm(true, false));
+            let out = tick(utc("2026-10-29T12:30:00Z"), &s, &m, &FakeNs, &l).await;
+            assert_eq!(out, TickOutcome::PublishedEnOnly);
+            let before = s.inner.translations.borrow()[&(1, "zh".to_string())].clone();
+            l.zh_ok.set(zh_ok);
+            s.revise_before_zh_write.set(Some("2026-10-29T12:40:00Z"));
+            let calls = l.calls.get();
+            assert_eq!(
+                tick(utc(at), &s, &m, &FakeNs, &l).await,
+                TickOutcome::Nothing,
+                "{at}"
+            );
+            assert!(l.calls.get() > calls, "{at}: the draft ran");
+            assert_eq!(
+                s.inner.translations.borrow()[&(1, "zh".to_string())],
+                before,
+                "{at}"
+            );
+            assert!(s.inner.alerts.borrow().is_empty(), "{at}");
         }
     }
 

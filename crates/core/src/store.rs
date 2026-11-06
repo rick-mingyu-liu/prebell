@@ -91,6 +91,14 @@ pub trait Store {
     ) -> Result<Option<TranslationRow>, String>;
     /// Insert or replace by `(post_id, lang)`.
     async fn upsert_translation(&self, t: &TranslationRow) -> Result<(), String>;
+    /// `upsert_translation`, but only while the post `t.post_id` exists with
+    /// this `revised_at`, checked in the same statement; returns whether it
+    /// wrote. A rewrite landing first is never overwritten.
+    async fn upsert_translation_at_revision(
+        &self,
+        t: &TranslationRow,
+        revised_at: Option<&str>,
+    ) -> Result<bool, String>;
     /// Replaces the post's sources with `s` (idempotent per post).
     async fn add_sources(&self, post_id: i64, s: &[NewsReason]) -> Result<(), String>;
     async fn add_alert(&self, run_key: &str, level: &str, msg: &str) -> Result<(), String>;
@@ -227,6 +235,21 @@ impl Store for MemStore {
             .borrow_mut()
             .insert((t.post_id, t.lang.clone()), t.clone());
         Ok(())
+    }
+    async fn upsert_translation_at_revision(
+        &self,
+        t: &TranslationRow,
+        revised_at: Option<&str>,
+    ) -> Result<bool, String> {
+        let current = self
+            .posts
+            .borrow()
+            .iter()
+            .any(|p| p.id == Some(t.post_id) && p.revised_at.as_deref() == revised_at);
+        if current {
+            self.upsert_translation(t).await?;
+        }
+        Ok(current)
     }
     async fn add_sources(&self, post_id: i64, s: &[NewsReason]) -> Result<(), String> {
         self.sources.borrow_mut().insert(post_id, s.to_vec());
@@ -402,6 +425,28 @@ mod tests {
             s.posts.borrow()[0].revised_at.as_deref(),
             Some("2026-11-04T12:35:00Z")
         );
+
+        // A translation write at the old revision is refused; at the current one it lands.
+        assert!(!s
+            .upsert_translation_at_revision(&tr(id, "zh", "stale"), None)
+            .await
+            .unwrap());
+        assert_eq!(
+            s.get_translation(id, "zh").await.unwrap().unwrap().title,
+            "新"
+        );
+        assert!(s
+            .upsert_translation_at_revision(&tr(id, "zh", "now"), Some("2026-11-04T12:35:00Z"))
+            .await
+            .unwrap());
+        assert_eq!(
+            s.get_translation(id, "zh").await.unwrap().unwrap().title,
+            "now"
+        );
+        assert!(!s
+            .upsert_translation_at_revision(&tr(99, "zh", "no post"), None)
+            .await
+            .unwrap());
 
         // A failed rewrite writes nothing.
         s.fail_revise_post.set(true);
