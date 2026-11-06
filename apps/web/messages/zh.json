@@ -186,7 +186,7 @@
     "earnings": "财报速评"
   },
   "earnings": {
-    "calendarTitle": "财报日历",
+    "calendarTitle": "市场日历",
     "weekOf": "{date}当周",
     "timesEt": "时间均为美东时间",
     "legend": "已确认：公司已公布日期。未确认：日期来自第三方汇总，可能变动。已发布：业绩已向美国证监会提交。规模最大的公司有财报速评；其余公司在日历中链接至其 SEC 申报文件。",
@@ -211,6 +211,16 @@
     "charts": "图表（GAAP）",
     "chartsNote": "图表为美国证监会文件中的 GAAP 数据；标为 8-K 的最后一栏为本次公布数据。空缺表示公司未单独公布该季度数据。",
     "checkedFiling": "✓ 每个数字均出自申报文件"
+  },
+  "events": {
+    "group": "经济与美联储",
+    "major": "重要",
+    "released": "已发布",
+    "release": "发布原文",
+    "schedule": "官方日程",
+    "postponed": "已推迟",
+    "movedFrom": "由{date}改期",
+    "legend": "经济与美联储：美国劳工统计局和美联储公布的官方日期，链接至官方日程，发布后链接至发布原文。"
   },
   "index": {
     "es": "标普500期货",

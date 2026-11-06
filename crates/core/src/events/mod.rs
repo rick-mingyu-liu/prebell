@@ -462,4 +462,17 @@ mod tests {
         assert!(!release_due(utc("2026-11-10T13:29:00Z"), 120));
         assert!(!release_due(utc("2026-11-10T16:00:00Z"), 120));
     }
+
+    #[test]
+    fn the_web_glossary_matches() {
+        const WEB: &str = include_str!("../../../../apps/web/src/lib/events.ts");
+        for (key, en, zh) in GLOSSARY {
+            for s in [key, en, zh] {
+                assert!(WEB.contains(&format!("\"{s}\"")), "events.ts lacks \"{s}\"");
+            }
+        }
+        for s in [SEP_SUFFIX.0, SEP_SUFFIX.1, FOMC_NOTE.0, FOMC_NOTE.1] {
+            assert!(WEB.contains(&format!("\"{s}\"")), "events.ts lacks \"{s}\"");
+        }
+    }
 }
