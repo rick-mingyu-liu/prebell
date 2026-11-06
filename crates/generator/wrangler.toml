@@ -36,9 +36,9 @@ queue = "prebell-jobs"
 # budget with another job.
 max_batch_size = 1
 
-# Earnings jobs on their own queue: one consumer and one message per batch,
-# so EDGAR is never hit in parallel (fair access, one build per filing) and
-# a build never delays the premarket job.
+# Earnings polls and the calendar refresh on their own queue: one consumer and
+# one message per batch, so a poll is never run twice at once and an earnings
+# step never delays the premarket job.
 [[queues.producers]]
 binding = "EARNINGS"
 queue = "prebell-earnings"
@@ -49,6 +49,20 @@ max_batch_size = 1
 max_concurrency = 1
 # Redeliver a failed message once, not the default 3 times: a poll killed for
 # CPU would only fail again, and the next firing polls anyway.
+max_retries = 1
+
+# Earnings builds on a third queue, one at a time, so a morning burst of
+# builds (1-5 min each) never holds up the polls behind it. A build's EDGAR
+# client pauses 250 ms between requests (the poll's 125 ms), so the two
+# together stay under SEC's 10 requests/second.
+[[queues.producers]]
+binding = "EARNINGS_BUILD"
+queue = "prebell-earnings-build"
+
+[[queues.consumers]]
+queue = "prebell-earnings-build"
+max_batch_size = 1
+max_concurrency = 1
 max_retries = 1
 
 [vars]

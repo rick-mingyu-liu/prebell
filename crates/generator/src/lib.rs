@@ -9,16 +9,14 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use prebell_core::earnings::calendar::{refresh_tick, yahoo_seeding, CalendarSource};
 use prebell_core::earnings::run::{build_tick, poll_job};
-use prebell_core::edgar::Edgar;
+use prebell_core::edgar::{Edgar, BUILD_GAP_MS};
 use prebell_core::jobs::{redact, run_job, JobRunner};
 use prebell_core::llm::{api_key_var, llm_from_env, unknown_provider};
 use prebell_core::providers::CountingHttp;
 use prebell_core::providers::LlmProvider;
 use prebell_core::recap;
 use prebell_core::run::{tick_with_hooks, Hooks, TickOutcome};
-use prebell_core::schedule::{
-    jobs_for_cron, queue_for, ContentJob, EarningsStep, EARNINGS_QUEUE, JOBS,
-};
+use prebell_core::schedule::{jobs_for_cron, queue_for, ContentJob, EarningsStep, JOBS};
 use prebell_core::tavily::Tavily;
 use prebell_core::yahoo::Yahoo;
 use prebell_core::yahoo_calendar::YahooCalendar;
@@ -92,9 +90,8 @@ async fn scheduled(event: ScheduledEvent, env: Env, _ctx: ScheduleContext) {
     });
     let at = now(&env).to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
     for job in jobs {
-        // Earnings go to their own queue (one consumer, one message at a
-        // time) so EDGAR is never hit in parallel and a build never delays
-        // the premarket brief.
+        // Earnings go to their own queues (one consumer, one message at a
+        // time each) so a build never delays the premarket brief.
         let binding = queue_for(job);
         let queue = match env.queue(binding) {
             Ok(q) => q,
@@ -211,9 +208,9 @@ impl JobRunner for Runner<'_> {
                 for e in &o.errors {
                     console_warn!("earnings poll: {e}");
                 }
-                let queue = env.queue(EARNINGS_QUEUE).map_err(|e| e.to_string());
                 for next in &o.follow_ups {
-                    let sent = match &queue {
+                    // Builds go to their own queue, the calendar to this one.
+                    let sent = match env.queue(queue_for(next.job())) {
                         Ok(q) => q
                             .send(Job {
                                 job: next.job().into(),
@@ -221,7 +218,7 @@ impl JobRunner for Runner<'_> {
                             })
                             .await
                             .map_err(|e| e.to_string()),
-                        Err(e) => Err(e.clone()),
+                        Err(e) => Err(e.to_string()),
                     };
                     if let Err(e) = sent {
                         console_error!("earnings: queue send for {} failed: {e}", next.job());
@@ -238,6 +235,8 @@ impl JobRunner for Runner<'_> {
             EarningsStep::Build => {
                 let llm = self.llm(&[])?;
                 let log = |m: &str| console_log!("{m}");
+                // Beside a poll on the other queue: slower, to stay under 10/s.
+                let edgar = edgar.paced(BUILD_GAP_MS);
                 let o = build_tick(t, store, store, &edgar, llm.as_ref(), &log).await?;
                 Ok(format!("{o:?}"))
             }

@@ -5,9 +5,13 @@
 /// Every job a cron queues.
 pub const JOBS: &[&str] = &["premarket", "recap", "earnings"];
 
-/// Queue binding for the earnings jobs: one consumer, one message at a time,
-/// so EDGAR is never hit in parallel and a build never delays a brief.
+/// Queue binding for the earnings polls and calendar refresh: one consumer,
+/// one message at a time, so a poll never runs twice at once and an
+/// earnings step never delays a brief.
 pub const EARNINGS_QUEUE: &str = "EARNINGS";
+/// Queue binding for earnings builds, one at a time beside the polls, so a
+/// burst of builds never delays detection.
+pub const EARNINGS_BUILD_QUEUE: &str = "EARNINGS_BUILD";
 /// Queue binding for every other job.
 pub const JOBS_QUEUE: &str = "JOBS";
 
@@ -66,6 +70,7 @@ impl JobKind {
 /// The queue binding a job is sent to.
 pub fn queue_for(job: &str) -> &'static str {
     match JobKind::parse(job) {
+        Some(JobKind::Earnings(EarningsStep::Build)) => EARNINGS_BUILD_QUEUE,
         Some(JobKind::Earnings(_)) => EARNINGS_QUEUE,
         _ => JOBS_QUEUE,
     }
@@ -226,18 +231,23 @@ mod tests {
     }
 
     #[test]
-    fn earnings_consumer_is_serial_and_retries_once() {
-        let c = consumer("prebell-earnings");
-        let setting = |k: &str| {
-            c.lines()
-                .find(|l| l.trim_start().starts_with(k))
-                .and_then(|l| l.split('=').nth(1))
-                .map(|v| v.trim().to_string())
-        };
-        assert_eq!(setting("max_batch_size").as_deref(), Some("1"), "{c}");
-        assert_eq!(setting("max_concurrency").as_deref(), Some("1"), "{c}");
-        // A poll killed for CPU is redelivered once, not 3 times.
-        assert_eq!(setting("max_retries").as_deref(), Some("1"), "{c}");
+    fn earnings_consumers_are_serial_and_retry_once() {
+        for queue in ["prebell-earnings", "prebell-earnings-build"] {
+            let c = consumer(queue);
+            let setting = |k: &str| {
+                c.lines()
+                    .find(|l| l.trim_start().starts_with(k))
+                    .and_then(|l| l.split('=').nth(1))
+                    .map(|v| v.trim().to_string())
+            };
+            assert_eq!(setting("max_batch_size").as_deref(), Some("1"), "{c}");
+            assert_eq!(setting("max_concurrency").as_deref(), Some("1"), "{c}");
+            // A poll killed for CPU is redelivered once, not 3 times.
+            assert_eq!(setting("max_retries").as_deref(), Some("1"), "{c}");
+        }
+        assert!(WRANGLER.contains(&format!(
+            "binding = \"{EARNINGS_BUILD_QUEUE}\"\nqueue = \"prebell-earnings-build\""
+        )));
     }
 
     #[test]
@@ -273,7 +283,11 @@ mod tests {
             EarningsStep::Calendar,
         ] {
             assert_eq!(JobKind::parse(step.job()), Some(JobKind::Earnings(step)));
-            assert_eq!(queue_for(step.job()), EARNINGS_QUEUE);
+            let queue = match step {
+                EarningsStep::Build => EARNINGS_BUILD_QUEUE,
+                _ => EARNINGS_QUEUE,
+            };
+            assert_eq!(queue_for(step.job()), queue);
         }
         for j in ["premarket", "recap", "nope"] {
             assert_eq!(queue_for(j), JOBS_QUEUE, "{j}");
