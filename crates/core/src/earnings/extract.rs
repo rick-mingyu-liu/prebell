@@ -148,21 +148,14 @@ const PARTS: &[&str] = &[
 /// for a per-share figure: "Earnings per share of common stock") a "share
 /// of" something; a table title may, as a statement covers those rows too.
 /// "Subsidiaries" is a part too, but for the company's own "Acme Corp and
-/// Subsidiaries".
+/// (its) (consolidated | wholly-owned) Subsidiaries" (`own_group`).
 fn part_named(m: Metric, s: &str, row: bool) -> Option<&'static str> {
     static SUBSIDIARIES: OnceLock<Regex> = OnceLock::new();
-    static OWN: OnceLock<Regex> = OnceLock::new();
     let subsidiaries = SUBSIDIARIES
         .get_or_init(|| Regex::new(r"(?i)\bsubsidiar(?:y|ies)\b").expect("valid built-in regex"));
-    let own = OWN.get_or_init(|| {
-        Regex::new(r"(?i)(?:\band(?:\s+its)?|\bits|&)\s*$").expect("valid built-in regex")
-    });
     // "non\u{2011}controlling": a filer's non-breaking hyphen.
-    let s = &s.replace(['\u{2010}', '\u{2011}'], "-");
-    if subsidiaries
-        .find_iter(s)
-        .any(|f| !own.is_match(&s[..f.start()]))
-    {
+    let s = &own_group(s).replace(['\u{2010}', '\u{2011}'], "-");
+    if subsidiaries.is_match(s) {
         return Some("subsidiaries");
     }
     let per_share = matches!(m, Metric::EpsGaap | Metric::EpsNonGaap);
@@ -178,6 +171,17 @@ fn part_named(m: Metric, s: &str, row: bool) -> Option<&'static str> {
         .copied()
 }
 
+/// `s` without the company's own group ("and its consolidated
+/// subsidiaries"), which names the whole company, not a part.
+fn own_group(s: &str) -> std::borrow::Cow<'_, str> {
+    static OWN: OnceLock<Regex> = OnceLock::new();
+    OWN.get_or_init(|| {
+        Regex::new(r"(?i)(?:\band\b|\bits\b|&)\s+(?:(?:its|our|the|consolidated|wholly[- ]owned|majority[- ]owned)\s+)*subsidiar(?:y|ies)\b")
+            .expect("valid built-in regex")
+    })
+    .replace_all(s, " ")
+}
+
 /// A line longer than this is prose, not a table's label.
 const PROSE_CHARS: usize = 200;
 
@@ -190,15 +194,26 @@ fn label_only(s: &str) -> bool {
         Regex::new(r"(?i)\b(?:19|20)\d\d\b|'\d\d\b|\b(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?\s+\d{1,2}\b|\(\w{1,2}\)|\w*[a-z]\d+\w*|\b\d+[a-z]\w*")
             .expect("valid built-in regex")
     });
-    // A row of dashes or small negatives ("— —", "(5) (3)") is a row of
-    // figures; a single trailing "(1)" is a footnote marker.
+    // A row of dashes or small negatives ("— —", "$ — $ —", "(5) (3)",
+    // "(2) (1)") is a row of figures. Footnote markers are not: a single
+    // "(1)", or "(1) (2)" counting up from one; nor is one dash after a
+    // title ("Segment Results –").
     static CELLS: OnceLock<Regex> = OnceLock::new();
     let cells = CELLS.get_or_init(|| {
         Regex::new(r"(?:\s+(?:\$\s*)?(?:[—–]|\(\d{1,2}\)))+\s*$").expect("valid built-in regex")
     });
     let figures = cells.find(s).is_some_and(|c| {
         let c = c.as_str();
-        c.contains(['—', '–']) || c.matches('(').count() >= 2
+        let dashes = c.matches(['—', '–']).count();
+        let parens: Vec<u32> = c
+            .split(|ch: char| !ch.is_ascii_digit())
+            .filter_map(|n| n.parse().ok())
+            .collect();
+        let markers = parens.iter().zip(1..).all(|(&n, i)| n == i);
+        dashes >= 2
+            || c.contains('$')
+            || dashes == 1 && !parens.is_empty()
+            || parens.len() >= 2 && !markers
     });
     s.len() <= PROSE_CHARS
         && s.chars().any(char::is_alphabetic)
@@ -206,20 +221,29 @@ fn label_only(s: &str) -> bool {
         && !r.replace_all(s, "").contains(|c: char| c.is_ascii_digit())
 }
 
-/// A footnote ("(1) Includes ...", "* At our share", "Note: ...") or a
-/// sentence ("Segment results are discussed above."): the end of the table
-/// before, never a table's title.
-fn note_line(s: &str) -> bool {
+/// A footnote: a marker ("(1)", "*", "†", "‡", "Note") followed by a
+/// sentence ("(1) Includes unconsolidated joint ventures.", "Note: excludes
+/// noncontrolling interests."): the end of the table before. A marker
+/// before a few words with no period ("Note: Segment Information", "(a)
+/// Joint Venture Statements of Operations") is a title.
+fn footnote(s: &str) -> bool {
     static NOTE: OnceLock<Regex> = OnceLock::new();
-    static ABBREVIATION: OnceLock<Regex> = OnceLock::new();
     let note = NOTE.get_or_init(|| {
         Regex::new(r"(?i)^\s*(?:\(\w{1,2}\)|[*†‡]|notes?\b)").expect("valid built-in regex")
     });
+    note.find(s)
+        .is_some_and(|m| sentence(s) || s[m.end()..].split_whitespace().count() >= 6)
+}
+
+/// A line ending in a period ("Provides pharmacy benefit services.",
+/// "(Unaudited)."), not an abbreviation ("Simon Property Group, Inc.").
+fn sentence(s: &str) -> bool {
+    static ABBREVIATION: OnceLock<Regex> = OnceLock::new();
     let abbreviation = ABBREVIATION.get_or_init(|| {
         Regex::new(r"(?i)\b(?:inc|corp|co|ltd|llc|plc|l\.p|n\.a)\.$").expect("valid built-in regex")
     });
     let s = s.trim();
-    note.is_match(s) || s.ends_with('.') && !abbreviation.is_match(s)
+    s.ends_with('.') && !abbreviation.is_match(s)
 }
 
 /// The words of a prose quote's label that qualify its metric: the last
@@ -294,11 +318,10 @@ fn names_metric(m: Metric, label: &str, after: &str) -> Result<(), String> {
             .expect("valid built-in regex")
     });
     let prose = word.is_match(after) || verb.is_match(label);
-    let qualifier = if prose {
-        metric_phrase(m, label)
-    } else {
-        label
-    };
+    // "Acme and its consolidated subsidiaries reported revenue ...": the
+    // company's own group is no qualifier.
+    let own = own_group(label);
+    let qualifier = if prose { metric_phrase(m, &own) } else { &own };
     if let Some(w) = part_named(m, qualifier, true) {
         return Err(format!(
             "the quote's label names {w:?}, a part of the company"
@@ -752,14 +775,14 @@ impl<'a> Table<'a> {
                 }
                 head = head_above(head);
             }
-            // Up to a row of figures or a note under the table before; a
-            // description in between is skipped.
+            // Up to a row of figures or a footnote under the table before;
+            // a description or other sentence in between is skipped.
             let title = (0..head)
                 .rev()
                 .take(6)
                 .map(line)
-                .filter(|s| s.len() <= PROSE_CHARS)
-                .take_while(|s| label_only(s) && !note_line(s))
+                .filter(|s| s.len() <= PROSE_CHARS && !sentence(s))
+                .take_while(|s| label_only(s) && !footnote(s))
                 .chain(Some(line(head)).filter(|s| label_only(s)))
                 .find_map(|s| part_named(m, s, false));
             let columns = (head + 1..at)
@@ -1969,6 +1992,69 @@ mod tests {
             (Metric::Revenue, "$1.4 billion", "Our share of revenue was $1.4 billion for the quarter."),
         ] {
             bad(t, m, amount, "units", t);
+        }
+    }
+
+    #[test]
+    fn titles_read_past_sentences_but_not_footnotes() {
+        let periods = "Three Months Ended September 30,\n2026 2025";
+        let q = "Total revenues $1,000 $900";
+        let verify = |top: &str| {
+            let t = format!("(In millions)\n{top}\n{periods}\n{q}");
+            verify_figure(&t, Metric::Revenue, &raw("$1,000", "millions", false, q))
+        };
+        // The company's own statements: "... and (its) (consolidated |
+        // wholly-owned) subsidiaries".
+        for title in [
+            "ACME CORPORATION AND CONSOLIDATED SUBSIDIARIES",
+            "ACME CORPORATION AND ITS CONSOLIDATED SUBSIDIARIES",
+            "ACME CORPORATION AND WHOLLY-OWNED SUBSIDIARIES",
+            "Acme Corporation and its wholly owned subsidiaries",
+            "ACME CORPORATION & CONSOLIDATED SUBSIDIARIES",
+        ] {
+            let r = verify(&format!(
+                "{title}\nCONDENSED CONSOLIDATED STATEMENTS OF INCOME"
+            ));
+            assert!(r.is_ok(), "{title}: {r:?}");
+        }
+        let t = format!("(In millions)\n{periods}\nNet income attributable to Acme Corporation and its consolidated subsidiaries $590 $492");
+        let q2 = "Net income attributable to Acme Corporation and its consolidated subsidiaries $590 $492";
+        assert!(verify_figure(&t, Metric::NetIncome, &raw("$590", "millions", false, q2)).is_ok());
+        let t = "Net income of Acme and its consolidated subsidiaries was $590 million.";
+        assert!(verify_figure(
+            t,
+            Metric::NetIncome,
+            &raw("$590 million", "units", false, t)
+        )
+        .is_ok());
+        let t =
+            "Acme Corporation and its consolidated subsidiaries reported revenue of $5.0 billion.";
+        let r = verify_figure(t, Metric::Revenue, &raw("$5.0 billion", "units", false, t));
+        assert!(r.is_ok(), "{r:?}");
+        // A short sentence under a title is skipped, not the title's end;
+        // a title may start with "Note", "*" or "(a)", and end in footnote
+        // markers or a dash.
+        for top in [
+            "Health Services segment\nProvides pharmacy benefit services.",
+            "Segment Information\n(Unaudited).",
+            "Note: Segment Information",
+            "* Segment Results",
+            "(a) Joint Venture Statements of Operations",
+            "Segment Results (1) (2)",
+            "Segment Results –",
+        ] {
+            let r = verify(top);
+            assert!(r.unwrap_err().contains("part of the company"), "{top}");
+        }
+        // A footnote that reads as one still ends the table before.
+        for note in [
+            "(1) Includes unconsolidated joint ventures.",
+            "Note: excludes noncontrolling interests.",
+            "* Joint venture revenue at our share.",
+            "(a) Amounts for our segments exclude intersegment eliminations and corporate items",
+        ] {
+            let r = verify(&format!("Segment Information\nCloud 1,000 900\n{note}\nCONDENSED CONSOLIDATED STATEMENTS OF INCOME"));
+            assert!(r.is_ok(), "{note}: {r:?}");
         }
     }
 
