@@ -240,17 +240,28 @@ pub async fn poll_job(
         return Ok(out);
     }
     // Foreign filers report on 6-Ks; skipped while SEC refuses requests.
+    // An error here (a D1 failure included) is logged, and the builds,
+    // calendar refresh and events check below are still queued.
     if !out.throttled {
-        let f = foreign_tick(now, es, filings).await?;
-        if f.throttled {
-            let msg = format!(
-                "SEC EDGAR refused requests (403/429) on the 6-K feed: {}",
-                f.errors.last().cloned().unwrap_or_default()
-            );
-            alert_once_today(now, "sec-throttled", "error", &msg, store).await?;
+        match foreign_tick(now, es, filings).await {
+            Ok(f) => {
+                if f.throttled {
+                    let msg = format!(
+                        "SEC EDGAR refused requests (403/429) on the 6-K feed: {}",
+                        f.errors.last().cloned().unwrap_or_default()
+                    );
+                    alert_once_today(now, "sec-throttled", "error", &msg, store).await?;
+                }
+                for (ticker, msg) in &f.mismatches {
+                    out.errors.push(msg.clone());
+                    alert_once_today(now, &format!("watchlist-cik:{ticker}"), "warn", msg, store)
+                        .await?;
+                }
+                out.errors.extend(f.errors.iter().cloned());
+                out.foreign = f;
+            }
+            Err(e) => out.errors.push(format!("6-K: {e}")),
         }
-        out.errors.extend(f.errors.iter().cloned());
-        out.foreign = f;
     }
     let builds = match out.detected.len() {
         0 => retry_builds(&es.open_runs().await?, now),
@@ -977,6 +988,8 @@ mod tests {
         no_trend: Cell<bool>,
         /// The exhibit's text, when not the AAPL fixture's.
         exhibit_text: RefCell<Option<String>>,
+        /// The current 6-K feed's first page.
+        six_k: RefCell<Vec<FeedEntry>>,
     }
     #[async_trait(?Send)]
     impl Filings for FakeFilings {
@@ -988,6 +1001,13 @@ mod tests {
                 None => feed(&[]),
             };
             parse_current_feed(&body)
+        }
+        async fn current_6k_filings(&self, start: usize) -> Result<Vec<FeedEntry>, ProviderError> {
+            Ok(if start == 0 {
+                self.six_k.borrow().clone()
+            } else {
+                vec![]
+            })
         }
         async fn filing_docs(&self, _: u64, _: &str) -> Result<Vec<FilingDoc>, ProviderError> {
             if self.no_exhibit.get() {
@@ -1591,6 +1611,57 @@ mod tests {
         // While a build holds its lease, nothing is sent.
         let o = open(vec![run("building", 1, 3), run("pending", 0, 0)]);
         assert_eq!(retry_builds(&o, t), 0);
+    }
+
+    #[tokio::test]
+    async fn a_failing_6k_part_never_holds_up_the_poll() {
+        let (base, es) = stores();
+        let fl = FakeFilings::default();
+        *es.fail_kv.borrow_mut() = Some(crate::earnings::foreign::KV_6K_WATERMARK.into());
+        let t = poll_time();
+        let o = poll_job(t, Some(t), &es, base.as_ref(), &fl).await.unwrap();
+        assert!(
+            o.errors.iter().any(|e| e.starts_with("6-K: ")),
+            "{:?}",
+            o.errors
+        );
+        // The new filing's build and the day's calendar refresh still go.
+        assert_eq!(o.detected, [KEY]);
+        assert!(o.follow_ups.contains(&EarningsStep::Build));
+        assert!(o.follow_ups.contains(&EarningsStep::Calendar));
+    }
+
+    #[tokio::test]
+    async fn a_foreign_filer_under_another_name_alerts_once_a_day() {
+        let (base, es) = stores();
+        let fl = FakeFilings::default();
+        let tm = find("TM").unwrap();
+        let t = poll_time();
+        let acc = "0001094517-26-000077".to_string();
+        let mut entry = parse_current_feed(&feed(&[(tm.cik, acc, t - Duration::minutes(5), "")]))
+            .unwrap()
+            .remove(0);
+        entry.form = "6-K".into();
+        entry.company = "TOYOTA INDUSTRIES CORP".into();
+        fl.six_k.borrow_mut().push(entry);
+        poll_job(t, Some(t), &es, base.as_ref(), &fl).await.unwrap();
+        poll_job(
+            t + Duration::minutes(5),
+            Some(t + Duration::minutes(5)),
+            &es,
+            base.as_ref(),
+            &fl,
+        )
+        .await
+        .unwrap();
+        let alerts: Vec<_> = base
+            .alerts
+            .borrow()
+            .iter()
+            .filter(|a| a.0.starts_with("watchlist-cik:TM"))
+            .cloned()
+            .collect();
+        assert_eq!(alerts.len(), 1, "{alerts:?}");
     }
 
     #[tokio::test]

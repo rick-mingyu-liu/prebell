@@ -2,20 +2,21 @@
 //! Novo Nordisk, ...). A 6-K has no Item 2.02, so EDGAR's current 6-K feed is
 //! read like the 8-K feed and each 6-K that a watched foreign company files
 //! near its calendar date is read: when its press release (or financial
-//! summary) states results for the quarter just ended, the calendar date is
-//! marked `reported` with the 6-K as its proof. Anything else, or any doubt,
-//! leaves the date as it was: a missing tick is better than a wrong one.
+//! summary) states results for a period just ended, with figures, and is not
+//! a notice of a coming release, the release date is marked `reported` with
+//! the 6-K as its proof. Anything else, or any doubt, leaves the date as it
+//! was: a missing tick is better than a wrong one.
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::OnceLock;
 
-use chrono::{DateTime, Datelike, Duration, NaiveDate, Utc};
+use chrono::{DateTime, Duration, NaiveDate, Utc};
 use regex::Regex;
 
 use crate::anchor::{has_word, normalize};
 use crate::clock::et;
 use crate::earnings::calendar::{apply_to, report_changes, SAME_EVENT_DAYS};
-use crate::earnings::detect::same_filer;
+use crate::earnings::detect::{name_mismatches, same_filer};
 use crate::earnings::store::{CalendarRow, EarningsStore};
 use crate::earnings::{watchlist, Filer, WatchEntry};
 use crate::edgar::{exhibit_991, filing_url, FeedEntry, FilingDoc, Filings, FEED_PAGE};
@@ -30,17 +31,18 @@ pub const KV_6K_CHECKED: &str = "edgar_6k_checked";
 pub const CHECKED_KEEP: usize = 300;
 /// 6-Ks read per poll at most (2 fetches each); the rest wait for the next
 /// firing, still on the feed's first page (100 6-Ks span about 20 hours).
-pub const MAX_CANDIDATES: usize = 3;
+pub const MAX_CANDIDATES: usize = 2;
 /// Bytes of a document read: the release's opening, or a financial
 /// summary's cover (Novo Nordisk's statement is 17 KB in). About 0.45 ms of
-/// CPU per document natively (`timing` below), so three stay well inside
-/// the Free plan's 10 ms.
+/// CPU per document natively (`timing` below), so two stay well inside the
+/// Free plan's 10 ms.
 pub const HEAD_BYTES: usize = 32 * 1024;
 /// A 6-K accepted from this many days before the calendar date (an Asian
-/// morning release is the previous US evening) ...
-pub const DAYS_BEFORE: i64 = 1;
-/// ... to this many after it (a 6-K filed the next day) is a candidate.
-pub const DAYS_AFTER: i64 = 2;
+/// morning release is the previous US evening; Yahoo's date may be late) ...
+pub const DAYS_BEFORE: i64 = 2;
+/// ... to this many after it (SAP filed its Oct 21 release on Oct 26; a
+/// stale date) is a candidate. Notices are rejected by `classify`.
+pub const DAYS_AFTER: i64 = 7;
 /// Feed pages one poll reads at most, as for the 8-K feed.
 pub const MAX_PAGES: usize = 3;
 
@@ -68,41 +70,64 @@ const MONTHS: [&str; 12] = [
     "December",
 ];
 
-/// The last calendar-quarter end before `day`: the period a release made
-/// on `day` reports (Toyota's and Alibaba's fiscal quarters end on calendar
-/// quarter ends too).
-pub fn quarter_end_before(day: NaiveDate) -> NaiveDate {
-    let (y, m) = (day.year(), day.month());
-    let end = |y: i32, m: u32, d: u32| NaiveDate::from_ymd_opt(y, m, d).expect("quarter end");
-    match m {
-        1..=3 => end(y - 1, 12, 31),
-        4..=6 => end(y, 3, 31),
-        7..=9 => end(y, 6, 30),
-        _ => end(y, 9, 30),
-    }
-}
+/// A period that ended at most this many days before the 6-K is the one it
+/// reports (fiscal quarters ending Aug 31, 13-week quarters, late filers);
+/// a prior-year comparison is always older.
+pub const PERIOD_DAYS: i64 = 100;
+/// The reported figures must start within this many characters after the
+/// results statement (a notice of a coming release has none; Barclays'
+/// first figures are 9,000 characters in).
+const FIGURE_WINDOW: usize = 12_000;
 
 /// The date in a period-end match: "September 30, 2026", "Sept. 30, 2026"
 /// or "30 September 2026".
 fn period_date(month: &str, day: &str, year: &str) -> Option<NaiveDate> {
-    let m = month.trim_end_matches('.').to_ascii_lowercase();
-    let m = MONTHS.iter().position(|full| {
-        let full = full.to_ascii_lowercase();
-        m == full || (m.len() >= 3 && full.starts_with(&m))
-    })? as u32;
-    NaiveDate::from_ymd_opt(year.parse().ok()?, m + 1, day.parse().ok()?)
+    NaiveDate::from_ymd_opt(year.parse().ok()?, month_number(month)?, day.parse().ok()?)
 }
 
-/// Lowercase phrases that, before the results statement, mark a filing that
-/// only talks about results: a date notice, a pre-announcement, a delivery
-/// or monthly report, a meeting, a buyback, a GAAP reconciliation, insider
+/// 1-12 for a month name or its abbreviation ("sept.", "oct").
+fn month_number(month: &str) -> Option<u32> {
+    let m = month.trim_end_matches('.').to_ascii_lowercase();
+    MONTHS
+        .iter()
+        .position(|full| {
+            let full = full.to_ascii_lowercase();
+            m == full || (m.len() >= 3 && full.starts_with(&m))
+        })
+        .map(|i| i as u32 + 1)
+}
+
+/// The last day of `month` in `year`.
+fn month_end(year: i32, month: u32) -> Option<NaiveDate> {
+    let next = if month == 12 {
+        NaiveDate::from_ymd_opt(year + 1, 1, 1)
+    } else {
+        NaiveDate::from_ymd_opt(year, month + 1, 1)
+    }?;
+    next.pred_opt()
+}
+
+/// Lowercase phrases that, up to the end of the results statement's
+/// sentence, mark a
+/// filing that only talks about results: board-meeting and date notices,
+/// pre-announcements, earnings-call notices, profit alerts, delivery or
+/// monthly reports, meetings, buybacks, GAAP reconciliations, insider
 /// dealing. Plain substring checks: the Free plan gives an invocation 10 ms
 /// of CPU.
-const NOT_A_RELEASE: [(&str, &str); 26] = [
+const NOT_A_RELEASE: [(&str, &str); 39] = [
     ("date of board meeting", "board meeting notice"),
     ("date of the board meeting", "board meeting notice"),
-    ("announces date", "pre-announcement"),
-    ("announces the date", "pre-announcement"),
+    ("notice of board meeting", "board meeting notice"),
+    ("meeting of the board", "board meeting notice"),
+    ("board meeting", "board meeting notice"),
+    ("audit committee meeting", "board meeting notice"),
+    ("will be held", "board meeting notice"),
+    ("announcement date", "date notice"),
+    ("release date", "date notice"),
+    ("announces date", "date notice"),
+    ("announces the date", "date notice"),
+    ("scheduled to", "pre-announcement"),
+    ("expected to be released", "pre-announcement"),
     ("will announce", "pre-announcement"),
     ("will report", "pre-announcement"),
     ("will release", "pre-announcement"),
@@ -112,7 +137,13 @@ const NOT_A_RELEASE: [(&str, &str); 26] = [
     ("to report", "pre-announcement"),
     ("to release", "pre-announcement"),
     ("to publish", "pre-announcement"),
+    ("profit warning", "profit alert"),
+    ("profit alert", "profit alert"),
+    ("preliminary", "profit alert"),
     ("delivery update", "delivery update"),
+    // TSMC's monthly "Revenue Report" totals January through the month.
+    ("revenue report", "monthly revenue"),
+    ("monthly revenue", "monthly revenue"),
     ("vehicles were delivered", "delivery update"),
     ("monthly return", "exchange return"),
     ("next day disclosure return", "exchange return"),
@@ -120,15 +151,14 @@ const NOT_A_RELEASE: [(&str, &str); 26] = [
     ("extraordinary general meeting", "general meeting"),
     ("voting results", "general meeting"),
     ("poll results", "general meeting"),
-    ("repurchase of shares", "buyback"),
     ("share repurchase", "buyback"),
     ("buyback", "buyback"),
-    ("reconciliation between", "GAAP reconciliation"),
-    ("made in", "insider dealing"),
+    ("reconciliation", "GAAP reconciliation"),
+    ("transaction(s) made in", "insider dealing"),
 ];
 
-/// Lowercase openers of a financial summary or report.
-const SUMMARY: [&str; 7] = [
+/// Lowercase openers of a financial summary, report or announcement.
+const SUMMARY: [&str; 9] = [
     "financial summary",
     "financial results",
     "financial report",
@@ -136,6 +166,21 @@ const SUMMARY: [&str; 7] = [
     "interim results",
     "annual results",
     "quarterly results",
+    "quarterly statement",
+    "results announcement",
+];
+
+/// Words that make an undated period ("Q3 2026", "third quarter of 2026")
+/// a results statement when they are near it.
+const RESULT_CUES: [&str; 8] = [
+    "results",
+    "earnings",
+    "statement",
+    "reports",
+    "net income",
+    "net sales",
+    "revenue",
+    "profit",
 ];
 
 /// The last whole word `w` in `hay`, as a byte offset.
@@ -155,30 +200,63 @@ fn floor(s: &str, mut i: usize) -> usize {
     i
 }
 
-/// The release states results for the period ended `quarter`: "announced its
-/// unaudited financial results for the second quarter ended June 30, 2026",
-/// "earnings per share ... for the third quarter ended September 30, 2026",
-/// "Financial report for the period 1 January 2026 to 30 September 2026",
-/// "FINANCIAL SUMMARY ... (April 1, 2026 through June 30, 2026)". `lower` is
-/// the ASCII-lowercased text. Returns where the first such statement starts.
-fn results_statement(lower: &str, quarter: NaiveDate) -> Option<usize> {
+/// `i` moved forward to a char boundary of `s` (at most its length).
+fn ceil(s: &str, mut i: usize) -> usize {
+    i = i.min(s.len());
+    while !s.is_char_boundary(i) {
+        i += 1;
+    }
+    i
+}
+
+/// A results statement: where it starts, where it ends, and the period end
+/// it states.
+#[derive(Debug, Clone, Copy)]
+struct Statement {
+    start: usize,
+    end: usize,
+    period: NaiveDate,
+}
+
+fn regex(p: &str) -> Regex {
+    Regex::new(p).expect("valid built-in regex")
+}
+
+/// Every results statement in `lower` (the ASCII-lowercased text):
+/// - a dated period end after "results ... for the" or a financial summary
+///   or report opener: "financial results for the second quarter ended June
+///   30, 2026", "Financial report for the period 1 January 2026 to 30
+///   September 2026", "FINANCIAL SUMMARY ... (April 1, 2026 through June 30,
+///   2026)", "Results Announcement ... relating to the nine months ended 30
+///   September 2026";
+/// - an undated period near a results word: "net income in Q3 2026",
+///   "Second Quarter and First Half of 2026 Financial Results", "results ...
+///   January - September 2026".
+fn statements(lower: &str) -> Vec<Statement> {
     static END: OnceLock<Regex> = OnceLock::new();
+    static UNDATED: OnceLock<Regex> = OnceLock::new();
     let end = END.get_or_init(|| {
-        Regex::new(
-            r"\b(?:ended|ending|through|to)\s+(?:([a-z]{3,9}\.?)\s+(\d{1,2}),?\s+(\d{4})|(\d{1,2})\s+([a-z]{3,9}\.?)\s+(\d{4}))",
-        )
-        .expect("valid built-in regex")
+        regex(r"\b(?:ended|ending|through|to)\s+(?:([a-z]{3,9}\.?)\s+(\d{1,2}),?\s+(\d{4})|(\d{1,2})\s+([a-z]{3,9}\.?)\s+(\d{4}))")
     });
+    let undated = UNDATED.get_or_init(|| {
+        regex(concat!(
+            r"\bq([1-4])\s+(20\d\d)\b",
+            r"|\b(first|second|third|fourth)\s+quarter(?:\s+and\s+(?:first\s+half|nine\s+months|full\s+year))?(?:\s+of)?\s+(20\d\d)\b",
+            r"|\bjanuary\s*(?:-|–|—|to|through)\s*(march|june|september|december)\s+(20\d\d)\b",
+            r"|\bfirst\s+(half|nine\s+months)\s+of\s+(20\d\d)\b",
+        ))
+    });
+    let mut out = Vec::new();
     for c in end.captures_iter(lower) {
-        let date = match (c.get(1), c.get(4)) {
+        let period = match (c.get(1), c.get(4)) {
             (Some(m), _) => period_date(m.as_str(), &c[2], &c[3]),
             (_, Some(d)) => period_date(&c[5], d.as_str(), &c[6]),
             _ => None,
         };
-        if date != Some(quarter) {
+        let (Some(period), Some(m)) = (period, c.get(0)) else {
             continue;
-        }
-        let at = c.get(0)?.start();
+        };
+        let at = m.start();
         // "... results ... for the ... ended <date>": "for the" within 100
         // characters, and "results" or "earnings" within 240 before it.
         let near = &lower[floor(lower, at.saturating_sub(100))..at];
@@ -199,10 +277,81 @@ fn results_statement(lower: &str, quarter: NaiveDate) -> Option<usize> {
             .min()
             .map(|j| at - wide.len() + j);
         if let Some(start) = [lead, summary].into_iter().flatten().min() {
-            return Some(start);
+            out.push(Statement {
+                start,
+                end: m.end(),
+                period,
+            });
         }
     }
-    None
+    for c in undated.captures_iter(lower) {
+        let Some(m) = c.get(0) else { continue };
+        let year = |i: usize| c.get(i).and_then(|y| y.as_str().parse::<i32>().ok());
+        let quarter_end = |q: u32, y: i32| month_end(y, q * 3);
+        let period = if let (Some(q), Some(y)) = (c.get(1), year(2)) {
+            quarter_end(q.as_str().parse().unwrap_or(0), y)
+        } else if let (Some(o), Some(y)) = (c.get(3), year(4)) {
+            // A fiscal quarter ("second fiscal quarter") is dated elsewhere.
+            let q = ["first", "second", "third", "fourth"]
+                .iter()
+                .position(|w| *w == o.as_str())
+                .map_or(0, |i| i as u32 + 1);
+            quarter_end(q, y)
+        } else if let (Some(mo), Some(y)) = (c.get(5), year(6)) {
+            month_number(mo.as_str()).and_then(|n| month_end(y, n))
+        } else if let (Some(h), Some(y)) = (c.get(7), year(8)) {
+            month_end(y, if h.as_str() == "half" { 6 } else { 9 })
+        } else {
+            None
+        };
+        let Some(period) = period else { continue };
+        let before = &lower[floor(lower, m.start().saturating_sub(240))..m.start()];
+        let after = &lower[m.end()..ceil(lower, m.end() + 120)];
+        let cue_before = RESULT_CUES
+            .iter()
+            .filter_map(|w| before.rfind(w))
+            .max()
+            .map(|j| m.start() - before.len() + j);
+        let cue_after = RESULT_CUES.iter().any(|w| after.contains(w));
+        if cue_before.is_none() && !cue_after {
+            continue;
+        }
+        out.push(Statement {
+            start: cue_before.unwrap_or(m.start()).min(m.start()),
+            end: m.end(),
+            period,
+        });
+    }
+    out
+}
+
+/// Reported figures: an amount with a currency ("RMB32,136.9", "US$4.60",
+/// "€11.7 billion", "DKK 31,720"), an amount with a scale word ("5.70bn",
+/// "125.8m"), or a table figure in the millions ("24,630,753").
+fn has_figure(s: &str) -> bool {
+    static FIGURE: OnceLock<Regex> = OnceLock::new();
+    FIGURE
+        .get_or_init(|| {
+            regex(r"(?:rmb|us\$|hk\$|nt\$|s\$|\$|€|£|¥|dkk|eur|usd|jpy)\s?\d|\d[\d,.]*\s?(?:billion|million|bn|mn|bln)\b|\b\d{1,3}(?:,\d{3}){2,}\b")
+        })
+        .is_match(s)
+}
+
+/// The release's dateline: the first date in its opening, before or just
+/// after the statement, from a week before the 6-K to the day after it
+/// ("BEIJING, China, August 18, 2026 –", "Madrid, 28 October 2026").
+fn dateline(lower: &str, upto: usize, accepted: NaiveDate) -> Option<NaiveDate> {
+    static DATE: OnceLock<Regex> = OnceLock::new();
+    let date = DATE.get_or_init(|| {
+        regex(r"\b(?:([a-z]{3,9}\.?)\s+(\d{1,2}),?\s+(\d{4})|(\d{1,2})\s+([a-z]{3,9}\.?)\s+(\d{4}))\b")
+    });
+    date.captures_iter(&lower[..ceil(lower, upto)])
+        .filter_map(|c| match (c.get(1), c.get(4)) {
+            (Some(m), _) => period_date(m.as_str(), &c[2], &c[3]),
+            (_, Some(d)) => period_date(&c[5], d.as_str(), &c[6]),
+            _ => None,
+        })
+        .find(|d| (accepted - Duration::days(7)..=accepted + Duration::days(1)).contains(d))
 }
 
 /// The company is named: its watchlist name as a word, or its ticker after
@@ -215,23 +364,58 @@ fn names_company(text: &str, lower: &str, e: &WatchEntry) -> bool {
             .any(|x| has_word(lower, &format!("{x}: {t}")) || has_word(lower, &format!("{x}:{t}")))
 }
 
+/// The first phrase of `NOT_A_RELEASE` in `s`, with its reason. "to
+/// announce" in "pleased to announce" (an HKEX results announcement) does
+/// not count.
+fn not_a_release(s: &str) -> Option<&'static str> {
+    NOT_A_RELEASE
+        .iter()
+        .find(|(p, _)| {
+            if *p == "to announce" {
+                s.matches("to announce").count() > s.matches("pleased to announce").count()
+            } else {
+                s.contains(p)
+            }
+        })
+        .map(|(_, why)| *why)
+}
+
 /// Whether `text` (the opening of a 6-K document) is `e`'s release of
-/// results for the quarter before `accepted` (its ET acceptance date).
-/// `Err` says why not.
-pub fn classify(text: &str, e: &WatchEntry, accepted: NaiveDate) -> Result<(), String> {
+/// results for a period that ended within `PERIOD_DAYS` before `accepted`
+/// (the 6-K's ET acceptance date): such a statement, nothing before or in it
+/// that marks a notice, reported figures after it, and the company named.
+/// `Ok` carries the release's dateline when it has one; `Err` says why not.
+pub fn classify(
+    text: &str,
+    e: &WatchEntry,
+    accepted: NaiveDate,
+) -> Result<Option<NaiveDate>, String> {
     let text = normalize(text);
     let lower = text.to_ascii_lowercase();
-    let quarter = quarter_end_before(accepted);
-    let Some(at) = results_statement(&lower, quarter) else {
-        return Err(format!("no results for the period ended {quarter}"));
+    let recent = |p: NaiveDate| (1..=PERIOD_DAYS).contains(&(accepted - p).num_days());
+    let Some(st) = statements(&lower)
+        .into_iter()
+        .filter(|s| recent(s.period))
+        .min_by_key(|s| s.start)
+    else {
+        return Err(format!(
+            "no results for a period ended within {PERIOD_DAYS} days"
+        ));
     };
-    if let Some((_, why)) = NOT_A_RELEASE.iter().find(|(p, _)| lower[..at].contains(p)) {
-        return Err((*why).to_string());
+    // Up to the end of the statement's sentence: "results for the quarter
+    // ended September 30, 2026 are expected to be released on ...".
+    let tail = &lower[st.end..ceil(&lower, st.end + 300)];
+    let sentence = st.end + tail.find(". ").unwrap_or(0);
+    if let Some(why) = not_a_release(&lower[..sentence]) {
+        return Err(why.to_string());
+    }
+    if !has_figure(&lower[st.start..ceil(&lower, st.end + FIGURE_WINDOW)]) {
+        return Err("no reported figures".into());
     }
     if !names_company(&text, &lower, e) {
         return Err(format!("{} not named", e.name));
     }
-    Ok(())
+    Ok(dateline(&lower, st.end + 3000, accepted))
 }
 
 /// The document to read: an `EX-99` exhibit whose description reads like
@@ -280,6 +464,9 @@ pub struct ForeignOutcome {
     pub errors: Vec<String>,
     /// SEC answered 403/429 and the 6-K part stopped.
     pub throttled: bool,
+    /// Foreign rows whose CIK files under another name, as `(ticker,
+    /// message)`: `poll_job` alerts once a day, like the 8-K watchlist.
+    pub mismatches: Vec<(&'static str, String)>,
 }
 
 fn iso(t: DateTime<Utc>) -> String {
@@ -320,8 +507,9 @@ fn target(rows: &[CalendarRow], day: NaiveDate) -> Option<NaiveDate> {
 
 /// Reads the current 6-K feed back to its watermark (as the 8-K poll does)
 /// and checks up to `MAX_CANDIDATES` new 6-Ks of watched foreign companies
-/// accepted near their calendar date. A results release marks that date
-/// `reported` with the 6-K's index as proof. D1: two kv reads, one ranged
+/// accepted near their calendar date. A results release marks its release
+/// date `reported` (moving the calendar's date when it differs) with the
+/// 6-K's index as proof. D1: two kv reads, one ranged
 /// calendar read when a candidate is seen, one batched calendar write when
 /// a date is marked, and the two kv writes. A store error aborts.
 pub async fn foreign_tick(
@@ -352,18 +540,30 @@ pub async fn foreign_tick(
         let oldest = list.iter().map(|f| f.accepted_at).min();
         entries.extend(list);
         let more = matches!((watermark, oldest), (Some(w), Some(o)) if full && o > w);
-        if !more || page + 1 == MAX_PAGES {
+        if !more {
             complete = true;
             break;
         }
+        if page + 1 == MAX_PAGES {
+            out.errors.push(format!(
+                "current 6-K filings: {MAX_PAGES} pages did not reach the last poll; older 6-Ks may be missed"
+            ));
+            complete = true;
+        }
+    }
+    // Throttled: no more requests this firing (the watermark stays).
+    if out.throttled {
+        return Ok(out);
     }
 
     let watch = foreign_by_cik();
+    out.mismatches = name_mismatches(&entries, &watch);
     let mut checked: Vec<String> = es
         .kv_get(KV_6K_CHECKED)
         .await?
         .and_then(|j| serde_json::from_str(&j).ok())
         .unwrap_or_default();
+    let checked_before = checked.len();
     let mut fresh: Vec<(&FeedEntry, &WatchEntry)> = Vec::new();
     for f in &entries {
         // An amendment repeats a release already counted (or corrects one).
@@ -412,6 +612,16 @@ pub async fn foreign_tick(
                 Err(e) => {
                     out.errors
                         .push(format!("{} {}: {e}", w.ticker, f.accession));
+                    // A 6-K without a readable document reads the same next
+                    // time: checked. Network errors and 5xx retry.
+                    if matches!(
+                        e,
+                        ProviderError::Empty
+                            | ProviderError::Parse(_)
+                            | ProviderError::Http(404 | 410)
+                    ) {
+                        checked.push(f.accession.clone());
+                    }
                     if matches!(e, ProviderError::Http(403 | 429)) {
                         out.throttled = true;
                         break;
@@ -422,9 +632,18 @@ pub async fn foreign_tick(
             out.read += 1;
             checked.push(f.accession.clone());
             match classify(&text, w, day(f)) {
-                Ok(()) => {
-                    let ch =
-                        report_changes(rows, w.ticker, d, filing_url(f.cik, &f.accession), now);
+                Ok(dated) => {
+                    // The release's own date (its dateline), else the 6-K's
+                    // when that is later than the calendar's; an earlier 6-K
+                    // is the Asian-morning case and keeps the calendar date.
+                    let released = dated.unwrap_or_else(|| day(f).max(d));
+                    let ch = report_changes(
+                        rows,
+                        w.ticker,
+                        released,
+                        filing_url(f.cik, &f.accession),
+                        now,
+                    );
                     apply_to(rows, &ch);
                     changes.extend(ch);
                     out.reported.push(w.ticker.to_string());
@@ -438,7 +657,7 @@ pub async fn foreign_tick(
     if !changes.is_empty() {
         es.write_calendar(&changes).await?;
     }
-    if out.read > 0 {
+    if checked.len() != checked_before {
         let keep = checked.len().saturating_sub(CHECKED_KEEP);
         let json = serde_json::to_string(&checked[keep..]).map_err(|e| e.to_string())?;
         es.kv_set(KV_6K_CHECKED, &json, &iso(now)).await?;
@@ -484,16 +703,7 @@ mod tests {
         head_text(&String::from_utf8_lossy(&std::fs::read(path).unwrap()))
     }
     fn check(ticker: &str, name: &str, accepted: &str) -> Result<(), String> {
-        classify(&fx(name), &find(ticker).unwrap(), d(accepted))
-    }
-
-    #[test]
-    fn quarter_ends() {
-        assert_eq!(quarter_end_before(d("2026-11-05")), d("2026-09-30"));
-        assert_eq!(quarter_end_before(d("2026-10-01")), d("2026-09-30"));
-        assert_eq!(quarter_end_before(d("2026-09-30")), d("2026-06-30"));
-        assert_eq!(quarter_end_before(d("2027-02-20")), d("2026-12-31"));
-        assert_eq!(quarter_end_before(d("2026-05-12")), d("2026-03-31"));
+        classify(&fx(name), &find(ticker).unwrap(), d(accepted)).map(|_| ())
     }
 
     #[test]
@@ -514,9 +724,46 @@ mod tests {
             ("TM", "tm_semiannual_summary.htm", "2026-11-05"),
             // Novo Nordisk: "Financial report for the period 1 January 2026 to 30 September 2026"
             ("NVO", "nvo_results.htm", "2026-11-04"),
+            // From the review corpus: fiscal quarters ended August 31 ...
+            ("TAL", "tal_results.htm", "2026-10-29"),
+            ("EDU", "edu_results.htm", "2026-10-28"),
+            // ... "net income in Q3 2026" (13-week quarters, no end date) ...
+            ("ASML", "asml_results.htm", "2026-10-14"),
+            // ... "Second Quarter and First Half of 2026 Financial Results" ...
+            ("TCOM", "tcom_results.htm", "2026-09-16"),
+            // ... "3RD QUARTER RESULTS ... nine months ended 30 September 2026" ...
+            ("BCS", "bcs_results.htm", "2026-10-22"),
+            // ... "the first nine months of 2026" ...
+            ("SAN", "san_results.htm", "2026-10-28"),
+            // ... "Quarterly Statement Q3 2026", filed five days after its date ...
+            ("SAP", "sap_results.htm", "2026-10-26"),
+            // ... and the HKEX "ANNOUNCEMENT OF ... RESULTS" form.
+            ("NTES", "ntes_hkex_results.htm", "2026-08-20"),
         ] {
             assert_eq!(check(ticker, name, accepted), Ok(()), "{name}");
         }
+    }
+
+    #[test]
+    fn the_release_date_is_its_dateline() {
+        let at = |ticker: &str, name: &str, accepted: &str| {
+            classify(&fx(name), &find(ticker).unwrap(), d(accepted)).unwrap()
+        };
+        // "SHANGHAI, China, September 1, 2026"
+        assert_eq!(
+            at("NIO", "nio_results.htm", "2026-09-01"),
+            Some(d("2026-09-01"))
+        );
+        // Released September 15 US time, filed the 16th.
+        assert_eq!(
+            at("TCOM", "tcom_results.htm", "2026-09-16"),
+            Some(d("2026-09-15"))
+        );
+        // "Walldorf, Germany – October 21, 2026", filed the 26th.
+        assert_eq!(
+            at("SAP", "sap_results.htm", "2026-10-26"),
+            Some(d("2026-10-21"))
+        );
     }
 
     #[test]
@@ -556,6 +803,33 @@ mod tests {
             ("PDD", "pdd_director.htm", "2026-08-21", ""),
             ("TSM", "tsm_monthly_revenue.htm", "2026-10-08", ""),
             ("NIO", "nio_gaap_ifrs.htm", "2026-09-01", ""),
+            // The review's wrong ticks: board-meeting and results-date
+            // notices naming the coming results' period.
+            (
+                "XPEV",
+                "xpev_board_meeting_q3.htm",
+                "2026-11-02",
+                "board meeting notice",
+            ),
+            (
+                "XPEV",
+                "xpev_board_meeting_q2.htm",
+                "2026-08-04",
+                "board meeting notice",
+            ),
+            (
+                "HTHT",
+                "htht_results_date_notice.htm",
+                "2026-11-04",
+                "board meeting notice",
+            ),
+            (
+                "TCOM",
+                "tcom_results_date_notice.htm",
+                "2026-09-02",
+                "board meeting notice",
+            ),
+            ("TME", "tme_to_report.htm", "2026-10-13", "pre-announcement"),
         ] {
             let r = check(ticker, name, accepted);
             assert!(r.is_err(), "{name} taken as results");
@@ -568,7 +842,7 @@ mod tests {
         // Alibaba's June-quarter release read after the September quarter ended.
         assert!(check("BABA", "baba_results.htm", "2026-11-19")
             .unwrap_err()
-            .starts_with("no results for the period ended 2026-09-30"));
+            .starts_with("no results for a period ended within 100 days"));
         // PDD's release under Alibaba's CIK (a wrong row).
         assert_eq!(
             check("BABA", "pdd_results.htm", "2026-08-25"),
@@ -582,15 +856,24 @@ mod tests {
         for text in [
             "Baidu, Inc. to Report Third Quarter 2026 Financial Results on November 18, 2026. Baidu, Inc. (NASDAQ: BIDU) will announce its unaudited financial results for the third quarter ended September 30, 2026, before U.S. markets open.",
             "Baidu Announces Date for Third Quarter 2026 Earnings. Baidu (NASDAQ: BIDU) plans to release its earnings for the quarter ended September 30, 2026 on November 18.",
+            // The review's synthetic notices.
+            "Baidu Announces Third Quarter 2026 Earnings Release Date. Baidu (NASDAQ: BIDU) results for the third quarter ended September 30, 2026 will be released on November 18.",
+            "Baidu (NASDAQ: BIDU) management is scheduled to hold an earnings call to discuss results for the quarter ended September 30, 2026. Revenue was RMB32.1 billion last year.",
+            "Baidu (NASDAQ: BIDU) results for the quarter ended September 30, 2026 are expected to be released on November 18. Revenue was RMB32.1 billion last year.",
+            "POSITIVE PROFIT ALERT. Baidu (NASDAQ: BIDU) is finalising its interim results for the three months ended September 30, 2026; profit is expected to rise to RMB9 billion.",
         ] {
-            assert_eq!(
-                classify(text, &e, d("2026-11-04")),
-                Err("pre-announcement".into()),
-                "{text}"
+            let why = classify(text, &e, d("2026-11-04")).unwrap_err();
+            assert!(
+                ["pre-announcement", "date notice", "profit alert", "no reported figures"]
+                    .contains(&why.as_str()),
+                "{text}: {why}"
             );
         }
-        let release = "Baidu Announces Third Quarter 2026 Results. BEIJING, Nov. 18, 2026 -- Baidu, Inc. (NASDAQ: BIDU) today announced its unaudited financial results for the third quarter ended September 30, 2026. Baidu will hold an earnings conference call.";
-        assert_eq!(classify(release, &e, d("2026-11-18")), Ok(()));
+        let release = "Baidu Announces Third Quarter 2026 Results. BEIJING, Nov. 18, 2026 -- Baidu, Inc. (NASDAQ: BIDU) today announced its unaudited financial results for the third quarter ended September 30, 2026. Total revenues were RMB32.1 billion. Baidu will hold an earnings conference call.";
+        assert_eq!(
+            classify(release, &e, d("2026-11-18")),
+            Ok(Some(d("2026-11-18")))
+        );
     }
 
     #[test]
@@ -640,6 +923,12 @@ mod tests {
         feed: RefCell<Vec<FeedRow>>,
         docs: RefCell<HashMap<String, String>>,
         fetches: Cell<usize>,
+        /// Full pages of other companies' 6-Ks, newer than any in `feed`.
+        filler_pages: Cell<usize>,
+        /// This page answers 429.
+        throttle_page: Cell<Option<usize>>,
+        /// Accessions whose index lists no readable document.
+        bare: RefCell<Vec<String>>,
     }
     impl Fake {
         fn add(
@@ -668,7 +957,29 @@ mod tests {
         }
         async fn current_6k_filings(&self, start: usize) -> Result<Vec<FeedEntry>, ProviderError> {
             self.fetches.set(self.fetches.get() + 1);
-            if start > 0 {
+            let page = start / FEED_PAGE;
+            if self.throttle_page.get() == Some(page) {
+                return Err(ProviderError::Http(429));
+            }
+            if page < self.filler_pages.get() {
+                return Ok((0..FEED_PAGE)
+                    .map(|i| {
+                        let acc = format!("0000000001-26-{page:02}{i:04}");
+                        FeedEntry {
+                            form: "6-K".into(),
+                            cik: 1,
+                            company: "Other Co".into(),
+                            filing_date: "2026-09-01".into(),
+                            items: vec![],
+                            accepted_at: utc("2026-09-01T23:00:00Z")
+                                - Duration::minutes((page * FEED_PAGE + i) as i64),
+                            index_url: filing_url(1, &acc),
+                            accession: acc,
+                        }
+                    })
+                    .collect());
+            }
+            if page > self.filler_pages.get() {
                 return Ok(vec![]);
             }
             let mut v: Vec<FeedEntry> = self
@@ -692,6 +1003,14 @@ mod tests {
         }
         async fn filing_docs(&self, cik: u64, acc: &str) -> Result<Vec<FilingDoc>, ProviderError> {
             self.fetches.set(self.fetches.get() + 1);
+            if self.bare.borrow().iter().any(|a| a == acc) {
+                return Ok(vec![FilingDoc {
+                    name: "g.jpg".into(),
+                    description: String::new(),
+                    doc_type: "GRAPHIC".into(),
+                    url: filing_url(cik, acc),
+                }]);
+            }
             Ok(vec![FilingDoc {
                 name: "ex99.htm".into(),
                 description: "EXHIBIT 99.1".into(),
@@ -712,7 +1031,7 @@ mod tests {
             let (_, text) = docs
                 .iter()
                 .find(|(acc, _)| url.contains(&acc.replace('-', "")))
-                .ok_or(ProviderError::Http(404))?;
+                .ok_or(ProviderError::Http(503))?;
             Ok(text.clone())
         }
         async fn company_concept(
@@ -808,11 +1127,11 @@ mod tests {
         seed(&es, "BABA", "2026-08-20").await;
         seed(&es, "TM", "2026-08-04").await;
         let fl = Fake::default();
-        // Four days after Toyota's date: outside the window.
+        // Nine days after Toyota's date: outside the window.
         fl.add(
             "TM",
             1,
-            "2026-08-08T10:00:00Z",
+            "2026-08-13T10:00:00Z",
             "6-K",
             Some(fx("tm_q1_summary.htm")),
         );
@@ -853,7 +1172,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn at_most_three_6ks_are_read_per_poll_and_the_rest_next_time() {
+    async fn at_most_two_6ks_are_read_per_poll_and_the_rest_next_time() {
         let es = stores();
         for t in ["NIO", "XPEV", "LI", "BIDU"] {
             seed(&es, t, "2026-09-01").await;
@@ -871,7 +1190,11 @@ mod tests {
         let o = foreign_tick(now + Duration::minutes(5), &es, &fl)
             .await
             .unwrap();
-        assert_eq!(o.read, 1, "the fourth one, next firing");
+        assert_eq!(o.read, 2, "the other two, next firing");
+        let o = foreign_tick(now + Duration::minutes(10), &es, &fl)
+            .await
+            .unwrap();
+        assert_eq!(o.read, 0);
     }
 
     #[tokio::test]
@@ -908,7 +1231,7 @@ mod tests {
         let es = stores();
         seed(&es, "NIO", "2026-09-01").await;
         let fl = Fake::default();
-        // No document text: the fake answers 404.
+        // No document text: the fake answers 503.
         fl.add("NIO", 1, "2026-09-01T11:15:00Z", "6-K", None);
         let now = utc("2026-09-01T11:20:00Z");
         let o = foreign_tick(now, &es, &fl).await.unwrap();
@@ -920,6 +1243,164 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(o.reported, ["NIO"]);
+    }
+    #[tokio::test]
+    async fn a_6k_with_no_readable_document_is_read_once() {
+        let es = stores();
+        seed(&es, "NIO", "2026-09-01").await;
+        let fl = Fake::default();
+        let acc = fl.add("NIO", 1, "2026-09-01T11:15:00Z", "6-K", None);
+        fl.bare.borrow_mut().push(acc);
+        let now = utc("2026-09-01T11:20:00Z");
+        let o = foreign_tick(now, &es, &fl).await.unwrap();
+        assert_eq!(o.errors.len(), 1, "{o:?}");
+        let before = fl.fetches.get();
+        foreign_tick(now + Duration::minutes(5), &es, &fl)
+            .await
+            .unwrap();
+        assert_eq!(fl.fetches.get() - before, 1, "the feed page only");
+    }
+
+    #[tokio::test]
+    async fn the_tick_goes_on_the_release_date_and_moves_yahoos() {
+        // Yahoo said Aug 29; NIO released (and filed) on Sep 1.
+        let es = stores();
+        seed(&es, "NIO", "2026-08-29").await;
+        let fl = Fake::default();
+        let acc = fl.add(
+            "NIO",
+            1,
+            "2026-09-01T11:15:00Z",
+            "6-K",
+            Some(fx("nio_results.htm")),
+        );
+        let o = foreign_tick(utc("2026-09-01T11:20:00Z"), &es, &fl)
+            .await
+            .unwrap();
+        assert_eq!(o.reported, ["NIO"]);
+        assert_eq!(
+            status(&es, "NIO"),
+            [(
+                "2026-09-01".into(),
+                "reported".into(),
+                Some(filing_url(1736541, &acc))
+            )]
+        );
+        // SAP: Yahoo's Oct 21 was right; the 6-K came on the 26th, inside
+        // the widened window, and the dateline keeps the 21st.
+        let es = stores();
+        seed(&es, "SAP", "2026-10-21").await;
+        let fl = Fake::default();
+        fl.add(
+            "SAP",
+            1,
+            "2026-10-26T10:00:00Z",
+            "6-K",
+            Some(fx("sap_results.htm")),
+        );
+        let o = foreign_tick(utc("2026-10-26T10:05:00Z"), &es, &fl)
+            .await
+            .unwrap();
+        assert_eq!(o.reported, ["SAP"], "{o:?}");
+        assert_eq!(status(&es, "SAP")[0].0, "2026-10-21");
+    }
+
+    #[tokio::test]
+    async fn pages_back_to_the_watermark_and_warns_at_the_cap() {
+        let es = stores();
+        seed(&es, "NIO", "2026-09-01").await;
+        es.kv_set(KV_6K_WATERMARK, "2026-08-31T00:00:00Z", "x")
+            .await
+            .unwrap();
+        let fl = Fake::default();
+        // A page of other 6-Ks above NIO's, which is on the second page.
+        fl.filler_pages.set(1);
+        fl.add(
+            "NIO",
+            1,
+            "2026-09-01T11:15:00Z",
+            "6-K",
+            Some(fx("nio_results.htm")),
+        );
+        let o = foreign_tick(utc("2026-09-02T00:00:00Z"), &es, &fl)
+            .await
+            .unwrap();
+        assert_eq!(
+            (o.pages, o.reported.clone()),
+            (2, vec!["NIO".to_string()]),
+            "{o:?}"
+        );
+        assert!(o.errors.is_empty(), "{o:?}");
+        // Three full pages still newer than the watermark: the gap is logged.
+        let es = stores();
+        es.kv_set(KV_6K_WATERMARK, "2026-08-31T00:00:00Z", "x")
+            .await
+            .unwrap();
+        let fl = Fake::default();
+        fl.filler_pages.set(MAX_PAGES);
+        let o = foreign_tick(utc("2026-09-02T00:00:00Z"), &es, &fl)
+            .await
+            .unwrap();
+        assert_eq!(o.pages, MAX_PAGES);
+        assert!(o.errors[0].contains("may be missed"), "{o:?}");
+    }
+
+    #[tokio::test]
+    async fn a_429_stops_the_6k_part_before_any_read() {
+        let es = stores();
+        seed(&es, "NIO", "2026-09-01").await;
+        es.kv_set(KV_6K_WATERMARK, "2026-08-31T00:00:00Z", "x")
+            .await
+            .unwrap();
+        let fl = Fake::default();
+        fl.filler_pages.set(1);
+        fl.throttle_page.set(Some(1));
+        fl.add(
+            "NIO",
+            1,
+            "2026-08-31T11:15:00Z",
+            "6-K",
+            Some(fx("nio_results.htm")),
+        );
+        let o = foreign_tick(utc("2026-09-01T12:00:00Z"), &es, &fl)
+            .await
+            .unwrap();
+        assert!(o.throttled);
+        assert_eq!(
+            (o.read, fl.fetches.get()),
+            (0, 2),
+            "two feed pages, no reads"
+        );
+        // The watermark stays, so the next firing reads the range again.
+        assert_eq!(
+            es.kv_get(KV_6K_WATERMARK).await.unwrap().as_deref(),
+            Some("2026-08-31T00:00:00Z")
+        );
+    }
+
+    #[tokio::test]
+    async fn a_foreign_filer_under_another_name_is_reported() {
+        let es = stores();
+        let fl = Fake::default();
+        fl.add("TM", 1, "2026-09-01T11:15:00Z", "6-K", None);
+        // The feed shows Toyota's CIK under another company's name.
+        let tm = find("TM").unwrap();
+        let entries = vec![FeedEntry {
+            form: "6-K".into(),
+            cik: tm.cik,
+            company: "TOYOTA INDUSTRIES CORP".into(),
+            accession: "0001094517-26-000001".into(),
+            filing_date: "2026-09-01".into(),
+            items: vec![],
+            accepted_at: utc("2026-09-01T11:15:00Z"),
+            index_url: filing_url(tm.cik, "0001094517-26-000001"),
+        }];
+        assert_eq!(name_mismatches(&entries, &foreign_by_cik())[0].0, "TM");
+        // Through the tick: the Fake names rows by their SEC name, so none.
+        let o = foreign_tick(utc("2026-09-01T11:20:00Z"), &es, &fl)
+            .await
+            .unwrap();
+        assert!(o.mismatches.is_empty());
     }
 }
 #[cfg(test)]
@@ -961,6 +1442,43 @@ mod timing {
                     p.file_name().unwrap().to_string_lossy()
                 );
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod corpus {
+    /// Runs every `<TICKER>_<ACCESSION>/` directory under `$SIXK_CORPUS`
+    /// (an `index.htm` and its documents, with `list.tsv` giving the ET
+    /// acceptance date) through the pipeline and prints each verdict.
+    #[test]
+    #[ignore]
+    fn corpus_verdicts() {
+        let root = std::env::var("SIXK_CORPUS").unwrap();
+        let list = std::fs::read_to_string(format!("{root}/list.tsv")).unwrap();
+        for line in list.lines() {
+            let c: Vec<&str> = line.split('\t').collect();
+            let (ticker, acc, day) = (c[0], c[1], c[2]);
+            let dir = format!("{root}/docs/{ticker}_{acc}");
+            let index = std::fs::read_to_string(format!("{dir}/index.htm")).unwrap();
+            let docs = crate::edgar::parse_filing_index(&index);
+            let Some(doc) = super::results_doc(&docs) else {
+                println!("{ticker}\t{acc}\tNO-DOC");
+                continue;
+            };
+            let file = doc.url.rsplit('/').next().unwrap();
+            let raw = std::fs::read(format!("{dir}/{file}")).unwrap_or_default();
+            let html =
+                String::from_utf8_lossy(&raw[..raw.len().min(super::HEAD_BYTES)]).into_owned();
+            let text = crate::edgar::head_text(&html);
+            let e = crate::earnings::find(ticker).unwrap();
+            let r = super::classify(&text, &e, day.parse().unwrap());
+            let snip: String = text
+                .chars()
+                .take(160)
+                .collect::<String>()
+                .replace('\n', " ");
+            println!("{ticker}\t{acc}\t{day}\t{}\t{r:?}\t{snip}", doc.doc_type);
         }
     }
 }
