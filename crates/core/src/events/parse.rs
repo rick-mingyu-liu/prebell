@@ -51,11 +51,12 @@ pub struct FomcPage {
 pub fn parse_fomc(html: &str) -> Result<FomcPage, String> {
     static PANEL: OnceLock<Regex> = OnceLock::new();
     static ROW: OnceLock<Regex> = OnceLock::new();
+    static DAYS: OnceLock<Regex> = OnceLock::new();
     let panel = PANEL.get_or_init(|| re(r"<h4><a id=\x22\d+\x22>(\d{4}) FOMC Meetings"));
     let row = ROW.get_or_init(|| {
         re(r#"fomc-meeting__month[^>]*><strong>([^<]+)</strong></div>\s*<div class="fomc-meeting__date[^>]*>([^<]+)</div>"#)
     });
-    let days_re = re(r"^(\d{1,2})-(\d{1,2})(\*?)$");
+    let days_re = DAYS.get_or_init(|| re(r"^(\d{1,2})-(\d{1,2})(\*?)$"));
     let starts: Vec<(usize, i32)> = panel
         .captures_iter(html)
         .filter_map(|c| Some((c.get(0)?.start(), c[1].parse().ok()?)))
@@ -110,7 +111,8 @@ pub fn parse_fomc(html: &str) -> Result<FomcPage, String> {
 pub fn parse_bls(html: &str, series: &str, url: &str) -> Result<Vec<Planned>, String> {
     static ROW: OnceLock<Regex> = OnceLock::new();
     let row = ROW.get_or_init(|| {
-        re(r"<tr[^>]*>\s*<td>([A-Za-z]+) (\d{4})</td>\s*<td>([A-Za-z]+)\.? (\d{1,2}), (\d{4})</td>\s*<td>(\d{1,2}):(\d{2}) ([AP])M</td>")
+        // Cells may carry attributes and a footnote mark after the value.
+        re(r"<tr[^>]*>\s*<td[^>]*>([A-Za-z]+) (\d{4})[^<]*(?:<[^/][^>]*>[^<]*</[^>]+>)?[^<]*</td>\s*<td[^>]*>([A-Za-z]+)\.? (\d{1,2}), (\d{4})[^<]*(?:<[^/][^>]*>[^<]*</[^>]+>)?[^<]*</td>\s*<td[^>]*>(\d{1,2}):(\d{2}) ([AP])M[^<]*</td>")
     });
     let mut out = Vec::new();
     for c in row.captures_iter(html) {
@@ -215,6 +217,13 @@ mod tests {
         assert_eq!(cpi[0].et_date, d("2026-11-10"));
         assert!(cpi.iter().all(|c| c.proof_url == BLS_CPI_URL));
         let sept = "<tr><td>August 2026</td><td>Sept. 04, 2026</td><td>08:30 AM</td></tr>";
+        // Attributes and a footnote mark on a cell.
+        let marked = r#"<tr class="x"><td class="a">December 2026</td><td>Jan. 08, 2027<sup>(1)</sup></td><td>08:30 AM</td></tr>"#;
+        let m = parse_bls(marked, "jobs", BLS_JOBS_URL).unwrap();
+        assert_eq!(
+            (m[0].id.as_str(), m[0].et_date),
+            ("bls:jobs:2026-12", d("2027-01-08"))
+        );
         assert_eq!(
             parse_bls(sept, "jobs", BLS_JOBS_URL).unwrap()[0].et_date,
             d("2026-09-04")

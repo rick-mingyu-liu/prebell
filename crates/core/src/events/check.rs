@@ -25,6 +25,9 @@ use crate::providers::Http;
 pub const USER_AGENT: &str = "PreBell (https://prebell.site; support@prebell.site)";
 /// A schedule page larger than this is refused (the FOMC calendar is ~170 KB).
 pub const MAX_PAGE_BYTES: usize = 1 << 20;
+/// Bytes of a release page read for the released check: the status and the
+/// page title are all it needs (BLS release pages are over 1 MB).
+pub const RELEASE_PREFIX_BYTES: usize = 16 * 1024;
 /// An event this many trading days ahead or nearer, re-seen on its page, is
 /// `confirmed`.
 pub const CONFIRM_TRADING_DAYS: usize = 10;
@@ -61,6 +64,11 @@ pub struct Live {
     pub cpi: Option<Vec<Planned>>,
 }
 
+/// The page lists a date on or after `date`.
+fn listed_through(page: Option<&[Planned]>, date: NaiveDate) -> bool {
+    page.is_some_and(|rows| rows.iter().any(|p| p.et_date >= date))
+}
+
 impl Live {
     fn sighting(&self, id: &str) -> Option<&Planned> {
         let fomc = self.fomc.as_ref().map(|p| p.meetings.as_slice());
@@ -72,8 +80,9 @@ impl Live {
     }
 
     /// Whether a page that parsed would list `series` on `date` if it were
-    /// still scheduled: only future days (BLS drops past releases), and for
-    /// FOMC only the years the page has panels for.
+    /// still scheduled: only future days (BLS drops past releases), for FOMC
+    /// only the years the page has panels for, for BLS only up to the last
+    /// date the page lists.
     fn covers(&self, series: &str, date: NaiveDate, today: NaiveDate) -> bool {
         date > today
             && match series {
@@ -81,8 +90,8 @@ impl Live {
                     .fomc
                     .as_ref()
                     .is_some_and(|p| p.years.contains(&date.year())),
-                "jobs" => self.jobs.is_some(),
-                "cpi" => self.cpi.is_some(),
+                "jobs" => listed_through(self.jobs.as_deref(), date),
+                "cpi" => listed_through(self.cpi.as_deref(), date),
                 _ => false,
             }
     }
@@ -105,6 +114,11 @@ impl Live {
             s(self.cpi.is_some())
         )
     }
+}
+
+/// Kinds whose dates the daily check re-reads from an official page.
+fn read_live(series: &str) -> bool {
+    matches!(series, "fomc" | "jobs" | "cpi")
 }
 
 /// The `n`th trading day after `today`.
@@ -182,49 +196,68 @@ pub fn reconcile(
     let plan: HashMap<&str, &Planned> = planned.iter().map(|p| (p.id.as_str(), p)).collect();
     let next_fomc = ids
         .iter()
-        .filter_map(|id| live.sighting(id).or(plan.get(id).copied()))
-        .filter(|p| p.series == "fomc" && p.et_date >= today)
-        .map(|p| p.et_date)
+        .filter_map(|id| {
+            live.sighting(id)
+                .map(|p| (p.series.as_str(), p.et_date))
+                .or_else(|| {
+                    let r = old.get(id)?;
+                    Some((r.series.as_str(), r.et_date.parse().ok()?))
+                })
+                .or_else(|| plan.get(id).map(|p| (p.series.as_str(), p.et_date)))
+        })
+        .filter(|(series, date)| *series == "fomc" && *date >= today)
+        .map(|(_, date)| date)
         .min();
 
     let mut out = Vec::new();
     for id in ids {
         let sight = live.sighting(id);
-        let Some(src) = sight.or(plan.get(id).copied()) else {
-            continue;
-        };
         let prev = old.get(id).copied();
         if prev.is_some_and(|r| r.status == "released") {
             continue;
         }
-        let mut r = prev.cloned().unwrap_or_else(|| new_row(src, now));
-        let new_date = ymd(src.et_date);
-        if let Some(p) = prev {
-            if p.et_date != new_date {
+        // Where the date comes from: a sighting on its page; for kinds no
+        // page is re-read for (minutes, elections, closures), the snapshot.
+        // A page-read kind not sighted (its page failed, or BLS dropped a
+        // past row) keeps the stored date and status, never the snapshot's.
+        let src = match (sight, prev) {
+            (Some(s), _) => Some(s),
+            (None, None) => plan.get(id).copied(),
+            (None, Some(_)) => plan.get(id).copied().filter(|p| !read_live(&p.series)),
+        };
+        let mut r = match (prev, src) {
+            (Some(p), _) => p.clone(),
+            (None, Some(s)) => new_row(s, now),
+            (None, None) => continue,
+        };
+        if let Some(src) = src {
+            let new_date = ymd(src.et_date);
+            if let Some(p) = prev.filter(|p| p.et_date != new_date) {
                 r.status = "moved".into();
                 r.moved_from = Some(p.et_date.clone());
             }
+            r.series = src.series.clone();
+            r.ref_period = src.ref_period.clone();
+            r.variant = src.variant.clone();
+            r.starts_at = src.starts_at.map(iso);
+            r.et_date = new_date;
+            r.tier = i64::from(src.tier);
+            r.proof_url = src.proof_url.clone();
         }
-        let shown_on: NaiveDate = r.et_date.parse().unwrap_or(src.et_date);
-        r.series = src.series.clone();
-        r.ref_period = src.ref_period.clone();
-        r.variant = src.variant.clone();
-        r.starts_at = src.starts_at.map(iso);
-        r.et_date = new_date;
-        r.tier = i64::from(src.tier);
-        r.proof_url = src.proof_url.clone();
-
+        let Ok(date) = r.et_date.parse::<NaiveDate>() else {
+            continue;
+        };
         if sight.is_some() {
             r.missing_count = 0;
             if matches!(r.status.as_str(), "scheduled" | "confirmed" | "postponed") {
-                let next = src.series != "fomc" || next_fomc == Some(src.et_date);
-                r.status = if src.et_date <= horizon && next {
+                let next = r.series != "fomc" || next_fomc == Some(date);
+                r.status = if date <= horizon && next {
                     "confirmed".into()
                 } else {
                     "scheduled".into()
                 };
             }
-        } else if live.covers(&src.series, shown_on, today) {
+        } else if live.covers(&r.series, date, today) {
             r.missing_count += 1;
             if r.missing_count >= POSTPONE_AFTER_MISSES {
                 r.status = "postponed".into();
@@ -276,9 +309,22 @@ pub async fn fetch_live(http: &dyn Http, errors: &mut Vec<String>) -> Live {
     }
 }
 
+/// Text the first `RELEASE_PREFIX_BYTES` of a real release page carry (its
+/// title or `og:title`).
+fn release_marker(series: &str) -> Option<&'static str> {
+    match series {
+        "jobs" => Some("Employment Situation"),
+        "cpi" => Some("Consumer Price Index"),
+        "fomc" => Some("FOMC statement"),
+        "fomc_minutes" => Some("FOMC Minutes"),
+        _ => None,
+    }
+}
+
 /// Rows whose release page is up: for each row not yet released that
 /// started at most `RELEASE_LOOKBACK_DAYS` ago and has a release URL, one
-/// GET (at most `max`); 200 marks it released with that URL.
+/// GET of the page's first `RELEASE_PREFIX_BYTES` (at most `max`); a 200
+/// whose prefix carries the release's title marks it released with that URL.
 pub async fn check_releases(
     now: DateTime<Utc>,
     rows: &[EventRow],
@@ -307,11 +353,15 @@ pub async fn check_releases(
         let Some(url) = release_url_for(&r.series, date, r.ref_period.as_deref()) else {
             continue;
         };
+        let Some(marker) = release_marker(&r.series) else {
+            continue;
+        };
         tries += 1;
+        // A 200 page that is not the release (a bot wall) does not count.
         let ok = http
-            .get_capped(&url, &[("User-Agent", USER_AGENT)], MAX_PAGE_BYTES)
+            .get_prefix(&url, &[("User-Agent", USER_AGENT)], RELEASE_PREFIX_BYTES)
             .await
-            .is_ok_and(|resp| resp.status == 200);
+            .is_ok_and(|resp| resp.status == 200 && resp.body.contains(marker));
         if ok {
             let mut r = r.clone();
             r.status = "released".into();
@@ -323,6 +373,11 @@ pub async fn check_releases(
         }
     }
     out
+}
+
+/// The error `check_tick` returns before migration 0008 is applied.
+pub fn missing_table(err: &str) -> bool {
+    err.contains("no such table: macro_events")
 }
 
 /// Whether the daily check already ran on `now`'s ET date.
@@ -356,11 +411,12 @@ pub async fn check_tick(
     let today = et(now).date_naive();
     let from = today - Duration::days(PAST_DAYS);
     out.daily = !checked_today(es, now).await?;
+    let existing = ev.events_between(&ymd(from), "9999-12-31").await?;
     if out.daily {
-        // Mark first: a failing page must not be fetched again every poll.
+        // Marked before the pages: a failing page must not be fetched again
+        // every poll. After the read, so a D1 failure retries the day.
         es.kv_set(KV_CHECKED, &ymd(today), &iso(now)).await?;
     }
-    let existing = ev.events_between(&ymd(from), "9999-12-31").await?;
     let mut changed: BTreeMap<String, EventRow> = BTreeMap::new();
     if out.daily {
         let live = fetch_live(http, &mut out.errors).await;
@@ -656,7 +712,12 @@ mod tests {
         ];
         let rows: Vec<EventRow> = p.iter().map(|p| new_row(p, utc(NOW))).collect();
         let cpi_release = "https://www.bls.gov/news.release/archives/cpi_11102026.htm";
-        let http = FakeHttp::with(&[(cpi_release, 200, "<html>CPI</html>")]);
+        // The real page is 1.37 MB: only its first bytes are read.
+        let page = format!(
+            "<title> Consumer Price Index News Release - 2026 M10 Results</title>{}",
+            "x".repeat(1_400_000)
+        );
+        let http = FakeHttp::with(&[(cpi_release, 200, &page)]);
         // 8:31 ET on CPI day: the CPI page is up; jobs is in the future.
         let out = check_releases(utc("2026-11-10T13:31:00Z"), &rows, &http, 4).await;
         assert_eq!(out.len(), 1);
@@ -674,6 +735,82 @@ mod tests {
             .await
             .is_empty());
         assert_eq!(http.urls().len(), 1);
+        // A 200 that is not the release (a bot wall) marks nothing.
+        let wall = FakeHttp::with(&[(cpi_release, 200, "<title>Access Denied</title>")]);
+        assert!(check_releases(utc("2026-11-10T13:31:00Z"), &rows, &wall, 4)
+            .await
+            .is_empty());
+    }
+
+    #[test]
+    fn a_moved_row_keeps_its_date_when_the_page_fails_or_drops_it() {
+        let snap = vec![plan(
+            "bls:cpi:2026-11",
+            "cpi",
+            "2026-12-10",
+            Some("2026-12-10T13:30:00Z"),
+        )];
+        let first = reconcile(utc(NOW), &snap, &live_cpi(snap.clone()), &[]);
+        let moved_to = vec![plan(
+            "bls:cpi:2026-11",
+            "cpi",
+            "2026-12-15",
+            Some("2026-12-15T13:30:00Z"),
+        )];
+        let moved = reconcile(utc(NOW), &snap, &live_cpi(moved_to), &first);
+        assert_eq!(
+            (moved[0].status.as_str(), moved[0].et_date.as_str()),
+            ("moved", "2026-12-15")
+        );
+        // The page fails the next day: the row stays as it is.
+        assert!(reconcile(utc(NOW), &snap, &Live::default(), &moved).is_empty());
+        // After the release day BLS drops the row from its page: still as it is.
+        let later = live_cpi(vec![plan("bls:cpi:2026-12", "cpi", "2027-01-13", None)]);
+        let out = reconcile(utc("2026-12-16T11:00:00Z"), &snap, &later, &moved);
+        assert!(out.iter().all(|r| r.id != "bls:cpi:2026-11"), "{out:?}");
+    }
+
+    #[test]
+    fn kinds_no_page_lists_follow_the_snapshot() {
+        let mut minutes = plan(
+            "fed:fomc_minutes:2026-10-28",
+            "fomc_minutes",
+            "2026-11-18",
+            Some("2026-11-18T19:00:00Z"),
+        );
+        minutes.ref_period = Some("2026-10-28".into());
+        let rows = reconcile(
+            utc(NOW),
+            std::slice::from_ref(&minutes),
+            &Live::default(),
+            &[],
+        );
+        minutes.et_date = d("2026-11-19");
+        minutes.starts_at = Some(utc("2026-11-19T19:00:00Z"));
+        let out = reconcile(utc(NOW), &[minutes], &Live::default(), &rows);
+        assert_eq!(out[0].status, "moved");
+        assert_eq!(out[0].moved_from.as_deref(), Some("2026-11-18"));
+    }
+
+    #[test]
+    fn bls_rows_after_the_last_listed_date_are_not_missing() {
+        let p = vec![
+            plan("bls:cpi:2026-10", "cpi", "2026-11-10", None),
+            plan("bls:cpi:2027-11", "cpi", "2027-12-10", None),
+        ];
+        let rows = reconcile(utc(NOW), &p, &live_cpi(p.clone()), &[]);
+        // A page that lists only November so far.
+        let short = live_cpi(vec![p[0].clone()]);
+        let out = reconcile(utc(NOW), &p, &short, &rows);
+        assert!(out.iter().all(|r| r.id != "bls:cpi:2027-11"), "{out:?}");
+    }
+
+    #[test]
+    fn the_missing_table_error_is_recognised() {
+        assert!(missing_table(
+            "D1_ERROR: no such table: macro_events: SQLITE_ERROR"
+        ));
+        assert!(!missing_table("D1_ERROR: network"));
     }
 
     #[tokio::test]

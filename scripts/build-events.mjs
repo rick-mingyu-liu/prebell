@@ -7,7 +7,8 @@
 // Market closures are not here: the generator writes them from crates/core/src/clock.rs.
 // BLS answers 403 to browser and default User-Agents; it serves a User-Agent naming a contact.
 // Requests go out at most 4 per second. 200 answers are cached in node_modules/.cache/events for
-// CACHE_HOURS, so reruns the same day write the same bytes.
+// CACHE_HOURS, so reruns the same day write the same bytes (the kept window starts from today's
+// date, so a rerun on another day may drop or add rows at the edges).
 // Usage (repo root):
 //   node scripts/build-events.mjs            generate (fetches what the cache lacks or has old)
 //   node scripts/build-events.mjs --refresh  fetch everything again, whatever the cache
@@ -202,7 +203,8 @@ function parseMinutes(html, year, month, url) {
 function parseBls(html, series, url) {
   const out = [];
   const rows = html.matchAll(
-    /<tr[^>]*>\s*<td>([A-Za-z]+) (\d{4})<\/td>\s*<td>([A-Za-z]+)\.? (\d{1,2}), (\d{4})<\/td>\s*<td>(\d{1,2}):(\d{2}) ([AP])M<\/td>/g,
+    // Cells may carry attributes and a footnote mark after the value (as in crates/core/src/events/parse.rs).
+    /<tr[^>]*>\s*<td[^>]*>([A-Za-z]+) (\d{4})[^<]*(?:<[^/][^>]*>[^<]*<\/[^>]+>)?[^<]*<\/td>\s*<td[^>]*>([A-Za-z]+)\.? (\d{1,2}), (\d{4})[^<]*(?:<[^/][^>]*>[^<]*<\/[^>]+>)?[^<]*<\/td>\s*<td[^>]*>(\d{1,2}):(\d{2}) ([AP])M[^<]*<\/td>/g,
   );
   for (const [, refMonth, refYear, month, day, year, hh, mm, ap] of rows) {
     const date = ymd(Number(year), monthIndex(month), Number(day));

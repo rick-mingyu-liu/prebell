@@ -9,6 +9,8 @@ use async_trait::async_trait;
 
 /// `macro_events` row. `status`: scheduled | confirmed | moved | postponed |
 /// released. Times are UTC ISO 8601 with `Z`; dates ET `YYYY-MM-DD`.
+/// `checked_at` and `updated_at` are set when a check writes the row, which
+/// it does only when something changed.
 #[derive(Debug, Clone, PartialEq)]
 pub struct EventRow {
     pub id: String,
