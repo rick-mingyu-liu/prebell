@@ -156,8 +156,8 @@ The site is the OpenNext Worker in `apps/web` (`wrangler.jsonc`, name `prebell-w
   1. Cloudflare dashboard → Add a domain → `prebell.site` → Free plan. Delete any imported records that point at Namecheap parking.
   2. Namecheap → Domain List → `prebell.site` → Nameservers → Custom DNS: the two nameservers Cloudflare shows. Wait for the zone to show **Active**. This usually takes minutes and can take up to 24 hours.
   3. Deploy the site (step 3 below). The first deploy with the route creates the custom domain and its certificate.
-  4. www: in DNS, add `AAAA www 100::` (proxied). Under Rules → Redirect Rules, use the template "Redirect from WWW to root" (301, keep the query string).
-  5. Check: `curl -sI https://prebell.site/en` returns 200, and `curl -sI https://www.prebell.site/en` returns 301 to `https://prebell.site/en`. Canonical URLs in a page's `<head>` start with `https://prebell.site`.
+  4. Nothing else for www: the deploy also makes `www.prebell.site` a custom domain, and `next.config.ts` permanently redirects (308) every www URL to the apex.
+  5. Check: `curl -sI https://prebell.site/en` returns 200, and `curl -sI https://www.prebell.site/en` returns 308 to `https://prebell.site/en`. Canonical URLs in a page's `<head>` start with `https://prebell.site`.
 - **Email on `prebell.site`** works the same way as TermPocket: role addresses on the domain forward to the owner's Gmail. PreBell sends no mail of its own (Buttondown sends the digest), so there is no `noreply@`. The addresses are:
   - `privacy@prebell.site`, named in the privacy policy for data requests.
   - `support@prebell.site`, named in the terms, and the generator's `SEC_CONTACT` (EDGAR User-Agent).

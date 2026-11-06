@@ -9,7 +9,16 @@ const nextConfig: NextConfig = {
   env: { HAS_AUTHOR_PHOTO: existsSync("public/author.jpg") ? "1" : "0" },
   experimental: { globalNotFound: true },
   async redirects() {
-    return [{ source: "/", destination: "/en", permanent: false }];
+    return [
+      // www is a second custom domain on this Worker; every www URL moves to the apex.
+      {
+        source: "/:path*",
+        has: [{ type: "host", value: "www.prebell.site" }],
+        destination: "https://prebell.site/:path*",
+        permanent: true,
+      },
+      { source: "/", destination: "/en", permanent: false },
+    ];
   },
   async headers() {
     // No ISR in Plan 1: every page is rendered per request and cached briefly at the edge.
