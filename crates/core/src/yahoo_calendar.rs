@@ -5,10 +5,10 @@
 //! are read (spec §8: no consensus).
 
 use async_trait::async_trait;
-use chrono::{NaiveTime, Timelike};
+use chrono::{Duration, NaiveTime, Timelike};
 
 use crate::clock::et;
-use crate::earnings::calendar::{CalendarSource, Seed, SeedRead, TimeSlot};
+use crate::earnings::calendar::{CalendarSource, Seed, SeedRead, TimeSlot, SAME_EVENT_DAYS};
 use crate::providers::{Http, MarketData, ProviderError};
 use crate::yahoo::{EarningsTimes, Yahoo};
 
@@ -44,8 +44,15 @@ fn slot(t: &EarningsTimes, local: NaiveTime) -> TimeSlot {
 /// forward, `earningsTimestamp` is the last report while the start of the
 /// range is already the next one (an estimate when `isEarningsDateEstimate`):
 /// on 2026-11-06, 202 of 561 watchlist symbols, TCOM and PDD among them.
+/// An estimate within `SAME_EVENT_DAYS` of `earningsTimestamp` is that report
+/// again, not the next (CF: reported Nov 4, "estimated" Nov 5); the next one
+/// is a quarter away (every other gap that day was 60 days or more).
 pub fn seed(ticker: &str, t: &EarningsTimes) -> Option<Seed> {
-    let local = et([t.at, t.start].into_iter().flatten().max()?);
+    let at = match (t.at, t.start) {
+        (Some(a), Some(s)) if t.estimate && s - a <= Duration::days(SAME_EVENT_DAYS) => a,
+        (a, s) => a.max(s)?,
+    };
+    let local = et(at);
     Some(Seed {
         ticker: ticker.to_string(),
         date: local.date_naive(),
@@ -166,6 +173,23 @@ mod tests {
             (x.date, x.slot, x.estimate),
             (d("2027-01-28"), TimeSlot::Bmo, false)
         );
+        // `earningsTimestamp` the later of two future values: it wins.
+        let later = EarningsTimes {
+            at: utc("2026-11-19T21:00:00Z"),
+            start: utc("2026-11-17T21:00:00Z"),
+            end: utc("2026-11-17T21:00:00Z"),
+            estimate: false,
+        };
+        assert_eq!(seed("WMT", &later).unwrap().date, d("2026-11-19"));
+        // CF: reported Nov 4, "estimated" Nov 5. The day after is the same
+        // report, so the seed stays on Nov 4 (past, dropped by the refresh).
+        let echo = EarningsTimes {
+            at: utc("2026-11-04T21:00:00Z"),
+            start: utc("2026-11-05T21:00:00Z"),
+            end: utc("2026-11-05T21:00:00Z"),
+            estimate: true,
+        };
+        assert_eq!(seed("CF", &echo).unwrap().date, d("2026-11-04"));
         let none = EarningsTimes {
             at: None,
             start: None,

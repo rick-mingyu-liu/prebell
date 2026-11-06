@@ -23,7 +23,8 @@ use crate::store::Store;
 /// Calendar rows of one ticker this close together describe the same report.
 pub const SAME_EVENT_DAYS: i64 = 21;
 /// Trading days ahead the aggregator's dates are kept for: from a Monday,
-/// this week and the two after; from a Friday, the next two full weeks.
+/// this week and the two after; from any other day, at least the next two
+/// full weeks.
 pub const SEED_DAYS: usize = 15;
 /// Company-announcement checks per daily refresh (each is one search and one LLM call).
 pub const IR_CHECKS: usize = 5;
@@ -199,8 +200,15 @@ pub fn reconcile(
         if p.slot != TimeSlot::Unknown {
             r.time_slot = p.slot.as_str().into();
         }
-        // Rule 3: an aggregator date for the same event disagrees.
-        if let Some(agg) = others.iter().find(|d| rows[d].source == "yahoo").copied() {
+        // Rule 3: an aggregator date for the same event disagrees. A Yahoo
+        // row without a time is its guess (`slot` gives every estimate
+        // `unknown`; firm dates carry 08:30 or 16:00 ET), and the company's
+        // date simply replaces it.
+        if let Some(agg) = others
+            .iter()
+            .find(|d| rows[d].source == "yahoo" && rows[d].time_slot != "unknown")
+            .copied()
+        {
             r.status = "quarantined".into();
             r.conflict_reason = Some(conflict(agg, p.date));
             r.next_check_at = recheck.clone();
@@ -923,7 +931,9 @@ mod tests {
 
     #[test]
     fn rule3_proof_against_aggregator_quarantines() {
-        let old = [existing("2026-10-29", "unconfirmed", "yahoo")];
+        let mut firm = existing("2026-10-29", "unconfirmed", "yahoo");
+        firm.time_slot = "bmo".into();
+        let old = [firm];
         let ch = reconcile(&old, None, Some(&proof("2026-10-30")), today(), utc(NOW));
         let rows = after(&old, &ch);
         assert_eq!(summary(&rows), [s3("2026-10-30", "quarantined", "ir")]);
@@ -935,6 +945,17 @@ mod tests {
             rows[0].next_check_at.as_deref(),
             Some("2026-10-26T23:00:00Z")
         );
+    }
+
+    #[test]
+    fn rule3_a_proof_replaces_an_estimated_date() {
+        // A Yahoo row without a time is a guess: the company's date wins.
+        let old = [existing("2026-10-29", "unconfirmed", "yahoo")];
+        assert_eq!(old[0].time_slot, "unknown");
+        let ch = reconcile(&old, None, Some(&proof("2026-10-30")), today(), utc(NOW));
+        let rows = after(&old, &ch);
+        assert_eq!(summary(&rows), [s3("2026-10-30", "confirmed", "ir")]);
+        assert!(rows[0].conflict_reason.is_none() && rows[0].next_check_at.is_none());
     }
 
     #[test]
@@ -1015,7 +1036,11 @@ mod tests {
             summary(&after(&old, &ch)),
             [s3("2026-10-30", "unconfirmed", "yahoo")]
         );
-        // Against the company's own date: only the check time moves.
+        // Against the company's own date, or a report already filed: only
+        // the check time moves.
+        let filed = [existing("2026-10-27", "reported", "edgar")];
+        let ch = reconcile(&filed, Some(&guess("2026-10-30")), None, today(), utc(NOW));
+        assert_eq!(after(&filed, &ch), filed);
         for status in ["confirmed", "quarantined"] {
             let old = [existing("2026-10-30", status, "ir")];
             let ch = reconcile(&old, Some(&guess("2026-11-05")), None, today(), utc(NOW));
