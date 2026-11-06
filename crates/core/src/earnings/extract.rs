@@ -748,10 +748,10 @@ fn current_column(
 
 fn quarter_words(q: u8) -> &'static [&'static str] {
     match q {
-        1 => &["first quarter", "q1", "1q"],
-        2 => &["second quarter", "q2", "2q"],
-        3 => &["third quarter", "q3", "3q"],
-        4 => &["fourth quarter", "q4", "4q"],
+        1 => &["first quarter", "first-quarter", "q1", "1q"],
+        2 => &["second quarter", "second-quarter", "q2", "2q"],
+        3 => &["third quarter", "third-quarter", "q3", "3q"],
+        4 => &["fourth quarter", "fourth-quarter", "q4", "4q"],
         _ => &[],
     }
 }
@@ -778,7 +778,15 @@ fn verify_period(text: &str, v: &Value) -> Result<FiscalPeriod, String> {
     if !verify_quote(text, &quote) {
         return Err("fiscal period quote not found".into());
     }
-    let lower = quote.to_ascii_lowercase();
+    // Non-breaking hyphens and dashes read as "-" ("third\u{2011}quarter").
+    let lower: String = quote
+        .to_ascii_lowercase()
+        .chars()
+        .map(|c| match c {
+            '\u{2010}' | '\u{2011}' | '\u{2012}' | '\u{2013}' => '-',
+            c => c,
+        })
+        .collect();
     let short = format!("{:02}", fy % 100);
     if !(lower.contains(&fy.to_string())
         || lower.contains(&format!("fy{short}"))
@@ -1832,6 +1840,15 @@ mod tests {
         assert!(p(json!(4), 2027, quote).is_err(), "year not in quote");
         assert!(p(json!(null), 2026, quote).is_ok());
         assert!(p(json!(5), 2026, quote).is_err());
+        // Hyphenated, as in "Southern Company reports third-quarter 2026 earnings",
+        // with an ASCII or a non-breaking hyphen.
+        for (q, word) in [(1, "first"), (2, "second"), (3, "third"), (4, "fourth")] {
+            for dash in ["-", "\u{2011}"] {
+                let quote = format!("Southern Company reports {word}{dash}quarter 2026 earnings");
+                let v = json!({"quarter": q, "fiscal_year": 2026, "quote": quote});
+                assert!(verify_period(&quote, &v).is_ok(), "{quote}");
+            }
+        }
     }
 
     struct FailLlm;

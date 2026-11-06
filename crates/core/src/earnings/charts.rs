@@ -66,6 +66,9 @@ pub(crate) struct Series {
     pub(crate) slots: Vec<Option<Bar>>,
     /// This 8-K's figure, when it is the last slot.
     pub(crate) release: Option<f64>,
+    /// The last slot is this release's quarter: its 8-K bar, or the latest
+    /// XBRL quarter when the 10-Q was filed with the release.
+    pub(crate) latest_is_release: bool,
 }
 
 fn quarter_bar(p: &QuarterPoint) -> Bar {
@@ -223,6 +226,7 @@ pub(crate) fn series(f: &EarningsFacts) -> Vec<Series> {
             name,
             slots: bars(points, release, f.filing_date),
             release,
+            latest_is_release: release.is_some() || release_already_in_trend(points, f.filing_date),
         }
     })
     .collect()
@@ -238,6 +242,7 @@ pub fn charts(f: &EarningsFacts) -> Vec<Chart> {
         name,
         slots: b,
         release,
+        ..
     } in series(f)
     {
         let (what_en, what_zh) = match name {
@@ -425,6 +430,22 @@ mod tests {
         let c = charts(&f);
         assert!(!c[0].svg.contains("8-K"));
         assert_eq!(c[0].svg.matches("<rect").count(), 2);
+    }
+
+    #[test]
+    fn series_marks_the_release_quarter_last() {
+        let f = facts();
+        assert!(series(&f).iter().all(|s| s.latest_is_release));
+        // The 10-Q came with the 8-K: no 8-K bar, but the last XBRL bar is the release's.
+        let mut g = facts();
+        g.filing_date = "2026-07-31".parse().unwrap();
+        assert!(series(&g)
+            .iter()
+            .all(|s| s.release.is_none() && s.latest_is_release));
+        // Release quarter unverified and not in the trend: the last bar is an older quarter.
+        let mut h = facts();
+        h.fiscal_period = Field::Missing { reason: "x".into() };
+        assert!(series(&h).iter().all(|s| !s.latest_is_release));
     }
 
     #[test]
