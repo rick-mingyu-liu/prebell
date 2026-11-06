@@ -322,7 +322,9 @@ pub struct EarningsAllowed {
 pub struct RowCell {
     pub value: f64,
     label: Vec<String>,
-    other_period: bool,
+    /// For a cell of another period than the row's current one, the
+    /// current fiscal year (a "2025年同期" is before it).
+    other_period: Option<i32>,
     /// A per-share row's amount measure ("Non-GAAP net income"), named in
     /// full; a note row's label must also have a word that is not
     /// `GENERIC`.
@@ -388,15 +390,20 @@ const ZH: &[(&str, &[&str])] = &[
     ("segment", &["分部"]),
 ];
 
-/// Phrases a sentence uses for another period than the current one; never
-/// a bare "from" ("from retail customers") or "较" ("盈利能力较强").
-const PERIOD_EN: &[&str] = &[
+/// Phrases that make the figure right after them another period's ("up
+/// from $1,920 million", "较上年同期的19.20亿"); never a bare "from"
+/// ("from retail customers") or "较" ("盈利能力较强").
+const LEAD_EN: &[&str] = &[
     "up from",
     "down from",
     "compared with",
     "compared to",
     "versus",
     "vs",
+];
+const LEAD_ZH: &[&str] = &["较上年", "较去年", "较同期"];
+/// Phrases that make a figure in their clause another period's.
+const PERIOD_EN: &[&str] = &[
     "year earlier",
     "year ago",
     "prior year",
@@ -406,17 +413,7 @@ const PERIOD_EN: &[&str] = &[
     "year-to-date",
     "year to date",
 ];
-const PERIOD_ZH: &[&str] = &[
-    "较上年",
-    "较去年",
-    "较同期",
-    "上年同期",
-    "去年同期",
-    "年同期",
-    "前九个月",
-    "前三季度",
-    "年初至今",
-];
+const PERIOD_ZH: &[&str] = &["上年同期", "去年同期", "前九个月", "前三季度", "年初至今"];
 
 /// Label words too common to name a row on their own: a label needs one
 /// more ("Southern Power" has "southern"; "Net income" alone names no row).
@@ -484,6 +481,54 @@ fn label_at(label: &[String], measure: bool, before: &str) -> Option<usize> {
         .try_fold(0, |end, at| Some(end.max(at?)))
 }
 
+/// Whether the clause of `sentence` holding the number at byte `at`
+/// (between "，", ",", "；" or ";", not a thousands comma) places it in
+/// another period than fiscal `year`: a `LEAD_*` phrase right before it
+/// with no other number between, a `PERIOD_*` phrase anywhere in the
+/// clause, or "<earlier year>年同期". In "earned $1,920 million, up from
+/// $2,272 million a year earlier" only $2,272 is the prior year's.
+fn other_period(sentence: &str, at: usize, year: i32) -> bool {
+    static SAME_PERIOD: OnceLock<Regex> = OnceLock::new();
+    let same_period =
+        SAME_PERIOD.get_or_init(|| Regex::new(r"(\d{4})年同期").expect("valid built-in regex"));
+    let bytes = sentence.as_bytes();
+    let boundary = |i: usize, c: char| {
+        matches!(c, '，' | '；' | ';')
+            || c == ','
+                && !(i > 0
+                    && bytes[i - 1].is_ascii_digit()
+                    && bytes.get(i + 1).is_some_and(u8::is_ascii_digit))
+    };
+    let start = sentence[..at]
+        .char_indices()
+        .rev()
+        .find(|&(i, c)| boundary(i, c))
+        .map_or(0, |(i, c)| i + c.len_utf8());
+    let end = sentence[at..]
+        .char_indices()
+        .find(|&(i, c)| boundary(at + i, c))
+        .map_or(sentence.len(), |(i, _)| at + i);
+    let clause = &sentence[start..end];
+    let lower = clause.to_ascii_lowercase();
+    let lead_in = &lower[..at - start];
+    let led = LEAD_EN
+        .iter()
+        .filter_map(|w| last_ascii_word(lead_in, w).map(|i| i + w.len()))
+        .chain(
+            LEAD_ZH
+                .iter()
+                .filter_map(|w| lead_in.rfind(w).map(|i| i + w.len())),
+        )
+        .any(|end| !lead_in[end..].contains(|c: char| c.is_ascii_digit()));
+    led || PERIOD_EN
+        .iter()
+        .any(|w| last_ascii_word(&lower, w).is_some())
+        || PERIOD_ZH.iter().any(|w| clause.contains(w))
+        || same_period
+            .captures_iter(clause)
+            .any(|c| c[1].parse::<i32>().is_ok_and(|y| y < year))
+}
+
 impl RowCell {
     /// The sentence names this cell's row before the number (at byte `at`),
     /// with no other row named between them, and a cell of another period
@@ -497,12 +542,9 @@ impl RowCell {
             .iter()
             .filter(|(l, _)| *l != self.label.as_slice())
             .all(|(l, m)| label_at(l, *m, before).is_none_or(|other| other <= own));
-        let lower = sentence.to_ascii_lowercase();
-        let period = !self.other_period
-            || PERIOD_EN
-                .iter()
-                .any(|w| last_ascii_word(&lower, w).is_some())
-            || PERIOD_ZH.iter().any(|w| sentence.contains(w));
+        let period = self
+            .other_period
+            .is_none_or(|year| other_period(sentence, at, year));
         nearest && period
     }
 }
@@ -561,7 +603,7 @@ fn row_label(quote: &str) -> &str {
 /// A note's table-row cells at its table's scale: whole-number amount
 /// cells ("$2,272", "52", "$1,234.5"), not percentages; none for a
 /// per-share row ("Diluted EPS $2 $1.66").
-fn push_note_cells(out: &mut Vec<RowCell>, n: &Note) {
+fn push_note_cells(out: &mut Vec<RowCell>, n: &Note, year: i32) {
     let label_text = row_label(&n.quote);
     let label = label_words(label_text);
     let lower = label_text.to_ascii_lowercase();
@@ -578,7 +620,7 @@ fn push_note_cells(out: &mut Vec<RowCell>, n: &Note) {
             out.push(RowCell {
                 value: c.value.abs() * n.scale,
                 label: label.clone(),
-                other_period: n.current.is_some_and(|cur| cur != c.value.abs()),
+                other_period: n.current.filter(|&cur| cur != c.value.abs()).map(|_| year),
                 measure: false,
             });
         }
@@ -591,7 +633,7 @@ fn push_note_cells(out: &mut Vec<RowCell>, n: &Note) {
 /// right before the figure's own cell is its period. No cell of a row of
 /// per-share figures only ("Diluted EPS $2 $1.66"), and no cell with
 /// decimals ("$12,345.67"), scales.
-fn push_figure_cells(out: &mut Vec<RowCell>, fig: &Figure, scale: f64) {
+fn push_figure_cells(out: &mut Vec<RowCell>, fig: &Figure, scale: f64, year: i32) {
     let label_text = row_label(&fig.quote);
     let label: Vec<String> = label_words(label_text)
         .into_iter()
@@ -613,7 +655,7 @@ fn push_figure_cells(out: &mut Vec<RowCell>, fig: &Figure, scale: f64) {
             out.push(RowCell {
                 value: c.value.abs() * scale,
                 label: label.clone(),
-                other_period: current != Some(c.value.abs()),
+                other_period: (current != Some(c.value.abs())).then_some(year),
                 measure: true,
             });
         }
@@ -696,6 +738,10 @@ fn push_quantities(out: &mut Vec<(f64, &'static [&'static str])>, quote: &str) {
 /// Every number an earnings post may cite, by how it may be written.
 pub fn allowed(f: &EarningsFacts) -> EarningsAllowed {
     let mut a = EarningsAllowed::default();
+    let fiscal_year = match &f.fiscal_period {
+        Field::Value(p) => p.fiscal_year,
+        _ => f.filing_date.year(),
+    };
     let year = f64::from(f.filing_date.year());
     a.any.extend([year - 1.0, year, year + 1.0]);
     let mut quotes: Vec<&str> = Vec::new();
@@ -710,7 +756,7 @@ pub fn allowed(f: &EarningsFacts) -> EarningsAllowed {
             a.any.push(fig.value);
             push_quote(&mut a, &fig.quote, fig.scale);
             if let Some(scale) = fig.table_scale {
-                push_figure_cells(&mut a.rows, fig, scale);
+                push_figure_cells(&mut a.rows, fig, scale, fiscal_year);
             }
             quotes.push(&fig.quote);
         }
@@ -720,7 +766,7 @@ pub fn allowed(f: &EarningsFacts) -> EarningsAllowed {
             for n in ns {
                 push_quote(&mut a, &n.quote, 1.0);
                 if n.scale != 1.0 {
-                    push_note_cells(&mut a.rows, n);
+                    push_note_cells(&mut a.rows, n, fiscal_year);
                 }
                 quotes.push(&n.quote);
             }
@@ -1012,6 +1058,15 @@ pub(crate) mod tests {
                 ("Traditional electric operating companies earned $1,920 million from retail customers.", Lang::En),
                 ("Income from traditional electric operating companies was $4,654 million.", Lang::En),
                 ("传统电力运营公司净利润19.20亿美元，盈利能力较强。", Lang::Zh),
+                // A period phrase binds to its own clause, and "up from" to
+                // the figure after it.
+                ("Traditional electric operating companies earned $1,920 million, up from $2,272 million a year earlier.", Lang::En),
+                ("传统电力运营公司净利润19.20亿美元，上年同期22.72亿美元。", Lang::Zh),
+                ("Traditional electric operating companies earned $4,654 million in the quarter, and nine months results improved.", Lang::En),
+                ("Traditional electric operating companies earned $1,920 million this quarter vs. expectations.", Lang::En),
+                // Only an earlier year's "同期".
+                ("传统电力运营公司今年同期净利润为19.20亿美元。", Lang::Zh),
+                ("传统电力运营公司2026年同期净利润为19.20亿美元。", Lang::Zh),
                 // A wrong digit or scale.
                 ("Traditional electric operating companies earned $2,722 million.", Lang::En),
                 ("传统电力运营公司净利润2.272亿美元。", Lang::Zh),
