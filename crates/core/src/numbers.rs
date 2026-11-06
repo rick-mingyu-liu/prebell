@@ -370,26 +370,70 @@ pub fn check(text: &str, lang: Lang, allowed: &[f64]) -> Result<(), Vec<String>>
 pub struct Allowed<'a> {
     /// Any number.
     pub any: &'a [f64],
-    /// A quantity in its own unit ("13 MTPA" is 13 million tonnes): never a
-    /// "$" amount or a percentage.
-    pub quantities: &'a [f64],
-    /// A count ("twelve months"): only a bare integer.
+    /// A quantity in its own unit, with the unit words one of which must
+    /// follow it ("13 MTPA" is 13 million tonnes: "1300万吨"); never money
+    /// or a percentage.
+    pub quantities: &'a [(f64, &'a [&'a str])],
+    /// A count ("twelve months"): only a bare integer right before a time
+    /// unit ("12 months", "12个月").
     pub counts: &'a [f64],
+    /// A year: only as four digits ("2024", not "2,024").
+    pub years: &'a [f64],
     /// A rate from a table quote ("Revenue $13,467 $14,766 10% 10%"): only
     /// a percentage.
     pub rates: &'a [f64],
     /// A value that holds only in context: `ok` gets the sentence (or line)
-    /// the number sits in.
+    /// the number sits in and where in it the number starts.
     pub in_context: &'a [(f64, Holds<'a>)],
 }
 
-/// Whether a value holds in the sentence a number sits in.
-pub type Holds<'a> = &'a dyn Fn(&str) -> bool;
+/// Whether a value holds in a sentence, for a number at a byte offset in it.
+pub type Holds<'a> = &'a dyn Fn(&str, usize) -> bool;
 
-/// The sentence or line around byte `at`: up to a line break, "。", "!",
-/// "?" or a period that ends a sentence (not a decimal point). A "；"
-/// joins clauses of one sentence ("...22.72亿美元；前九个月为46.54亿美元").
-pub fn sentence_at(text: &str, at: usize) -> &str {
+/// Time units a count may precede.
+const TIME_UNITS: &[&str] = &[
+    "months",
+    "month",
+    "years",
+    "year",
+    "quarters",
+    "quarter",
+    "weeks",
+    "week",
+    "days",
+    "day",
+    "个月",
+    "个季度",
+    "季度",
+    "年",
+    "周",
+    "天",
+];
+
+/// Money written after a number ("1300万美元", "港元", "人民币").
+const MONEY_AFTER: &[&str] = &[
+    "美元",
+    "港元",
+    "日元",
+    "欧元",
+    "英镑",
+    "人民币",
+    "元",
+    "dollar",
+    "usd",
+    "hkd",
+    "rmb",
+    "eur",
+    "gbp",
+    "jpy",
+    "cny",
+];
+
+/// The sentence or line around byte `at`, and where it starts: up to a line
+/// break, "。", "!", "?" or a period that ends a sentence (not a decimal
+/// point). A "；" joins clauses of one sentence ("...22.72亿美元；前九个月为
+/// 46.54亿美元").
+pub fn sentence_at(text: &str, at: usize) -> (usize, &str) {
     let ends = |i: usize, c: char| {
         matches!(c, '\n' | '。' | '!' | '?' | '！' | '？')
             || c == '.' && !text[i + 1..].starts_with(|d: char| d.is_ascii_digit())
@@ -403,29 +447,49 @@ pub fn sentence_at(text: &str, at: usize) -> &str {
         .char_indices()
         .find(|&(i, c)| ends(at + i, c))
         .map_or(text.len(), |(i, _)| at + i);
-    &text[start..end]
+    (start, &text[start..end])
 }
 
-/// `check` with values that hold only as a quantity, a count or in context.
+/// `check` with values that hold only as a quantity, a count, a year, a
+/// rate or in context.
 pub fn check_allowed(text: &str, lang: Lang, a: &Allowed) -> Result<(), Vec<String>> {
     let bad: Vec<String> = extract(text, lang)
         .into_iter()
         .filter(|n| {
             let bare = n.multiplier == 1.0 && n.decimals == 0 && !n.signed;
-            let after = text[n.at + n.raw.len()..].trim_start();
+            let after = text[n.at + n.raw.len()..].trim_start().to_lowercase();
             let money = n.raw.contains('$')
-                || ["美元", "元", "dollar", "USD"]
-                    .iter()
-                    .any(|u| after.starts_with(u));
+                || text[..n.at].ends_with(['€', '£', '¥', '￥'])
+                || MONEY_AFTER.iter().any(|u| after.starts_with(u));
             let plain = !n.is_percent && !money;
+            let core = n.raw.trim_start_matches(['+', '-', '−']);
+            // Main read "412百万" as 412: what it accepted so still passes.
+            let main_reading = ["百万", "千万"].iter().any(|u| n.raw.ends_with(u)) && {
+                let mut plain = n.clone();
+                plain.value /= n.multiplier;
+                plain.multiplier = 1.0;
+                a.any.iter().any(|&v| matches(&plain, v))
+            };
             !(is_small_count(n)
+                || main_reading
                 || a.any.iter().any(|&v| matches(n, v))
-                || plain && a.quantities.iter().any(|&v| matches(n, v))
-                || plain && bare && a.counts.iter().any(|&v| matches(n, v))
+                || plain
+                    && a.quantities.iter().any(|(v, units)| {
+                        matches(n, *v) && units.iter().any(|u| after.starts_with(u))
+                    })
+                || plain
+                    && bare
+                    && TIME_UNITS.iter().any(|u| after.starts_with(u))
+                    && a.counts.iter().any(|&v| matches(n, v))
+                || bare
+                    && core.len() == 4
+                    && core.chars().all(|c| c.is_ascii_digit())
+                    && a.years.iter().any(|&v| matches(n, v))
                 || n.is_percent && a.rates.iter().any(|&v| matches(n, v))
-                || a.in_context
-                    .iter()
-                    .any(|(v, ok)| matches(n, *v) && ok(sentence_at(text, n.at))))
+                || a.in_context.iter().any(|(v, ok)| {
+                    let (start, s) = sentence_at(text, n.at);
+                    matches(n, *v) && ok(s, n.at - start)
+                }))
         })
         .map(|n| n.raw)
         .collect();
@@ -483,6 +547,16 @@ mod tests {
             read("Adjusted EPS $1.62 ~$7.25 billion"),
             [(1.62, 1.0), (7.25, 1e9)]
         );
+    }
+
+    #[test]
+    fn a_hundred_million_word_keeps_main_reading_too() {
+        // Main read "412百万美元" as 412; it still passes where 412 is
+        // allowed, and as 412 million where that is.
+        assert_eq!(check("412百万美元", Lang::Zh, &[412.0]), Ok(()));
+        assert_eq!(check("412百万美元", Lang::Zh, &[4.12e8]), Ok(()));
+        assert!(check("413百万美元", Lang::Zh, &[412.0]).is_err());
+        assert!(check("4.12千万美元", Lang::Zh, &[4.12e8]).is_err());
     }
 
     // Brief's exact cases.

@@ -301,10 +301,13 @@ pub struct EarningsAllowed {
     /// Figure values, the numbers in kept quotes (scaled for table quotes),
     /// trend values, and the filing and fiscal years with their neighbours.
     pub any: Vec<f64>,
-    /// Sizes an industry unit implies ("13 MTPA" is 13 million tonnes).
-    pub quantities: Vec<f64>,
-    /// Spelled-out time counts ("eighteen months") and the trend's years.
+    /// Sizes an industry unit implies ("13 MTPA" is 13 million tonnes), with
+    /// the words a draft writes that unit in.
+    pub quantities: Vec<(f64, &'static [&'static str])>,
+    /// Spelled-out time counts ("eighteen months").
     pub counts: Vec<f64>,
+    /// The years the trend's quarters fall in.
+    pub years: Vec<f64>,
     /// Rates in table quotes.
     pub rates: Vec<f64>,
     /// Table-row cells at the table's scale (SO's segment row "$2,272" is
@@ -320,6 +323,10 @@ pub struct RowCell {
     pub value: f64,
     label: Vec<String>,
     other_period: bool,
+    /// A per-share row's amount measure ("Non-GAAP net income"), named in
+    /// full; a note row's label must also have a word that is not
+    /// `GENERIC`.
+    measure: bool,
 }
 
 /// Label words that are not the label.
@@ -381,53 +388,54 @@ const ZH: &[(&str, &[&str])] = &[
     ("segment", &["分部"]),
 ];
 
-/// Words a sentence uses for another period than the current one.
+/// Phrases a sentence uses for another period than the current one; never
+/// a bare "from" ("from retail customers") or "较" ("盈利能力较强").
 const PERIOD_EN: &[&str] = &[
+    "up from",
+    "down from",
+    "compared with",
+    "compared to",
+    "versus",
+    "vs",
     "year earlier",
     "year ago",
-    "a year",
     "prior year",
     "prior-year",
     "last year",
-    "previous year",
-    "compared",
-    "versus",
-    "vs",
-    "from",
     "nine months",
-    "six months",
     "year-to-date",
     "year to date",
-    "ytd",
-    "full year",
-    "full-year",
 ];
 const PERIOD_ZH: &[&str] = &[
-    "上年",
-    "去年",
-    "同期",
-    "相比",
-    "较",
-    "此前",
+    "较上年",
+    "较去年",
+    "较同期",
+    "上年同期",
+    "去年同期",
+    "年同期",
     "前九个月",
     "前三季度",
-    "前六个月",
-    "上半年",
     "年初至今",
-    "全年",
-    "累计",
 ];
 
-/// `w` in `hay` with no ASCII letter or digit right before or after it, so
-/// "gaap" is a word in "非gaap净利润" too.
-fn ascii_word(hay: &str, w: &str) -> bool {
-    hay.match_indices(w).any(|(i, _)| {
-        let before = hay[..i].chars().next_back();
-        let after = hay[i + w.len()..].chars().next();
-        !before.is_some_and(|c| c.is_ascii_alphanumeric())
-            && !after.is_some_and(|c| c.is_ascii_alphanumeric())
-    })
-}
+/// Label words too common to name a row on their own: a label needs one
+/// more ("Southern Power" has "southern"; "Net income" alone names no row).
+const GENERIC: &[&str] = &[
+    "companies",
+    "company",
+    "power",
+    "electric",
+    "net",
+    "non",
+    "income",
+    "revenue",
+    "revenues",
+    "sales",
+    "segment",
+    "adjusted",
+    "operating",
+    "gaap",
+];
 
 fn label_words(label: &str) -> Vec<String> {
     label
@@ -438,31 +446,83 @@ fn label_words(label: &str) -> Vec<String> {
         .collect()
 }
 
+/// `w` in `hay` with no ASCII letter or digit right before or after it, so
+/// "gaap" is a word in "非gaap净利润" too: where its last such occurrence
+/// starts.
+fn last_ascii_word(hay: &str, w: &str) -> Option<usize> {
+    hay.match_indices(w)
+        .filter(|&(i, _)| {
+            let before = hay[..i].chars().next_back();
+            let after = hay[i + w.len()..].chars().next();
+            !before.is_some_and(|c| c.is_ascii_alphanumeric())
+                && !after.is_some_and(|c| c.is_ascii_alphanumeric())
+        })
+        .map(|(i, _)| i)
+        .last()
+}
+
+/// Where row label `label` (its words, in English or their `ZH` rendering)
+/// ends in `before`: the start of its last word there. `None` unless every
+/// word is there and, unless the label is a `measure`, one is more than a
+/// `GENERIC` word.
+fn label_at(label: &[String], measure: bool, before: &str) -> Option<usize> {
+    if label.is_empty() || !measure && label.iter().all(|w| GENERIC.contains(&w.as_str())) {
+        return None;
+    }
+    let lower = before.to_ascii_lowercase();
+    label
+        .iter()
+        .map(|w| {
+            let zh = ZH
+                .iter()
+                .find(|(en, _)| en == w)
+                .map_or(&[][..], |(_, zh)| *zh);
+            let en = last_ascii_word(&lower, w);
+            let zh = zh.iter().filter_map(|z| lower.rfind(z)).max();
+            en.max(zh)
+        })
+        .try_fold(0, |end, at| Some(end.max(at?)))
+}
+
 impl RowCell {
-    fn holds(&self, sentence: &str) -> bool {
-        let lower = sentence.to_lowercase();
-        let named = !self.label.is_empty()
-            && self.label.iter().all(|w| {
-                ascii_word(&lower, w)
-                    || ZH
-                        .iter()
-                        .find(|(en, _)| en == w)
-                        .is_some_and(|(_, zh)| zh.iter().any(|z| sentence.contains(z)))
-            });
+    /// The sentence names this cell's row before the number (at byte `at`),
+    /// with no other row named between them, and a cell of another period
+    /// than the row's current one has a period phrase.
+    fn holds(&self, sentence: &str, at: usize, labels: &[(&[String], bool)]) -> bool {
+        let before = &sentence[..at];
+        let Some(own) = label_at(&self.label, self.measure, before) else {
+            return false;
+        };
+        let nearest = labels
+            .iter()
+            .filter(|(l, _)| *l != self.label.as_slice())
+            .all(|(l, m)| label_at(l, *m, before).is_none_or(|other| other <= own));
+        let lower = sentence.to_ascii_lowercase();
         let period = !self.other_period
-            || PERIOD_EN.iter().any(|w| ascii_word(&lower, w))
+            || PERIOD_EN
+                .iter()
+                .any(|w| last_ascii_word(&lower, w).is_some())
             || PERIOD_ZH.iter().any(|w| sentence.contains(w));
-        named && period
+        nearest && period
     }
 }
 
 impl EarningsAllowed {
     /// `numbers::check_allowed` against these values.
     pub fn check(&self, text: &str, lang: Lang) -> Result<(), Vec<String>> {
+        let mut labels: Vec<(&[String], bool)> = self
+            .rows
+            .iter()
+            .map(|c| (c.label.as_slice(), c.measure))
+            .collect();
+        labels.dedup();
         let holds: Vec<_> = self
             .rows
             .iter()
-            .map(|c| move |s: &str| c.holds(s))
+            .map(|c| {
+                let labels = &labels;
+                move |s: &str, at: usize| c.holds(s, at, labels)
+            })
             .collect();
         let in_context: Vec<(f64, numbers::Holds)> = self
             .rows
@@ -482,6 +542,7 @@ impl EarningsAllowed {
                 any: &self.any,
                 quantities: &self.quantities,
                 counts: &self.counts,
+                years: &self.years,
                 rates: &self.rates,
                 in_context: &in_context,
             },
@@ -518,6 +579,7 @@ fn push_note_cells(out: &mut Vec<RowCell>, n: &Note) {
                 value: c.value.abs() * n.scale,
                 label: label.clone(),
                 other_period: n.current.is_some_and(|cur| cur != c.value.abs()),
+                measure: false,
             });
         }
     }
@@ -552,6 +614,7 @@ fn push_figure_cells(out: &mut Vec<RowCell>, fig: &Figure, scale: f64) {
                 value: c.value.abs() * scale,
                 label: label.clone(),
                 other_period: current != Some(c.value.abs()),
+                measure: true,
             });
         }
     }
@@ -597,10 +660,15 @@ fn push_counts(out: &mut Vec<f64>, quote: &str) {
     }
 }
 
-/// Sizes an industry unit implies: "13 MTPA" is 13 million tonnes a year
-/// (a Chinese draft writes 1300万吨), "1,450 MMcfe" 1.45 billion cubic feet.
-fn push_quantities(out: &mut Vec<f64>, quote: &str) {
+/// Sizes an industry unit implies, with the words a draft writes that unit
+/// in: "13 MTPA" is 13 million tonnes ("1300万吨"), "1,450 MMcfe" 1.45
+/// billion cubic feet ("14.5亿立方英尺").
+fn push_quantities(out: &mut Vec<(f64, &'static [&'static str])>, quote: &str) {
     static R: OnceLock<Regex> = OnceLock::new();
+    const TONNES: &[&str] = &["tonnes", "tonne", "tons", "ton", "metric", "吨", "mtpa"];
+    const BARRELS: &[&str] = &["barrels", "barrel", "boe", "bbl", "桶", "油当量"];
+    const BTU: &[&str] = &["btu", "mmbtu", "英热"];
+    const CUBIC_FEET: &[&str] = &["cubic", "cf", "mcf", "bcf", "立方英尺", "立方"];
     let r = R.get_or_init(|| {
         Regex::new(r"(?:^|[^\d,.])(\d{1,3}(?:,\d{3})+(?:\.\d+)?|\d+(?:\.\d+)?)\s?(MTPA|MMBOE|MMboe|MMBbl|MMbbl|MMBtu|MMbtu|MMcfe?|Bcfe?|MBOE|Mboe|MBbl|Mbbl|Mcfe?)\b")
             .expect("valid built-in regex")
@@ -609,12 +677,19 @@ fn push_quantities(out: &mut Vec<f64>, quote: &str) {
         let Ok(v) = c[1].replace(',', "").parse::<f64>() else {
             continue;
         };
-        let size = match &c[2] {
+        let unit = &c[2];
+        let size = match unit {
             u if u.starts_with("MM") || u == "MTPA" => 1e6,
             u if u.starts_with('B') => 1e9,
             _ => 1e3,
         };
-        out.push(v * size);
+        let words = match unit.to_ascii_lowercase() {
+            u if u == "mtpa" => TONNES,
+            u if u.contains("btu") => BTU,
+            u if u.contains("cf") => CUBIC_FEET,
+            _ => BARRELS,
+        };
+        out.push((v * size, words));
     }
 }
 
@@ -660,7 +735,7 @@ pub fn allowed(f: &EarningsFacts) -> EarningsAllowed {
     if let Field::Value(t) = &f.trend {
         for p in t.revenue.iter().chain(&t.eps_diluted).chain(&t.net_income) {
             a.any.push(p.value);
-            a.counts.push(f64::from(p.period_end.year()));
+            a.years.push(f64::from(p.period_end.year()));
         }
     }
     a
@@ -919,20 +994,24 @@ pub(crate) mod tests {
                 ("Traditional Electric Operating Companies earned $2.27 billion.", Lang::En),
                 ("Southern Power earned $52 million against $3 million a year earlier.", Lang::En),
                 ("传统电力运营公司净利润22.72亿美元，上年同期19.20亿美元；Southern Power净利润为5200万美元，2025年同期为300万美元。", Lang::Zh),
-                ("传统电力运营公司前九个月为46.54亿美元。",
-                    Lang::Zh,
-                ),
-                (
-                    "传统电力运营公司本季度净利润为22.72亿美元，上年同期为19.20亿美元；前九个月为46.54亿美元，上年同期为39.94亿美元。", Lang::Zh),
+                ("传统电力运营公司前九个月为46.54亿美元。", Lang::Zh),
+                ("传统电力运营公司本季度净利润为22.72亿美元，上年同期为19.20亿美元；前九个月为46.54亿美元，上年同期为39.94亿美元。", Lang::Zh),
                 ("| Traditional Electric Operating Companies | $2,272 million |", Lang::En),
             ],
             &[
                 // The segment figure as the company's.
                 ("Southern Company net income was $2,272 million.", Lang::En),
                 ("南方公司净利润为22.72亿美元。", Lang::Zh),
-                // A prior-year cell as this quarter.
+                // Another segment's figure under the nearest label.
+                ("南方公司旗下传统电力运营公司净利润为5200万美元。", Lang::Zh),
+                ("Southern Company's traditional electric operating companies earned $52 million, while Southern Power grew.", Lang::En),
+                // A prior-year or year-to-date cell as this quarter: a bare
+                // "from" or "较" is no period phrase.
                 ("Traditional electric operating companies earned $1,920 million this quarter.", Lang::En),
                 ("传统电力运营公司本季度净利润为19.20亿美元。", Lang::Zh),
+                ("Traditional electric operating companies earned $1,920 million from retail customers.", Lang::En),
+                ("Income from traditional electric operating companies was $4,654 million.", Lang::En),
+                ("传统电力运营公司净利润19.20亿美元，盈利能力较强。", Lang::Zh),
                 // A wrong digit or scale.
                 ("Traditional electric operating companies earned $2,722 million.", Lang::En),
                 ("传统电力运营公司净利润2.272亿美元。", Lang::Zh),
@@ -940,47 +1019,50 @@ pub(crate) mod tests {
                 ("Southern Power earned $52 billion.", Lang::En),
             ],
         );
-        // A note stored before the scale was kept is read as written: no
-        // scale is guessed.
-        f.highlights = Field::Value(vec![note(
-            "Traditional Electric Operating Companies $2,272 $1,920 $4,654 $3,994",
-            1.0,
+        // Generic words alone name no row.
+        f.highlights = Field::Value(vec![row_note(
+            "Net income $3,864 $3,216",
+            1e6,
+            Some(3864.0),
         )]);
         verdicts(
             &f,
             &[],
             &[
-                (
-                    "Traditional electric operating companies earned $2,272 million.",
-                    Lang::En,
-                ),
-                ("传统电力运营公司净利润22.72亿美元", Lang::Zh),
+                ("Net income was $3,864 million.", Lang::En),
+                ("净利润38.64亿美元", Lang::Zh),
             ],
         );
-        // EMR: a segment EBITA row of one quarter (no year header), with
-        // margins; the margin is a rate.
-        f.highlights = Field::Value(vec![row_note(
+        // A note stored before the scale was kept, or a row the exhibit
+        // gives no year line for (EMR's segment EBITA, AMGN's GAAP and
+        // non-GAAP columns: extraction leaves them at scale 1), is read as
+        // written: no scale is guessed.
+        for quote in [
+            "Traditional Electric Operating Companies $2,272 $1,920 $4,654 $3,994",
             "Control Systems & Software $297 23.8% $99 $16 $412 33.1%",
-            1e6,
-            None,
-        )]);
-        verdicts(
-            &f,
-            &[
-                ("Control Systems & Software adjusted segment EBITA was $412 million, a 33.1% margin.", Lang::En),
-                ("控制系统与软件分部本季度调整后分部 EBITA 为4.12亿美元，调整后利润率为33.1%。", Lang::Zh),
-            ],
-            &[
-                ("Segment EBITA was $412 million.", Lang::En),
-                ("控制系统与软件分部 EBITA 为41.2亿美元。", Lang::Zh),
-                ("Control Systems & Software had a $33.1 million margin.", Lang::En),
-                ("Control Systems & Software EBITA was $421 million.", Lang::En),
-            ],
-        );
+            "Net income $3,864 $3,520 $3,216 $3,055",
+        ] {
+            f.highlights = Field::Value(vec![note(quote, 1.0)]);
+            verdicts(
+                &f,
+                &[],
+                &[
+                    ("Traditional electric operating companies earned $2,272 million.", Lang::En),
+                    ("传统电力运营公司净利润22.72亿美元", Lang::Zh),
+                    ("Control Systems & Software adjusted segment EBITA was $412 million.", Lang::En),
+                    ("Control Systems & Software adjusted segment EBITA was $99 million.", Lang::En),
+                    ("Control Systems & Software adjusted segment EBITA was $297 million.", Lang::En),
+                    ("Control Systems & Software adjusted segment EBITA was $298 million this quarter.", Lang::En),
+                    ("控制系统与软件分部调整后EBITA为9900万美元。", Lang::Zh),
+                    ("Amgen net income was $3,216 million.", Lang::En),
+                    ("GAAP net income was $3,520 million.", Lang::En),
+                ],
+            );
+        }
         // Per-share rows never scale, integer cells included.
         f.highlights = Field::Value(vec![
-            row_note("Diluted EPS $1.77 $1.55", 1e6, None),
-            row_note("Diluted EPS $2 $1.66", 1e6, None),
+            row_note("Diluted EPS $1.77 $1.55", 1e6, Some(1.77)),
+            row_note("Diluted EPS $2 $1.66", 1e6, Some(2.0)),
         ]);
         verdicts(
             &f,
@@ -995,7 +1077,7 @@ pub(crate) mod tests {
     #[test]
     fn a_per_share_row_keeps_its_amount_cells_in_the_table_scale() {
         // AMD: non-GAAP net income and EPS alternate in one row; $3,471 is
-        // this quarter's, $2,760 the prior quarter's.
+        // this quarter's, $2,760 the prior quarter's, $1,965 a year ago.
         let mut f = facts();
         let eps = |amount: &str, value: f64, quote: &str| {
             Field::Value(Figure {
@@ -1015,29 +1097,20 @@ pub(crate) mod tests {
         verdicts(
             &f,
             &[
-                (
-                    "Non-GAAP net income was $3,471 million, or $2.09 per share.",
-                    Lang::En,
-                ),
+                ("Non-GAAP net income was $3,471 million, or $2.09 per share.", Lang::En),
                 ("非GAAP净利润34.7亿美元，每股2.09美元。", Lang::Zh),
-                (
-                    "调整后（非GAAP）摊薄每股收益为2.09美元，对应非GAAP净利润34.71亿美元。",
-                    Lang::Zh,
-                ),
-                (
-                    "Non-GAAP net income rose from $2,760 million in the prior quarter.",
-                    Lang::En,
-                ),
+                ("调整后（非GAAP）摊薄每股收益为2.09美元，对应非GAAP净利润34.71亿美元。", Lang::Zh),
+                ("Non-GAAP net income was $3,471 million, up from $1,965 million a year earlier.", Lang::En),
             ],
             &[
                 ("$2.09 million", Lang::En),
                 ("非GAAP净利润347.1亿美元", Lang::Zh),
                 ("Non-GAAP net income was $3,417 million.", Lang::En),
                 ("Revenue was $3,471 million.", Lang::En),
-                (
-                    "Non-GAAP net income was $2,760 million this quarter.",
-                    Lang::En,
-                ),
+                ("GAAP net income was $3,471 million.", Lang::En),
+                ("Non-GAAP net income was $2,760 million this quarter.", Lang::En),
+                ("Non-GAAP net income from operations was $2,760 million.", Lang::En),
+                ("Non-GAAP net income rose from $1,965 million.", Lang::En),
             ],
         );
         // A row of per-share figures only, or a per-share figure of $1,000
@@ -1087,6 +1160,9 @@ pub(crate) mod tests {
                 ("Operating cash flow of $4.3 million.", Lang::En),
                 // A unit's size is no dollar amount or rate.
                 ("a $13 million charge", Lang::En),
+                ("13 million customers", Lang::En),
+                ("1300万港元", Lang::Zh),
+                ("1300万人民币", Lang::Zh),
                 ("1300万美元", Lang::Zh),
             ],
         );
@@ -1138,6 +1214,7 @@ pub(crate) mod tests {
                 ("增加190万", Lang::Zh),
                 ("lines grew 12%", Lang::En),
                 ("a $12 charge", Lang::En),
+                ("opened 12 stores", Lang::En),
             ],
         );
         // Counts under eleven, and counts not of time, add nothing.
@@ -1172,6 +1249,7 @@ pub(crate) mod tests {
             &[
                 ("since 2023", Lang::En),
                 ("a $2,024 charge", Lang::En),
+                ("2,024 stores", Lang::En),
                 ("2024%", Lang::En),
             ],
         );

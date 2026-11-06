@@ -1491,7 +1491,7 @@ fn quarter_first_above(lines: &Lines, j: usize) -> bool {
 const ROW_HEADING_LINES: usize = 60;
 
 /// The scale of the table `quote` is a whole row of, and the row's
-/// current-period cell when its year header gives one. A row is a whole
+/// current-period cell, which its year header must give. A row is a whole
 /// line of the exhibit with at least two cells, no size word, and nothing
 /// but cells after its first one (footnote markers and "%" aside: "Acme
 /// opened 52 new stores and closed 3 ..." is prose). Its scale heading
@@ -1523,9 +1523,9 @@ fn row_scale(lines: &Lines, quote: &str) -> Option<(f64, Option<f64>)> {
     }
     // The row's periods: the nearest line above it that ends in two or
     // more years ("Net Income – As Reported 2026 2025 2026 2025"), one per
-    // cell. No such line: the row is of one period (EMR's "2026 Q4 ...
-    // Adjusted Segment EBITA ..." columns). One that does not settle which
-    // cell is the current quarter: the row is not scaled at all.
+    // cell. Without one, or one that does not settle which cell is the
+    // current quarter, the row is not scaled at all: EMR's "2026 Q4 ...
+    // Adjusted Segment EBITA" columns are measures a sentence could swap.
     static YEARS: OnceLock<Regex> = OnceLock::new();
     let years_re = YEARS.get_or_init(|| {
         Regex::new(r"(?:\b(?:19|20)\d\d\b\s*){2,}$").expect("valid built-in regex")
@@ -1541,23 +1541,19 @@ fn row_scale(lines: &Lines, quote: &str) -> Option<(f64, Option<f64>)> {
             (j, years)
         })
     });
-    let current = match header {
-        None => None,
-        Some((j, years)) => {
-            let latest = *years.iter().max()?;
-            let repeated = years.iter().filter(|&&y| y == latest).count() > 1;
-            if years.len() != cells.len() || repeated && !quarter_first_above(lines, j) {
-                return None;
-            }
-            let col = years.iter().position(|&y| y == latest)?;
-            Some(
-                quote[cells[col].0..cells[col].1]
-                    .replace(',', "")
-                    .parse()
-                    .ok()?,
-            )
-        }
-    };
+    let (j, years) = header?;
+    let latest = *years.iter().max()?;
+    let repeated = years.iter().filter(|&&y| y == latest).count() > 1;
+    if years.len() != cells.len() || repeated && !quarter_first_above(lines, j) {
+        return None;
+    }
+    let col = years.iter().position(|&y| y == latest)?;
+    let current = Some(
+        quote[cells[col].0..cells[col].1]
+            .replace(',', "")
+            .parse()
+            .ok()?,
+    );
     Some((t.scale, current))
 }
 
@@ -3373,6 +3369,24 @@ mod tests {
             ),
         );
         assert_eq!(notes[0].scale, 1.0);
+        // A row with no year line above it, or one that does not settle the
+        // current quarter, is not scaled: EMR's segment EBITA columns are
+        // measures of one quarter, AMGN's are GAAP and non-GAAP per year.
+        let emr = "(dollars in millions)\nPage 19\n2026 Q4 Adjusted Segment EBITA EBIT EBIT Margin Amortization of Intangibles Restructuring and Related Costs Adjusted Segment EBITA Adjusted Segment EBITA Margin\nControl Systems & Software $297 23.8% $99 $16 $412 33.1%";
+        let amgn = "(In millions, except per-share data)\nThree months ended September 30, 2026 Three months ended September 30, 2025\nGAAP Non-GAAP GAAP Non-GAAP\nNet income $3,864 $3,520 $3,216 $3,055";
+        for (text, quote) in [
+            (
+                emr,
+                "Control Systems & Software $297 23.8% $99 $16 $412 33.1%",
+            ),
+            (amgn, "Net income $3,864 $3,520 $3,216 $3,055"),
+        ] {
+            let notes = verify_notes(
+                text,
+                Some(&json!([{"quote": quote, "summary_en": "A row."}])),
+            );
+            assert_eq!((notes[0].scale, notes[0].current), (1.0, None), "{quote}");
+        }
         // The same row is still no company figure.
         let q = "Traditional Electric Operating Companies $2,272 $1,920 $4,654 $3,994";
         for m in [Metric::Revenue, Metric::NetIncome] {
