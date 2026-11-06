@@ -123,7 +123,7 @@ impl<H: Http, T: Timer> Edgar<H, T> {
         Ok(Self {
             http,
             timer,
-            user_agent: format!("PreBell/0.1 (+https://prebell.ai; {contact})"),
+            user_agent: format!("PreBell/0.1 (+https://prebell.site; {contact})"),
             used: Cell::new(false),
         })
     }
@@ -466,7 +466,7 @@ pub(crate) mod tests {
                 .collect(),
             ..Default::default()
         };
-        Edgar::new(http, RecTimer::default(), "ops@prebell.ai").unwrap()
+        Edgar::new(http, RecTimer::default(), "ops@prebell.site").unwrap()
     }
 
     #[test]
@@ -537,7 +537,7 @@ pub(crate) mod tests {
         assert_eq!(seen.len(), 3);
         for (_, h) in seen.iter() {
             let ua = h.iter().find(|(k, _)| k == "User-Agent").unwrap();
-            assert_eq!(ua.1, "PreBell/0.1 (+https://prebell.ai; ops@prebell.ai)");
+            assert_eq!(ua.1, "PreBell/0.1 (+https://prebell.site; ops@prebell.site)");
         }
         // No pause before the first request, one before each later one.
         assert_eq!(*e.timer.0.borrow(), vec![GAP_MS, GAP_MS]);

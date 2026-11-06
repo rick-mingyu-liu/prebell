@@ -1305,7 +1305,7 @@ mod tests {
         let edgar = Edgar::new(
             CountingHttp::new(http),
             RecTimer::default(),
-            "ops@prebell.ai",
+            "ops@prebell.site",
         )
         .unwrap();
         let inner = llm(true, false);

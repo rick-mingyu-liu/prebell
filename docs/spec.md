@@ -1,7 +1,7 @@
 # Bilingual daily market site — design
 
 Date: 2026-10-29. Status: draft for owner review.
-Name: PreBell (盘前铃), domain prebell.ai
+Name: PreBell (盘前铃), domain prebell.site (bought 2026-11-05; planned as prebell.ai)
 
 ## 1. Intent
 
@@ -129,7 +129,7 @@ EDGAR poller (every 2–5 min, market hours) ─┤
 
 ## 12. Open for the owner
 
-- Site name and domain: PreBell (盘前铃), prebell.ai (domain not yet bought). Use a config value for the EDGAR User-Agent contact email.
+- Site name and domain: PreBell (盘前铃), prebell.site (bought 2026-11-05). Use a config value for the EDGAR User-Agent contact email.
 - Whether premarket/recap pages are indexed by search engines. Designer's default: index them.
 
 ## 13. Build approach (owner)

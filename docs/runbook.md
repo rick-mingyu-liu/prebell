@@ -158,6 +158,16 @@ The site is the OpenNext Worker in `apps/web` (`wrangler.jsonc`, name `prebell-w
   3. Deploy the site (step 3 below). The first deploy with the route creates the custom domain and its certificate.
   4. www: in DNS, add `AAAA www 100::` (proxied). Under Rules → Redirect Rules, use the template "Redirect from WWW to root" (301, keep the query string).
   5. Check: `curl -sI https://prebell.site/en` returns 200, and `curl -sI https://www.prebell.site/en` returns 301 to `https://prebell.site/en`. Canonical URLs in a page's `<head>` start with `https://prebell.site`.
+- **Email on `prebell.site`** works the same way as TermPocket: role addresses on the domain forward to the owner's Gmail. PreBell sends no mail of its own (Buttondown sends the digest), so there is no `noreply@`. The addresses are:
+  - `privacy@prebell.site`, named in the privacy policy for data requests.
+  - `support@prebell.site`, named in the terms, and the generator's `SEC_CONTACT` (EDGAR User-Agent).
+
+  The DNS is on Cloudflare, so forwarding is Cloudflare Email Routing (free), not Namecheap's. One-time setup (owner only):
+  1. Cloudflare → `prebell.site` → Email → Email Routing → Get started. Delete the imported Namecheap `eforward*` MX records and their SPF TXT when asked, and let Email Routing add its own MX and SPF.
+  2. Destination addresses: add the owner's Gmail and click the verification link Cloudflare emails to it.
+  3. Routing rules: add custom addresses `privacy` and `support`, each sending to that Gmail. Turn on the catch-all only if wanted.
+  4. Check: send a message to each address from another account and confirm it arrives.
+  Do this before deploying the generator with `SEC_CONTACT = "support@prebell.site"`, so SEC can reach the address.
 - **Deploy order** (owner only): first apply any new D1 migrations, then deploy the generator, then the site.
   1. `cd crates/generator && pnpm exec wrangler d1 migrations apply prebell --remote`. Migration `0006_covers.sql` adds `posts.cover_key` and `post_translations.cover_line1` / `cover_line2`; both Workers read them, so it must run before either deploys.
   2. `pnpm exec wrangler deploy` in `crates/generator`.
@@ -184,7 +194,7 @@ Company logos (the white tag on earnings-check covers) and partner logos are sta
 
 Tiers 2 and 3 become 64px PNG tiles: a full-bleed app icon fills the tile, and anything else sits on a white tile (near-black when the mark is too pale for white). `SKIP` in the script keeps a ticker as a text chip on purpose. Partner marks (`PARTNERS`) are square tiles shown before the partner's name: OKX from Simple Icons, the others from each partner's own site or newsroom.
 
-- **Run it:** downloads go out one per second with the User-Agent `PreBell logo build (https://prebell.ai)`. Definitive answers (2xx, and 4xx other than 408/429) are cached in `apps/web/node_modules/.cache/logos`, so a rerun gives the same files; `pnpm logos --offline` uses only the cache. Delete the cache to fetch everything again (a full run takes about 8 minutes). The script prints each tier's tickers, the ones left without a logo, and why a Commons file was skipped. Before committing, look at every new or changed tile at 18px on the white cover tag.
+- **Run it:** downloads go out one per second with the User-Agent `PreBell logo build (https://prebell.site)`. Definitive answers (2xx, and 4xx other than 408/429) are cached in `apps/web/node_modules/.cache/logos`, so a rerun gives the same files; `pnpm logos --offline` uses only the cache. Delete the cache to fetch everything again (a full run takes about 8 minutes). The script prints each tier's tickers, the ones left without a logo, and why a Commons file was skipped. Before committing, look at every new or changed tile at 18px on the white cover tag.
 - **When it fails:** the script builds in `apps/web/node_modules/.cache/logos-build` and moves the result into `public/logos/` and `src/lib/logos.generated.ts` only when the whole run succeeds. A failed run leaves the committed files as they were. It stops with an error when Wikidata, Commons or a partner file doesn't answer (a timeout, 429 or 5xx is never cached, so just run it again later). It also stops when a ticker that has a logo in the committed manifest would lose it; pass `--allow-shrink` only if that is intended. Company sites that fail the same way are reported at the end and retried on the next run.
 - **Browser caching:** `apps/web/public/_headers` serves `/logos/*` with a one-year `immutable` Cache-Control, so a tile replaced under the same file name may keep showing the old image to returning visitors for up to a year.
 - **Add or fix a company logo:** if Simple Icons has the brand, add `TICKER: "slug"` to `COMPANIES`. Otherwise, if Wikidata picks a wordmark that is too wide, find the company's own square mark on Commons and add `TICKER: "File name.svg"` to `COMMONS` (the licence check still applies). If the result is unreadable at 18px, add the ticker to `SKIP` with the reason. Use only the company's own current mark.
