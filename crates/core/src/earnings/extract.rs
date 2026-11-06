@@ -398,42 +398,64 @@ fn names_metric(m: Metric, label: &str, after: &str, group: Option<&str>) -> Res
         && (has_word(&near_after, "per share") || has_word(&near_after, "per diluted share"));
     // A per-share row may take its name from its group line: SPG's "Net
     // income attributable to common stockholders $1.54 ..." under "BASIC
-    // AND DILUTED EARNINGS PER COMMON SHARE:". A group naming funds from
-    // operations or dividends names no EPS, and a "Diluted" row under it,
-    // naming no measure itself, is that measure.
+    // AND DILUTED EARNINGS PER COMMON SHARE:". The row must still name
+    // earnings ("Book value", "Operating income" or "Declared" under "PER
+    // SHARE DATA:" do not), and a group naming another basis or measure
+    // (FFO, dividends, pro forma, combined, recast, supplemental, as
+    // adjusted, basic only; for GAAP EPS non-GAAP, adjusted or core) names
+    // no EPS. Under such a group a row naming no measure itself ("Diluted
+    // $3.09" under an FFO group) is that measure.
     let group = group.filter(|_| per_share);
-    let group_other = group.is_some_and(|g| {
-        other.iter().any(|w| has_word(g, w)) || has_word(g, "dividend") || has_word(g, "dividends")
+    let words = label_keywords(m);
+    let own = per_share_after || words.iter().any(|w| has_word(label, w));
+    let any = |s: &str, ws: &[&str]| ws.iter().any(|w| has_word(s, w));
+    let basic = |s: &str| has_word(s, "basic") && !has_word(s, "diluted");
+    let group_basis = group.is_some_and(|g| {
+        other.iter().any(|w| has_word(g, w))
+            || any(
+                g,
+                &[
+                    "dividend",
+                    "dividends",
+                    "combined",
+                    "supplemental",
+                    "recast",
+                    "as adjusted",
+                    "predecessor",
+                    "successor",
+                ],
+            )
+            || basic(g)
+            || m == Metric::EpsGaap && (non_gaap_wording(g) || has_word(g, "core"))
     });
-    if group_other
-        && !["income", "earnings", "eps"]
-            .iter()
-            .any(|w| has_word(label, w))
-    {
+    if group_basis && (!own || !any(label, &["income", "earnings", "eps", "profit"])) {
         return Err(format!(
-            "the row's group {:?} names another measure, not {}",
+            "the row's group {:?} names another basis or measure, not {}",
             group.unwrap_or_default(),
             m.key()
         ));
     }
-    // A "Basic" row under the group is basic EPS, not diluted.
-    let basic = has_word(label, "basic") && !has_word(label, "diluted");
-    let group_names_eps = !group_other
-        && !basic
+    let group_names_eps = !own
+        && !basic(label)
+        && any(
+            label,
+            &["income", "earnings", "eps", "diluted", "net", "profit"],
+        )
+        && !any(label, &["operating", "pre-tax", "pretax", "before"])
         && group.is_some_and(|g| {
-            [
-                "diluted",
-                "per share",
-                "per common share",
-                "per diluted share",
-                "earnings per",
-                "eps",
-            ]
-            .iter()
-            .any(|w| has_word(g, w))
+            any(
+                g,
+                &[
+                    "diluted",
+                    "per share",
+                    "per common share",
+                    "per diluted share",
+                    "earnings per",
+                    "eps",
+                ],
+            )
         });
-    let words = label_keywords(m);
-    if per_share_after || group_names_eps || words.iter().any(|w| has_word(label, w)) {
+    if own || group_names_eps {
         return Ok(());
     }
     Err(format!(
@@ -809,32 +831,42 @@ impl<'a> Table<'a> {
             .collect()
     }
 
-    /// The column basis labels on the line right below header `h`, one per
-    /// year with "% Change" columns left out: whether each column is pro
-    /// forma ("Pro Forma Pro Forma % Change Actual Actual % Change" at
-    /// CHTR, which reports the Cox merger's combined quarter first).
-    /// `None` unless every word on the line is such a label.
-    fn pro_forma_columns(&self, h: &Header) -> Option<Vec<bool>> {
+    /// The column basis labels on a line below header `h`, one per
+    /// year with "% Change" columns left out: whether each column is not
+    /// the reported basis ("Pro Forma Pro Forma % Change Actual Actual %
+    /// Change" at CHTR, which reports the Cox merger's combined quarter
+    /// first; also combined, as adjusted, supplemental, recast, predecessor
+    /// and successor columns). `None` when the line names no such basis;
+    /// `Some(None)` when it names one but does not read as one label per
+    /// year, which reads no column.
+    fn unreported_columns(&self, h: &Header) -> Option<Option<Vec<bool>>> {
         static LABEL: OnceLock<Regex> = OnceLock::new();
+        static BASIS: OnceLock<Regex> = OnceLock::new();
         let label = LABEL.get_or_init(|| {
-            Regex::new(r"(?i)\b(pro\s+forma)\b(?:\s*\(\w{1,2}\))?|\b(?:actual|as\s+reported|reported)\b|(%\s*change\b|\bchange\b)")
+            Regex::new(r"(?i)\b((?:unaudited\s+)?pro[\s-]?forma(?:\s+combined)?|combined|as\s+adjusted|supplemental|recast|predecessor|successor)\b(?:\s*\(\w{1,2}\))?|\b(?:actual|as\s+reported|reported)\b|(%\s*change\b|\bchange\b)")
                 .expect("valid built-in regex")
         });
+        let basis = BASIS.get_or_init(|| {
+            Regex::new(r"(?i)\b(?:pro[\s-]?forma|combined|as\s+adjusted|supplemental|recast|predecessor|successor)\b")
+                .expect("valid built-in regex")
+        });
+        // The first line naming a basis among the figure-free lines right
+        // below the header ("Unaudited" may sit between); a row such as
+        // "Pro forma revenue $1,000" is not one.
         let l = self.lines;
-        let below = h.line + 1;
-        if below >= l.line_of(self.quote_at) {
-            return None;
-        }
-        let line = l.line(below, self.quote_at);
+        let line = (h.line + 1..l.line_of(self.quote_at))
+            .map(|i| l.line(i, self.quote_at))
+            .take_while(|s| !s.contains(|c: char| c.is_ascii_digit()))
+            .find(|s| basis.is_match(s))?;
         if !label.replace_all(line, "").trim().is_empty() {
-            return None;
+            return Some(None);
         }
         let columns: Vec<bool> = label
             .captures_iter(line)
             .filter(|c| c.get(2).is_none())
             .map(|c| c.get(1).is_some())
             .collect();
-        (columns.len() == h.years.len()).then_some(columns)
+        Some((columns.len() == h.years.len()).then_some(columns))
     }
 
     /// Why the quote's table or row group is about a part of the company,
@@ -1215,14 +1247,15 @@ fn current_column(
         return col == 0;
     };
     let years = &h.years;
-    // Pro forma columns are never the reported figure; with some, the
-    // reported quarter is the latest year among the others, when the
-    // header names the quarter alone.
-    if let Some(pro_forma) = t
-        .pro_forma_columns(&h)
-        .filter(|p| p.len() == cells.len() && p.contains(&true))
-    {
-        if pro_forma[col] || !t.quarter_only(h.line) {
+    // Pro forma (or other unreported) columns are never the figure; with
+    // some, the reported quarter is the latest year among the others, when
+    // the header names the quarter alone and the quote has every labelled
+    // column ("Total Revenues $16,505" cut short is no first column).
+    if let Some(bases) = t.unreported_columns(&h) {
+        let Some(pro_forma) = bases else {
+            return false;
+        };
+        if pro_forma.len() != cells.len() || pro_forma[col] || !t.quarter_only(h.line) {
             return false;
         }
         let reported: Vec<usize> = (0..years.len()).filter(|&i| !pro_forma[i]).collect();
@@ -2893,6 +2926,236 @@ mod tests {
             ),
         );
         assert!(r.unwrap_err().contains("does not name"));
+    }
+
+    #[test]
+    fn a_group_never_upgrades_another_basis_or_measure_to_gaap_eps() {
+        let hdr = "ACME CORP\nSTATEMENTS OF OPERATIONS\n(Dollars in millions, except per share amounts)\nThree Months Ended September 30,\n2026 2025";
+        let verify = |m: Metric, group: &str, row: &str, amount: &str| {
+            let t = format!("{hdr}\nNet income $600 $500\n{group}\n{row}");
+            verify_figure(&t, m, &raw(amount, "units", false, row))
+        };
+        for (group, row, amount) in [
+            // Another basis.
+            (
+                "Non-GAAP diluted earnings per share:",
+                "Net income attributable to common stockholders $1.54 $1.46",
+                "$1.54",
+            ),
+            (
+                "Adjusted diluted EPS:",
+                "Net income attributable to common stockholders $1.54 $1.46",
+                "$1.54",
+            ),
+            ("Adjusted diluted EPS:", "Diluted $1.54 $1.46", "$1.54"),
+            (
+                "Core earnings per diluted share:",
+                "Net income $1.20 $1.10",
+                "$1.20",
+            ),
+            (
+                "Combined diluted earnings per share:",
+                "Net income $1.20 $1.10",
+                "$1.20",
+            ),
+            (
+                "Supplemental diluted earnings per share:",
+                "Net income $1.20 $1.10",
+                "$1.20",
+            ),
+            (
+                "Recast diluted earnings per share:",
+                "Net income $1.20 $1.10",
+                "$1.20",
+            ),
+            (
+                "As adjusted diluted earnings per share:",
+                "Net income $1.20 $1.10",
+                "$1.20",
+            ),
+            (
+                "Pro forma earnings per share:",
+                "Net income $1.20 $1.10",
+                "$1.20",
+            ),
+            (
+                "Pro-forma diluted earnings per share:",
+                "Net income $1.20 $1.10",
+                "$1.20",
+            ),
+            (
+                "Basic earnings per share:",
+                "Net income $1.20 $1.10",
+                "$1.20",
+            ),
+            (
+                "Earnings per share – basic:",
+                "Net income $1.20 $1.10",
+                "$1.20",
+            ),
+            (
+                "Basic net income per share:",
+                "Net income attributable to Acme $1.20 $1.10",
+                "$1.20",
+            ),
+            (
+                "BASIC AND DILUTED EARNINGS PER SHARE:",
+                "Basic $1.54 $1.86",
+                "$1.54",
+            ),
+            // Another measure.
+            ("PER SHARE DATA:", "Book value $30.12 $29.50", "$30.12"),
+            (
+                "PER SHARE DATA:",
+                "Tangible book value $22.10 $21.00",
+                "$22.10",
+            ),
+            (
+                "PER SHARE DATA:",
+                "Operating cash flow $3.10 $2.90",
+                "$3.10",
+            ),
+            ("PER SHARE DATA:", "Revenue $12.00 $11.00", "$12.00"),
+            ("PER SHARE DATA:", "Free cash flow $2.50 $2.20", "$2.50"),
+            ("PER SHARE DATA:", "Operating income $1.80 $1.70", "$1.80"),
+            ("PER SHARE DATA:", "Declared $0.65 $0.60", "$0.65"),
+            ("PER SHARE DATA:", "Dividends declared $0.65 $0.60", "$0.65"),
+            ("Dividends per share:", "Net income $0.65 $0.60", "$0.65"),
+            (
+                "Earnings per share:",
+                "Continuing operations $1.30 $1.10",
+                "$1.30",
+            ),
+            (
+                "FUNDS FROM OPERATIONS PER SHARE:",
+                "Diluted $3.09 $3.25",
+                "$3.09",
+            ),
+        ] {
+            let r = verify(Metric::EpsGaap, group, row, amount);
+            assert!(r.is_err(), "{group} / {row}: {r:?}");
+        }
+        for (m, group, row, amount) in [
+            (
+                Metric::EpsGaap,
+                "Earnings per common share:",
+                "Net income $1.20 $1.10",
+                "$1.20",
+            ),
+            (
+                Metric::EpsGaap,
+                "Diluted earnings per share:",
+                "Net income attributable to Acme $1.18 $1.08",
+                "$1.18",
+            ),
+            (
+                Metric::EpsGaap,
+                "BASIC AND DILUTED EARNINGS PER COMMON SHARE:",
+                "Net income attributable to common stockholders $1.54 $1.86",
+                "$1.54",
+            ),
+            (
+                Metric::EpsGaap,
+                "Earnings per share:",
+                "Basic and diluted $1.54 $1.86",
+                "$1.54",
+            ),
+            (
+                Metric::EpsNonGaap,
+                "Adjusted earnings per share:",
+                "Net income $1.60 $1.50",
+                "$1.60",
+            ),
+            (
+                Metric::EpsNonGaap,
+                "Non-GAAP diluted earnings per share:",
+                "Net income attributable to common stockholders $1.54 $1.46",
+                "$1.54",
+            ),
+        ] {
+            let r = verify(m, group, row, amount);
+            assert!(r.is_ok(), "{m:?} {group} / {row}: {r:?}");
+        }
+    }
+
+    #[test]
+    fn basis_labels_fail_closed() {
+        let tbl = |labels: &str| {
+            format!("Third Quarter Financial Results\n(in millions)\nThree Months Ended September 30,\n2026 2025 2026 2025\n{labels}\nRevenues:\nInternet $7,097 $7,366 (3.7) % $6,395 $5,971 7.1%\nTotal Revenues $16,505 $16,764 (1.5) % $14,922 $13,672 9.1%")
+        };
+        let full = "Total Revenues $16,505 $16,764 (1.5) % $14,922 $13,672 9.1%";
+        let verify = |t: &str, amount: &str, q: &str| {
+            verify_figure(t, Metric::Revenue, &raw(amount, "millions", false, q))
+        };
+        // A truncated CHTR quote is never read past its labelled columns;
+        // one that keeps every labelled cell reads the reported one.
+        let t = tbl("Pro Forma Pro Forma % Change Actual Actual % Change");
+        for q in [
+            "Total Revenues $16,505",
+            "Total Revenues $16,505 $16,764",
+            "Total Revenues $16,505 $16,764 (1.5) %",
+            "Total Revenues $16,505 $16,764 (1.5) % $14,922",
+        ] {
+            for a in ["$16,505", "$14,922"] {
+                let r = verify(&t, a, q);
+                assert!(r.is_err(), "{a} in {q:?}: {r:?}");
+            }
+        }
+        let q = "Total Revenues $16,505 $16,764 (1.5) % $14,922 $13,672";
+        assert!(verify(&t, "$16,505", q).is_err());
+        assert!(verify(&t, "$14,922", q).is_ok());
+        // Other spellings and bases: never the first, unreported column;
+        // the reported one when there is one.
+        for (labels, reported) in [
+            ("Pro-Forma Pro-Forma % Change Actual Actual % Change", true),
+            ("Proforma Proforma % Change Actual Actual % Change", true),
+            (
+                "Pro Forma Combined Pro Forma Combined % Change Actual Actual % Change",
+                true,
+            ),
+            (
+                "Unaudited Pro Forma Unaudited Pro Forma % Change Actual Actual % Change",
+                true,
+            ),
+            ("Combined Combined % Change Actual Actual % Change", true),
+            (
+                "As adjusted As adjusted % Change As reported As reported % Change",
+                true,
+            ),
+            (
+                "Supplemental Supplemental % Change Actual Actual % Change",
+                true,
+            ),
+            ("Recast Recast % Change Actual Actual % Change", true),
+            (
+                "Predecessor Predecessor % Change Successor Successor % Change",
+                false,
+            ),
+            (
+                "Pro Forma (Cox) Pro Forma (Cox) % Change Actual Actual % Change",
+                false,
+            ),
+            (
+                "Pro Forma for the Cox Transactions % Change Actual Actual % Change",
+                false,
+            ),
+        ] {
+            let t = tbl(labels);
+            let r = verify(&t, "$16,505", full);
+            assert!(r.is_err(), "{labels}: {r:?}");
+            let r = verify(&t, "$14,922", full);
+            assert_eq!(r.is_ok(), reported, "{labels}: {r:?}");
+        }
+        // Below an "Unaudited" line too.
+        let t = tbl("Unaudited\nPro Forma Pro Forma % Change Actual Actual % Change");
+        assert!(verify(&t, "$16,505", full).is_err());
+        assert!(verify(&t, "$14,922", full).is_ok());
+        // Lines that name no basis leave the other rules alone.
+        for labels in ["Unaudited", "Actual Actual % Change Actual Actual % Change"] {
+            let t = format!("(in millions)\nThree Months Ended September 30,\n2026 2025\n{labels}\nTotal Revenues $14,922 $13,672");
+            let r = verify(&t, "$14,922", "Total Revenues $14,922 $13,672");
+            assert!(r.is_ok(), "{labels}: {r:?}");
+        }
     }
 
     #[test]
