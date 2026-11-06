@@ -244,7 +244,6 @@ html:lang(zh-Hans) .partners-strip .partners-label { font-variant-caps: normal; 
 .partners-strip:not(:has(a)) { display: none; }
 .partners-strip a { font-weight: 600; text-decoration: none; }
 .partners-strip a:hover, .partners-strip a:focus-visible { text-decoration: underline; }
-.partners-strip .partners-note { margin: 0 0 0 auto; color: var(--muted); font-size: 12px; }
 
 /* Footer: About, Privacy & Terms and the language link. */
 .site-footer { border-top: 3px double var(--rule-strong); margin-top: 2rem; padding: 1rem 0 2rem; }
@@ -349,7 +348,6 @@ html:lang(zh-Hans) .cal-slot { font-variant-caps: normal; letter-spacing: 0.02em
   .author { flex-wrap: wrap; }
   .author-all { margin-left: 0; align-self: auto; flex-basis: 100%; }
   .signup-form { max-width: none; }
-  .partners-strip .partners-note { margin-left: 0; flex-basis: 100%; }
   .cal-day { grid-template-columns: minmax(0, 1fr); }
   .post-row { grid-template-columns: minmax(0, 1fr); gap: 0.6rem 0; }
   .post-row .cover { height: 130px; }
