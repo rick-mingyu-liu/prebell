@@ -9,6 +9,7 @@ mod store;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use prebell_core::cover::card::{cards_tick, wants_card};
+use prebell_core::digest::{digest_tick, parse_mode};
 use prebell_core::earnings::calendar::{refresh_tick, yahoo_seeding, CalendarSource};
 use prebell_core::earnings::foreign::foreign_read;
 use prebell_core::earnings::run::{build_tick, poll_job};
@@ -307,6 +308,19 @@ impl JobRunner for Runner<'_> {
                 let src: Option<&dyn CalendarSource> = if yahoo { Some(&cal) } else { None };
                 let o = refresh_tick(t, store, store, src, &ns, llm.as_ref()).await?;
                 Ok((format!("{o:?}"), false))
+            }
+            EarningsStep::Digest => {
+                // Neither EDGAR nor an LLM; without the key a logged no-op.
+                let mode = parse_mode(text(env, "DIGEST_MODE").as_deref())?;
+                let key = env
+                    .secret("BUTTONDOWN_API_KEY")
+                    .map(|v| v.to_string())
+                    .unwrap_or_default();
+                let log = |m: &str| console_log!("{m}");
+                let line = digest_tick(t, store, store, store, store, &self.http, &key, mode, &log)
+                    .await
+                    .map_err(|e| redact(&e, &[&key]))?;
+                Ok((redact(&line, &[&key]), false))
             }
         }
     }

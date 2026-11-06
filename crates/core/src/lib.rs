@@ -4,6 +4,7 @@ pub mod claude;
 pub mod clock;
 pub mod cover;
 pub mod deepseek;
+pub mod digest;
 pub mod earnings;
 pub mod edgar;
 pub mod events;

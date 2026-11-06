@@ -137,6 +137,16 @@ impl Http for WorkerHttp {
             .await
     }
 
+    async fn patch_json(
+        &self,
+        url: &str,
+        headers: &[(&str, &str)],
+        body: &serde_json::Value,
+    ) -> Result<HttpResp, ProviderError> {
+        self.send(Method::Patch, url, headers, Some(body.to_string()))
+            .await
+    }
+
     async fn get_capped(
         &self,
         url: &str,

@@ -65,6 +65,10 @@ pub async fn run_job(
             Err(e) if step == EarningsStep::Events => {
                 Err(config_error(now, "events", &e, store).await)
             }
+            // The digest too: a bad DIGEST_MODE is not an earnings problem.
+            Err(e) if step == EarningsStep::Digest => {
+                Err(config_error(now, "digest", &e, store).await)
+            }
             // One alert per day for every earnings step: they share the config.
             Err(e) => Err(config_error(now, "earnings", &e, store).await),
         },
@@ -195,6 +199,22 @@ mod tests {
         assert!(s.has_alert("config:events:2026-11-10").await.unwrap());
         // The earnings alert is still free for a real earnings config error.
         assert!(!s.has_alert("config:earnings:2026-11-10").await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn a_digest_error_alerts_under_its_own_key() {
+        let s = MemStore::default();
+        let r = FakeRunner {
+            content_err: Some("unknown DIGEST_MODE: sheduled (use draft or scheduled)".into()),
+            content_calls: RefCell::new(vec![]),
+            earnings_calls: RefCell::new(vec![]),
+        };
+        let now = utc("2026-11-13T23:00:00Z");
+        let line = run_job(now, "digest", &s, &r).await.unwrap_err();
+        assert!(line.contains("digest: config error"), "{line}");
+        assert_eq!(*r.earnings_calls.borrow(), [EarningsStep::Digest]);
+        assert!(s.has_alert("config:digest:2026-11-13").await.unwrap());
+        assert!(!s.has_alert("config:earnings:2026-11-13").await.unwrap());
     }
 
     #[tokio::test]

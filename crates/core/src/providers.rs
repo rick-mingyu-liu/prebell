@@ -50,6 +50,16 @@ pub trait Http {
         headers: &[(&str, &str)],
         body: &serde_json::Value,
     ) -> Result<HttpResp, ProviderError>;
+    /// A JSON `PATCH`. Only the digest uses it (Buttondown), so clients
+    /// without one keep this default, which sends nothing.
+    async fn patch_json(
+        &self,
+        _url: &str,
+        _headers: &[(&str, &str)],
+        _body: &serde_json::Value,
+    ) -> Result<HttpResp, ProviderError> {
+        Err(ProviderError::Network("PATCH not supported".into()))
+    }
     /// `get` that fails with `TooLarge` when the body is over `max_bytes`.
     /// Real clients should stop reading at the cap; this default checks
     /// only after the whole body is in memory.
@@ -143,6 +153,15 @@ impl<H: Http> Http for CountingHttp<H> {
     ) -> Result<HttpResp, ProviderError> {
         self.bump();
         self.inner.post_json(url, headers, body).await
+    }
+    async fn patch_json(
+        &self,
+        url: &str,
+        headers: &[(&str, &str)],
+        body: &serde_json::Value,
+    ) -> Result<HttpResp, ProviderError> {
+        self.bump();
+        self.inner.patch_json(url, headers, body).await
     }
     async fn get_capped(
         &self,
