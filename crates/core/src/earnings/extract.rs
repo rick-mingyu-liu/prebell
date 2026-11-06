@@ -829,8 +829,7 @@ fn verify_period(text: &str, v: &Value) -> Result<FiscalPeriod, String> {
 fn states_revenue(text: &str) -> bool {
     static R: OnceLock<Regex> = OnceLock::new();
     R.get_or_init(|| {
-        Regex::new(r"(?i)\b(?:revenues?|sales)\b[^.\d]{0,60}\d")
-            .expect("valid built-in regex")
+        Regex::new(r"(?i)\b(?:revenues?|sales)\b[^.\d]{0,60}\d").expect("valid built-in regex")
     })
     .is_match(text)
 }
@@ -1060,7 +1059,10 @@ mod tests {
             NOT_STATED
         );
         assert_ne!(reason("Revenue of $102.5 billion, up 8%."), NOT_STATED);
-        assert_ne!(reason("Revenue for the third quarter was a record $8.9 billion."), NOT_STATED);
+        assert_ne!(
+            reason("Revenue for the third quarter was a record $8.9 billion."),
+            NOT_STATED
+        );
         assert_ne!(reason("Net sales\n$4,210"), NOT_STATED);
         // The model saw only the opening: revenue may sit further down.
         let long = format!("{aig} {}", "x ".repeat(MAX_DOC_CHARS));
