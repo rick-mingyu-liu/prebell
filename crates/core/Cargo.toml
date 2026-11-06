@@ -16,6 +16,9 @@ regex = "1"
 thiserror = "2"
 futures = { version = "0.3", default-features = false, features = ["alloc"] }
 plotters = { version = "0.3", default-features = false, features = ["svg_backend"] }
+# Share cards: the SVG cover to PNG, with embedded fonts only (no system fonts, no raster inputs).
+resvg = { version = "0.45", default-features = false, features = ["text"] }
+png = "0.17"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt"] }

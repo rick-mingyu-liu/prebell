@@ -5,6 +5,7 @@
 use std::cell::Cell;
 
 use async_trait::async_trait;
+use prebell_core::cover::card::{CardStore, CoverPost};
 use prebell_core::facts::NewsReason;
 use prebell_core::store::{PostRow, RunRow, Store, TranslationRow};
 use serde::de::DeserializeOwned;
@@ -545,6 +546,59 @@ impl Store for D1Store {
 
     async fn kv_set(&self, key: &str, value: &str, now: &str) -> Result<(), String> {
         self.kv_upsert(key, value, now).await
+    }
+}
+
+/// Newest published posts with an SVG cover, for the `cards` job (`?1` is
+/// the limit). A revised post counts from its update, which gave it a new
+/// cover key.
+pub(crate) const COVER_POSTS: &str = "SELECT p.cover_key, p.trading_date, f.ticker FROM posts p \
+     LEFT JOIN earnings_filings f ON f.run_key = p.run_key \
+     WHERE p.published_at IS NOT NULL AND p.cover_key LIKE 'covers/%.svg' \
+     ORDER BY COALESCE(p.revised_at, p.published_at) DESC LIMIT ?1";
+
+#[derive(Deserialize)]
+struct CoverPostRec {
+    cover_key: String,
+    trading_date: String,
+    ticker: Option<String>,
+}
+
+#[async_trait(?Send)]
+impl CardStore for D1Store {
+    async fn cover_posts(&self, limit: usize) -> Result<Vec<CoverPost>, String> {
+        self.query();
+        let stmt = self
+            .db
+            .prepare(COVER_POSTS)
+            .bind(&[int(limit as i64)])
+            .map_err(|e| err(COVER_POSTS, e))?;
+        let rows = stmt.all().await.map_err(|e| err(COVER_POSTS, e))?;
+        let rows: Vec<CoverPostRec> = rows.results().map_err(|e| err(COVER_POSTS, e))?;
+        Ok(rows
+            .into_iter()
+            .map(|r| CoverPost {
+                cover_key: r.cover_key,
+                trading_date: r.trading_date,
+                ticker: r.ticker,
+            })
+            .collect())
+    }
+
+    async fn has_object(&self, key: &str) -> Result<bool, String> {
+        self.facts
+            .head(key)
+            .await
+            .map(|o| o.is_some())
+            .map_err(|e| err(&format!("R2 head {key}"), e))
+    }
+
+    async fn get_text(&self, key: &str) -> Result<Option<String>, String> {
+        Store::get_facts(self, key).await
+    }
+
+    async fn put_png(&self, key: &str, bytes: &[u8]) -> Result<(), String> {
+        Store::put_bytes(self, key, bytes, "image/png").await
     }
 }
 

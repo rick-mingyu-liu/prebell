@@ -21,6 +21,9 @@ pub trait JobRunner {
     /// One earnings step. `Ok` is a log line; `Err` is a config error, as
     /// for `content`.
     async fn earnings(&self, step: EarningsStep) -> Result<String, String>;
+    /// One `cards` job (`cover::card::cards_tick`). `Ok` is a log line; `Err`
+    /// a store or render error, logged and left for the next firing.
+    async fn cards(&self) -> Result<String, String>;
 }
 
 /// Alert text is at most this many characters.
@@ -43,6 +46,11 @@ pub async fn run_job(
             // One alert per day for every earnings step: they share the config.
             Err(e) => Err(config_error(now, "earnings", &e, store).await),
         },
+        Some(JobKind::Cards) => runner
+            .cards()
+            .await
+            .map(|line| format!("job {job}: {line}"))
+            .map_err(|e| format!("job {job}: {e}")),
         None => Err(format!("job {job}: unknown job, dropped")),
     }
 }
@@ -116,6 +124,12 @@ mod tests {
             match &self.content_err {
                 Some(e) => Err(e.clone()),
                 None => Ok("polled".into()),
+            }
+        }
+        async fn cards(&self) -> Result<String, String> {
+            match &self.content_err {
+                Some(e) => Err(e.clone()),
+                None => Ok("no card missing".into()),
             }
         }
     }
@@ -254,6 +268,30 @@ mod tests {
         };
         let out = run_job(utc("2026-10-29T12:30:00Z"), "earnings", &s, &r).await;
         assert_eq!(out, Ok("job earnings: polled".to_string()));
+        assert!(s.alerts.borrow().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_cards_error_is_logged_and_never_alerted() {
+        let s = MemStore::default();
+        let ok = FakeRunner {
+            content_err: None,
+            content_calls: RefCell::new(vec![]),
+            earnings_calls: RefCell::new(vec![]),
+        };
+        let now = utc("2026-10-29T12:30:00Z");
+        assert_eq!(
+            run_job(now, "cards", &s, &ok).await,
+            Ok("job cards: no card missing".to_string())
+        );
+        let failing = FakeRunner {
+            content_err: Some("R2 put: down".into()),
+            ..ok
+        };
+        assert_eq!(
+            run_job(now, "cards", &s, &failing).await,
+            Err("job cards: R2 put: down".to_string())
+        );
         assert!(s.alerts.borrow().is_empty());
     }
 

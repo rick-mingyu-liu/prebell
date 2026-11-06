@@ -7,6 +7,7 @@ mod store;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
+use prebell_core::cover::card::cards_tick;
 use prebell_core::earnings::calendar::{refresh_tick, yahoo_seeding, CalendarSource};
 use prebell_core::earnings::run::{build_tick, poll_job};
 use prebell_core::edgar::{Edgar, BUILD_GAP_MS};
@@ -254,6 +255,11 @@ impl JobRunner for Runner<'_> {
                 Ok(format!("{o:?}"))
             }
         }
+    }
+
+    /// Renders at most one missing share card; no providers, only D1 and R2.
+    async fn cards(&self) -> std::result::Result<String, String> {
+        cards_tick(self.store).await
     }
 }
 
