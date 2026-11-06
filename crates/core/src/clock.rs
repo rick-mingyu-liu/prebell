@@ -106,6 +106,15 @@ pub fn premarket_window(_day: DayKind) -> Window {
     }
 }
 
+/// Premarket update: 08:35-09:25 ET, once the 8:30 ET economic releases
+/// are out, on every trading day.
+pub fn premarket_update_window(_day: DayKind) -> Window {
+    Window {
+        start: hm(8, 35),
+        end: hm(9, 25),
+    }
+}
+
 /// After-close recap: 45 minutes after the close (16:45 ET, or 13:45 ET on
 /// a 1 PM early-close day), late up to 19:00 ET either way.
 pub fn recap_window(day: DayKind) -> Window {
@@ -142,6 +151,12 @@ pub fn decide(now_utc: DateTime<Utc>, window: impl Fn(DayKind) -> Window) -> Slo
 /// on a trading day.
 pub fn premarket_decision(now_utc: DateTime<Utc>) -> SlotDecision {
     decide(now_utc, premarket_window)
+}
+
+/// Decides whether `now_utc` is inside the premarket update window on a
+/// trading day.
+pub fn premarket_update_decision(now_utc: DateTime<Utc>) -> SlotDecision {
+    decide(now_utc, premarket_update_window)
 }
 
 /// Decides whether `now_utc` is inside the recap window on a trading day.
@@ -239,6 +254,42 @@ mod tests {
             premarket_decision(utc("2026-10-30T13:25:00Z")),
             SlotDecision::PastDeadline { .. }
         ));
+    }
+
+    #[test]
+    fn premarket_update_window_edt_and_est() {
+        // EDT: 08:35 ET = 12:35Z, 09:25 ET = 13:25Z.
+        assert_eq!(
+            premarket_update_decision(utc("2026-10-29T12:34:59Z")),
+            SlotDecision::TooEarly
+        );
+        assert_eq!(
+            premarket_update_decision(utc("2026-10-29T12:35:00Z")),
+            SlotDecision::InWindow {
+                trading_date: d("2026-10-29")
+            }
+        );
+        assert_eq!(
+            premarket_update_decision(utc("2026-10-29T13:25:00Z")),
+            SlotDecision::PastDeadline {
+                trading_date: d("2026-10-29")
+            }
+        );
+        // EST: 08:35 ET = 13:35Z; the early-close day keeps the same window.
+        assert_eq!(
+            premarket_update_decision(utc("2026-11-02T12:35:00Z")),
+            SlotDecision::TooEarly
+        );
+        for t in ["2026-11-02T13:35:00Z", "2026-11-27T14:20:00Z"] {
+            assert!(matches!(
+                premarket_update_decision(utc(t)),
+                SlotDecision::InWindow { .. }
+            ));
+        }
+        assert_eq!(
+            premarket_update_decision(utc("2026-11-26T13:35:00Z")),
+            SlotDecision::NotToday
+        );
     }
 
     #[test]

@@ -20,6 +20,8 @@ use crate::premarket::draft::{source_reasons, write, Draft, TEMPLATE_ID};
 use crate::providers::{LlmProvider, MarketData, NewsSearch};
 use crate::store::{PostRow, RunRow, Store, TranslationRow};
 
+pub mod update;
+
 /// One scheduled content type (premarket brief, recap): its window, facts,
 /// gate, drafting and sources. Everything else is the shared state machine.
 #[async_trait(?Send)]
@@ -410,13 +412,7 @@ async fn publish<C: Content>(
     lines: &[String],
 ) -> Result<TickOutcome, String> {
     let ts = iso(now);
-    let missing = c.missing_required(facts);
-    if !missing.is_empty() {
-        let diagnostics = lines.join("; ");
-        let mut err = missing.join(", ");
-        if !diagnostics.is_empty() {
-            err = format!("{err} | {diagnostics}");
-        }
+    if let Some(err) = gate_error(&c.missing_required(facts), lines) {
         return retry_later(store, row, err).await;
     }
 
@@ -518,6 +514,21 @@ async fn publish<C: Content>(
     })
 }
 
+/// The `last_error` of a build whose facts lack the `missing` required
+/// sections, with the diagnostics `lines`; `None` when nothing is missing.
+fn gate_error(missing: &[&str], lines: &[String]) -> Option<String> {
+    if missing.is_empty() {
+        return None;
+    }
+    let diagnostics = lines.join("; ");
+    let err = missing.join(", ");
+    Some(if diagnostics.is_empty() {
+        err
+    } else {
+        format!("{err} | {diagnostics}")
+    })
+}
+
 /// True when another tick finished this run (published or skipped) while
 /// this one was building; the caller must then write nothing.
 async fn superseded(store: &dyn Store, run_key: &str) -> Result<bool, String> {
@@ -608,7 +619,14 @@ async fn retry_zh<C: Content>(
     let facts: C::Facts = serde_json::from_str(&json).map_err(|e| format!("facts json: {e}"))?;
     let ts = iso(now);
     let lines = c.cover_lines(&facts).zh;
-    match c.write(&facts, Lang::Zh).await {
+    let draft = c.write(&facts, Lang::Zh).await;
+    // The premarket update may have rewritten the post, ZH included, while
+    // this draft ran from the older facts: then write nothing.
+    let current = store.get_post_by_run(&run.run_key).await?;
+    if current.is_none_or(|p| p.revised_at != post.revised_at) {
+        return Ok(TickOutcome::Nothing);
+    }
+    match draft {
         Ok((d, body)) => {
             store
                 .upsert_translation(&translation_zh(
@@ -666,10 +684,10 @@ mod tests {
 
     const ARTICLE: &str = "Apple shares jumped 8% in premarket trading after the company reported record iPhone sales for the quarter.";
     const QUOTE: &str = "Apple shares jumped 8% in premarket trading";
-    const URL: &str = "https://news.test/aapl";
-    const KEY: &str = "premarket:2026-10-29";
+    pub(super) const URL: &str = "https://news.test/aapl";
+    pub(super) const KEY: &str = "premarket:2026-10-29";
 
-    fn utc(s: &str) -> DateTime<Utc> {
+    pub(super) fn utc(s: &str) -> DateTime<Utc> {
         s.parse().unwrap()
     }
 
@@ -684,9 +702,9 @@ mod tests {
     }
 
     /// `ok = false` makes every call fail with HTTP 429.
-    struct FakeMd {
+    pub(super) struct FakeMd {
         ok: bool,
-        calls: Cell<usize>,
+        pub(super) calls: Cell<usize>,
     }
     #[async_trait(?Send)]
     impl MarketData for FakeMd {
@@ -719,14 +737,14 @@ mod tests {
                 .collect()
         }
     }
-    fn md(ok: bool) -> FakeMd {
+    pub(super) fn md(ok: bool) -> FakeMd {
         FakeMd {
             ok,
             calls: Cell::new(0),
         }
     }
 
-    struct FakeNs;
+    pub(super) struct FakeNs;
     #[async_trait(?Send)]
     impl NewsSearch for FakeNs {
         async fn search(&self, query: &str, _max: usize) -> Result<Vec<SearchHit>, ProviderError> {
@@ -745,10 +763,10 @@ mod tests {
 
     /// Reason extraction always answers with the anchored Apple reason;
     /// drafts answer clean or bad per language.
-    struct FakeLlm {
-        en_ok: Cell<bool>,
-        zh_ok: Cell<bool>,
-        calls: Cell<usize>,
+    pub(super) struct FakeLlm {
+        pub(super) en_ok: Cell<bool>,
+        pub(super) zh_ok: Cell<bool>,
+        pub(super) calls: Cell<usize>,
     }
     #[async_trait(?Send)]
     impl LlmProvider for FakeLlm {
@@ -765,7 +783,7 @@ mod tests {
             }
         }
     }
-    fn llm(en_ok: bool, zh_ok: bool) -> FakeLlm {
+    pub(super) fn llm(en_ok: bool, zh_ok: bool) -> FakeLlm {
         FakeLlm {
             en_ok: Cell::new(en_ok),
             zh_ok: Cell::new(zh_ok),
