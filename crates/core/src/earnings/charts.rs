@@ -30,7 +30,7 @@ pub(crate) const MIN_BARS: usize = 2;
 /// Widest slot per bar (bar plus gap), in px.
 const MAX_SLOT: i32 = 96;
 /// Narrowest slot that fits a "2024-03" date label (~48px at 13px) with room
-/// between neighbours; narrower slots label every other bar.
+/// between neighbours; narrower slots label every second (or third...) bar.
 const DATE_LABEL_SLOT: i32 = 52;
 const RELEASE_LABEL: &str = "8-K";
 /// Period ends further apart than one quarter (plus 52/53-week slack) mean
