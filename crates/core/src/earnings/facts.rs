@@ -310,21 +310,21 @@ pub struct EarningsAllowed {
     pub years: Vec<f64>,
     /// Rates in table quotes.
     pub rates: Vec<f64>,
-    /// Table-row cells at the table's scale (SO's segment row "$2,272" is
-    /// $2,272 million): only in a sentence that names the row.
+    /// Table rows' current-period cells at the table's scale (SO's segment
+    /// row "$2,272" is $2,272 million): only in a sentence that names the
+    /// row.
     pub rows: Vec<RowCell>,
 }
 
-/// A table-row cell at its table's scale and what a sentence citing it
-/// must carry: the row's label words (in English, or for a Chinese draft
-/// their `ZH` rendering), and for a cell of another period than the row's
-/// current one, a period or comparison word.
+/// A table row's current-period cell at its table's scale, and the row
+/// label a sentence citing it must carry: its words in English, or for a
+/// Chinese draft their `ZH` rendering. Other periods' cells are not
+/// allowed at the table's scale at all: a sentence can swap a current and
+/// a prior figure too many ways ("$1,920 million versus $2,272 million a
+/// year earlier") to date each by its wording.
 pub struct RowCell {
     pub value: f64,
     label: Vec<String>,
-    /// For a cell of another period than the row's current one, the
-    /// current fiscal year (a "2025年同期" is before it).
-    other_period: Option<i32>,
     /// A per-share row's amount measure ("Non-GAAP net income"), named in
     /// full; a note row's label must also have a word that is not
     /// `GENERIC`.
@@ -389,31 +389,6 @@ const ZH: &[(&str, &[&str])] = &[
     ("adjusted", &["调整后"]),
     ("segment", &["分部"]),
 ];
-
-/// Phrases that make the figure right after them another period's ("up
-/// from $1,920 million", "较上年同期的19.20亿"); never a bare "from"
-/// ("from retail customers") or "较" ("盈利能力较强").
-const LEAD_EN: &[&str] = &[
-    "up from",
-    "down from",
-    "compared with",
-    "compared to",
-    "versus",
-    "vs",
-];
-const LEAD_ZH: &[&str] = &["较上年", "较去年", "较同期"];
-/// Phrases that make a figure in their clause another period's.
-const PERIOD_EN: &[&str] = &[
-    "year earlier",
-    "year ago",
-    "prior year",
-    "prior-year",
-    "last year",
-    "nine months",
-    "year-to-date",
-    "year to date",
-];
-const PERIOD_ZH: &[&str] = &["上年同期", "去年同期", "前九个月", "前三季度", "年初至今"];
 
 /// Label words too common to name a row on their own: a label needs one
 /// more ("Southern Power" has "southern"; "Net income" alone names no row).
@@ -481,71 +456,18 @@ fn label_at(label: &[String], measure: bool, before: &str) -> Option<usize> {
         .try_fold(0, |end, at| Some(end.max(at?)))
 }
 
-/// Whether the clause of `sentence` holding the number at byte `at`
-/// (between "，", ",", "；" or ";", not a thousands comma) places it in
-/// another period than fiscal `year`: a `LEAD_*` phrase right before it
-/// with no other number between, a `PERIOD_*` phrase anywhere in the
-/// clause, or "<earlier year>年同期". In "earned $1,920 million, up from
-/// $2,272 million a year earlier" only $2,272 is the prior year's.
-fn other_period(sentence: &str, at: usize, year: i32) -> bool {
-    static SAME_PERIOD: OnceLock<Regex> = OnceLock::new();
-    let same_period =
-        SAME_PERIOD.get_or_init(|| Regex::new(r"(\d{4})年同期").expect("valid built-in regex"));
-    let bytes = sentence.as_bytes();
-    let boundary = |i: usize, c: char| {
-        matches!(c, '，' | '；' | ';')
-            || c == ','
-                && !(i > 0
-                    && bytes[i - 1].is_ascii_digit()
-                    && bytes.get(i + 1).is_some_and(u8::is_ascii_digit))
-    };
-    let start = sentence[..at]
-        .char_indices()
-        .rev()
-        .find(|&(i, c)| boundary(i, c))
-        .map_or(0, |(i, c)| i + c.len_utf8());
-    let end = sentence[at..]
-        .char_indices()
-        .find(|&(i, c)| boundary(at + i, c))
-        .map_or(sentence.len(), |(i, _)| at + i);
-    let clause = &sentence[start..end];
-    let lower = clause.to_ascii_lowercase();
-    let lead_in = &lower[..at - start];
-    let led = LEAD_EN
-        .iter()
-        .filter_map(|w| last_ascii_word(lead_in, w).map(|i| i + w.len()))
-        .chain(
-            LEAD_ZH
-                .iter()
-                .filter_map(|w| lead_in.rfind(w).map(|i| i + w.len())),
-        )
-        .any(|end| !lead_in[end..].contains(|c: char| c.is_ascii_digit()));
-    led || PERIOD_EN
-        .iter()
-        .any(|w| last_ascii_word(&lower, w).is_some())
-        || PERIOD_ZH.iter().any(|w| clause.contains(w))
-        || same_period
-            .captures_iter(clause)
-            .any(|c| c[1].parse::<i32>().is_ok_and(|y| y < year))
-}
-
 impl RowCell {
     /// The sentence names this cell's row before the number (at byte `at`),
-    /// with no other row named between them, and a cell of another period
-    /// than the row's current one has a period phrase.
+    /// with no other row named between them.
     fn holds(&self, sentence: &str, at: usize, labels: &[(&[String], bool)]) -> bool {
         let before = &sentence[..at];
         let Some(own) = label_at(&self.label, self.measure, before) else {
             return false;
         };
-        let nearest = labels
+        labels
             .iter()
             .filter(|(l, _)| *l != self.label.as_slice())
-            .all(|(l, m)| label_at(l, *m, before).is_none_or(|other| other <= own));
-        let period = self
-            .other_period
-            .is_none_or(|year| other_period(sentence, at, year));
-        nearest && period
+            .all(|(l, m)| label_at(l, *m, before).is_none_or(|other| other <= own))
     }
 }
 
@@ -600,10 +522,10 @@ fn row_label(quote: &str) -> &str {
     &quote[..at]
 }
 
-/// A note's table-row cells at its table's scale: whole-number amount
-/// cells ("$2,272", "52", "$1,234.5"), not percentages; none for a
-/// per-share row ("Diluted EPS $2 $1.66").
-fn push_note_cells(out: &mut Vec<RowCell>, n: &Note, year: i32) {
+/// A note's table row: its current-period cell at the table's scale
+/// ("$2,272" of "$2,272 $1,920 $4,654 $3,994"); none for a per-share row
+/// ("Diluted EPS $2 $1.66").
+fn push_note_cells(out: &mut Vec<RowCell>, n: &Note) {
     let label_text = row_label(&n.quote);
     let label = label_words(label_text);
     let lower = label_text.to_ascii_lowercase();
@@ -613,27 +535,31 @@ fn push_note_cells(out: &mut Vec<RowCell>, n: &Note, year: i32) {
     {
         return;
     }
-    for c in numbers::extract(&n.quote, Lang::En) {
-        let amount =
-            c.multiplier == 1.0 && !c.is_percent && (c.decimals == 0 || c.value.abs() >= 1000.0);
-        if amount {
-            out.push(RowCell {
-                value: c.value.abs() * n.scale,
-                label: label.clone(),
-                other_period: n.current.filter(|&cur| cur != c.value.abs()).map(|_| year),
-                measure: false,
-            });
-        }
+    let Some(current) = n.current else {
+        return;
+    };
+    let cell = numbers::extract(&n.quote, Lang::En).into_iter().any(|c| {
+        c.multiplier == 1.0
+            && !c.is_percent
+            && (c.decimals == 0 || c.value.abs() >= 1000.0)
+            && c.value.abs() == current
+    });
+    if cell {
+        out.push(RowCell {
+            value: current * n.scale,
+            label,
+            measure: false,
+        });
     }
 }
 
 /// A per-share figure's row of mixed measures ("Non-GAAP net income /
-/// earnings per share $3,471 $2.09 $2,760 $1.66 ..."): its whole-number
-/// cells at the table's scale, labelled by the amount measure; the one
-/// right before the figure's own cell is its period. No cell of a row of
-/// per-share figures only ("Diluted EPS $2 $1.66"), and no cell with
-/// decimals ("$12,345.67"), scales.
-fn push_figure_cells(out: &mut Vec<RowCell>, fig: &Figure, scale: f64, year: i32) {
+/// earnings per share $3,471 $2.09 $2,760 $1.66 ..."): the whole-number
+/// cell right before the figure's own, its period's amount, at the table's
+/// scale and labelled by the amount measure. Nothing for a row of
+/// per-share figures only ("Diluted EPS $2 $1.66") or a cell with
+/// decimals ("$12,345.67").
+fn push_figure_cells(out: &mut Vec<RowCell>, fig: &Figure, scale: f64) {
     let label_text = row_label(&fig.quote);
     let label: Vec<String> = label_words(label_text)
         .into_iter()
@@ -642,23 +568,18 @@ fn push_figure_cells(out: &mut Vec<RowCell>, fig: &Figure, scale: f64, year: i32
     if !label.iter().any(|w| AMOUNTS.contains(&w.as_str())) {
         return;
     }
-    let cells = numbers::extract(&fig.quote, Lang::En);
     let own = fig.quote.find(&fig.amount).unwrap_or(0);
-    let current = cells
-        .iter()
+    let current = numbers::extract(&fig.quote, Lang::En)
+        .into_iter()
         .take_while(|c| c.at < own)
         .last()
-        .filter(|c| c.decimals == 0)
-        .map(|c| c.value.abs());
-    for c in &cells {
-        if c.multiplier == 1.0 && !c.is_percent && c.decimals == 0 && c.at != own {
-            out.push(RowCell {
-                value: c.value.abs() * scale,
-                label: label.clone(),
-                other_period: (current != Some(c.value.abs())).then_some(year),
-                measure: true,
-            });
-        }
+        .filter(|c| c.multiplier == 1.0 && !c.is_percent && c.decimals == 0);
+    if let Some(c) = current {
+        out.push(RowCell {
+            value: c.value.abs() * scale,
+            label,
+            measure: true,
+        });
     }
 }
 
@@ -738,10 +659,6 @@ fn push_quantities(out: &mut Vec<(f64, &'static [&'static str])>, quote: &str) {
 /// Every number an earnings post may cite, by how it may be written.
 pub fn allowed(f: &EarningsFacts) -> EarningsAllowed {
     let mut a = EarningsAllowed::default();
-    let fiscal_year = match &f.fiscal_period {
-        Field::Value(p) => p.fiscal_year,
-        _ => f.filing_date.year(),
-    };
     let year = f64::from(f.filing_date.year());
     a.any.extend([year - 1.0, year, year + 1.0]);
     let mut quotes: Vec<&str> = Vec::new();
@@ -756,7 +673,7 @@ pub fn allowed(f: &EarningsFacts) -> EarningsAllowed {
             a.any.push(fig.value);
             push_quote(&mut a, &fig.quote, fig.scale);
             if let Some(scale) = fig.table_scale {
-                push_figure_cells(&mut a.rows, fig, scale, fiscal_year);
+                push_figure_cells(&mut a.rows, fig, scale);
             }
             quotes.push(&fig.quote);
         }
@@ -766,7 +683,7 @@ pub fn allowed(f: &EarningsFacts) -> EarningsAllowed {
             for n in ns {
                 push_quote(&mut a, &n.quote, 1.0);
                 if n.scale != 1.0 {
-                    push_note_cells(&mut a.rows, n, fiscal_year);
+                    push_note_cells(&mut a.rows, n);
                 }
                 quotes.push(&n.quote);
             }
@@ -1023,7 +940,7 @@ pub(crate) mod tests {
     fn a_note_quoting_a_table_row_is_in_the_table_scale_where_it_names_the_row() {
         // SO: the segment rows a highlight quotes, from "(In Millions
         // Except Earnings Per Share)"; the year header makes $2,272 and 52
-        // the current quarter.
+        // the current quarter, and only those are at the table's scale.
         let mut f = facts();
         f.highlights = Field::Value(vec![
             row_note(
@@ -1036,12 +953,10 @@ pub(crate) mod tests {
         verdicts(
             &f,
             &[
-                ("Traditional electric operating companies earned $2,272 million, up from $1,920 million a year earlier.", Lang::En),
+                ("Traditional electric operating companies earned $2,272 million.", Lang::En),
                 ("Traditional Electric Operating Companies earned $2.27 billion.", Lang::En),
-                ("Southern Power earned $52 million against $3 million a year earlier.", Lang::En),
-                ("传统电力运营公司净利润22.72亿美元，上年同期19.20亿美元；Southern Power净利润为5200万美元，2025年同期为300万美元。", Lang::Zh),
-                ("传统电力运营公司前九个月为46.54亿美元。", Lang::Zh),
-                ("传统电力运营公司本季度净利润为22.72亿美元，上年同期为19.20亿美元；前九个月为46.54亿美元，上年同期为39.94亿美元。", Lang::Zh),
+                ("Southern Power earned $52 million.", Lang::En),
+                ("传统电力运营公司净利润22.72亿美元；Southern Power净利润为5200万美元。", Lang::Zh),
                 ("| Traditional Electric Operating Companies | $2,272 million |", Lang::En),
             ],
             &[
@@ -1051,22 +966,39 @@ pub(crate) mod tests {
                 // Another segment's figure under the nearest label.
                 ("南方公司旗下传统电力运营公司净利润为5200万美元。", Lang::Zh),
                 ("Southern Company's traditional electric operating companies earned $52 million, while Southern Power grew.", Lang::En),
-                // A prior-year or year-to-date cell as this quarter: a bare
-                // "from" or "较" is no period phrase.
+                // Another period's cell, however the sentence dates it: as
+                // this quarter, as its own period, or swapped with the
+                // current one.
                 ("Traditional electric operating companies earned $1,920 million this quarter.", Lang::En),
                 ("传统电力运营公司本季度净利润为19.20亿美元。", Lang::Zh),
                 ("Traditional electric operating companies earned $1,920 million from retail customers.", Lang::En),
                 ("Income from traditional electric operating companies was $4,654 million.", Lang::En),
                 ("传统电力运营公司净利润19.20亿美元，盈利能力较强。", Lang::Zh),
-                // A period phrase binds to its own clause, and "up from" to
-                // the figure after it.
+                ("Traditional electric operating companies earned $2,272 million, up from $1,920 million a year earlier.", Lang::En),
+                ("Southern Power earned $52 million against $3 million a year earlier.", Lang::En),
+                ("传统电力运营公司净利润22.72亿美元，上年同期19.20亿美元。", Lang::Zh),
+                ("Southern Power净利润为5200万美元，2025年同期为300万美元。", Lang::Zh),
+                ("传统电力运营公司前九个月为46.54亿美元。", Lang::Zh),
+                ("传统电力运营公司本季度净利润为22.72亿美元，上年同期为19.20亿美元；前九个月为46.54亿美元，上年同期为39.94亿美元。", Lang::Zh),
                 ("Traditional electric operating companies earned $1,920 million, up from $2,272 million a year earlier.", Lang::En),
                 ("传统电力运营公司净利润19.20亿美元，上年同期22.72亿美元。", Lang::Zh),
                 ("Traditional electric operating companies earned $4,654 million in the quarter, and nine months results improved.", Lang::En),
                 ("Traditional electric operating companies earned $1,920 million this quarter vs. expectations.", Lang::En),
-                // Only an earlier year's "同期".
                 ("传统电力运营公司今年同期净利润为19.20亿美元。", Lang::Zh),
                 ("传统电力运营公司2026年同期净利润为19.20亿美元。", Lang::Zh),
+                ("传统电力运营公司2025年同期净利润为19.20亿美元。", Lang::Zh),
+                ("Traditional electric operating companies earned $1,920 million versus $2,272 million a year earlier.", Lang::En),
+                ("Traditional electric operating companies earned $1,920 million (up from $2,272 million a year earlier).", Lang::En),
+                ("传统电力运营公司净利润19.20亿美元（上年同期22.72亿美元）。", Lang::Zh),
+                ("传统电力运营公司净利润19.20亿美元而上年同期为22.72亿美元。", Lang::Zh),
+                ("传统电力运营公司净利润19.20亿美元、上年同期22.72亿美元。", Lang::Zh),
+                ("传统电力运营公司净利润：19.20亿美元，上年同期：22.72亿美元。", Lang::Zh),
+                ("Traditional electric operating companies earned $1,920 million in the quarter and $4,654 million in the first nine months.", Lang::En),
+                ("Traditional electric operating companies earned $2,272 million, compared with $1,920 million and $3,994 million.", Lang::En),
+                ("Compared with a year earlier, traditional electric operating companies earned $1,920 million.", Lang::En),
+                ("Traditional electric operating companies earned $1,920 million versus $2,272 million.", Lang::En),
+                ("Traditional electric operating companies earned $1,920 million，up from $2,272 million a year earlier.", Lang::En),
+                ("传统电力运营公司净利润19.20亿美元，较上年同期的22.72亿美元增长。", Lang::Zh),
                 // A wrong digit or scale.
                 ("Traditional electric operating companies earned $2,722 million.", Lang::En),
                 ("传统电力运营公司净利润2.272亿美元。", Lang::Zh),
@@ -1132,7 +1064,8 @@ pub(crate) mod tests {
     #[test]
     fn a_per_share_row_keeps_its_amount_cells_in_the_table_scale() {
         // AMD: non-GAAP net income and EPS alternate in one row; $3,471 is
-        // this quarter's, $2,760 the prior quarter's, $1,965 a year ago.
+        // this quarter's, $2,760 the prior quarter's, $1,965 a year ago, and
+        // only $3,471 is at the table's scale.
         let mut f = facts();
         let eps = |amount: &str, value: f64, quote: &str| {
             Field::Value(Figure {
@@ -1155,7 +1088,6 @@ pub(crate) mod tests {
                 ("Non-GAAP net income was $3,471 million, or $2.09 per share.", Lang::En),
                 ("非GAAP净利润34.7亿美元，每股2.09美元。", Lang::Zh),
                 ("调整后（非GAAP）摊薄每股收益为2.09美元，对应非GAAP净利润34.71亿美元。", Lang::Zh),
-                ("Non-GAAP net income was $3,471 million, up from $1,965 million a year earlier.", Lang::En),
             ],
             &[
                 ("$2.09 million", Lang::En),
@@ -1166,6 +1098,8 @@ pub(crate) mod tests {
                 ("Non-GAAP net income was $2,760 million this quarter.", Lang::En),
                 ("Non-GAAP net income from operations was $2,760 million.", Lang::En),
                 ("Non-GAAP net income rose from $1,965 million.", Lang::En),
+                // Other periods' amounts stay as written.
+                ("Non-GAAP net income was $3,471 million, up from $1,965 million a year earlier.", Lang::En),
             ],
         );
         // A row of per-share figures only, or a per-share figure of $1,000
