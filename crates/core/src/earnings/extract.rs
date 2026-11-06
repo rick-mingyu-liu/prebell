@@ -748,10 +748,10 @@ fn current_column(
 
 fn quarter_words(q: u8) -> &'static [&'static str] {
     match q {
-        1 => &["first quarter", "q1", "1q"],
-        2 => &["second quarter", "q2", "2q"],
-        3 => &["third quarter", "q3", "3q"],
-        4 => &["fourth quarter", "q4", "4q"],
+        1 => &["first quarter", "first-quarter", "q1", "1q"],
+        2 => &["second quarter", "second-quarter", "q2", "2q"],
+        3 => &["third quarter", "third-quarter", "q3", "3q"],
+        4 => &["fourth quarter", "fourth-quarter", "q4", "4q"],
         _ => &[],
     }
 }
@@ -1832,6 +1832,11 @@ mod tests {
         assert!(p(json!(4), 2027, quote).is_err(), "year not in quote");
         assert!(p(json!(null), 2026, quote).is_ok());
         assert!(p(json!(5), 2026, quote).is_err());
+        // Hyphenated, as in "Southern Company reports third-quarter 2026 earnings".
+        let so = "Southern Company reports third-quarter 2026 earnings";
+        assert!(
+            verify_period(so, &json!({"quarter": 3, "fiscal_year": 2026, "quote": so})).is_ok()
+        );
     }
 
     struct FailLlm;

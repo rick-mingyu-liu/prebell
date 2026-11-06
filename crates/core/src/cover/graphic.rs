@@ -250,13 +250,12 @@ fn earnings_svg(all: &[Series], allowed: &[f64]) -> Option<String> {
         "revenue" => (fmt_short_usd(last.value), "REVENUE"),
         _ => (fmt_eps(last.value), "DILUTED EPS"),
     };
-    // The ink bar and its value only for this release's own bar, which `series` puts last.
-    let value = match s.release {
-        Some(_) => {
-            check(&value, Lang::En, allowed).ok()?;
-            Some(value)
-        }
-        None => None,
+    // The ink bar and its value only for this release's own quarter, which `series` puts last.
+    let value = if s.latest_is_release {
+        check(&value, Lang::En, allowed).ok()?;
+        Some(value)
+    } else {
+        None
     };
 
     const WIDTH: f64 = 640.0;
@@ -649,6 +648,35 @@ mod tests {
     }
 
     #[test]
+    fn earnings_graphic_inks_the_latest_quarter_when_the_10q_came_with_the_release() {
+        let mut f = facts();
+        // The 10-Q for the release quarter was filed with the 8-K, so the
+        // release is the trend's last XBRL quarter, not an extra 8-K bar.
+        f.filing_date = "2026-07-31".parse().unwrap();
+        // Holds even when the press release's quarter was not verified.
+        f.fiscal_period = Field::Missing { reason: "x".into() };
+        let svg = earnings_graphic(&f).unwrap();
+        assert_in_frame(&svg);
+        assert_eq!(rects(&svg).iter().filter(|r| r.4 == GREY).count(), 1);
+        assert_eq!(rects(&svg).iter().filter(|r| r.4 == INK).count(), 1);
+        let bs = earnings_bars(&svg);
+        let ink = bs.iter().find(|b| b.4 == INK).unwrap();
+        assert!(bs.iter().all(|b| b.0 <= ink.0), "{bs:?}");
+        assert!(svg.contains(">$99.8B<") && svg.contains(">REVENUE, LAST 2 QUARTERS<"));
+    }
+
+    #[test]
+    fn earnings_graphic_no_ink_when_the_release_is_not_charted() {
+        // The release quarter unverified and the trend a quarter behind: the
+        // last bar is an older quarter, so nothing is inked or labelled.
+        let mut f = facts();
+        f.fiscal_period = Field::Missing { reason: "x".into() };
+        let svg = earnings_graphic(&f).unwrap();
+        assert_eq!(rects(&svg).iter().filter(|r| r.4 == INK).count(), 0);
+        assert!(!svg.contains(">$99.8B<"));
+    }
+
+    #[test]
     fn earnings_graphic_falls_back_to_diluted_eps() {
         let mut f = facts();
         f.metrics.revenue = Field::Missing { reason: "x".into() };
@@ -780,11 +808,13 @@ mod tests {
                 name: "revenue",
                 slots: revenue,
                 release: None,
+                latest_is_release: false,
             },
             Series {
                 name: "eps",
                 slots: vec![bar("2026-03", 1.5), bar("8-K", 1.85)],
                 release: Some(1.85),
+                latest_is_release: true,
             },
         ];
         let svg = earnings_svg(&all, &[1.85]).unwrap();
