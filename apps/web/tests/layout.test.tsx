@@ -210,6 +210,11 @@ describe("globals.css", () => {
     expect(css).toMatch(/\.cal-key-tick \{ color: var\(--up\);/);
     expect(css).toMatch(/\.cal-key-dash \{[^}]*border: 1px dashed var\(--muted\);/);
     expect(css).toMatch(/\.cal-unconfirmed \.cal-card-link \{ border-style: dashed; border-color: var\(--muted\);/);
+    // The dashed border is the only signal: no fade, no grey ticker, no washed-out ground (Rick: "Dashed, full-colour logo").
+    const unconfirmed = [...css.replace(/\/\*[\s\S]*?\*\//g, "").matchAll(/([^{}]*\.cal-unconfirmed[^{}]*)\{([^}]*)\}/g)];
+    expect(unconfirmed.map((m) => m[1].trim())).toEqual([".cal-unconfirmed .cal-card-link"]);
+    expect(unconfirmed[0][2]).not.toMatch(/opacity|filter|background|color-mix|box-shadow|(?<!border-)color:/);
+    expect(css).toMatch(/\.cal-key-dash \{[^}]*background: var\(--card\);/);
   });
 
   it("keeps the desktop board compact, inside the content column", () => {
