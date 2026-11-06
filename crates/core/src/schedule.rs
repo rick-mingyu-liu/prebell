@@ -47,6 +47,10 @@ pub enum EarningsStep {
     /// day, and the released check just after an event's time. It rides
     /// this queue for its serial consumer, not for EDGAR.
     Events,
+    /// `earnings:6k`, queued by a poll: read one pending 6-K of a foreign
+    /// filer (`earnings::foreign::foreign_read`), in its own invocation so
+    /// its CPU never adds to the poll's.
+    Foreign,
 }
 
 impl EarningsStep {
@@ -57,6 +61,7 @@ impl EarningsStep {
             EarningsStep::Build => "earnings:build",
             EarningsStep::Calendar => "earnings:calendar",
             EarningsStep::Events => "events:check",
+            EarningsStep::Foreign => "earnings:6k",
         }
     }
 }
@@ -81,6 +86,7 @@ impl JobKind {
             "earnings:build" => Some(JobKind::Earnings(EarningsStep::Build)),
             "earnings:calendar" => Some(JobKind::Earnings(EarningsStep::Calendar)),
             "events:check" => Some(JobKind::Earnings(EarningsStep::Events)),
+            "earnings:6k" => Some(JobKind::Earnings(EarningsStep::Foreign)),
             "cards" => Some(JobKind::Cards),
             _ => None,
         }
@@ -327,6 +333,7 @@ mod tests {
             EarningsStep::Build,
             EarningsStep::Calendar,
             EarningsStep::Events,
+            EarningsStep::Foreign,
         ] {
             assert_eq!(JobKind::parse(step.job()), Some(JobKind::Earnings(step)));
             let queue = match step {

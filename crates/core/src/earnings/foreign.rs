@@ -11,11 +11,12 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::OnceLock;
 
 use chrono::{DateTime, Duration, NaiveDate, Utc};
-use regex::Regex;
+use regex::{Regex, RegexBuilder};
+use serde::{Deserialize, Serialize};
 
 use crate::anchor::{has_word, normalize};
 use crate::clock::et;
-use crate::earnings::calendar::{apply_to, report_changes, SAME_EVENT_DAYS};
+use crate::earnings::calendar::{report_changes, SAME_EVENT_DAYS};
 use crate::earnings::detect::{name_mismatches, same_filer};
 use crate::earnings::store::{CalendarRow, EarningsStore};
 use crate::earnings::{watchlist, Filer, WatchEntry};
@@ -29,13 +30,10 @@ pub const KV_6K_WATERMARK: &str = "edgar_6k_watermark";
 pub const KV_6K_CHECKED: &str = "edgar_6k_checked";
 /// Accessions kept in `KV_6K_CHECKED` (about two weeks of candidates).
 pub const CHECKED_KEEP: usize = 300;
-/// 6-Ks read per poll at most (2 fetches each); the rest wait for the next
-/// firing, still on the feed's first page (100 6-Ks span about 20 hours).
-pub const MAX_CANDIDATES: usize = 2;
 /// Bytes of a document read: the release's opening, or a financial
-/// summary's cover (Novo Nordisk's statement is 17 KB in). About 0.45 ms of
-/// CPU per document natively (`timing` below), so two stay well inside the
-/// Free plan's 10 ms.
+/// summary's cover (Novo Nordisk's statement is 17 KB in). One 6-K message
+/// (its index, this much of one document, the check) takes about 2-4 ms of
+/// CPU in Wasm in a fresh isolate, well inside the Free plan's 10 ms.
 pub const HEAD_BYTES: usize = 32 * 1024;
 /// A 6-K accepted from this many days before the calendar date (an Asian
 /// morning release is the previous US evening; Yahoo's date may be late) ...
@@ -114,7 +112,7 @@ fn month_end(year: i32, month: u32) -> Option<NaiveDate> {
 /// monthly reports, meetings, buybacks, GAAP reconciliations, insider
 /// dealing. Plain substring checks: the Free plan gives an invocation 10 ms
 /// of CPU.
-const NOT_A_RELEASE: [(&str, &str); 39] = [
+const NOT_A_RELEASE: &[(&str, &str)] = &[
     ("date of board meeting", "board meeting notice"),
     ("date of the board meeting", "board meeting notice"),
     ("notice of board meeting", "board meeting notice"),
@@ -141,6 +139,18 @@ const NOT_A_RELEASE: [(&str, &str); 39] = [
     ("profit alert", "profit alert"),
     ("preliminary", "profit alert"),
     ("delivery update", "delivery update"),
+    ("delivery results", "delivery update"),
+    ("vehicle delivery", "delivery update"),
+    ("operating data", "operating update"),
+    ("operational update", "operating update"),
+    ("business update", "operating update"),
+    ("will be released", "pre-announcement"),
+    ("will host", "pre-announcement"),
+    ("expects", "outlook"),
+    ("estimates", "outlook"),
+    ("anticipated", "outlook"),
+    ("rescheduled", "date notice"),
+    ("change of date", "date notice"),
     // TSMC's monthly "Revenue Report" totals January through the month.
     ("revenue report", "monthly revenue"),
     ("monthly revenue", "monthly revenue"),
@@ -218,8 +228,32 @@ struct Statement {
     period: NaiveDate,
 }
 
+/// A pattern over ASCII-lowercased text, without Unicode classes: about
+/// half the compile time in Wasm (a cold Worker compiles each once).
 fn regex(p: &str) -> Regex {
-    Regex::new(p).expect("valid built-in regex")
+    RegexBuilder::new(p)
+        .unicode(false)
+        .build()
+        .expect("valid built-in regex")
+}
+
+/// A written date: "september 30, 2026", "sept. 30, 2026", "30 september
+/// 2026" (lowercase), as `(start, end, date)`.
+fn dates(lower: &str) -> impl Iterator<Item = (usize, usize, NaiveDate)> + '_ {
+    static DATE: OnceLock<Regex> = OnceLock::new();
+    DATE.get_or_init(|| {
+        regex(r"\b(?:([a-z]{3,9}\.?)\s+(\d{1,2}),?\s+(\d{4})|(\d{1,2})\s+([a-z]{3,9}\.?)\s+(\d{4}))\b")
+    })
+    .captures_iter(lower)
+    .filter_map(|c| {
+        let m = c.get(0)?;
+        let d = match (c.get(1), c.get(4)) {
+            (Some(mo), _) => period_date(mo.as_str(), &c[2], &c[3]),
+            (_, Some(day)) => period_date(&c[5], day.as_str(), &c[6]),
+            _ => None,
+        }?;
+        Some((m.start(), m.end(), d))
+    })
 }
 
 /// Every results statement in `lower` (the ASCII-lowercased text):
@@ -233,11 +267,7 @@ fn regex(p: &str) -> Regex {
 ///   "Second Quarter and First Half of 2026 Financial Results", "results ...
 ///   January - September 2026".
 fn statements(lower: &str) -> Vec<Statement> {
-    static END: OnceLock<Regex> = OnceLock::new();
     static UNDATED: OnceLock<Regex> = OnceLock::new();
-    let end = END.get_or_init(|| {
-        regex(r"\b(?:ended|ending|through|to)\s+(?:([a-z]{3,9}\.?)\s+(\d{1,2}),?\s+(\d{4})|(\d{1,2})\s+([a-z]{3,9}\.?)\s+(\d{4}))")
-    });
     let undated = UNDATED.get_or_init(|| {
         regex(concat!(
             r"\bq([1-4])\s+(20\d\d)\b",
@@ -247,16 +277,16 @@ fn statements(lower: &str) -> Vec<Statement> {
         ))
     });
     let mut out = Vec::new();
-    for c in end.captures_iter(lower) {
-        let period = match (c.get(1), c.get(4)) {
-            (Some(m), _) => period_date(m.as_str(), &c[2], &c[3]),
-            (_, Some(d)) => period_date(&c[5], d.as_str(), &c[6]),
-            _ => None,
-        };
-        let (Some(period), Some(m)) = (period, c.get(0)) else {
+    for (date_at, date_end, period) in dates(lower) {
+        // "ended / ending / through / to <date>"
+        let before = lower[..date_at].trim_end();
+        let Some(word) = ["ended", "ending", "through", "to"].iter().find(|w| {
+            before.ends_with(*w)
+                && !before[..before.len() - w.len()].ends_with(|c: char| c.is_ascii_alphanumeric())
+        }) else {
             continue;
         };
-        let at = m.start();
+        let at = before.len() - word.len();
         // "... results ... for the ... ended <date>": "for the" within 100
         // characters, and "results" or "earnings" within 240 before it.
         let near = &lower[floor(lower, at.saturating_sub(100))..at];
@@ -279,7 +309,7 @@ fn statements(lower: &str) -> Vec<Statement> {
         if let Some(start) = [lead, summary].into_iter().flatten().min() {
             out.push(Statement {
                 start,
-                end: m.end(),
+                end: date_end,
                 period,
             });
         }
@@ -326,32 +356,59 @@ fn statements(lower: &str) -> Vec<Statement> {
 }
 
 /// Reported figures: an amount with a currency ("RMB32,136.9", "US$4.60",
-/// "€11.7 billion", "DKK 31,720"), an amount with a scale word ("5.70bn",
-/// "125.8m"), or a table figure in the millions ("24,630,753").
+/// "€11.7 billion", "DKK 31,720"), a table figure in the millions
+/// ("24,630,753"), or an amount with a scale word next to a financial word
+/// ("revenue of 5.70bn"; not XPENG's "4.14 million tons" of CO2).
 fn has_figure(s: &str) -> bool {
-    static FIGURE: OnceLock<Regex> = OnceLock::new();
-    FIGURE
-        .get_or_init(|| {
-            regex(r"(?:rmb|us\$|hk\$|nt\$|s\$|\$|€|£|¥|dkk|eur|usd|jpy)\s?\d|\d[\d,.]*\s?(?:billion|million|bn|mn|bln)\b|\b\d{1,3}(?:,\d{3}){2,}\b")
-        })
-        .is_match(s)
+    static MONEY: OnceLock<Regex> = OnceLock::new();
+    static SCALED: OnceLock<Regex> = OnceLock::new();
+    let money = MONEY.get_or_init(|| {
+        regex(r"(?:rmb|us\$|hk\$|nt\$|s\$|\$|€|£|¥|dkk|eur|usd|jpy)\s?\d|\b\d{1,3}(?:,\d{3}){2,}\b")
+    });
+    if money.is_match(s) {
+        return true;
+    }
+    let scaled = SCALED.get_or_init(|| regex(r"\d[\d,.]*\s?(?:billion|million|bn|mn|bln)\b"));
+    scaled.find_iter(s).any(|m| {
+        let near = &s[floor(s, m.start().saturating_sub(60))..m.start()];
+        FINANCIAL.iter().any(|w| near.contains(w))
+    })
 }
 
-/// The release's dateline: the first date in its opening, before or just
-/// after the statement, from a week before the 6-K to the day after it
-/// ("BEIJING, China, August 18, 2026 –", "Madrid, 28 October 2026").
-fn dateline(lower: &str, upto: usize, accepted: NaiveDate) -> Option<NaiveDate> {
-    static DATE: OnceLock<Regex> = OnceLock::new();
-    let date = DATE.get_or_init(|| {
-        regex(r"\b(?:([a-z]{3,9}\.?)\s+(\d{1,2}),?\s+(\d{4})|(\d{1,2})\s+([a-z]{3,9}\.?)\s+(\d{4}))\b")
-    });
-    date.captures_iter(&lower[..ceil(lower, upto)])
-        .filter_map(|c| match (c.get(1), c.get(4)) {
-            (Some(m), _) => period_date(m.as_str(), &c[2], &c[3]),
-            (_, Some(d)) => period_date(&c[5], d.as_str(), &c[6]),
-            _ => None,
+/// Words that make "N million" a financial figure.
+const FINANCIAL: [&str; 9] = [
+    "revenue", "income", "earnings", "sales", "profit", "loss", "ebitda", "margin", "turnover",
+];
+
+/// The release's dateline: the first date from a week before the 6-K to
+/// the day after it that comes before the statement, or after it right next
+/// to a dateline mark ("BEIJING, China, August 18, 2026 –", "Walldorf,
+/// Germany – October 21, 2026", "(GLOBE NEWSWIRE)"). A period end stated in
+/// the text ("as of September 30, 2026") is not a dateline.
+fn dateline(lower: &str, st: &Statement, upto: usize, accepted: NaiveDate) -> Option<NaiveDate> {
+    const MARKS: [&str; 9] = [
+        "–",
+        "—",
+        "&ndash;",
+        "&mdash;",
+        " - ",
+        "--",
+        "/prnewswire/",
+        "(globe newswire)",
+        "(business wire)",
+    ];
+    let window = accepted - Duration::days(7)..=accepted + Duration::days(1);
+    dates(&lower[..ceil(lower, upto)])
+        .filter(|(_, _, d)| window.contains(d) && *d != st.period)
+        .find(|(at, end, _)| {
+            let before = &lower[floor(lower, at.saturating_sub(8))..*at];
+            let after = &lower[*end..ceil(lower, end + 20)];
+            *at < st.start
+                || MARKS
+                    .iter()
+                    .any(|m| before.contains(m) || after.contains(m))
         })
-        .find(|d| (accepted - Duration::days(7)..=accepted + Duration::days(1)).contains(d))
+        .map(|(_, _, d)| d)
 }
 
 /// The company is named: its watchlist name as a word, or its ticker after
@@ -415,7 +472,7 @@ pub fn classify(
     if !names_company(&text, &lower, e) {
         return Err(format!("{} not named", e.name));
     }
-    Ok(dateline(&lower, st.end + 3000, accepted))
+    Ok(dateline(&lower, &st, st.end + 3000, accepted))
 }
 
 /// The document to read: an `EX-99` exhibit whose description reads like
@@ -451,16 +508,33 @@ pub fn results_doc(docs: &[FilingDoc]) -> Option<&FilingDoc> {
         })
 }
 
+/// A 6-K waiting to be read by its own `earnings:6k` message.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Pending {
+    pub cik: u64,
+    pub ticker: String,
+    pub accession: String,
+    /// UTC acceptance time (RFC 3339).
+    pub accepted_at: String,
+    /// Reads that found no document yet (404/410), to retry once.
+    #[serde(default)]
+    pub missing: u8,
+    /// Reads that failed on the network or a 5xx.
+    #[serde(default)]
+    pub failed: u8,
+}
+
+/// What a poll's 6-K part did.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct ForeignOutcome {
     /// 6-K feed pages read.
     pub pages: usize,
-    /// 6-Ks read (index and document fetched).
-    pub read: usize,
-    /// Tickers whose calendar date was marked reported.
-    pub reported: Vec<String>,
-    /// `TICKER accession: reason` for 6-Ks read and not taken as results.
-    pub rejected: Vec<String>,
+    /// 6-Ks newly added to the pending list.
+    pub found: usize,
+    /// 6-Ks waiting to be read after this poll.
+    pub pending: usize,
+    /// `earnings:6k` messages to queue (one 6-K each).
+    pub reads: usize,
     pub errors: Vec<String>,
     /// SEC answered 403/429 and the 6-K part stopped.
     pub throttled: bool,
@@ -468,6 +542,31 @@ pub struct ForeignOutcome {
     /// message)`: `poll_job` alerts once a day, like the 8-K watchlist.
     pub mismatches: Vec<(&'static str, String)>,
 }
+
+/// What one `earnings:6k` message did.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ReadOutcome {
+    /// `TICKER accession` read, when one was.
+    pub read: Option<String>,
+    /// The calendar date marked reported.
+    pub reported: Option<String>,
+    /// Why the 6-K is not a results release.
+    pub rejected: Option<String>,
+    pub errors: Vec<String>,
+    /// SEC answered 403/429: the 6-K stays pending.
+    pub throttled: bool,
+}
+
+/// kv key: the 6-Ks found near a calendar date and not yet read (a JSON
+/// list, oldest first).
+pub const KV_6K_PENDING: &str = "edgar_6k_pending";
+/// `earnings:6k` messages a poll queues at most; the rest wait for the next
+/// firing.
+pub const MAX_READS: usize = 3;
+/// Pending 6-Ks kept at most.
+const PENDING_KEEP: usize = 50;
+/// Network or 5xx failures of one 6-K before it is given up.
+const MAX_FAILED: u8 = 5;
 
 fn iso(t: DateTime<Utc>) -> String {
     t.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
@@ -505,13 +604,42 @@ fn target(rows: &[CalendarRow], day: NaiveDate) -> Option<NaiveDate> {
     (!done).then_some(d)
 }
 
-/// Reads the current 6-K feed back to its watermark (as the 8-K poll does)
-/// and checks up to `MAX_CANDIDATES` new 6-Ks of watched foreign companies
-/// accepted near their calendar date. A results release marks its release
-/// date `reported` (moving the calendar's date when it differs) with the
-/// 6-K's index as proof. D1: two kv reads, one ranged
-/// calendar read when a candidate is seen, one batched calendar write when
-/// a date is marked, and the two kv writes. A store error aborts.
+async fn kv_list<T: serde::de::DeserializeOwned>(
+    es: &dyn EarningsStore,
+    key: &str,
+) -> Result<Vec<T>, String> {
+    Ok(es
+        .kv_get(key)
+        .await?
+        .and_then(|j| serde_json::from_str(&j).ok())
+        .unwrap_or_default())
+}
+
+async fn kv_put<T: Serialize>(
+    es: &dyn EarningsStore,
+    key: &str,
+    list: &[T],
+    keep: usize,
+    now: DateTime<Utc>,
+) -> Result<(), String> {
+    let from = list.len().saturating_sub(keep);
+    let json = serde_json::to_string(&list[from..]).map_err(|e| e.to_string())?;
+    es.kv_set(key, &json, &iso(now)).await
+}
+
+fn accepted_day(p: &Pending) -> Option<NaiveDate> {
+    DateTime::parse_from_rfc3339(&p.accepted_at)
+        .ok()
+        .map(|t| et(t.with_timezone(&Utc)).date_naive())
+}
+
+/// The poll's 6-K part: reads the current 6-K feed back to its watermark
+/// (as the 8-K poll does) and adds each new 6-K that a watched foreign
+/// company filed near its calendar date to the pending list. No 6-K is read
+/// here: each is read by its own `earnings:6k` message (`foreign_read`), so
+/// its CPU never adds to the poll's. D1: the watermark, checked and pending
+/// reads, one ranged calendar read when a new 6-K is seen, and the pending
+/// and watermark writes. A store error aborts (`poll_job` logs it).
 pub async fn foreign_tick(
     now: DateTime<Utc>,
     es: &dyn EarningsStore,
@@ -551,19 +679,16 @@ pub async fn foreign_tick(
             complete = true;
         }
     }
-    // Throttled: no more requests this firing (the watermark stays).
-    if out.throttled {
-        return Ok(out);
-    }
 
     let watch = foreign_by_cik();
     out.mismatches = name_mismatches(&entries, &watch);
-    let mut checked: Vec<String> = es
-        .kv_get(KV_6K_CHECKED)
-        .await?
-        .and_then(|j| serde_json::from_str(&j).ok())
-        .unwrap_or_default();
-    let checked_before = checked.len();
+    let checked: Vec<String> = kv_list(es, KV_6K_CHECKED).await?;
+    let mut pending: Vec<Pending> = kv_list(es, KV_6K_PENDING).await?;
+    let before = pending.clone();
+    // A 6-K older than the window is no longer near its date.
+    let today = et(now).date_naive();
+    let old = |d: NaiveDate| (today - d).num_days() > DAYS_AFTER + 1;
+    pending.retain(|p| accepted_day(p).is_some_and(|d| !old(d)));
     let mut fresh: Vec<(&FeedEntry, &WatchEntry)> = Vec::new();
     for f in &entries {
         // An amendment repeats a release already counted (or corrects one).
@@ -571,19 +696,18 @@ pub async fn foreign_tick(
             continue;
         };
         if !same_filer(&f.company, w.sec)
+            || old(et(f.accepted_at).date_naive())
             || checked.contains(&f.accession)
+            || pending.iter().any(|p| p.accession == f.accession)
             || fresh.iter().any(|(g, _)| g.accession == f.accession)
         {
             continue;
         }
         fresh.push((f, w));
     }
-    // Oldest first, so a burst is worked through in order.
+    // Oldest first, so a burst is read in order.
     fresh.sort_by_key(|(f, _)| f.accepted_at);
-
     let day = |f: &FeedEntry| et(f.accepted_at).date_naive();
-    let mut changes = Vec::new();
-    let mut seen = 0;
     if let (Some(first), Some(last)) = (
         fresh.iter().map(|(f, _)| day(f)).min(),
         fresh.iter().map(|(f, _)| day(f)).max(),
@@ -597,77 +721,137 @@ pub async fn foreign_tick(
             by_ticker.entry(r.ticker.clone()).or_default().push(r);
         }
         for (f, w) in fresh {
-            let rows = by_ticker.entry(w.ticker.to_string()).or_default();
             // Not near a calendar date: not a candidate, and not marked
             // checked (cheap to look at again).
-            let Some(d) = target(rows, day(f)) else {
+            let rows = by_ticker.get(w.ticker).map_or(&[][..], Vec::as_slice);
+            if target(rows, day(f)).is_none() {
                 continue;
-            };
-            if seen == MAX_CANDIDATES {
-                break;
             }
-            seen += 1;
-            let text = match read(filings, f).await {
-                Ok(t) => t,
-                Err(e) => {
-                    out.errors
-                        .push(format!("{} {}: {e}", w.ticker, f.accession));
-                    // A 6-K without a readable document reads the same next
-                    // time: checked. Network errors and 5xx retry.
-                    if matches!(
-                        e,
-                        ProviderError::Empty
-                            | ProviderError::Parse(_)
-                            | ProviderError::Http(404 | 410)
-                    ) {
-                        checked.push(f.accession.clone());
-                    }
-                    if matches!(e, ProviderError::Http(403 | 429)) {
-                        out.throttled = true;
-                        break;
-                    }
-                    continue;
-                }
-            };
-            out.read += 1;
-            checked.push(f.accession.clone());
-            match classify(&text, w, day(f)) {
-                Ok(dated) => {
-                    // The release's own date (its dateline), else the 6-K's
-                    // when that is later than the calendar's; an earlier 6-K
-                    // is the Asian-morning case and keeps the calendar date.
-                    let released = dated.unwrap_or_else(|| day(f).max(d));
-                    let ch = report_changes(
-                        rows,
-                        w.ticker,
-                        released,
-                        filing_url(f.cik, &f.accession),
-                        now,
-                    );
-                    apply_to(rows, &ch);
-                    changes.extend(ch);
-                    out.reported.push(w.ticker.to_string());
-                }
-                Err(why) => out
-                    .rejected
-                    .push(format!("{} {}: {why}", w.ticker, f.accession)),
-            }
+            out.found += 1;
+            pending.push(Pending {
+                cik: f.cik,
+                ticker: w.ticker.to_string(),
+                accession: f.accession.clone(),
+                accepted_at: iso(f.accepted_at),
+                missing: 0,
+                failed: 0,
+            });
         }
     }
-    if !changes.is_empty() {
-        es.write_calendar(&changes).await?;
+    if pending != before {
+        kv_put(es, KV_6K_PENDING, &pending, PENDING_KEEP, now).await?;
     }
-    if checked.len() != checked_before {
-        let keep = checked.len().saturating_sub(CHECKED_KEEP);
-        let json = serde_json::to_string(&checked[keep..]).map_err(|e| e.to_string())?;
-        es.kv_set(KV_6K_CHECKED, &json, &iso(now)).await?;
-    }
+    out.pending = pending.len().min(PENDING_KEEP);
+    out.reads = out.pending.min(MAX_READS);
     let newest = entries.iter().map(|f| f.accepted_at).max();
     if let (true, Some(n)) = (complete, newest) {
         if watermark.is_none_or(|w| n > w) {
             es.kv_set(KV_6K_WATERMARK, &iso(n), &iso(now)).await?;
         }
     }
+    Ok(out)
+}
+
+/// One `earnings:6k` message: reads the oldest pending 6-K (its index, then
+/// the opening of its results document: 2 fetches) and, when it is a
+/// results release, marks its release date reported with the 6-K as proof
+/// (moving the calendar date when it differs, as the 8-K path does).
+/// Idempotent: a redelivered message finds that 6-K checked and reads the
+/// next one, or nothing. A 403/429 or network failure leaves it pending; a
+/// missing document (404/410) is retried once by a later message. D1: the
+/// pending and checked reads, the ticker's calendar rows, at most one
+/// calendar write, and the two list writes.
+pub async fn foreign_read(
+    now: DateTime<Utc>,
+    es: &dyn EarningsStore,
+    filings: &dyn Filings,
+) -> Result<ReadOutcome, String> {
+    let mut out = ReadOutcome::default();
+    let mut pending: Vec<Pending> = kv_list(es, KV_6K_PENDING).await?;
+    if pending.is_empty() {
+        return Ok(out);
+    }
+    let mut checked: Vec<String> = kv_list(es, KV_6K_CHECKED).await?;
+    let mut p = pending.remove(0);
+    let label = format!("{} {}", p.ticker, p.accession);
+    let watch = foreign_by_cik();
+    let (Some(w), Some(day)) = (watch.get(&p.cik), accepted_day(&p)) else {
+        kv_put(es, KV_6K_PENDING, &pending, PENDING_KEEP, now).await?;
+        return Ok(out);
+    };
+    if !checked.contains(&p.accession) {
+        let f = FeedEntry {
+            form: "6-K".into(),
+            cik: p.cik,
+            company: w.sec.to_string(),
+            accession: p.accession.clone(),
+            filing_date: ymd(day),
+            items: vec![],
+            accepted_at: DateTime::parse_from_rfc3339(&p.accepted_at)
+                .map(|t| t.with_timezone(&Utc))
+                .unwrap_or(now),
+            index_url: filing_url(p.cik, &p.accession),
+        };
+        match read(filings, &f).await {
+            Ok(text) => {
+                out.read = Some(label.clone());
+                checked.push(p.accession.clone());
+                match classify(&text, w, day) {
+                    Ok(dated) => {
+                        let rows = es.calendar_for(w.ticker).await?;
+                        // Already reported meanwhile (an 8-K, an earlier 6-K):
+                        // nothing to do.
+                        if let Some(d) = target(&rows, day) {
+                            // The release's own date (its dateline), else the
+                            // 6-K's when that is later than the calendar's; an
+                            // earlier 6-K is the Asian-morning case and keeps
+                            // the calendar date.
+                            let released = dated.unwrap_or_else(|| day.max(d));
+                            let ch = report_changes(
+                                &rows,
+                                w.ticker,
+                                released,
+                                filing_url(p.cik, &p.accession),
+                                now,
+                            );
+                            if !ch.is_empty() {
+                                es.write_calendar(&ch).await?;
+                            }
+                            out.reported = Some(ymd(released));
+                        }
+                    }
+                    Err(why) => out.rejected = Some(format!("{label}: {why}")),
+                }
+            }
+            Err(e) => {
+                out.errors.push(format!("{label}: {e}"));
+                match e {
+                    ProviderError::Http(403 | 429) => {
+                        out.throttled = true;
+                        pending.insert(0, p);
+                    }
+                    // Not there yet, or not at all: one more try later.
+                    ProviderError::Http(404 | 410) if p.missing == 0 => {
+                        p.missing = 1;
+                        pending.push(p);
+                    }
+                    // No readable document: it reads the same next time.
+                    ProviderError::Http(404 | 410)
+                    | ProviderError::Empty
+                    | ProviderError::Parse(_) => {
+                        checked.push(p.accession.clone());
+                    }
+                    _ if p.failed + 1 < MAX_FAILED => {
+                        p.failed += 1;
+                        pending.push(p);
+                    }
+                    _ => checked.push(p.accession.clone()),
+                }
+            }
+        }
+    }
+    kv_put(es, KV_6K_CHECKED, &checked, CHECKED_KEEP, now).await?;
+    kv_put(es, KV_6K_PENDING, &pending, PENDING_KEEP, now).await?;
     Ok(out)
 }
 
@@ -742,6 +926,31 @@ mod tests {
         ] {
             assert_eq!(check(ticker, name, accepted), Ok(()), "{name}");
         }
+    }
+
+    #[test]
+    fn a_figure_is_money_or_a_financial_amount() {
+        assert!(has_figure("total revenues were rmb32,136.9 million"));
+        assert!(has_figure("net sales of €11.7 billion"));
+        assert!(has_figure("sales 24,630,753 operating income"));
+        assert!(has_figure("revenue reached 5.70bn"));
+        // Operating data in millions is not a reported figure.
+        assert!(!has_figure("reduced carbon emissions by 4.14 million tons"));
+        assert!(!has_figure("125.8 million passengers in 2026"));
+        assert!(!has_figure("a meeting on november 16, 2026 at 10:00"));
+    }
+
+    #[test]
+    fn a_period_end_is_not_a_dateline() {
+        let e = find("NIO").unwrap();
+        // Filed within a week of the quarter end, with no dateline mark.
+        let text = "NIO Inc. (NYSE: NIO) today announced its unaudited financial results for the quarter ended September 30, 2026. Total revenues were RMB32.1 billion.";
+        assert_eq!(classify(text, &e, d("2026-10-02")), Ok(None));
+        let dated = "SHANGHAI, China, October 2, 2026 (GLOBE NEWSWIRE) -- NIO Inc. (NYSE: NIO) today announced its unaudited financial results for the quarter ended September 30, 2026. Total revenues were RMB32.1 billion.";
+        assert_eq!(
+            classify(dated, &e, d("2026-10-02")),
+            Ok(Some(d("2026-10-02")))
+        );
     }
 
     #[test]
@@ -830,6 +1039,14 @@ mod tests {
                 "board meeting notice",
             ),
             ("TME", "tme_to_report.htm", "2026-10-13", "pre-announcement"),
+            // "XPENG Announces Vehicle Delivery Results for September and
+            // Third Quarter 2026", with "4.14 million tons" of CO2.
+            (
+                "XPEV",
+                "xpev_delivery_results.htm",
+                "2026-10-02",
+                "delivery update",
+            ),
         ] {
             let r = check(ticker, name, accepted);
             assert!(r.is_err(), "{name} taken as results");
@@ -929,6 +1146,8 @@ mod tests {
         throttle_page: Cell<Option<usize>>,
         /// Accessions whose index lists no readable document.
         bare: RefCell<Vec<String>>,
+        /// Errors a document read answers first, per accession, in order.
+        head_errors: RefCell<HashMap<String, Vec<ProviderError>>>,
     }
     impl Fake {
         fn add(
@@ -1027,6 +1246,11 @@ mod tests {
         async fn document_head(&self, url: &str, max: usize) -> Result<String, ProviderError> {
             assert_eq!(max, HEAD_BYTES);
             self.fetches.set(self.fetches.get() + 1);
+            for (acc, errs) in self.head_errors.borrow_mut().iter_mut() {
+                if url.contains(&acc.replace('-', "")) && !errs.is_empty() {
+                    return Err(errs.remove(0));
+                }
+            }
             let docs = self.docs.borrow();
             let (_, text) = docs
                 .iter()
@@ -1073,6 +1297,23 @@ mod tests {
             .collect()
     }
 
+    /// A poll, then the `earnings:6k` messages it queued, one by one.
+    async fn run(
+        now: DateTime<Utc>,
+        es: &MemEarningsStore,
+        fl: &Fake,
+    ) -> (ForeignOutcome, Vec<ReadOutcome>) {
+        let o = foreign_tick(now, es, fl).await.unwrap();
+        let mut reads = Vec::new();
+        for _ in 0..o.reads {
+            reads.push(foreign_read(now, es, fl).await.unwrap());
+        }
+        (o, reads)
+    }
+    fn reported(reads: &[ReadOutcome]) -> Vec<String> {
+        reads.iter().filter_map(|r| r.reported.clone()).collect()
+    }
+
     #[tokio::test]
     async fn a_results_6k_near_the_date_marks_it_reported_with_the_6k_as_proof() {
         let es = stores();
@@ -1096,9 +1337,29 @@ mod tests {
         let now = utc("2026-09-01T11:20:00Z");
         es.calls.set(0);
         let o = foreign_tick(now, &es, &fl).await.unwrap();
-        assert_eq!(o.reported, ["NIO"], "{o:?}");
-        assert_eq!(o.rejected.len(), 1, "{o:?}");
-        assert!(o.rejected[0].contains("no results"), "{o:?}");
+        // The poll reads the feed page only; each 6-K gets its own message.
+        assert_eq!(
+            (o.pages, o.found, o.reads, fl.fetches.get()),
+            (1, 2, 2, 1),
+            "{o:?}"
+        );
+        // kv: watermark, checked and pending reads; one calendar read; the
+        // pending and watermark writes.
+        assert_eq!(es.calls.get(), 6);
+        es.calls.set(0);
+        let first = foreign_read(now, &es, &fl).await.unwrap();
+        // The older one first: the delivery update. Pending, checked reads;
+        // the two list writes.
+        assert!(
+            first.rejected.is_some() && first.reported.is_none(),
+            "{first:?}"
+        );
+        assert_eq!((es.calls.get(), fl.fetches.get()), (4, 3));
+        es.calls.set(0);
+        let second = foreign_read(now, &es, &fl).await.unwrap();
+        assert_eq!(second.reported.as_deref(), Some("2026-09-01"), "{second:?}");
+        // Plus the ticker's calendar rows and the calendar write.
+        assert_eq!((es.calls.get(), fl.fetches.get()), (6, 5));
         assert_eq!(
             status(&es, "NIO"),
             [(
@@ -1107,18 +1368,18 @@ mod tests {
                 Some(filing_url(1736541, &res))
             )]
         );
-        // The feed page, then 2 fetches for each of the 2 6-Ks.
-        assert_eq!((o.pages, o.read, fl.fetches.get()), (1, 2, 5));
-        // kv: watermark and checked reads; one calendar read; one write;
-        // checked and watermark writes.
-        assert_eq!(es.calls.get(), 6);
-        // The next firing sees the same feed: nothing is read again.
+        // A redelivered message finds nothing pending.
+        assert_eq!(
+            foreign_read(now, &es, &fl).await.unwrap(),
+            ReadOutcome::default()
+        );
+        // The next firing sees the same feed: nothing is queued again.
         let (f0, c0) = (fl.fetches.get(), es.calls.get());
         let o = foreign_tick(now + Duration::minutes(5), &es, &fl)
             .await
             .unwrap();
-        assert_eq!((o.read, fl.fetches.get() - f0), (0, 1));
-        assert_eq!(es.calls.get() - c0, 2, "only the two kv reads");
+        assert_eq!((o.found, o.reads, fl.fetches.get() - f0), (0, 0, 1));
+        assert_eq!(es.calls.get() - c0, 3, "only the three kv reads");
     }
 
     #[tokio::test]
@@ -1158,43 +1419,40 @@ mod tests {
             "6-K",
             Some(fx("baba_results.htm")),
         );
-        let o = foreign_tick(utc("2026-08-20T21:00:00Z"), &es, &fl)
-            .await
-            .unwrap();
-        // The June-quarter release accepted on Aug 19 ET: the Aug 20 date.
-        assert_eq!(
-            (o.read, o.reported.clone()),
-            (1, vec!["BABA".to_string()]),
-            "{o:?}"
-        );
+        let (o, reads) = run(utc("2026-08-20T21:00:00Z"), &es, &fl).await;
+        assert_eq!(o.found, 1, "{o:?}");
+        // The June-quarter release dated "August 20, 2026".
+        assert_eq!(reported(&reads), ["2026-08-20"], "{reads:?}");
         assert_eq!(status(&es, "BABA")[0].2, Some(filing_url(1577552, &real)));
         assert_eq!(status(&es, "TM")[0].1, "unconfirmed");
     }
 
     #[tokio::test]
-    async fn at_most_two_6ks_are_read_per_poll_and_the_rest_next_time() {
+    async fn a_poll_queues_at_most_three_reads_and_the_rest_next_time() {
         let es = stores();
-        for t in ["NIO", "XPEV", "LI", "BIDU"] {
+        let tickers = ["NIO", "XPEV", "LI", "BIDU"];
+        for t in tickers {
             seed(&es, t, "2026-09-01").await;
         }
         let fl = Fake::default();
-        for (i, t) in ["NIO", "XPEV", "LI", "BIDU"].iter().enumerate() {
+        for (i, t) in tickers.iter().enumerate() {
             let at = format!("2026-09-01T1{i}:00:00Z");
             fl.add(t, i, &at, "6-K", Some(fx("nio_august_deliveries.htm")));
         }
         let now = utc("2026-09-01T15:00:00Z");
-        let o = foreign_tick(now, &es, &fl).await.unwrap();
-        assert_eq!(o.read, MAX_CANDIDATES);
-        // Every fetch of this poll: the page and 2 per 6-K.
-        assert_eq!(fl.fetches.get(), 1 + 2 * MAX_CANDIDATES);
-        let o = foreign_tick(now + Duration::minutes(5), &es, &fl)
-            .await
-            .unwrap();
-        assert_eq!(o.read, 2, "the other two, next firing");
-        let o = foreign_tick(now + Duration::minutes(10), &es, &fl)
-            .await
-            .unwrap();
-        assert_eq!(o.read, 0);
+        let (o, reads) = run(now, &es, &fl).await;
+        assert_eq!(
+            (o.found, o.pending, o.reads, reads.len()),
+            (4, 4, MAX_READS, MAX_READS)
+        );
+        let (o, reads) = run(now + Duration::minutes(5), &es, &fl).await;
+        assert_eq!(
+            (o.found, o.reads, reads.len()),
+            (0, 1, 1),
+            "the fourth, next firing"
+        );
+        let (o, _) = run(now + Duration::minutes(10), &es, &fl).await;
+        assert_eq!((o.pending, o.reads), (0, 0));
     }
 
     #[tokio::test]
@@ -1209,8 +1467,7 @@ mod tests {
             "6-K",
             Some(fx("nio_results.htm")),
         );
-        let now = utc("2026-09-01T11:20:00Z");
-        foreign_tick(now, &es, &fl).await.unwrap();
+        run(utc("2026-09-01T11:20:00Z"), &es, &fl).await;
         // A second 6-K the next day (the GAAP/IFRS reconciliation, say).
         fl.add(
             "NIO",
@@ -1220,30 +1477,85 @@ mod tests {
             Some(fx("nio_gaap_ifrs.htm")),
         );
         let before = fl.fetches.get();
-        let o = foreign_tick(utc("2026-09-02T11:05:00Z"), &es, &fl)
-            .await
-            .unwrap();
-        assert_eq!((o.read, fl.fetches.get() - before), (0, 1));
+        let (o, _) = run(utc("2026-09-02T11:05:00Z"), &es, &fl).await;
+        assert_eq!((o.found, fl.fetches.get() - before), (0, 1));
     }
 
     #[tokio::test]
-    async fn a_fetch_error_is_retried_next_firing() {
+    async fn a_network_error_is_retried_by_a_later_message() {
         let es = stores();
         seed(&es, "NIO", "2026-09-01").await;
         let fl = Fake::default();
-        // No document text: the fake answers 503.
+        // No document text yet: the fake answers 503.
         fl.add("NIO", 1, "2026-09-01T11:15:00Z", "6-K", None);
         let now = utc("2026-09-01T11:20:00Z");
-        let o = foreign_tick(now, &es, &fl).await.unwrap();
-        assert_eq!((o.read, o.errors.len()), (0, 1), "{o:?}");
-        fl.docs
-            .borrow_mut()
-            .insert(fl.feed.borrow()[0].1.clone(), fx("nio_results.htm"));
-        let o = foreign_tick(now + Duration::minutes(5), &es, &fl)
-            .await
-            .unwrap();
-        assert_eq!(o.reported, ["NIO"]);
+        let (_, reads) = run(now, &es, &fl).await;
+        assert_eq!(reads[0].errors.len(), 1, "{reads:?}");
+        let acc = fl.feed.borrow()[0].1.clone();
+        fl.docs.borrow_mut().insert(acc, fx("nio_results.htm"));
+        let (o, reads) = run(now + Duration::minutes(5), &es, &fl).await;
+        assert_eq!(o.reads, 1);
+        assert_eq!(reported(&reads), ["2026-09-01"]);
     }
+
+    #[tokio::test]
+    async fn a_missing_document_is_retried_once_then_checked() {
+        let es = stores();
+        seed(&es, "NIO", "2026-09-01").await;
+        let fl = Fake::default();
+        let acc = fl.add(
+            "NIO",
+            1,
+            "2026-09-01T11:15:00Z",
+            "6-K",
+            Some(fx("nio_results.htm")),
+        );
+        // EDGAR lists the filing a moment before it serves the document.
+        fl.head_errors
+            .borrow_mut()
+            .insert(acc.clone(), vec![ProviderError::Http(404)]);
+        let now = utc("2026-09-01T11:20:00Z");
+        let (_, reads) = run(now, &es, &fl).await;
+        assert!(reads[0].errors[0].contains("404"), "{reads:?}");
+        let (_, reads) = run(now + Duration::minutes(5), &es, &fl).await;
+        assert_eq!(reported(&reads), ["2026-09-01"], "the second try reads it");
+        // Two 404s: checked, never read again.
+        let es = stores();
+        seed(&es, "NIO", "2026-09-01").await;
+        fl.head_errors.borrow_mut().insert(
+            acc.clone(),
+            vec![ProviderError::Http(404), ProviderError::Http(410)],
+        );
+        run(now, &es, &fl).await;
+        run(now + Duration::minutes(5), &es, &fl).await;
+        let (o, _) = run(now + Duration::minutes(10), &es, &fl).await;
+        assert_eq!((o.pending, o.reads), (0, 0));
+        assert!(status(&es, "NIO")[0].1 == "unconfirmed");
+    }
+
+    #[tokio::test]
+    async fn a_429_on_a_read_leaves_the_6k_pending() {
+        let es = stores();
+        seed(&es, "NIO", "2026-09-01").await;
+        let fl = Fake::default();
+        let acc = fl.add(
+            "NIO",
+            1,
+            "2026-09-01T11:15:00Z",
+            "6-K",
+            Some(fx("nio_results.htm")),
+        );
+        fl.head_errors
+            .borrow_mut()
+            .insert(acc, vec![ProviderError::Http(429)]);
+        let now = utc("2026-09-01T11:20:00Z");
+        let (_, reads) = run(now, &es, &fl).await;
+        assert!(reads[0].throttled);
+        let (o, reads) = run(now + Duration::minutes(5), &es, &fl).await;
+        assert_eq!(o.reads, 1);
+        assert_eq!(reported(&reads), ["2026-09-01"]);
+    }
+
     #[tokio::test]
     async fn a_6k_with_no_readable_document_is_read_once() {
         let es = stores();
@@ -1252,13 +1564,15 @@ mod tests {
         let acc = fl.add("NIO", 1, "2026-09-01T11:15:00Z", "6-K", None);
         fl.bare.borrow_mut().push(acc);
         let now = utc("2026-09-01T11:20:00Z");
-        let o = foreign_tick(now, &es, &fl).await.unwrap();
-        assert_eq!(o.errors.len(), 1, "{o:?}");
+        let (_, reads) = run(now, &es, &fl).await;
+        assert_eq!(reads[0].errors.len(), 1, "{reads:?}");
         let before = fl.fetches.get();
-        foreign_tick(now + Duration::minutes(5), &es, &fl)
-            .await
-            .unwrap();
-        assert_eq!(fl.fetches.get() - before, 1, "the feed page only");
+        let (o, _) = run(now + Duration::minutes(5), &es, &fl).await;
+        assert_eq!(
+            (o.reads, fl.fetches.get() - before),
+            (0, 1),
+            "the feed page only"
+        );
     }
 
     #[tokio::test]
@@ -1274,10 +1588,8 @@ mod tests {
             "6-K",
             Some(fx("nio_results.htm")),
         );
-        let o = foreign_tick(utc("2026-09-01T11:20:00Z"), &es, &fl)
-            .await
-            .unwrap();
-        assert_eq!(o.reported, ["NIO"]);
+        let (_, reads) = run(utc("2026-09-01T11:20:00Z"), &es, &fl).await;
+        assert_eq!(reported(&reads), ["2026-09-01"]);
         assert_eq!(
             status(&es, "NIO"),
             [(
@@ -1298,10 +1610,8 @@ mod tests {
             "6-K",
             Some(fx("sap_results.htm")),
         );
-        let o = foreign_tick(utc("2026-10-26T10:05:00Z"), &es, &fl)
-            .await
-            .unwrap();
-        assert_eq!(o.reported, ["SAP"], "{o:?}");
+        let (_, reads) = run(utc("2026-10-26T10:05:00Z"), &es, &fl).await;
+        assert_eq!(reported(&reads), ["2026-10-21"], "{reads:?}");
         assert_eq!(status(&es, "SAP")[0].0, "2026-10-21");
     }
 
@@ -1322,12 +1632,10 @@ mod tests {
             "6-K",
             Some(fx("nio_results.htm")),
         );
-        let o = foreign_tick(utc("2026-09-02T00:00:00Z"), &es, &fl)
-            .await
-            .unwrap();
+        let (o, reads) = run(utc("2026-09-02T00:00:00Z"), &es, &fl).await;
         assert_eq!(
-            (o.pages, o.reported.clone()),
-            (2, vec!["NIO".to_string()]),
+            (o.pages, reported(&reads)),
+            (2, vec!["2026-09-01".to_string()]),
             "{o:?}"
         );
         assert!(o.errors.is_empty(), "{o:?}");
@@ -1346,7 +1654,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_429_stops_the_6k_part_before_any_read() {
+    async fn a_429_stops_the_6k_part_of_the_poll() {
         let es = stores();
         seed(&es, "NIO", "2026-09-01").await;
         es.kv_set(KV_6K_WATERMARK, "2026-08-31T00:00:00Z", "x")
@@ -1367,9 +1675,9 @@ mod tests {
             .unwrap();
         assert!(o.throttled);
         assert_eq!(
-            (o.read, fl.fetches.get()),
-            (0, 2),
-            "two feed pages, no reads"
+            (o.found, o.reads, fl.fetches.get()),
+            (0, 0, 2),
+            "two feed pages"
         );
         // The watermark stays, so the next firing reads the range again.
         assert_eq!(
@@ -1379,11 +1687,23 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_foreign_filer_under_another_name_is_reported() {
+    async fn a_pending_6k_past_the_window_is_dropped() {
         let es = stores();
+        seed(&es, "NIO", "2026-09-01").await;
         let fl = Fake::default();
-        fl.add("TM", 1, "2026-09-01T11:15:00Z", "6-K", None);
-        // The feed shows Toyota's CIK under another company's name.
+        fl.add("NIO", 1, "2026-09-01T11:15:00Z", "6-K", None);
+        let o = foreign_tick(utc("2026-09-01T11:20:00Z"), &es, &fl)
+            .await
+            .unwrap();
+        assert_eq!(o.pending, 1);
+        let o = foreign_tick(utc("2026-09-12T11:20:00Z"), &es, &fl)
+            .await
+            .unwrap();
+        assert_eq!((o.pending, o.reads), (0, 0));
+    }
+
+    #[test]
+    fn a_foreign_filer_under_another_name_is_a_mismatch() {
         let tm = find("TM").unwrap();
         let entries = vec![FeedEntry {
             form: "6-K".into(),
@@ -1396,13 +1716,9 @@ mod tests {
             index_url: filing_url(tm.cik, "0001094517-26-000001"),
         }];
         assert_eq!(name_mismatches(&entries, &foreign_by_cik())[0].0, "TM");
-        // Through the tick: the Fake names rows by their SEC name, so none.
-        let o = foreign_tick(utc("2026-09-01T11:20:00Z"), &es, &fl)
-            .await
-            .unwrap();
-        assert!(o.mismatches.is_empty());
     }
 }
+
 #[cfg(test)]
 mod timing {
     /// CPU per 6-K read (release build), over raw 6-K documents in

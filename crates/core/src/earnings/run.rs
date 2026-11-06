@@ -268,6 +268,11 @@ pub async fn poll_job(
         n => n,
     };
     out.follow_ups = vec![EarningsStep::Build; builds];
+    // One message per pending 6-K, each read in its own invocation.
+    out.follow_ups.extend(std::iter::repeat_n(
+        EarningsStep::Foreign,
+        out.foreign.reads,
+    ));
     if !crate::earnings::calendar::refreshed_today(es, now).await? {
         out.follow_ups.push(EarningsStep::Calendar);
     }

@@ -238,7 +238,84 @@ pub fn current_form_feed_url(form: &str, start: usize) -> String {
 /// Plain text of the opening of a document cut at a byte limit: the cut
 /// half-tag is dropped first.
 pub fn head_text(html: &str) -> String {
-    html_to_text(&html[..html.rfind('>').map_or(0, |i| i + 1)])
+    quick_text(&html[..html.rfind('>').map_or(0, |i| i + 1)])
+}
+
+/// Plain text of HTML on one line, without regexes: scripts, styles,
+/// comments, the head and the hidden inline-XBRL header dropped, every tag a
+/// space, entities decoded, whitespace collapsed. For text that is matched
+/// against, not quoted: a cold Worker spends several ms compiling
+/// `html_to_text`'s patterns, and the 6-K reader has 10 ms of CPU in all.
+pub fn quick_text(html: &str) -> String {
+    let bytes = html.as_bytes();
+    let lower = html.to_ascii_lowercase();
+    let mut out = String::with_capacity(html.len() / 2);
+    let mut i = 0;
+    let mut text_from = 0;
+    while let Some(off) = html[i..].find('<') {
+        let at = i + off;
+        out.push_str(&html[text_from..at]);
+        out.push(' ');
+        let rest = &lower[at..];
+        let skip_to = |close: &str| {
+            rest.find(close)
+                .map_or(html.len(), |e| at + e + close.len())
+        };
+        i = if rest.starts_with("<!--") {
+            skip_to("-->")
+        } else if ["<script", "<style", "<head", "<ix:header"]
+            .iter()
+            .any(|t| {
+                rest.starts_with(t)
+                    && !rest[t.len()..].starts_with(|c: char| c.is_ascii_alphanumeric())
+            })
+        {
+            let name = &rest[1..rest
+                .find(|c: char| c.is_whitespace() || c == '>')
+                .unwrap_or(rest.len())];
+            let end = format!("</{name}");
+            match rest.find(&end) {
+                Some(e) => {
+                    let after = at + e;
+                    lower[after..]
+                        .find('>')
+                        .map_or(html.len(), |g| after + g + 1)
+                }
+                None => html.len(),
+            }
+        } else {
+            // To the tag's '>', outside quoted attribute values.
+            let mut j = at + 1;
+            let mut quote = 0u8;
+            while j < bytes.len() {
+                let b = bytes[j];
+                if quote != 0 {
+                    if b == quote {
+                        quote = 0;
+                    }
+                } else if b == b'"' || b == b'\'' {
+                    quote = b;
+                } else if b == b'>' {
+                    break;
+                }
+                j += 1;
+            }
+            (j + 1).min(html.len())
+        };
+        text_from = i;
+    }
+    out.push_str(&html[text_from.min(html.len())..]);
+    decode_entities(&out)
+        .replace(
+            [
+                '\u{200b}', '\u{200c}', '\u{200d}', '\u{2060}', '\u{feff}', '\u{a0}',
+            ],
+            " ",
+        )
+        .replace('\u{ad}', "")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// The text between `<tag ...>` and `</tag>` in `s`.
@@ -346,9 +423,9 @@ pub fn parse_filing_index(html: &str) -> Vec<FilingDoc> {
             continue;
         }
         out.push(FilingDoc {
-            name: html_to_text(&a[2]),
-            description: html_to_text(cells[1]),
-            doc_type: html_to_text(cells[3]),
+            name: quick_text(&a[2]),
+            description: quick_text(cells[1]),
+            doc_type: quick_text(cells[3]),
             url: format!("https://www.sec.gov{path}"),
         });
     }
