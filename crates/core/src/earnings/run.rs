@@ -18,7 +18,7 @@ use crate::earnings::extract::{extract, Extracted};
 use crate::earnings::facts::{missing_required, EarningsFacts, Metric, Metrics};
 use crate::earnings::store::{ChartRow, EarningsStore, FilingRow};
 use crate::earnings::xbrl::fetch_trend;
-use crate::earnings::{find, in_window, WatchEntry};
+use crate::earnings::{find, in_window, Tier, WatchEntry};
 use crate::edgar::{exhibit_991, filing_url, FeedEntry, Filings, FEED_PAGE};
 use crate::facts::{Field, NewsReason};
 use crate::jobs::alert_once_today;
@@ -47,6 +47,9 @@ pub const MAX_POLL_LAG_MINUTES: i64 = 5;
 /// Feed pages one poll reads at most (300 filings, far more than EDGAR
 /// accepts in 5 minutes even at the peak of earnings season).
 pub const MAX_FEED_PAGES: usize = 3;
+/// Build messages a poll sends for open filings when it detected nothing
+/// new, so a burst's retries drain three at a time.
+pub const MAX_RETRY_BUILDS: usize = 3;
 /// kv key: the newest feed acceptance time a poll read (RFC 3339).
 pub const KV_FEED_WATERMARK: &str = "edgar_feed_watermark";
 
@@ -165,6 +168,10 @@ pub async fn poll_tick(
         // Calendar first and on every sighting (idempotent), so a failed
         // write after the insert cannot leave the calendar unmarked.
         crate::earnings::calendar::record_filing(es, &row, now).await?;
+        // A calendar-tier report only marks its date reported.
+        if w.tier != Tier::Full {
+            continue;
+        }
         if !es.insert_filing(&row).await? {
             continue;
         }
@@ -184,9 +191,9 @@ pub async fn poll_tick(
 
 /// One `earnings` queue message: drops it when stale, else polls the feed,
 /// alerts once per ET day when SEC refuses (403/429), and lists the
-/// follow-up messages: one build per new filing (or one while any filing is
-/// still open, for retries and Chinese drafts) and the calendar refresh
-/// until it ran today.
+/// follow-up messages: one build per new filing (or, with none, one per open
+/// filing up to `MAX_RETRY_BUILDS`, for retries and Chinese drafts) and the
+/// calendar refresh until it ran today.
 pub async fn poll_job(
     now: DateTime<Utc>,
     fired: Option<DateTime<Utc>>,
@@ -213,7 +220,7 @@ pub async fn poll_job(
         return Ok(out);
     }
     let builds = match out.detected.len() {
-        0 => usize::from(!es.open_filings().await?.is_empty()),
+        0 => es.open_filings().await?.len().min(MAX_RETRY_BUILDS),
         n => n,
     };
     out.follow_ups = vec![EarningsStep::Build; builds];
@@ -860,6 +867,7 @@ mod tests {
     use crate::earnings::facts::NOT_STATED;
     use crate::earnings::store::MemEarningsStore;
     use crate::earnings::xbrl::tests::aapl_concept;
+    use crate::earnings::Filer;
     use crate::edgar::tests::{EX991, FEED, INDEX};
     use crate::edgar::{html_to_text, parse_current_feed, parse_filing_index, Concept, FilingDoc};
     use crate::store::MemStore;
@@ -938,7 +946,7 @@ mod tests {
                 .collect();
             out.push_str(&format!(
                 "<entry>\n<title>8-K - {} (00{cik:08}) (Filer)</title>\n<link rel=\"alternate\" type=\"text/html\" href=\"https://www.sec.gov/Archives/edgar/data/{cik}/{nodash}/{acc}-index.htm\"/>\n<summary type=\"html\">\n &lt;b&gt;Filed:&lt;/b&gt; {} &lt;b&gt;AccNo:&lt;/b&gt; {acc}\n{lines}</summary>\n<updated>{}</updated>\n<id>urn:tag:sec.gov,2008:accession-number={acc}</id>\n</entry>\n",
-                crate::earnings::by_cik(*cik).map_or("Co", |w| w.name),
+                crate::earnings::by_cik(*cik).map_or("Co", |w| w.sec),
                 et(*at).format("%Y-%m-%d"),
                 at.to_rfc3339()
             ));
@@ -1267,12 +1275,64 @@ mod tests {
             .unwrap();
         assert!(o.detected.is_empty());
         assert_eq!(o.follow_ups, [EarningsStep::Build]);
+        // A burst's retries: one build per open filing, at most
+        // `MAX_RETRY_BUILDS` per firing.
+        for i in 0..5 {
+            let mut f = es.filings.borrow()[ACC].clone();
+            f.accession = format!("0000320193-26-00010{i}");
+            f.run_key = run_key("AAPL", &f.accession);
+            es.insert_filing(&f).await.unwrap();
+        }
+        let o = poll_job(t2, Some(t2), &es, base.as_ref(), &fl)
+            .await
+            .unwrap();
+        assert_eq!(o.follow_ups, [EarningsStep::Build; MAX_RETRY_BUILDS]);
+        for i in 0..5 {
+            es.set_filing_state(&format!("0000320193-26-00010{i}"), "done")
+                .await
+                .unwrap();
+        }
         // Nothing open, calendar done: no follow-ups.
         es.set_filing_state(ACC, "done").await.unwrap();
         let o = poll_job(t2, Some(t2), &es, base.as_ref(), &fl)
             .await
             .unwrap();
         assert!(o.follow_ups.is_empty(), "{o:?}");
+    }
+
+    #[tokio::test]
+    async fn a_calendar_tier_report_marks_the_calendar_and_queues_no_build() {
+        // Agilent: domestic filer, calendar tier.
+        let a = crate::earnings::find("A").unwrap();
+        assert_eq!((a.filer, a.tier), (Filer::Domestic, Tier::Calendar));
+        let (base, es) = stores();
+        let fl = FakeFilings::default();
+        let t = poll_time();
+        let acc = "0001090872-26-000041".to_string();
+        fl.pages.borrow_mut().insert(
+            0,
+            Ok(feed(&[(
+                a.cik,
+                acc.clone(),
+                t - Duration::minutes(10),
+                "2.02,9.01",
+            )])),
+        );
+        let o = poll_job(t, Some(t), &es, base.as_ref(), &fl).await.unwrap();
+        assert!(o.detected.is_empty());
+        assert!(es.filings.borrow().is_empty());
+        assert!(base.runs.borrow().is_empty());
+        assert_eq!(o.follow_ups, [EarningsStep::Calendar]);
+        let cal = es.calendar_for("A").await.unwrap();
+        assert_eq!(cal.len(), 1);
+        assert_eq!(
+            (cal[0].status.as_str(), cal[0].report_date.as_str()),
+            ("reported", "2026-10-30")
+        );
+        assert_eq!(
+            cal[0].proof_url.as_deref(),
+            Some(filing_url(a.cik, &acc).as_str())
+        );
     }
 
     #[tokio::test]
