@@ -81,3 +81,4 @@ they are never asked twice. Things decided *not* to do go in `declined.md`.
   - no rule breaks for Sonnet, 4 for DeepSeek;
   - about $23–32 a month at current volume, against the $100 credit;
   - Opus costs 2.5× as much and is no more accurate.
+- **Smaller local Rust builds**: debug builds keep line tables for our crates and no debug info for dependencies (`[profile.dev]` in `Cargo.toml`), and every local checkout, including `.worktrees/*`, shares one build dir through an untracked `prebell/.cargo/config.toml` (`target-dir = ~/.cache/prebell-target`, excluded in `.git/info/exclude`, so CI is unaffected). Scripts find binaries with `cargo metadata`'s `target_directory`, never `target/`. The disk had filled with about 4 GB of `target/` per worktree, 33 GB in all; a full debug + release + wasm build in the shared dir is now 1.1 GB. Rick, 2026-11-07: "yes".

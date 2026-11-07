@@ -16,7 +16,7 @@ trap 'rm -rf "$TMP"' EXIT
 WRANGLER=(pnpm exec wrangler)
 
 cargo build -q -p prebell-core --bin cover-graphic
-BIN=$PWD/target/debug/cover-graphic
+BIN=$(cargo metadata -q --format-version 1 --no-deps | jq -r .target_directory)/debug/cover-graphic
 mkdir -p "$IMG_DIR"
 : >"$OUT"
 

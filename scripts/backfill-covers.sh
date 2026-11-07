@@ -12,7 +12,7 @@ trap 'rm -rf "$TMP"' EXIT
 WRANGLER=(pnpm exec wrangler)
 
 cargo build -q -p prebell-core --bin cover-lines
-BIN=$PWD/target/debug/cover-lines
+BIN=$(cargo metadata -q --format-version 1 --no-deps | jq -r .target_directory)/debug/cover-lines
 : >"$OUT"
 
 # Wrangler config lives in crates/generator; paths below are relative to it.
