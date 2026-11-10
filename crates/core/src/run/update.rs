@@ -73,7 +73,14 @@ pub async fn tick_with_watch(
     watch: Option<&dyn WatchSource>,
     hooks: &Hooks<'_>,
 ) -> TickOutcome {
-    step(now, store, &Premarket { md, ns, llm, watch }, hooks)
+    let c = Premarket {
+        md,
+        ns,
+        llm,
+        watch,
+        reports: Some(store),
+    };
+    step(now, store, &c, hooks)
         .await
         .unwrap_or_else(TickOutcome::Retrying)
 }

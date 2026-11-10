@@ -732,6 +732,7 @@ async fn to_mover(
         quote,
         name,
         reasons,
+        fallback: None,
     }
 }
 

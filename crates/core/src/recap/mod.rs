@@ -23,6 +23,7 @@ use crate::providers::{LlmProvider, MarketData, NewsSearch};
 use crate::run::{tick_content, Content, Hooks, TickOutcome};
 use crate::store::Store;
 use crate::themes::{detect_all, RECAP_RULES, THEME_MAX};
+use crate::why;
 
 /// `(label, Yahoo symbol)`: the indexes themselves, not ETF proxies, so the
 /// levels match what readers see quoted at the close.
@@ -204,6 +205,7 @@ async fn mover(
         quote,
         name,
         reasons,
+        fallback: None,
     }
 }
 
@@ -477,11 +479,22 @@ pub async fn build_facts(
     )
     .await;
     let after_hours = after_hours(ns, llm, trading_date, now, &reported, &mut d).await;
+    // One read for the reported results that explain a mover without news.
+    let needed = gainers.iter().chain(&losers).any(|m| m.reasons.is_empty());
+    let (reports, reports_err) = why::read_reports(store, trading_date, needed).await;
+    let counts = why::fill(
+        gainers.iter_mut().chain(losers.iter_mut()),
+        &themes,
+        &reports,
+        trading_date,
+        Session::Recap,
+    );
     let mut diagnostics = d.lines_as("indexes");
     diagnostics.push(format!(
         "reported={} reported_err={reported_err}",
         reported.len()
     ));
+    diagnostics.extend(why::diagnostics(counts, reports_err));
     RecapFacts {
         trading_date,
         as_of_utc: now,
@@ -830,6 +843,41 @@ mod tests {
         assert_eq!(batches[0].len(), universe().len());
         assert!(!batches[0].iter().any(|s| s.starts_with('^')));
         assert_eq!(m.sessions.borrow().len(), 4 + universe().len());
+    }
+
+    #[tokio::test]
+    async fn a_mover_without_news_gets_its_reported_results_from_one_read() {
+        use crate::facts::FallbackKind;
+        use crate::store::ReportRow;
+        let m = md(&[q("NVDA", 182.35, 3.08, Some(210_000_000))]);
+        let s = MemStore::default();
+        let row = |date: &str, slot: &str| ReportRow {
+            ticker: "NVDA".into(),
+            report_date: date.into(),
+            time_slot: slot.into(),
+            proof_url: None,
+            post_slug: Some("nvda-q3-fy2027-earnings".into()),
+        };
+        // A report after today's close does not explain today's session.
+        *s.reports.borrow_mut() = vec![row("2026-10-28", "amc"), row("2026-10-29", "amc")];
+        let f = build_facts(&m, &ns(vec![]), &llm(vec![]), &s, date(), now(), &|| 0).await;
+        let fb = f.gainers[0].fallback.as_ref().unwrap();
+        assert_eq!(fb.kind, FallbackKind::Results);
+        assert_eq!(fb.text_en, "Reported results after Wednesday's close");
+        assert_eq!(fb.text_zh, "已于周三盘后公布财报");
+        assert_eq!(fb.post_slug.as_deref(), Some("nvda-q3-fy2027-earnings"));
+        assert_eq!(
+            f.diagnostics.last().unwrap(),
+            "why results=1 theme=0 reports_err=0"
+        );
+        // A store error costs only the fallback.
+        s.fail_reports.set(true);
+        let f = build_facts(&m, &ns(vec![]), &llm(vec![]), &s, date(), now(), &|| 0).await;
+        assert_eq!(f.gainers[0].fallback, None);
+        assert_eq!(
+            f.diagnostics.last().unwrap(),
+            "why results=0 theme=0 reports_err=1"
+        );
     }
 
     #[tokio::test]
@@ -2384,6 +2432,7 @@ mod run_tests {
                 quote: q("FIS", 60.0, -23.67),
                 name: "Fidelity National".into(),
                 reasons: vec![],
+                fallback: None,
             }],
             macro_items: Field::Missing {
                 reason: "n/a".into(),

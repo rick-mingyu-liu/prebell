@@ -5,8 +5,8 @@
 use crate::facts::{Field, Mover, NewsReason};
 use crate::numbers::{check, Lang};
 use crate::premarket::draft::{
-    blank_names, cell, fmt_num, fmt_pct, na, no_news, render_sources, render_themes, section,
-    theme_allowed, theme_names, without_link_targets, write_with, Draft, MOVERS, THEMES,
+    blank_names, cell, fmt_num, fmt_pct, na, render_sources, render_themes, section, theme_allowed,
+    theme_names, why, without_link_targets, write_with, Draft, MOVERS, THEMES,
 };
 use crate::providers::LlmProvider;
 use crate::recap::{numbers_in_facts, RecapFacts, Reported};
@@ -110,11 +110,7 @@ fn mover_row(m: &Mover, lang: Lang) -> String {
         fmt_pct(q.change_pct)
     );
     if lang == Lang::En {
-        let why = m
-            .reasons
-            .first()
-            .map_or(no_news(lang), |r| r.summary_en.as_str());
-        row.push_str(&format!(" {} |", cell(why)));
+        row.push_str(&format!(" {} |", cell(why(m, lang))));
     }
     row
 }
@@ -361,6 +357,7 @@ mod tests {
                 quote: quote("NVDA", 182.35, 3.08),
                 name: "Nvidia".into(),
                 reasons: vec![reason("https://news.test/nvda", "Nvidia rises")],
+                fallback: None,
             }],
             losers: vec![],
             macro_items: Field::Missing {
@@ -636,6 +633,7 @@ mod tests {
             quote: quote("MMM", 130.0, -2.5),
             name: "3M".into(),
             reasons: vec![],
+            fallback: None,
         }];
         let (_, md) = write(&llm(vec![clean(Lang::En)]), &f, Lang::En)
             .await
@@ -644,6 +642,72 @@ mod tests {
             md.contains("99% run") && md.contains("| MMM | 3M | 130.00 | -2.50% | No clear news |"),
             "{md}"
         );
+    }
+
+    #[tokio::test]
+    async fn fallback_whys_render_in_the_en_table_and_pass_the_rendered_check() {
+        use crate::facts::{Direction, Theme, ThemeMember};
+        use crate::store::ReportRow;
+        let mut f = facts();
+        f.themes = vec![Theme {
+            group: "Networking & optical".into(),
+            group_zh: "网络与光通信".into(),
+            direction: Direction::Down,
+            members: vec![ThemeMember {
+                ticker: "COHR".into(),
+                name: "Coherent".into(),
+                change_pct: -5.45,
+            }],
+            more: 2,
+            median_pct: -4.63,
+            reasons: vec![],
+        }];
+        let loser = |sym: &str, name: &str, pct: f64| Mover {
+            quote: quote(sym, 80.0, pct),
+            name: name.into(),
+            reasons: vec![],
+            fallback: None,
+        };
+        f.losers = vec![
+            loser("LITE", "Lumentum", -5.55),
+            loser("GEV", "GE Vernova", -7.0),
+        ];
+        let reports = [ReportRow {
+            ticker: "GEV".into(),
+            report_date: "2026-10-28".into(),
+            time_slot: "amc".into(),
+            proof_url: None,
+            post_slug: Some("gev-q3-2026-earnings".into()),
+        }];
+        crate::why::fill(
+            f.gainers.iter_mut().chain(f.losers.iter_mut()),
+            &f.themes,
+            &reports,
+            f.trading_date,
+            crate::cover::Session::Recap,
+        );
+        let (_, md) = write(&llm(vec![clean(Lang::En)]), &f, Lang::En)
+            .await
+            .unwrap();
+        assert!(
+            md.contains("| LITE | Lumentum | 80.00 | -5.55% | Fell with the networking & optical group (median −4.63%); no company news found |"),
+            "{md}"
+        );
+        assert!(
+            md.contains(
+                "| GEV | GE Vernova | 80.00 | -7.00% | Reported results after Wednesday's close |"
+            ),
+            "{md}"
+        );
+        // The ZH table keeps no Why column.
+        let (_, zh) = write(&llm(vec![clean(Lang::Zh)]), &f, Lang::Zh)
+            .await
+            .unwrap();
+        assert!(
+            zh.contains("| LITE | Lumentum | 80.00 | -5.55% |\n"),
+            "{zh}"
+        );
+        assert!(!zh.contains("随网络与光通信板块"), "{zh}");
     }
 
     #[tokio::test]
@@ -665,6 +729,7 @@ mod tests {
             quote: quote("PSX", 130.0, -2.5),
             name: "Phillips 66".into(),
             reasons: vec![],
+            fallback: None,
         }];
         let l = llm(vec![reply(Lang::En, "Phillips 66 fell 2.5%.")]);
         assert!(write(&l, &f, Lang::En).await.is_ok());
@@ -690,6 +755,7 @@ mod tests {
             quote: quote("MMM", 130.0, -2.5),
             name: "3M".into(),
             reasons: vec![],
+            fallback: None,
         }];
         let bad = || reply(Lang::En, "3M fell; Apple rose 9%.");
         let l = llm(vec![bad(), bad()]);
@@ -794,6 +860,11 @@ mod tests {
                 "https://news.test/chips"
             ]
         );
+    }
+
+    #[test]
+    fn prompts_state_a_fallback_without_making_it_a_cause() {
+        crate::premarket::draft::tests::assert_fallback_rule(PROMPT_EN, PROMPT_ZH);
     }
 
     #[test]

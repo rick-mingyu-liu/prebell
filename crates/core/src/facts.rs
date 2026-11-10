@@ -84,6 +84,39 @@ pub struct Mover {
     pub quote: Quote,
     pub name: String,
     pub reasons: Vec<NewsReason>,
+    /// What code can prove about a mover with no verified reason (`why`).
+    /// Absent when it has a reason or nothing is known, and in facts stored
+    /// before it existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fallback: Option<Fallback>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum FallbackKind {
+    /// The earnings calendar marks the company's report as out, at a time
+    /// that precedes this session's move.
+    Results,
+    /// The mover is in the group of one of the facts' themes and moved the
+    /// same way. Co-movement, never a cause.
+    Theme,
+}
+
+/// The Why of a mover without a verified news reason, rendered by code
+/// (`why::fill`) from the calendar or the themes, never by the LLM.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct Fallback {
+    pub kind: FallbackKind,
+    /// "Reported results after Monday's close", "Fell with the networking
+    /// & optical group (median −4.63%); no company news found".
+    pub text_en: String,
+    pub text_zh: String,
+    /// This site's earnings check for the report: `/{lang}/p/{slug}`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub post_slug: Option<String>,
+    /// The SEC filing of the report, when there is no earnings check.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub filing_url: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -220,6 +253,7 @@ mod tests {
             quote: quote("ABC"),
             name: "ABC Inc".into(),
             reasons,
+            fallback: None,
         }
     }
     fn missing() -> Field<Quote> {
@@ -288,6 +322,33 @@ mod tests {
         v.as_object_mut().unwrap().remove("diagnostics");
         let old: PremarketFacts = serde_json::from_value(v).unwrap();
         assert!(old.diagnostics.is_empty());
+    }
+
+    #[test]
+    fn mover_fallback_round_trips_and_is_absent_from_old_facts() {
+        let mut f = facts();
+        // No fallback: the stored JSON has no key, as before it existed.
+        let s = serde_json::to_string(&f).unwrap();
+        assert!(!s.contains("fallback"), "{s}");
+        f.losers = vec![Mover {
+            fallback: Some(Fallback {
+                kind: FallbackKind::Results,
+                text_en: "Reported results after Monday's close".into(),
+                text_zh: "已于周一盘后公布财报".into(),
+                post_slug: None,
+                filing_url: Some("https://www.sec.gov/Archives/edgar/data/1/x-index.htm".into()),
+            }),
+            ..mover(vec![])
+        }];
+        let s = serde_json::to_string(&f).unwrap();
+        assert!(
+            s.contains(r#""kind":"results""#) && !s.contains("post_slug"),
+            "{s}"
+        );
+        assert_eq!(serde_json::from_str::<PremarketFacts>(&s).unwrap(), f);
+        // A mover stored before the field existed reads as having none.
+        let old = r#"{"quote":{"symbol":"ABC","last":1.0,"prev_close":1.0,"change_pct":0.0,"volume":null},"name":"ABC Inc","reasons":[]}"#;
+        assert_eq!(serde_json::from_str::<Mover>(old).unwrap().fallback, None);
     }
 
     #[test]

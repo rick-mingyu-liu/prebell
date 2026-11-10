@@ -12,6 +12,7 @@ const mover = (over: Partial<MoverView> & { pct?: number } = {}): MoverView => {
     quote: { symbol: "AAPL", last: 1234.5, changePct: pct, pointChange: 1, dir: dirOf(pct) },
     reason: "Services revenue beat estimates",
     reasonUrl: null,
+    reasonPost: null,
     ...over,
   };
 };
@@ -51,6 +52,24 @@ describe("MoversTable column", () => {
       <MoversTable movers={[mover({ reasonUrl: "javascript:alert(1)" })]} locale="en" variant="column" />,
     );
     expect(unsafe).not.toContain("<a ");
+  });
+
+  it("shows a fallback Why in the reason's quiet style, linked to the earnings check on this site", () => {
+    const text = "Reported results after Monday's close";
+    const out = renderToStaticMarkup(
+      <MoversTable movers={[mover({ reason: text, reasonPost: "lite-q1-fy2027-earnings", reasonUrl: "https://www.sec.gov/x" })]} locale="en" variant="column" />,
+    );
+    expect(out).toContain('<p class="mover-why muted"><a href="/en/p/lite-q1-fy2027-earnings">Reported results after Monday&#x27;s close</a></p>');
+    expect(out).not.toContain("<i>");
+    const theme = "Fell with the networking &amp; optical group (median −4.63%); no company news found";
+    const table = renderToStaticMarkup(
+      <MoversTable movers={[mover({ reason: theme.replace("&amp;", "&") })]} locale="en" variant="table" />,
+    );
+    expect(table).toContain(`<td class="mover-why muted">${theme}</td>`);
+    // ZH shows no reason line, fallback or not.
+    const zh = renderToStaticMarkup(<MoversTable movers={[mover({ reason: text, reasonPost: "lite-q1-fy2027-earnings" })]} locale="zh" variant="column" />);
+    expect(zh).not.toContain("mover-why");
+    expect(zh).not.toContain("/p/lite");
   });
 
   it("escapes the reason text", () => {

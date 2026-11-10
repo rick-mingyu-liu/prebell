@@ -19,6 +19,7 @@ pub mod schedule;
 pub mod store;
 pub mod tavily;
 pub mod themes;
+pub mod why;
 pub mod yahoo;
 pub mod yahoo_calendar;
 

@@ -1,3 +1,4 @@
+import Link from "next/link";
 import type { ReactNode } from "react";
 import type { Locale } from "../i18n/routing";
 import type { MoverView } from "../lib/facts";
@@ -15,9 +16,13 @@ export interface MoversTableProps {
   priceLabel?: "last" | "close";
 }
 
-/** The reason in grey, linked to its source when that is an http(s) URL; "No clear news" in grey italics without one. */
-function why(m: MoverView, noNews: string): ReactNode {
+/**
+ * The reason (a news summary, or the generator's fallback) in grey, linked to the site's earnings check or to its
+ * source when that is an http(s) URL; "No clear news" in grey italics without one.
+ */
+function why(m: MoverView, noNews: string, locale: Locale): ReactNode {
   if (!m.reason) return <i>{noNews}</i>;
+  if (m.reasonPost) return <Link href={`/${locale}/p/${m.reasonPost}`}>{m.reason}</Link>;
   if (!m.reasonUrl || !/^https?:\/\//i.test(m.reasonUrl)) return m.reason;
   return (
     <a href={m.reasonUrl} rel="nofollow noopener" target="_blank">
@@ -52,7 +57,7 @@ export default function MoversTable({ movers, locale, variant, showPrice = false
                 {pct(m)}
               </span>
             </p>
-            {reasons && <p className="mover-why muted">{why(m, noNews)}</p>}
+            {reasons && <p className="mover-why muted">{why(m, noNews, locale)}</p>}
           </li>
         ))}
       </ol>
@@ -82,7 +87,7 @@ export default function MoversTable({ movers, locale, variant, showPrice = false
               <td>
                 <b className="mover-name">{m.name}</b> <span className="mover-ticker muted">{m.symbol}</span>
               </td>
-              {reasons && <td className="mover-why muted">{why(m, noNews)}</td>}
+              {reasons && <td className="mover-why muted">{why(m, noNews, locale)}</td>}
               {showPrice && <td className="r num">${fmtPrice(m.quote.last)}</td>}
               <td className="r">{pct(m)}</td>
             </tr>
