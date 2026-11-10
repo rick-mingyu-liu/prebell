@@ -596,6 +596,8 @@ pub fn verify_figure(text: &str, metric: Metric, raw: &RawFigure) -> Result<Figu
         _ => {}
     }
     let scale = scale_of(&raw.scale).ok_or_else(|| format!("unknown scale {:?}", raw.scale))?;
+    // A per-share row's table scale, for its other cells (`Figure`).
+    let mut table_scale = None;
     let scale = match unit {
         Unit::Usd if n.multiplier == 1.0 => {
             // A bare table number: only a scale the document itself states,
@@ -667,6 +669,9 @@ pub fn verify_figure(text: &str, metric: Metric, raw: &RawFigure) -> Result<Figu
                 if in_row && !current_column(table.as_ref(), &quote, &cells, col) {
                     return Err(CURRENT_COLUMN.into());
                 }
+                if in_row {
+                    table_scale = table.as_ref().map(|t| t.scale);
+                }
                 // A lone per-share cell may be prose: only its group counts.
                 if let Some(e) = table
                     .as_ref()
@@ -705,6 +710,7 @@ pub fn verify_figure(text: &str, metric: Metric, raw: &RawFigure) -> Result<Figu
         amount,
         scale,
         quote,
+        table_scale,
     })
 }
 
@@ -1503,15 +1509,23 @@ fn period_from_headline(text: &str, v: &Value) -> Option<FiscalPeriod> {
 }
 
 /// Notes whose quote is in the exhibit and whose summary uses only the
-/// quote's numbers and no markup.
+/// quote's numbers and no markup, each with its table's scale when it
+/// quotes a table row (`row_scale`).
 fn verify_notes(text: &str, v: Option<&Value>) -> Vec<Note> {
+    let lines = Lines::new(text);
     v.and_then(Value::as_array)
         .into_iter()
         .flatten()
         .filter_map(|it| serde_json::from_value::<Note>(it.clone()).ok())
-        .map(|n| Note {
-            quote: collapse(&n.quote),
-            summary_en: collapse(&n.summary_en),
+        .map(|n| {
+            let quote = collapse(&n.quote);
+            let (scale, current) = row_scale(&lines, &quote).unwrap_or((1.0, None));
+            Note {
+                scale,
+                current,
+                quote,
+                summary_en: collapse(&n.summary_en),
+            }
         })
         .filter(|n| !n.summary_en.is_empty())
         .filter(|n| reject_markup("summary_en", &n.summary_en).is_ok())
@@ -1526,6 +1540,90 @@ fn verify_notes(text: &str, v: Option<&Value>) -> Vec<Note> {
         })
         .take(MAX_NOTES)
         .collect()
+}
+
+/// Whether the period lengths on year line `j` and the line above it name
+/// the quarter first ("Three Months Ended September Year-To-Date
+/// September").
+fn quarter_first_above(lines: &Lines, j: usize) -> bool {
+    static R: OnceLock<Regex> = OnceLock::new();
+    let r = R.get_or_init(|| {
+        Regex::new(r"(?i)\b(?:(three\s+months|thirteen\s+weeks|quarters?|q[1-4])|six\s+months|nine\s+months|twelve\s+months|years?|ytd|year-to-date)\b")
+            .expect("valid built-in regex")
+    });
+    let above = j.checked_sub(1).map_or("", |a| lines.line(a, usize::MAX));
+    let labels = format!("{above} {}", lines.line(j, usize::MAX));
+    r.captures(&labels).is_some_and(|c| c.get(1).is_some())
+}
+
+/// Lines a scale heading may sit above a row it scales.
+const ROW_HEADING_LINES: usize = 60;
+
+/// The scale of the table `quote` is a whole row of, and the row's
+/// current-period cell, which its year header must give. A row is a whole
+/// line of the exhibit with at least two cells, no size word, and nothing
+/// but cells after its first one (footnote markers and "%" aside: "Acme
+/// opened 52 new stores and closed 3 ..." is prose). Its scale heading
+/// starts a line or is parenthesised ("All amounts are in millions,
+/// except ..." inside a sentence is not one) and sits at most
+/// `ROW_HEADING_LINES` lines above it.
+fn row_scale(lines: &Lines, quote: &str) -> Option<(f64, Option<f64>)> {
+    static MARKER: OnceLock<Regex> = OnceLock::new();
+    let marker = MARKER.get_or_init(|| Regex::new(r"\(\w{1,2}\)").expect("valid built-in regex"));
+    let t = Table::find(lines, quote)?;
+    let (i, top) = (lines.line_of(t.quote_at), lines.line_of(t.heading_at));
+    let whole_line = lines.starts[i] == t.quote_at && lines.line(i, usize::MAX) == quote;
+    let heading_starts =
+        lines.doc[t.heading_at..].starts_with('(') || lines.starts[top] == t.heading_at;
+    let sized = extract_numbers(quote, Lang::En)
+        .iter()
+        .any(|n| n.multiplier != 1.0);
+    let cells = row_cells(quote);
+    let first_end = cells.first()?.1;
+    let after = marker.replace_all(&quote[first_end..], "");
+    let row = whole_line
+        && heading_starts
+        && i - top <= ROW_HEADING_LINES
+        && !sized
+        && cells.len() >= 2
+        && !after.contains(|c: char| c.is_alphabetic());
+    if !row {
+        return None;
+    }
+    // The row's periods: the nearest line above it that ends in two or
+    // more years ("Net Income – As Reported 2026 2025 2026 2025"), one per
+    // cell. Without one, or one that does not settle which cell is the
+    // current quarter, the row is not scaled at all: EMR's "2026 Q4 ...
+    // Adjusted Segment EBITA" columns are measures a sentence could swap.
+    static YEARS: OnceLock<Regex> = OnceLock::new();
+    let years_re = YEARS.get_or_init(|| {
+        Regex::new(r"(?:\b(?:19|20)\d\d\b\s*){2,}$").expect("valid built-in regex")
+    });
+    let header = (top..i).rev().find_map(|j| {
+        let line = lines.line(j, t.quote_at);
+        years_re.find(line).map(|m| {
+            let years: Vec<u32> = m
+                .as_str()
+                .split_whitespace()
+                .filter_map(|y| y.parse().ok())
+                .collect();
+            (j, years)
+        })
+    });
+    let (j, years) = header?;
+    let latest = *years.iter().max()?;
+    let repeated = years.iter().filter(|&&y| y == latest).count() > 1;
+    if years.len() != cells.len() || repeated && !quarter_first_above(lines, j) {
+        return None;
+    }
+    let col = years.iter().position(|&y| y == latest)?;
+    let current = Some(
+        quote[cells[col].0..cells[col].1]
+            .replace(',', "")
+            .parse()
+            .ok()?,
+    );
+    Some((t.scale, current))
 }
 
 fn user_prompt(text: &str, company: &str, ticker: &str) -> String {
@@ -3297,6 +3395,88 @@ mod tests {
             let r = verify_figure(&t, Metric::EpsGaap, &raw(a, "units", false, row));
             assert!(r.is_err(), "{row}: {r:?}");
         }
+    }
+
+    #[test]
+    fn a_note_quoting_a_table_row_keeps_its_scale() {
+        // SO's highlights table, as html_to_text renders it.
+        let text = "Southern Company\nFinancial Highlights\n(In Millions Except Earnings Per Share)\nThree Months Ended September Year-To-Date September\nNet Income – As Reported 2026 2025 2026 2025\nTraditional Electric Operating Companies $2,272 $1,920 $4,654 $3,994\nSouthern Power 52 3 30 141\nSouthern Company today reported third-quarter earnings of $2.0 billion, or $1.77 per share.";
+        let v = json!([
+            {"quote": "Traditional Electric Operating Companies $2,272 $1,920 $4,654 $3,994", "summary_en": "Traditional Electric Operating Companies net income was $2,272 versus $1,920.", "scale": 7},
+            {"quote": "Southern Power 52 3 30 141", "summary_en": "Southern Power net income was 52 versus 3."},
+            {"quote": "Southern Company today reported third-quarter earnings of $2.0 billion, or $1.77 per share.", "summary_en": "Earnings were $2.0 billion, or $1.77 per share."},
+            // Part of a row is not the row.
+            {"quote": "Traditional Electric Operating Companies $2,272 $1,920", "summary_en": "Net income was $2,272 versus $1,920."}
+        ]);
+        let notes = verify_notes(text, Some(&v));
+        let rows: Vec<(f64, Option<f64>)> = notes.iter().map(|n| (n.scale, n.current)).collect();
+        assert_eq!(
+            rows,
+            [
+                (1e6, Some(2272.0)),
+                (1e6, Some(52.0)),
+                (1.0, None),
+                (1.0, None)
+            ]
+        );
+        // Prose under a scale heading is no table row, and a heading inside
+        // a sentence is no scale heading.
+        let text = "Acme Corp\n(In millions, except per share amounts)\nTotal revenues $9,000 $8,000\nNet income $900 $800\nAcme opened 52 new stores and closed 3 underperforming locations in the quarter.\nThe board approved a dividend of 24 cents and a buyback of 150 shares per holder.\nAll amounts are in millions, except per share data, unless noted.\nHighlights\nCustomers 4,512 4,100";
+        let v = json!([
+            {"quote": "Acme opened 52 new stores and closed 3 underperforming locations in the quarter.", "summary_en": "Acme opened 52 stores and closed 3."},
+            {"quote": "The board approved a dividend of 24 cents and a buyback of 150 shares per holder.", "summary_en": "A dividend of 24 cents."},
+            {"quote": "Customers 4,512 4,100", "summary_en": "Customers were 4,512 versus 4,100."}
+        ]);
+        let notes = verify_notes(text, Some(&v));
+        assert_eq!(notes.len(), 3);
+        assert!(notes.iter().all(|n| n.scale == 1.0), "{notes:?}");
+        let text = "Acme Corp reports results\nAll amounts are in millions, except per share data, unless noted.\nHighlights\nCustomers 4,512 4,100";
+        let notes = verify_notes(
+            text,
+            Some(
+                &json!([{"quote": "Customers 4,512 4,100", "summary_en": "Customers were 4,512."}]),
+            ),
+        );
+        assert_eq!(notes[0].scale, 1.0);
+        // A row with no year line above it, or one that does not settle the
+        // current quarter, is not scaled: EMR's segment EBITA columns are
+        // measures of one quarter, AMGN's are GAAP and non-GAAP per year.
+        let emr = "(dollars in millions)\nPage 19\n2026 Q4 Adjusted Segment EBITA EBIT EBIT Margin Amortization of Intangibles Restructuring and Related Costs Adjusted Segment EBITA Adjusted Segment EBITA Margin\nControl Systems & Software $297 23.8% $99 $16 $412 33.1%";
+        let amgn = "(In millions, except per-share data)\nThree months ended September 30, 2026 Three months ended September 30, 2025\nGAAP Non-GAAP GAAP Non-GAAP\nNet income $3,864 $3,520 $3,216 $3,055";
+        for (text, quote) in [
+            (
+                emr,
+                "Control Systems & Software $297 23.8% $99 $16 $412 33.1%",
+            ),
+            (amgn, "Net income $3,864 $3,520 $3,216 $3,055"),
+        ] {
+            let notes = verify_notes(
+                text,
+                Some(&json!([{"quote": quote, "summary_en": "A row."}])),
+            );
+            assert_eq!((notes[0].scale, notes[0].current), (1.0, None), "{quote}");
+        }
+        // The same row is still no company figure.
+        let q = "Traditional Electric Operating Companies $2,272 $1,920 $4,654 $3,994";
+        for m in [Metric::Revenue, Metric::NetIncome] {
+            assert!(
+                verify_figure(text, m, &raw("$2,272", "millions", false, q)).is_err(),
+                "{m:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_per_share_row_records_its_table_scale() {
+        let amd = "(In millions, except per share amounts)\nThree Months Ended\nSeptember 26, 2026 June 27, 2026 September 27, 2025\nNon-GAAP net income / earnings per share $3,471 $2.09 $2,760 $1.66 $1,965 $1.20";
+        let q = "Non-GAAP net income / earnings per share $3,471 $2.09 $2,760 $1.66 $1,965 $1.20";
+        let f = verify_figure(amd, Metric::EpsNonGaap, &raw("$2.09", "units", false, q)).unwrap();
+        assert_eq!(f.table_scale, Some(1e6));
+        // Prose has no table scale.
+        let t = "(In millions)\nNon-GAAP EPS grew 35% YoY to $0.88.";
+        let q = "Non-GAAP EPS grew 35% YoY to $0.88.";
+        let f = verify_figure(t, Metric::EpsNonGaap, &raw("$0.88", "units", false, q)).unwrap();
+        assert_eq!(f.table_scale, None);
     }
 
     #[test]

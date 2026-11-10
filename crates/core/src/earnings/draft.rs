@@ -11,9 +11,11 @@ use chrono::Datelike;
 use regex::Regex;
 use serde_json::Value;
 
-use crate::earnings::facts::{numbers_in_facts, EarningsFacts, Metric, Unit};
+use crate::earnings::facts::{
+    allowed as allowed_numbers, EarningsAllowed, EarningsFacts, Metric, Unit,
+};
 use crate::facts::Field;
-use crate::numbers::{check, Lang};
+use crate::numbers::Lang;
 use crate::premarket::draft::{
     fmt_num, is_setext_underline, match_sections, one_line, reject_markup, sections_line,
     without_link_targets, Draft,
@@ -323,17 +325,19 @@ fn attempt(
     f: &EarningsFacts,
     lang: Lang,
     want: &[&str],
-    allowed: &[f64],
+    allowed: &EarningsAllowed,
 ) -> Result<(Draft, String), Problem> {
     let v = v.map_err(Problem::Llm)?;
     let d = parse(&v, lang, want).map_err(Problem::Malformed)?;
     let md = render_markdown(&d, f);
     // The whole page, code-rendered parts included, is checked. Names are
     // not figures: "3M" must not read as three million.
-    check(&mask_names(&without_link_targets(&md), f), lang, allowed).map_err(|bad| {
-        let mut seen = HashSet::new();
-        Problem::Numbers(bad.into_iter().filter(|n| seen.insert(n.clone())).collect())
-    })?;
+    allowed
+        .check(&mask_names(&without_link_targets(&md), f), lang)
+        .map_err(|bad| {
+            let mut seen = HashSet::new();
+            Problem::Numbers(bad.into_iter().filter(|n| seen.insert(n.clone())).collect())
+        })?;
     Ok((d, md))
 }
 
@@ -370,7 +374,7 @@ pub async fn write(
 ) -> Result<(Draft, String), Vec<String>> {
     let facts_json =
         serde_json::to_string_pretty(f).map_err(|e| vec![format!("draft: facts json: {e}")])?;
-    let allowed = numbers_in_facts(f);
+    let allowed = allowed_numbers(f);
     let want = wanted(f, lang);
     let base = format!("{facts_json}\n\n{}", sections_line(lang, &want));
     let mut user = base.clone();
@@ -398,6 +402,7 @@ pub(crate) mod tests {
     use super::*;
     use crate::earnings::facts::tests::facts;
     use crate::earnings::facts::FiscalPeriod;
+    use crate::numbers::check;
     use async_trait::async_trait;
     use serde_json::json;
     use std::cell::RefCell;
@@ -492,6 +497,7 @@ pub(crate) mod tests {
             amount: "$27.5 billion".into(),
             scale: 1.0,
             quote: "Net income was $27.5 billion for the quarter.".into(),
+            table_scale: None,
         });
         f.guidance = Field::Value(vec![]);
         f.highlights = Field::Missing {
@@ -678,6 +684,7 @@ pub(crate) mod tests {
             amount: "$25 million".into(),
             scale: 1.0,
             quote: "Net loss was $25 million in the quarter.".into(),
+            table_scale: None,
         });
         // The revenue quote is now a table row, so "up 8 percent" is gone.
         let mut r = reply(Lang::Zh, "营收1024.7亿美元，净亏损2500万美元。");
@@ -715,7 +722,7 @@ pub(crate) mod tests {
     #[test]
     fn every_rendered_number_is_in_the_facts() {
         let f = facts();
-        let allowed = numbers_in_facts(&f);
+        let allowed = crate::earnings::facts::numbers_in_facts(&f);
         for lang in [Lang::En, Lang::Zh] {
             let d = parse(&reply(lang, "Quiet."), lang, &wanted(&f, lang)).unwrap();
             let md = render_markdown(&d, &f);

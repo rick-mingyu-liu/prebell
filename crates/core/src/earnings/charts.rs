@@ -467,6 +467,7 @@ mod tests {
             amount: "$2.22".into(),
             scale: 1.0,
             quote: "non-GAAP diluted earnings per share of $2.22".into(),
+            table_scale: None,
         });
         let c = charts(&f);
         let eps = c.iter().find(|c| c.name == "eps").unwrap();

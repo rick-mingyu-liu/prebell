@@ -12,7 +12,7 @@ use crate::cover::{
     brief_graphic, brief_lines, cover_movers, index_snapshot, CoverLines, IndexSnapshot, Session,
 };
 use crate::earnings::facts::EarningsFacts;
-use crate::facts::{push_themes, quote_numbers, Field, Mover, NewsReason, Quote, Theme, ThemeStat};
+use crate::facts::{push_reason, push_themes, Field, Mover, NewsReason, Quote, Theme, ThemeStat};
 use crate::numbers::Lang;
 use crate::premarket::draft::Draft;
 use crate::premarket::{
@@ -138,13 +138,13 @@ pub fn numbers_in_facts(f: &RecapFacts) -> Vec<f64> {
     for m in f.gainers.iter().chain(&f.losers) {
         push_quote(&mut out, &m.quote);
         for r in &m.reasons {
-            out.extend(quote_numbers(&r.quote));
+            push_reason(&mut out, r);
         }
     }
     for items in [&f.macro_items, &f.after_hours] {
         if let Field::Value(items) = items {
             for r in items {
-                out.extend(quote_numbers(&r.quote));
+                push_reason(&mut out, r);
             }
         }
     }

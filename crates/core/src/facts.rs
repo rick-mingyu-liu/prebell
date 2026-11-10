@@ -140,21 +140,42 @@ fn push_quote(out: &mut Vec<f64>, q: &Quote) {
 }
 
 /// Numbers a source quote allows, in base units. Without an explicit sign
-/// marker the quote carries no direction, so both signs are allowed.
+/// marker the quote carries no direction, so both signs are allowed. A
+/// range's first figure is allowed bare too ("2.32 to 2.36 million" allows
+/// 2.32 and 2.32 million).
 pub(crate) fn quote_numbers(quote: &str) -> Vec<f64> {
     let mut out = Vec::new();
     // `Num.value` is already scaled to base units.
     for n in numbers::extract(quote, Lang::En) {
-        out.push(n.value);
-        if !n.signed {
-            out.push(-n.value);
+        push_signed(&mut out, n.value, n.signed);
+        if n.from_range {
+            push_signed(&mut out, n.value / n.multiplier, n.signed);
         }
     }
     out
 }
 
-fn push_reason(out: &mut Vec<f64>, r: &NewsReason) {
+fn push_signed(out: &mut Vec<f64>, v: f64, signed: bool) {
+    out.push(v);
+    if !signed {
+        out.push(-v);
+    }
+}
+
+/// A reason's quote and its title, which is fetched with the article and
+/// never written by the model ("... Biggest Losses on Record, $2.9
+/// Trillion"). Only a title's figures count, not a list's small numbers
+/// ("3 Stocks to Buy Now, 7 to Avoid"): a percentage, a "$" amount, a size
+/// word or 11 and up.
+pub(crate) fn push_reason(out: &mut Vec<f64>, r: &NewsReason) {
     out.extend(quote_numbers(&r.quote));
+    for n in numbers::extract(&r.title, Lang::En) {
+        let figure =
+            n.is_percent || n.raw.contains('$') || n.multiplier != 1.0 || n.value.abs() >= 11.0;
+        if figure {
+            push_signed(out, n.value, n.signed);
+        }
+    }
 }
 
 /// Each theme's member moves and median, computed in code so the draft may
@@ -348,6 +369,55 @@ mod tests {
             more: 0,
             median_pct: -5.25,
             reasons: vec![reason("memory prices fell 7% in October")],
+        }
+    }
+
+    #[test]
+    fn a_reason_title_is_in_the_facts() {
+        // Recaps of 2026-11-05 and -06: the figures sit in the fetched
+        // headlines, not the quotes.
+        let mut n = Vec::new();
+        for title in [
+            "Stock Market Today: Nasdaq, S&P 500 Suffer Biggest Losses on Record, $2.9 Trillion — Live Updates",
+            "Tech stocks rebound after AI fears spark the worst rout in 19 months",
+        ] {
+            push_reason(
+                &mut n,
+                &NewsReason {
+                    url: "https://news.test/a".into(),
+                    title: title.into(),
+                    quote: "Stocks fell sharply in a broad-based selloff".into(),
+                    summary_en: String::new(),
+                },
+            );
+        }
+        for ok in [
+            "市值蒸发2.9万亿美元",
+            "a $2.9 trillion wipeout",
+            "19个月来最大跌幅",
+        ] {
+            assert_eq!(numbers::check(ok, Lang::Zh, &n), Ok(()), "{ok}");
+        }
+        for bad in [
+            "市值蒸发29万亿美元",
+            "a $2.8 trillion wipeout",
+            "18个月来最大跌幅",
+        ] {
+            assert!(numbers::check(bad, Lang::Zh, &n).is_err(), "{bad}");
+        }
+        // A list's small numbers are not figures.
+        let mut n = Vec::new();
+        push_reason(
+            &mut n,
+            &NewsReason {
+                url: "https://news.test/b".into(),
+                title: "3 Stocks to Buy Now, 7 to Avoid".into(),
+                quote: "Shares moved.".into(),
+                summary_en: String::new(),
+            },
+        );
+        for bad in ["NVDA fell 3%", "AMD rose 7%"] {
+            assert!(numbers::check(bad, Lang::En, &n).is_err(), "{bad}");
         }
     }
 
