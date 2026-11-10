@@ -39,9 +39,12 @@ const FILING_URL = /^https:\/\/www\.sec\.gov\/Archives\/edgar\/data\/\d+\/\d{18}
 /** R2 keys the generator writes: charts/earnings/{TICKER}/{accession}/{name}.svg */
 const CHART_KEY = /^earnings\/[A-Z0-9-]{1,10}\/\d{10}-\d{2}-\d{6}\/(revenue|eps)\.svg$/;
 
-/** A real calendar date written as YYYY-MM-DD. */
+/**
+ * A real calendar date written as YYYY-MM-DD, in the years 1000-9998, so that a caller's few days either side
+ * (the week links, a range) stay four-digit dates that sort as strings.
+ */
 export function isDate(s: string | undefined | null): s is string {
-  if (!s || !DATE.test(s)) return false;
+  if (!s || !DATE.test(s) || s < "1000" || s >= "9999") return false;
   const d = new Date(`${s}T00:00:00Z`);
   return !Number.isNaN(d.getTime()) && d.toISOString().slice(0, 10) === s;
 }
@@ -53,10 +56,16 @@ export function normalizeTicker(raw: string): string | null {
   return TICKER.test(t) ? t : null;
 }
 
+/**
+ * `date` plus `n` days. Throws a RangeError rather than return something that is not a four-digit-year date
+ * (`toISOString` writes year 10000 as "+010000-01-01", which sorts before "9999-12-31").
+ */
 export function addDays(date: string, n: number): string {
   const d = new Date(`${date}T00:00:00Z`);
   d.setUTCDate(d.getUTCDate() + n);
-  return d.toISOString().slice(0, 10);
+  const out = Number.isNaN(d.getTime()) ? "" : d.toISOString().slice(0, 10);
+  if (!DATE.test(out)) throw new RangeError(`addDays: ${date} + ${n} is out of range`);
+  return out;
 }
 
 /** The Monday of the week containing `date` (YYYY-MM-DD, calendar arithmetic only). */

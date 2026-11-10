@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  addDays,
   chartResponse,
   getPostCharts,
   isDate,
@@ -347,5 +348,20 @@ describe("stripDay", () => {
       .bind(...entries!.args)
       .all<{ detail: string }>();
     expect(results.map((r) => r.detail).join("\n")).toContain("idx_posts_trading_date");
+  });
+});
+
+describe("date helpers stay in four-digit years", () => {
+  it("isDate refuses years a caller could step out of", () => {
+    expect(isDate("9998-12-31")).toBe(true);
+    expect(isDate("9999-12-31")).toBe(false);
+    expect(isDate("1000-01-01")).toBe(true);
+    expect(isDate("0999-12-31")).toBe(false);
+  });
+
+  it("addDays throws rather than return a date that sorts wrongly", () => {
+    expect(addDays("9998-12-31", 1)).toBe("9999-01-01");
+    expect(() => addDays("9999-12-31", 1)).toThrow(RangeError);
+    expect(() => addDays("0000-01-01", -1)).toThrow(RangeError);
   });
 });
