@@ -208,9 +208,10 @@ pub(crate) fn push_themes(out: &mut Vec<f64>, themes: &[Theme]) {
 }
 
 /// Every number a draft may cite: quote fields, numbers inside source quotes,
-/// a released report's figures on the watch list and the numbers in their
-/// release sentences, and the trading year and its neighbours ("full-year
-/// 2026 guidance").
+/// a released report's figures on the watch list, and the trading year and
+/// its neighbours ("full-year 2026 guidance"). The other numbers of a
+/// figure's release sentence are allowed in "What to watch" only
+/// (`premarket::draft::write`).
 pub fn numbers_in_facts(f: &PremarketFacts) -> Vec<f64> {
     let year = f64::from(f.trading_date.year());
     let mut out = vec![year - 1.0, year, year + 1.0];
@@ -232,11 +233,7 @@ pub fn numbers_in_facts(f: &PremarketFacts) -> Vec<f64> {
     }
     push_themes(&mut out, &f.themes);
     if let Field::Value(items) = &f.watch_list {
-        for g in items.iter().flat_map(|i| &i.figures) {
-            out.push(g.value);
-            // The release's sentence ("after rising 0.6 percent in September").
-            out.extend(quote_numbers(&g.quote));
-        }
+        out.extend(items.iter().flat_map(|i| i.figures.iter().map(|g| g.value)));
     }
     out
 }
