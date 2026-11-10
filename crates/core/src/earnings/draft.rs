@@ -175,6 +175,80 @@ fn check_title(title: &str, lang: Lang, f: &EarningsFacts) -> Result<(), String>
     Ok(())
 }
 
+/// Items a draft may give as the cause of a result only when the facts
+/// quote them: (English words, Chinese words, what a quote must contain).
+/// A swing with no such quote is stated without a cause.
+const CAUSE_WORDS: [(&str, &str, &str); 9] = [
+    (r"impair\w*", "减值", r"impair|write-?down|written down"),
+    (
+        r"write-?(?:down|off)s?|written\s+(?:down|off)",
+        "核销|冲销|注销|撇减",
+        r"write-?(?:down|off)|written (?:down|off)",
+    ),
+    (r"restructur\w*", "重组", r"restructur"),
+    (r"litigation|lawsuits?", "诉讼", r"litigation|lawsuit|legal"),
+    (r"settlements?", "和解", r"settlement"),
+    (r"severance", "遣散", r"severance"),
+    (r"goodwill", "商誉", r"goodwill"),
+    (
+        r"one-?time|non-?recurring",
+        "一次性",
+        r"one-?time|non-?recurring",
+    ),
+    (r"non-?cash", "非现金", r"non-?cash"),
+];
+
+/// The draft names no cause item the facts do not quote (spec: never
+/// outside knowledge), so a loss without a cause note is not explained.
+fn check_causes(d: &Draft, f: &EarningsFacts) -> Result<(), String> {
+    static RES: OnceLock<Vec<(Regex, Regex, Regex)>> = OnceLock::new();
+    let res = RES.get_or_init(|| {
+        let re = |p: String| Regex::new(&p).expect("valid built-in regex");
+        CAUSE_WORDS
+            .iter()
+            .map(|(en, zh, backing)| {
+                (
+                    re(format!(r"(?i)\b(?:{en})\b")),
+                    re(zh.to_string()),
+                    re(format!("(?i){backing}")),
+                )
+            })
+            .collect()
+    });
+    let mut quotes: Vec<&str> = Metric::ALL
+        .iter()
+        .filter_map(|m| f.metrics.value(*m))
+        .map(|fig| fig.quote.as_str())
+        .collect();
+    for notes in [&f.guidance, &f.highlights] {
+        if let Field::Value(ns) = notes {
+            quotes.extend(
+                ns.iter()
+                    .flat_map(|n| [n.quote.as_str(), n.summary_en.as_str()]),
+            );
+        }
+    }
+    let quoted = quotes.join("\n");
+    let text = std::iter::once(d.title.as_str())
+        .chain([d.summary.as_str()])
+        .chain(d.sections.iter().map(|(_, m)| m.as_str()))
+        .collect::<Vec<_>>()
+        .join("\n");
+    for (en, zh, backing) in res {
+        let word = match d.lang {
+            Lang::En => en.find(&text),
+            Lang::Zh => zh.find(&text).or_else(|| en.find(&text)),
+        };
+        if let (Some(w), false) = (word, backing.is_match(&quoted)) {
+            return Err(format!(
+                "give only a cause the facts quote: {:?} is in no quote; state a swing without a cause when no highlight has \"cause\": true",
+                w.as_str()
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Up to `max` decimals, trailing zeros dropped: 47.20 -> "47.2".
 fn trim_dec(v: f64, max: usize) -> String {
     let s = format!("{v:.max$}");
@@ -403,6 +477,7 @@ fn attempt(
     let v = v.map_err(Problem::Llm)?;
     let d = parse(&v, lang, want).map_err(Problem::Malformed)?;
     check_title(&d.title, lang, f).map_err(Problem::Malformed)?;
+    check_causes(&d, f).map_err(Problem::Malformed)?;
     let md = render_markdown(&d, f);
     // The whole page, code-rendered parts included, is checked. Names are
     // not figures: "3M" must not read as three million.
@@ -473,7 +548,7 @@ pub async fn write(
 pub(crate) mod tests {
     use super::*;
     use crate::earnings::facts::tests::facts;
-    use crate::earnings::facts::FiscalPeriod;
+    use crate::earnings::facts::{FiscalPeriod, Note};
     use async_trait::async_trait;
     use serde_json::json;
     use std::cell::RefCell;
@@ -822,12 +897,8 @@ pub(crate) mod tests {
             };
             let l = llm(vec![bad.clone(), reply(lang, "Quiet.")]);
             assert!(write(&l, &facts(), lang).await.is_ok());
-            let p = l.prompts.borrow();
-            assert!(
-                p[1].contains("not repeat the press release's headline"),
-                "{}",
-                p[1]
-            );
+            let p = l.prompts.borrow()[1].clone();
+            assert!(p.contains("not repeat the press release's headline"), "{p}");
             let l = llm(vec![bad.clone(), bad]);
             let e = write(&l, &facts(), lang).await.unwrap_err();
             assert!(e[0].starts_with("draft: the title must"), "{e:?}");
@@ -866,6 +937,112 @@ pub(crate) mod tests {
                 && PROMPT_EN.contains("at most 90 characters")
         );
         assert!(PROMPT_ZH.contains("最重要的结果") && PROMPT_ZH.contains("不超过 40 个字"));
+    }
+
+    /// A profit a year earlier, a loss now (`extract::tests::SWING`), with
+    /// or without the release's cause as a highlight.
+    fn swing_facts(cause: bool) -> EarningsFacts {
+        let mut f = facts();
+        f.company = "Acme Cable".into();
+        f.ticker = "ACME".into();
+        f.metrics.eps_gaap = crate::earnings::facts::tests::fig(
+            -20.5,
+            Unit::UsdPerShare,
+            "$(20.50)",
+            "Diluted $(20.50) $8.34",
+        );
+        let mut notes = vec![Note {
+            quote: "Acme closed the Metro Transactions on August 1, 2026 and launched a new operating model.".into(),
+            summary_en: "Acme closed the Metro Transactions and launched a new operating model.".into(),
+            cause: false,
+        }];
+        if cause {
+            notes.insert(0, Note {
+                quote: "The third quarter net loss was primarily due to a $4.6 billion non-cash impairment of franchise rights recorded in connection with the Metro Transactions.".into(),
+                summary_en: "The loss was mainly due to a $4.6 billion non-cash impairment of franchise rights.".into(),
+                cause: true,
+            });
+        }
+        f.highlights = Field::Value(notes);
+        f
+    }
+
+    fn swing_reply(lang: Lang, results: &str) -> Value {
+        let mut r = reply(lang, results);
+        let (title, summary): (Value, Value) = match lang {
+            Lang::En => (
+                "Acme swings to a $20.50-a-share loss as revenue reaches $102.5 billion".into(),
+                "GAAP diluted EPS was a loss of $20.50, against $8.34 a year earlier.".into(),
+            ),
+            Lang::Zh => (
+                "Acme由盈转亏，GAAP每股亏损20.50美元".into(),
+                "GAAP摊薄每股亏损20.50美元，去年同期为盈利8.34美元。".into(),
+            ),
+        };
+        r["title"] = title;
+        r["summary"] = summary;
+        r
+    }
+
+    #[tokio::test]
+    async fn a_swing_names_the_cause_the_release_gives() {
+        for (lang, results) in [
+            (Lang::En, "The loss was mainly due to a $4.6 billion non-cash impairment of franchise rights, the release says."),
+            (Lang::Zh, "新闻稿称，亏损主要由于46亿美元的特许经营权非现金减值。"),
+        ] {
+            let l = llm(vec![swing_reply(lang, results)]);
+            let (d, md) = write(&l, &swing_facts(true), lang).await.unwrap();
+            assert!(d.sections[0].1.contains(results), "{md}");
+            // The model sees the cause note marked.
+            assert!(l.prompts.borrow()[0].contains("\"cause\": true"));
+        }
+    }
+
+    #[tokio::test]
+    async fn without_a_cause_note_the_draft_gives_no_cause() {
+        for (lang, guess, plain) in [
+            (
+                Lang::En,
+                "The loss was mainly due to a goodwill impairment.",
+                "GAAP diluted EPS swung to a loss of $20.50 from $8.34 a year earlier.",
+            ),
+            (
+                Lang::En,
+                "The loss reflects one-time restructuring costs.",
+                "GAAP diluted EPS swung to a loss of $20.50 from $8.34 a year earlier.",
+            ),
+            (
+                Lang::Zh,
+                "亏损主要由于商誉减值。",
+                "GAAP摊薄每股收益由去年同期的8.34美元转为亏损20.50美元。",
+            ),
+        ] {
+            let f = swing_facts(false);
+            // The facts carry no cause for the model to give.
+            assert!(!serde_json::to_string(&f).unwrap().contains("cause"));
+            let l = llm(vec![swing_reply(lang, guess), swing_reply(lang, plain)]);
+            let (d, _) = write(&l, &f, lang).await.unwrap();
+            assert_eq!(d.sections[0].1, plain);
+            let p = l.prompts.borrow()[1].clone();
+            assert!(p.contains("give only a cause the facts quote"), "{p}");
+            // Twice: no post.
+            let l = llm(vec![swing_reply(lang, guess), swing_reply(lang, guess)]);
+            let e = write(&l, &f, lang).await.unwrap_err();
+            assert!(e[0].contains("is in no quote"), "{e:?}");
+        }
+    }
+
+    #[test]
+    fn prompts_name_the_cause_only_from_the_facts() {
+        assert!(
+            PROMPT_EN.contains("\"cause\": true")
+                && PROMPT_EN.contains("state the swing and give no cause")
+        );
+        assert!(
+            PROMPT_ZH.contains("\"cause\": true") && PROMPT_ZH.contains("只说明波动，不写原因")
+        );
+        let extract = include_str!("../../prompts/earnings_extract_v1.md");
+        assert!(extract.contains("the FIRST highlight must be that item"));
     }
 
     #[test]

@@ -172,6 +172,11 @@ impl Metrics {
 pub struct Note {
     pub quote: String,
     pub summary_en: String,
+    /// A highlight that names what the release itself gives for a sharp
+    /// swing in profit (an impairment, a charge, a gain on a deal). Absent
+    /// from facts stored before it existed, and from every other note.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub cause: bool,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -341,6 +346,7 @@ pub(crate) mod tests {
             guidance: Field::Value(vec![Note {
                 quote: "the Company expects total revenue to grow 10 to 12 percent year over year".into(),
                 summary_en: "Apple expects revenue growth of 10 to 12 percent.".into(),
+                cause: false,
             }]),
             highlights: Field::Missing { reason: "none".into() },
             trend: Field::Value(Trend {

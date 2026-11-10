@@ -22,6 +22,7 @@ Also return:
 - `fiscal_period`: `{"quarter": 1-4 or null for a full-year-only release, "fiscal_year": the company's fiscal year as a number, "quote": a passage naming the quarter and fiscal year}`, or null.
 - `guidance`: up to 4 items of forward-looking outlook the company gives, each `{"quote": verbatim passage, "summary_en": at most 30 words}`; [] if none.
 - `highlights`: up to 4 other notable results (segments, products, buybacks, dividends), same shape; [] if none.
+- A sharp swing needs its cause: when GAAP net income or diluted EPS changes sign against the year-earlier period or recent quarters (a profit turning into a loss, or back), or the document itself names a large one-time item (an impairment, a restructuring charge, litigation or a settlement, a tax item, a gain or loss on a deal), the FIRST highlight must be that item as the document gives it, with `"cause": true` added: `{"quote": the passage that names the item (and its amount, if the document gives one), "summary_en": "...", "cause": true}`. Quote only what the document says; if it names no item that explains the swing, add no such highlight. Never give a cause from outside knowledge. Every other note has no `cause` field.
 
 `summary_en` is plain text: no links, URLs, email addresses, HTML or markdown, and no number that is not in its quote. Do not mention analyst estimates, consensus, or whether results beat or missed anything.
 
