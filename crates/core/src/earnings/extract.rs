@@ -1435,11 +1435,29 @@ fn period_from_headline(text: &str, v: &Value) -> Option<FiscalPeriod> {
 
 /// The quote names an item a release gives for a swing in profit: an
 /// impairment, a charge, a gain or loss on a deal, a tax or legal item.
-/// "Net loss was $2.4 billion" alone names none.
+/// "Net loss was $2.4 billion" alone names none. ASCII classes only
+/// (`(?-u)`): a Unicode pattern costs several times more to compile, and
+/// the Worker pays that once per isolate.
 fn names_item(quote: &str) -> bool {
     static R: OnceLock<Regex> = OnceLock::new();
     R.get_or_init(|| {
-        Regex::new(r"(?i)\b(?:impair\w*|write-?downs?|write-?offs?|written\s+(?:down|off)|charges?|restructuring|severance|litigation|lawsuits?|legal|settlements?|tax(?:es)?|one-?time|non-?recurring|non-?cash|gains?|loss(?:es)?\s+on|extinguishment|remeasurement|mark-to-market|valuation\s+allowance|divestitures?|(?:transaction|merger|acquisition|integration)(?:-related)?\s+(?:costs?|expenses?))\b")
+        Regex::new(r"(?i-u)\b(?:impair[a-z]*|write-?downs?|write-?offs?|wr(?:itten|ote)\s+(?:down|off)|charges?|restructuring|severance|litigation|lawsuits?|legal|settle(?:d|ments?)|tax(?:es)?|one-?time|non-?recurring|non-?cash|gains?|loss(?:es)?\s+on|extinguishment|remeasurement|mark-to-market|valuation\s+allowance|divestitures?|(?:transaction|merger|acquisition|integration)(?:-related)?\s+(?:costs?|expenses?))\b")
+            .expect("valid built-in regex")
+    })
+    .is_match(quote)
+}
+
+/// The quote attributes a result to something, in the words 8-K releases
+/// use: "primarily due to", "driven by", "as a result of", "resulting
+/// from", "reflects", or a net income, net loss or EPS figure that
+/// "included" an item. "Results included a $50 million restructuring
+/// charge" or "a tax rate of 21%" names an item but attributes nothing.
+/// ("attributable to" is left out: "net income attributable to Acme
+/// shareholders" names whose income it is, not why.)
+fn attributes(quote: &str) -> bool {
+    static R: OnceLock<Regex> = OnceLock::new();
+    R.get_or_init(|| {
+        Regex::new(r"(?i-u)\b(?:due\s+to|driven\s+by|as\s+a\s+result\s+of|result(?:s|ed|ing)?\s+from|reflect(?:s|ed|ing)?|because\s+of|caused\s+by|attributed\s+to)\b|\b(?:net\s+(?:income|loss|earnings)|(?:loss|earnings)\s+per\s+(?:diluted\s+)?share|eps)\b[a-z0-9$,.%() -]{0,80}\binclud(?:e|es|ed|ing)\b")
             .expect("valid built-in regex")
     })
     .is_match(quote)
@@ -1447,8 +1465,9 @@ fn names_item(quote: &str) -> bool {
 
 /// Notes whose quote is in the exhibit and whose summary uses only the
 /// quote's numbers and no markup. With `causes`, a note marked as the cause
-/// of a swing keeps the mark only when its quote names an item, and such
-/// notes come first so the cap never drops them; otherwise no note is one.
+/// of a swing keeps the mark only when its quote names an item and
+/// attributes a result to it, and such notes come first so the cap never
+/// drops them; otherwise no note is one.
 fn verify_notes(text: &str, v: Option<&Value>, causes: bool) -> Vec<Note> {
     let mut notes: Vec<Note> = v
         .and_then(Value::as_array)
@@ -1456,7 +1475,7 @@ fn verify_notes(text: &str, v: Option<&Value>, causes: bool) -> Vec<Note> {
         .flatten()
         .filter_map(|it| serde_json::from_value::<Note>(it.clone()).ok())
         .map(|n| Note {
-            cause: causes && n.cause && names_item(&n.quote),
+            cause: causes && n.cause && names_item(&n.quote) && attributes(&n.quote),
             quote: collapse(&n.quote),
             summary_en: collapse(&n.summary_en),
         })
@@ -3887,6 +3906,22 @@ mod tests {
             ("launched a new operating model", false),
         ] {
             assert_eq!(names_item(q), item, "{q}");
+        }
+        // An item the release names but does not give as a reason is an
+        // ordinary highlight.
+        for (q, cause) in [
+            ("The third quarter net loss was primarily due to a $4.6 billion non-cash impairment", true),
+            ("Net loss for the quarter included a $4.6 billion non-cash impairment charge", true),
+            ("Diluted EPS of $(20.50) includes a $310 million restructuring charge", true),
+            ("The decline in net income reflects a $1.2 billion loss on the sale of the towers business", true),
+            ("Net income increased, driven by a gain on the sale of its towers business", true),
+            ("The net loss resulted from a $900 million litigation settlement", true),
+            ("Results included a $50 million restructuring charge", false),
+            ("The effective tax rate was 21% for the quarter", false),
+            ("Operating income benefited from gains in broadband pricing", false),
+            ("Net income attributable to Acme shareholders was $1.1 billion, with a tax rate of 21%", false),
+        ] {
+            assert_eq!(names_item(q) && attributes(q), cause, "{q}");
         }
     }
 
