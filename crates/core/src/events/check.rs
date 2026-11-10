@@ -25,9 +25,12 @@ use crate::providers::Http;
 pub const USER_AGENT: &str = "PreBell (https://prebell.site; support@prebell.site)";
 /// A schedule page larger than this is refused (the FOMC calendar is ~170 KB).
 pub const MAX_PAGE_BYTES: usize = 1 << 20;
-/// Bytes of a release page read for the released check: the status and the
-/// page title are all it needs (BLS release pages are over 1 MB).
-pub const RELEASE_PREFIX_BYTES: usize = 16 * 1024;
+/// Bytes of a release page read for the released check: the status, the
+/// page title and, for CPI and jobs, the opening summary the headline
+/// figures come from (`figures`). BLS release pages are over 1 MB; on the
+/// 2026-11 pages the summary ends at byte 36,066 (CPI) and the jobs
+/// headline sentence at 36,100, after ~34 KB of site navigation.
+pub const RELEASE_PREFIX_BYTES: usize = 48 * 1024;
 /// An event this many trading days ahead or nearer, re-seen on its page, is
 /// `confirmed`.
 pub const CONFIRM_TRADING_DAYS: usize = 10;
@@ -329,6 +332,18 @@ fn release_marker(series: &str) -> Option<&'static str> {
     }
 }
 
+/// The first `RELEASE_PREFIX_BYTES` of `url` (one GET with the contact
+/// User-Agent) when it answers 200 and carries `series`' release title. A
+/// 200 page that is not the release (a bot wall) does not count.
+pub(crate) async fn release_page(http: &dyn Http, url: &str, series: &str) -> Option<String> {
+    let marker = release_marker(series)?;
+    http.get_prefix(url, &[("User-Agent", USER_AGENT)], RELEASE_PREFIX_BYTES)
+        .await
+        .ok()
+        .filter(|resp| resp.status == 200 && resp.body.contains(marker))
+        .map(|resp| resp.body)
+}
+
 /// Rows whose release page is up: for each row not yet released that
 /// started at most `RELEASE_LOOKBACK_DAYS` ago and has a release URL, one
 /// GET of the page's first `RELEASE_PREFIX_BYTES` (at most `max`); a 200
@@ -339,6 +354,22 @@ pub async fn check_releases(
     http: &dyn Http,
     max: usize,
 ) -> Vec<EventRow> {
+    check_release_pages(now, rows, http, max)
+        .await
+        .0
+        .into_iter()
+        .map(|(r, _)| r)
+        .collect()
+}
+
+/// `check_releases` with each released row's page prefix, and the number
+/// of fetches made.
+pub(crate) async fn check_release_pages(
+    now: DateTime<Utc>,
+    rows: &[EventRow],
+    http: &dyn Http,
+    max: usize,
+) -> (Vec<(EventRow, String)>, usize) {
     let mut out = Vec::new();
     let mut tries = 0;
     for r in rows {
@@ -361,26 +392,21 @@ pub async fn check_releases(
         let Some(url) = release_url_for(&r.series, date, r.ref_period.as_deref()) else {
             continue;
         };
-        let Some(marker) = release_marker(&r.series) else {
+        if release_marker(&r.series).is_none() {
             continue;
-        };
+        }
         tries += 1;
-        // A 200 page that is not the release (a bot wall) does not count.
-        let ok = http
-            .get_prefix(&url, &[("User-Agent", USER_AGENT)], RELEASE_PREFIX_BYTES)
-            .await
-            .is_ok_and(|resp| resp.status == 200 && resp.body.contains(marker));
-        if ok {
+        if let Some(page) = release_page(http, &url, &r.series).await {
             let mut r = r.clone();
             r.status = "released".into();
             r.release_url = Some(url);
             r.moved_from = None;
             r.checked_at = iso(now);
             r.updated_at = iso(now);
-            out.push(r);
+            out.push((r, page));
         }
     }
-    out
+    (out, tries)
 }
 
 /// The error `check_tick` returns before migration 0008 is applied.
