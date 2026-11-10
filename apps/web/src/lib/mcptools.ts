@@ -1,7 +1,10 @@
 /**
  * The MCP server's three read-only tools (see docs/superpowers/specs/2026-11-10-mcp-server-design.md). They read
  * only what the site publishes: posts, the earnings calendar, macro events, and the facts the posts were written
- * from. Each call does at most three small D1 reads and one R2 read, and never fetches anything else.
+ * from, and never fetch anything else. Every D1 read is an indexed lookup whose rows do not grow with the archive:
+ * `earnings_report` 1-2 statements, `latest_brief` 1-2 (the newest brief walks idx_posts_trading_date backwards),
+ * `earnings_calendar` 2 per week not already in the cache (a range touches at most 4 weeks); plus at most one R2
+ * read.
  */
 
 import { COMPANIES } from "./companies.generated";
@@ -19,7 +22,8 @@ import { loadEarningsFacts, METRIC_LABELS, periodFromSlug, periodLabel } from ".
 import { listEvents, type MacroEvent } from "./events";
 import { parseFacts, type IndexView, type MoverView, type R2Like } from "./facts";
 import { indexName } from "./indexnames";
-import type { D1Like, Lang } from "./posts";
+import { VISIBLE, type D1Like, type Lang } from "./posts";
+import type { EdgeCache } from "./sitemap";
 import { formatEt, formatEtTime, formatWeekday } from "./time";
 import { translator } from "./translator";
 
@@ -29,15 +33,30 @@ export interface ToolContext {
   /** Site origin for `source` links (`SITE_URL`). */
   origin: URL;
   now: Date;
-  /** Hears about R2, JSON and shape errors in stored facts. */
+  /**
+   * Hears about R2, JSON and shape errors in stored facts, and D1 errors a tool answers around. An answer built
+   * while it fired is degraded and is not cached.
+   */
   onError?: (error: unknown) => void;
+  /** Workers' `caches.default`, for the calendar's per-week entries; null where there is none. */
+  cache?: EdgeCache | null;
+  /** Keeps a cache write alive after the response (`ctx.waitUntil`); awaited when absent. */
+  waitUntil?: (p: Promise<unknown>) => void;
+  /** Hears whether each cached part of an answer (a calendar week) was a hit, for the log line. */
+  noteCache?: (hit: boolean) => void;
 }
 
-/** A tool call with valid arguments: the cache key of its normalized arguments, and the work. */
+/**
+ * A tool call with valid arguments: the cache key of its normalized arguments (null: the call's answer is not
+ * cached whole, as the calendar caches its weeks instead), and the work.
+ */
 export interface PreparedCall {
-  key: Record<string, string>;
+  key: Record<string, string> | null;
   run: () => Promise<Record<string, unknown>>;
 }
+
+/** Seconds a cached answer (a whole call, or a calendar week) is served. */
+export const CACHE_TTL = 60;
 
 /** Arguments the caller got wrong: a tool execution error the model can correct. */
 export class ArgumentError extends Error {}
@@ -425,6 +444,13 @@ function dateArg(v: unknown, name: string): string | undefined {
 /** Calendar range: at most 21 days counted inclusively. */
 export const MAX_RANGE_DAYS = 21;
 export const MAX_TICKERS = 50;
+/**
+ * Calendar dates must fall from 400 days before today (ET) to 800 days after: the calendar's history, its
+ * earnings dates (about a quarter ahead), and the events table (scheduled releases about a year ahead, elections
+ * two). It bounds the week cache's keys to about 170 weeks per language.
+ */
+export const WINDOW_BACK_DAYS = 400;
+export const WINDOW_AHEAD_DAYS = 800;
 
 const days = (from: string, to: string) => Math.round((Date.parse(to) - Date.parse(from)) / 86_400_000);
 
@@ -445,6 +471,10 @@ export function prepareCall(name: ToolName, args: Record<string, unknown>, ctx: 
       } else if (!from) from = addDays(to!, -6);
       else if (!to) to = addDays(from, 6);
       if (to! < from) throw new ArgumentError("to must not be before from.");
+      const today = todayEt(ctx.now);
+      const lo = addDays(today, -WINDOW_BACK_DAYS);
+      const hi = addDays(today, WINDOW_AHEAD_DAYS);
+      if (from < lo || to! > hi) throw new ArgumentError(`Dates must be between ${lo} and ${hi}.`);
       if (days(from, to!) >= MAX_RANGE_DAYS)
         throw new ArgumentError(`The range is at most ${MAX_RANGE_DAYS} days; ask for several ranges instead.`);
       let tickers: string[] = [];
@@ -454,10 +484,7 @@ export function prepareCall(name: ToolName, args: Record<string, unknown>, ctx: 
         tickers = [...new Set(args.tickers.map(tickerArg))].sort();
       }
       const range = { from, to: to! };
-      return {
-        key: { from: range.from, to: range.to, tickers: tickers.join(","), lang },
-        run: () => earningsCalendar(ctx, range.from, range.to, tickers, lang),
-      };
+      return { key: null, run: () => earningsCalendar(ctx, range.from, range.to, tickers, lang) };
     }
     case "earnings_report": {
       only(args, ["ticker", "lang", "full_text"]);
@@ -523,13 +550,61 @@ const isWeekday = (date: string) => {
   return d !== 0 && d !== 6;
 };
 
-async function earningsCalendar(ctx: ToolContext, from: string, to: string, tickers: string[], lang: Lang) {
+interface CalendarWeek {
+  entries: CalendarEntry[];
+  events: Record<string, MacroEvent[]>;
+}
+
+/**
+ * One Monday-Sunday week of calendar rows and events in `lang` (two D1 reads), cached for `CACHE_TTL` seconds
+ * under (week, lang) only. Callers filter days and tickers, so any range or ticker subset inside the week shares
+ * the entry, and the keys are bounded by the date window.
+ */
+async function calendarWeek(ctx: ToolContext, monday: string, lang: Lang): Promise<CalendarWeek> {
+  const key = new Request(new URL(`/__mcp_cache/v1/calendar_week?lang=${lang}&monday=${monday}`, ctx.origin));
+  try {
+    const hit = await ctx.cache?.match(key);
+    if (hit) {
+      const week = (await hit.json()) as CalendarWeek;
+      ctx.noteCache?.(true);
+      return week;
+    }
+  } catch {}
+  ctx.noteCache?.(false);
+  const sunday = addDays(monday, 6);
   const [entries, events] = await Promise.all([
-    listCalendarRange(ctx.db, from, to, lang, tickers),
-    listEvents(ctx.db, from, to, lang),
+    listCalendarRange(ctx.db, monday, sunday, lang),
+    listEvents(ctx.db, monday, sunday, lang),
   ]);
+  const week = { entries, events };
+  const store = ctx.cache
+    ?.put(
+      key,
+      new Response(JSON.stringify(week), {
+        headers: { "Content-Type": "application/json", "Cache-Control": `public, max-age=${CACHE_TTL}` },
+      }),
+    )
+    .catch(() => {});
+  if (store) {
+    if (ctx.waitUntil) ctx.waitUntil(store);
+    else await store;
+  }
+  return week;
+}
+
+async function earningsCalendar(ctx: ToolContext, from: string, to: string, tickers: string[], lang: Lang) {
+  // Counted loops: the range is at most 21 days, so at most 4 weeks.
+  const first = weekStart(from);
+  const weeks = Array.from({ length: Math.floor(days(first, to) / 7) + 1 }, (_, i) => addDays(first, 7 * i));
+  const read = await Promise.all(weeks.map((w) => calendarWeek(ctx, w, lang)));
+  const wanted = tickers.length ? new Set(tickers) : null;
+  const entries = read
+    .flatMap((w) => w.entries)
+    .filter((e) => e.date >= from && e.date <= to && (!wanted || wanted.has(e.ticker)));
+  const events: Record<string, MacroEvent[]> = Object.assign({}, ...read.map((w) => w.events));
   const out = [];
-  for (let d = from; d <= to; d = addDays(d, 1)) {
+  for (let i = 0; i <= days(from, to); i++) {
+    const d = addDays(from, i);
     const companies = entries.filter((e) => e.date === d).map((e) => company(ctx, lang, e));
     const evs = (events[d] ?? []).map((e) => event(e, lang));
     if (isWeekday(d) || companies.length || evs.length)
@@ -585,6 +660,8 @@ interface ReportRow {
   en_title: string | null;
   en_summary: string | null;
   en_body: string | null;
+  /** 1 when the post is visible in the requested language (`VISIBLE`), else 0: link the English page. */
+  visible: number;
 }
 
 /** The EDGAR filing index for an accession, the form the generator links. */
@@ -592,16 +669,17 @@ const filingIndex = (cik: number, acc: string) =>
   `https://www.sec.gov/Archives/edgar/data/${cik}/${acc.replace(/-/g, "")}/${acc}-index.htm`;
 
 async function earningsReport(ctx: ToolContext, ticker: string, lang: Lang, fullText: boolean) {
-  const body = fullText ? "t.body_md AS t_body, en.body_md AS en_body" : "NULL AS t_body, NULL AS en_body";
+  const body = fullText ? "t.body_md AS t_body, o.body_md AS en_body" : "NULL AS t_body, NULL AS en_body";
   // The newest check whose English text is published (the calendar's rule), with this language's text if any.
+  // `o` is the English row: for ZH it is the other language `VISIBLE` reads, and for EN it is never read.
   const row = await ctx.db
     .prepare(
       `SELECT p.slug, p.trading_date, p.published_at, p.revised_at, p.facts_r2_key, f.cik, f.accession, f.filing_date,
-         t.status AS t_status, t.title AS t_title, t.summary AS t_summary, en.title AS en_title, en.summary AS en_summary,
-         ${body}
+         t.status AS t_status, t.title AS t_title, t.summary AS t_summary, o.title AS en_title, o.summary AS en_summary,
+         CASE WHEN ${VISIBLE} THEN 1 ELSE 0 END AS visible, ${body}
        FROM earnings_filings f
        CROSS JOIN posts p ON p.run_key = f.run_key
-       CROSS JOIN post_translations en ON en.post_id = p.id AND en.lang = 'en' AND en.status = 'published'
+       CROSS JOIN post_translations o ON o.post_id = p.id AND o.lang = 'en' AND o.status = 'published'
        LEFT JOIN post_translations t ON t.post_id = p.id AND t.lang = ?
        WHERE f.ticker = ?
        ORDER BY p.trading_date DESC, p.published_at DESC LIMIT 1`,
@@ -643,7 +721,8 @@ async function earningsReport(ctx: ToolContext, ticker: string, lang: Lang, full
   const textLang: Lang = translated ? "zh" : "en";
   const facts = await loadEarningsFacts(ctx.bucket, row.facts_r2_key, ticker, ctx.onError);
   const p = facts?.fiscalPeriod ?? periodFromSlug(row.slug);
-  const url = postUrl(ctx, lang, row.slug);
+  // A ZH page that is not visible (its translation failed) would 404: link the English one.
+  const url = postUrl(ctx, row.visible ? lang : "en", row.slug);
   return {
     status: "check_published",
     ...base,
@@ -767,16 +846,20 @@ const DUE: Record<Kind, { at: string; en: string; zh: string }> = {
 
 /**
  * Upcoming closure dates from the events table, or null when it holds none (not loaded yet, or the table is
- * missing before migration 0008), in which case no date is promised.
+ * missing before migration 0008), in which case no closure-aware date is promised. A D1 error is reported, so
+ * the answer is not cached.
  */
-async function closures(db: D1Like, today: string): Promise<Set<string> | null> {
+async function closures(ctx: ToolContext, today: string): Promise<Set<string> | null> {
   try {
-    const { results } = await db
+    const { results } = await ctx.db
       .prepare(`SELECT et_date FROM macro_events WHERE series = 'closed' AND et_date >= ? ORDER BY et_date LIMIT 10`)
       .bind(today)
       .all<{ et_date: string }>();
     return results.length ? new Set(results.map((r) => r.et_date)) : null;
-  } catch {
+  } catch (e) {
+    try {
+      ctx.onError?.(e);
+    } catch {}
     return null;
   }
 }
@@ -784,9 +867,17 @@ async function closures(db: D1Like, today: string): Promise<Set<string> | null> 
 async function nextDue(ctx: ToolContext, kind: Kind, lang: Lang) {
   const today = todayEt(ctx.now);
   const due = DUE[kind];
-  const closed = await closures(ctx.db, today);
+  const closed = await closures(ctx, today);
   const label = kind === "premarket" ? { en: "premarket brief", zh: "盘前简报" } : { en: "after-close recap", zh: "收盘回顾" };
+  const upcoming = (date: string) => ({
+    date,
+    time_et: due.at,
+    text: lang === "en" ? `The next ${label.en} is due at ${due.en} on ${date}.` : `下一期${label.zh}将于${date}${due.zh}发布。`,
+  });
+  const beforeDue = etClock.format(ctx.now) < due.at;
   if (!closed) {
+    // No closure data: today still counts on a weekday before the due time; otherwise no date is promised.
+    if (isWeekday(today) && beforeDue) return upcoming(today);
     return {
       date: null,
       time_et: due.at,
@@ -798,7 +889,7 @@ async function nextDue(ctx: ToolContext, kind: Kind, lang: Lang) {
   }
   const trading = (d: string) => isWeekday(d) && !closed.has(d);
   let date = today;
-  if (!trading(today) || etClock.format(ctx.now) >= due.at) {
+  if (!trading(today) || !beforeDue) {
     // Today's is late (or there is none today): name today only when it is a trading day.
     if (trading(today)) {
       return {
@@ -810,14 +901,13 @@ async function nextDue(ctx: ToolContext, kind: Kind, lang: Lang) {
             : `今天的${label.zh}通常在${due.zh}发布，目前尚未发布。`,
       };
     }
-    do date = addDays(date, 1);
-    while (!trading(date) && date < addDays(today, 14));
+    // Counted: at most two weeks ahead.
+    for (let i = 1; i <= 14; i++) {
+      date = addDays(today, i);
+      if (trading(date)) break;
+    }
   }
-  return {
-    date,
-    time_et: due.at,
-    text: lang === "en" ? `The next ${label.en} is due at ${due.en} on ${date}.` : `下一期${label.zh}将于${date}${due.zh}发布。`,
-  };
+  return upcoming(date);
 }
 
 function indexRow(i: IndexView, t: ReturnType<typeof translator>) {
@@ -844,18 +934,19 @@ function moverRow(ctx: ToolContext, lang: Lang, m: MoverView) {
 }
 
 async function latestBrief(ctx: ToolContext, kind: Kind | null, lang: Lang, fullText: boolean) {
-  const body = fullText ? "t.body_md AS t_body, en.body_md AS en_body" : "NULL AS t_body, NULL AS en_body";
-  // Visible as the site shows it: published in this language, or (ZH) pending while the English is published.
+  const body = fullText ? "t.body_md AS t_body, o.body_md AS en_body" : "NULL AS t_body, NULL AS en_body";
+  // Visible as the site shows it (`VISIBLE`; `o` is the English row, which only the ZH case reads). `INDEXED BY`,
+  // CROSS JOIN and the always-true range term make SQLite walk idx_posts_trading_date backwards and stop at the
+  // first match, whatever its statistics say, instead of reading every translation (tests/queryplan.test.ts).
   const row = await ctx.db
     .prepare(
       `SELECT p.slug, p.content_type, p.trading_date, p.published_at, p.revised_at, p.facts_r2_key,
-         t.status AS t_status, t.title AS t_title, t.summary AS t_summary, en.title AS en_title, en.summary AS en_summary,
+         t.status AS t_status, t.title AS t_title, t.summary AS t_summary, o.title AS en_title, o.summary AS en_summary,
          ${body}
-       FROM posts p
-       JOIN post_translations t ON t.post_id = p.id AND t.lang = ?
-       LEFT JOIN post_translations en ON en.post_id = p.id AND en.lang = 'en'
-       WHERE p.content_type IN (?, ?)
-         AND (t.status = 'published' OR (t.lang = 'zh' AND t.status = 'pending' AND en.status = 'published'))
+       FROM posts p INDEXED BY idx_posts_trading_date
+       CROSS JOIN post_translations t ON t.post_id = p.id AND t.lang = ?
+       LEFT JOIN post_translations o ON o.post_id = p.id AND o.lang = 'en'
+       WHERE p.trading_date <= '9999-12-31' AND p.content_type IN (?, ?) AND ${VISIBLE}
        ORDER BY p.trading_date DESC, p.published_at DESC LIMIT 1`,
     )
     .bind(lang, kind ?? "premarket", kind ?? "recap")

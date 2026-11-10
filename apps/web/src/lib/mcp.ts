@@ -7,12 +7,16 @@
  * served as the handshake revisions 2025-11-25, 2025-06-18 and 2025-03-26 (`initialize`, `ping`). Both eras get the
  * same three tools.
  *
- * Public and unauthenticated, so: bodies are capped at 16 KB, batches are refused, a browser `Origin` other than
- * the site's is refused (DNS rebinding and cross-site use), arguments are validated before any read, identical
- * tool calls are answered from a one-minute cache, and each request logs one line without the caller's address.
+ * Public and unauthenticated, so: it answers only on the site's own host (not workers.dev), a browser `Origin`
+ * other than the site's is refused (DNS rebinding and cross-site use), batches are refused, arguments are
+ * validated before any read, healthy answers are cached for a minute, any unexpected failure is a JSON-RPC error
+ * rather than a 500 page, and each request logs one line without the caller's address.
+ *
+ * The 16 KB body cap protects parsing only: OpenNext reads the whole request body into memory before the route
+ * runs, so it cannot stop a large upload from being buffered. A site-wide guard in a custom Worker entry would.
  */
 
-import { INSTRUCTIONS, isToolName, prepareCall, TOOLS, ArgumentError, type ToolContext } from "./mcptools";
+import { CACHE_TTL, INSTRUCTIONS, isToolName, prepareCall, TOOLS, ArgumentError, type ToolContext } from "./mcptools";
 import type { EdgeCache } from "./sitemap";
 
 export const MODERN_VERSIONS = ["2026-07-28"];
@@ -21,9 +25,9 @@ const SUPPORTED = [...MODERN_VERSIONS, ...LEGACY_VERSIONS];
 /** The 2025-11-25 transport: a request without the version header is taken as 2025-03-26. */
 const ASSUMED_LEGACY = "2025-03-26";
 
+/** Larger bodies are refused before parsing (OpenNext has already buffered them; see above). */
 export const MAX_BODY_BYTES = 16 * 1024;
-/** Seconds an identical tool call is answered from the cache. */
-export const CACHE_TTL = 60;
+export { CACHE_TTL };
 const TOOLS_TTL_MS = 3_600_000;
 
 const SERVER_INFO = {
@@ -37,7 +41,10 @@ const SERVER_INFO = {
 export interface McpDeps extends ToolContext {
   /** `MCP_ENABLED === "true"`; otherwise the route answers 404. */
   enabled: boolean;
-  /** `SITE_URL` as configured; browser origins other than its own are refused. Unset only in local dev. */
+  /**
+   * `SITE_URL` as configured: only its host (and loopback, for the local preview) is served, and browser origins
+   * other than its own are refused. Unset only in local dev, where any host is served.
+   */
   siteUrl: string | undefined;
   /** Workers' `caches.default`; null where there is none (`next dev`, tests). */
   cache: EdgeCache | null;
@@ -51,6 +58,7 @@ const PARSE_ERROR = -32700;
 const INVALID_REQUEST = -32600;
 const METHOD_NOT_FOUND = -32601;
 const INVALID_PARAMS = -32602;
+const INTERNAL_ERROR = -32603;
 const HEADER_MISMATCH = -32020;
 const UNSUPPORTED_VERSION = -32022;
 
@@ -69,7 +77,19 @@ const failure = (id: Id | null, code: number, message: string, data?: unknown) =
 const notFound = () => new Response("Not found", { status: 404, headers: { "Content-Type": "text/plain; charset=utf-8" } });
 
 const isObj = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
-const short = (v: unknown) => String(v).replace(/[^\w./-]/g, "?").slice(0, 60);
+/** A loggable, echoable form of a client value: a string's safe characters, else only its type (never `String()`, which a deeply nested array overflows). */
+const short = (v: unknown) => (typeof v === "string" ? v.replace(/[^\w./-]/g, "?").slice(0, 60) : typeof v);
+
+/**
+ * Whether `/mcp` is served at this request's host: `SITE_URL`'s host only, so the workers.dev address (no WAF
+ * rule, no Cache API) and any other host get 404; loopback too, for the local preview, whose `SITE_URL` is the
+ * production one. Without `SITE_URL` (local dev) every host is served.
+ */
+export function hostAllowed(requestUrl: string, siteUrl: string | undefined): boolean {
+  if (!siteUrl) return true;
+  const { host, hostname } = new URL(requestUrl);
+  return host === new URL(siteUrl).host || hostname === "localhost" || hostname === "127.0.0.1" || hostname === "[::1]";
+}
 
 /** A browser origin this server answers: the site's own (or, in local dev without `SITE_URL`, localhost). */
 export function originAllowed(origin: string, siteUrl: string | undefined): boolean {
@@ -141,8 +161,8 @@ Informational only; not investment advice; not real-time.
  * `GET /mcp`: a short description for a person who opens the address. A client asking for an event stream
  * (`Accept: text/event-stream`, the 2025 transports' optional GET stream) gets 405: this server has none.
  */
-export function handleMcpGet(req: Request, deps: Pick<McpDeps, "enabled">): Response {
-  if (!deps.enabled) return notFound();
+export function handleMcpGet(req: Request, deps: Pick<McpDeps, "enabled" | "siteUrl">): Response {
+  if (!deps.enabled || !hostAllowed(req.url, deps.siteUrl)) return notFound();
   const accept = req.headers.get("accept") ?? "";
   if (accept.includes("text/event-stream") && !accept.includes("text/html"))
     return new Response(null, { status: 405, headers: { Allow: "POST" } });
@@ -155,9 +175,23 @@ export function handleMcpGet(req: Request, deps: Pick<McpDeps, "enabled">): Resp
   });
 }
 
-/** `POST /mcp`: one JSON-RPC message in, one JSON response (or 202) out. */
+/**
+ * `POST /mcp`: one JSON-RPC message in, one JSON response (or 202) out. Nothing a client sends can produce an
+ * HTML 500: an unexpected failure is JSON-RPC -32603 with `Cache-Control: no-store`.
+ */
 export async function handleMcpPost(req: Request, deps: McpDeps): Promise<Response> {
-  if (!deps.enabled) return notFound();
+  try {
+    return await servePost(req, deps);
+  } catch (e) {
+    try {
+      console.error("mcp internal error", e instanceof Error ? e.name : typeof e);
+    } catch {}
+    return json(failure(null, INTERNAL_ERROR, "Internal error"), 500);
+  }
+}
+
+async function servePost(req: Request, deps: McpDeps): Promise<Response> {
+  if (!deps.enabled || !hostAllowed(req.url, deps.siteUrl)) return notFound();
   const started = Date.now();
   const logLine = (fields: string) => deps.log(`mcp ${fields} ms=${Date.now() - started}`);
 
@@ -329,9 +363,21 @@ async function callTool(
   }
   const toolError = (text: string) => ok({ content: [{ type: "text", text }], isError: true });
 
+  // An answer built while `onError` fired (an R2 or D1 failure the tool answered around) is degraded: it is
+  // returned but not cached, so the next call tries again.
+  let degraded = false;
+  const weeks = { hit: 0, miss: 0 };
+  const ctx: ToolContext = {
+    ...deps,
+    onError: (e) => {
+      degraded = true;
+      deps.onError?.(e);
+    },
+    noteCache: (h) => void (h ? weeks.hit++ : weeks.miss++),
+  };
   let call;
   try {
-    call = prepareCall(name, (params.arguments ?? {}) as Record<string, unknown>, deps);
+    call = prepareCall(name, (params.arguments ?? {}) as Record<string, unknown>, ctx);
   } catch (e) {
     if (!(e instanceof ArgumentError)) throw e;
     logLine(`tool=${name} error=arguments`);
@@ -339,12 +385,15 @@ async function callTool(
   }
 
   // The Cache API keeps GET responses only, so a POST's answer is stored under a synthetic GET of its
-  // normalized arguments. Nothing serves this path; it is a cache key.
-  const key = new Request(new URL(`/__mcp_cache/v1/${name}?${new URLSearchParams(Object.entries(call.key).sort())}`, deps.origin));
+  // normalized arguments. Nothing serves this path; it is a cache key. A call without a key (the calendar)
+  // caches its weeks itself.
+  const key = call.key
+    ? new Request(new URL(`/__mcp_cache/v1/${name}?${new URLSearchParams(Object.entries(call.key).sort())}`, deps.origin))
+    : null;
   let data: Record<string, unknown> | null = null;
   let hit = false;
   try {
-    const cached = await deps.cache?.match(key);
+    const cached = key ? await deps.cache?.match(key) : undefined;
     if (cached) {
       data = (await cached.json()) as Record<string, unknown>;
       hit = true;
@@ -360,7 +409,11 @@ async function callTool(
       logLine(`tool=${name} cache=miss error=internal`);
       return toolError("PreBell could not read its data just now. Try again in a minute.");
     }
-    const store = deps.cache
+    if (degraded) {
+      logLine(`tool=${name} cache=miss degraded`);
+      return ok({ content: [{ type: "text", text: JSON.stringify(data) }], structuredContent: data, isError: false });
+    }
+    const store = key && deps.cache
       ?.put(
         key,
         new Response(JSON.stringify(data), {
@@ -373,6 +426,8 @@ async function callTool(
       else await store;
     }
   }
+  // A call cached by parts (the calendar's weeks) is a hit when every part was.
+  if (!key) hit = weeks.hit > 0 && weeks.miss === 0;
   logLine(`tool=${name} cache=${hit ? "hit" : "miss"}`);
   // The structured result, and the same JSON as text for clients that read only `content`.
   return ok({ content: [{ type: "text", text: JSON.stringify(data) }], structuredContent: data, isError: false });

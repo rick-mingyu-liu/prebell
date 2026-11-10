@@ -11,6 +11,7 @@ import {
   fixture,
   FRIDAY,
   macro,
+  memoryCache,
   objects,
   post,
   premarketFacts,
@@ -428,5 +429,88 @@ describe("seed sanity", () => {
   it("helpers produce valid SQL", () => {
     expect(() => memoryD1(seed() + post({ type: "recap", date: "2026-10-30", slug: "x", factsKey: null, publishedAt: "t", zh: null }) + check("KO", 21344, "0000021344-26-000001", "2026-10-21", "ko-q3-fy2026-earnings") + cal("KO", "2026-10-21", "reported"))).not.toThrow();
     expect(premarketFacts().themes).toBeDefined();
+  });
+});
+
+describe("review fixes", () => {
+  it("B1: dates far outside the calendar's window are refused at once (no runaway loop)", () => {
+    const started = Date.now();
+    // The reviewer's request: not a date the helpers accept (years 1000-9998), so refused before any arithmetic.
+    expect(bad("earnings_calendar", { from: "9999-12-31", to: "9999-12-31" })).toThrow(/YYYY-MM-DD/);
+    expect(bad("earnings_calendar", { from: "9998-12-31", to: "9998-12-31" })).toThrow(/between 2025-09-25 and 2029-01-07/);
+    expect(bad("earnings_calendar", { from: "0001-01-01" })).toThrow(ArgumentError);
+    expect(Date.now() - started).toBeLessThan(1000);
+  });
+
+  it("B1: the window is 400 days back to 800 days ahead of today (ET), inclusive", async () => {
+    // FRIDAY is 2026-10-30: the window is 2025-09-25 .. 2029-01-07.
+    expect(bad("earnings_calendar", { from: "2025-09-25", to: "2025-09-25" })).not.toThrow();
+    expect(bad("earnings_calendar", { from: "2025-09-24", to: "2025-09-25" })).toThrow(/between/);
+    expect(bad("earnings_calendar", { from: "2029-01-07", to: "2029-01-07" })).not.toThrow();
+    expect(bad("earnings_calendar", { from: "2029-01-02", to: "2029-01-08" })).toThrow(/between/);
+    // `from` alone makes a week from it; ending on the window's last day is still allowed.
+    expect(bad("earnings_calendar", { from: "2029-01-01" })).not.toThrow();
+    expect(bad("earnings_calendar", { from: "2029-01-02" })).toThrow(/between/);
+    const out = await run("earnings_calendar", { from: "2029-01-01" });
+    expect(out.days.map((d: { date: string }) => d.date)).toEqual(["2029-01-01", "2029-01-02", "2029-01-03", "2029-01-04", "2029-01-05"]);
+  });
+
+  it("S2: calendar weeks are read once and shared by calls with any ticker subset or range inside them", async () => {
+    const cache = memoryCache();
+    const c = ctx({ cache });
+    await run("earnings_calendar", { from: "2026-11-02", to: "2026-11-06", tickers: ["KO"] }, c);
+    const reads = c.reads.length;
+    expect(reads).toBe(2); // that week's calendar rows and events
+    const out = await run("earnings_calendar", { from: "2026-11-03", to: "2026-11-04", tickers: ["NVDA", "KO"] }, c);
+    expect(c.reads.length).toBe(reads);
+    expect(out.days.map((d: { date: string }) => d.date)).toEqual(["2026-11-03", "2026-11-04"]);
+    expect(out.days[0].companies.map((x: { ticker: string }) => x.ticker)).toEqual(["KO"]);
+    expect(out.tickers_without_dates).toEqual(["NVDA"]);
+    expect(cache.keys.every((k) => /\/__mcp_cache\/v1\/calendar_week\?lang=(en|zh)&monday=\d{4}-\d{2}-\d{2}$/.test(k))).toBe(true);
+  });
+
+  it("S2: a range across weeks reads each week once", async () => {
+    const c = ctx({ cache: memoryCache() });
+    // Wed 2026-10-28 .. Mon 2026-11-16 touches four weeks.
+    const first = await run("earnings_calendar", { from: "2026-10-28", to: "2026-11-16" }, c);
+    expect(c.reads.length).toBe(8);
+    const rows = first.days.flatMap((d: { companies: { ticker: string }[] }) => d.companies.map((x) => x.ticker));
+    expect(rows).toEqual(["MSFT", "XOM", "AAPL", "KO"]);
+    await run("earnings_calendar", { from: "2026-10-26", to: "2026-11-15", lang: "en" }, c);
+    expect(c.reads.length).toBe(8);
+    await run("earnings_calendar", { from: "2026-10-26", to: "2026-11-01", lang: "zh" }, c);
+    expect(c.reads.length).toBe(10);
+  });
+
+  it("S6: a Chinese check that failed links the English page", async () => {
+    const sql = seed() + check("NFLX", 1065280, "0001065280-26-000040", "2026-10-21", "nflx-q3-fy2026-earnings", null) +
+      "INSERT INTO post_translations (post_id, lang, status, updated_at) SELECT id,'zh','failed','t' FROM posts WHERE slug='nflx-q3-fy2026-earnings';";
+    const out = await run("earnings_report", { ticker: "NFLX", lang: "zh" }, ctx({ sql }));
+    expect(out.text_lang).toBe("en");
+    expect(out.url).toBe("https://prebell.site/en/p/nflx-q3-fy2026-earnings");
+    expect(out.source).toBe(out.url);
+    // Pending still links the Chinese page, which shows the coming-soon notice.
+    const msft = await run("earnings_report", { ticker: "MSFT", lang: "zh" });
+    expect(msft.url).toBe("https://prebell.site/zh/p/msft-q1-fy2027-earnings");
+  });
+
+  it("N3: before 8:00 ET on a weekday with no closure rows, today's brief is due today", async () => {
+    const sql = seed() + DROP_FRIDAY_BRIEF + "DELETE FROM macro_events WHERE series = 'closed';";
+    const out = await run("latest_brief", {}, ctx({ now: new Date("2026-10-30T11:00:00Z"), sql }));
+    expect(out.next_brief_due).toEqual({ date: "2026-10-30", time_et: "08:00", text: "The next premarket brief is due at 8:00 AM ET on 2026-10-30." });
+  });
+
+  it("N1: a degraded answer reports itself through onError", async () => {
+    const failing = { async get() { throw new Error("r2 down"); } };
+    const c = ctx({ bucket: failing });
+    const out = await run("latest_brief", {}, c);
+    expect(out.market_data_available).toBe(false);
+    expect(c.errors).toHaveLength(1);
+    const broken = counted(memoryD1(seed()));
+    const d1: typeof broken.db = { prepare: (s) => { if (s.includes("macro_events")) throw new Error("D1 down"); return broken.db.prepare(s); } };
+    const c2 = ctx({ db: d1, now: new Date("2026-10-31T15:00:00Z") });
+    const stale = await run("latest_brief", {}, c2);
+    expect(stale.next_brief_due.date).toBeNull();
+    expect(c2.errors).toHaveLength(1);
   });
 });

@@ -321,18 +321,89 @@ describe("off switch and GET", () => {
   it("answers 404 to everything when disabled", async () => {
     const res = await handleMcpPost(req(legacy("tools/list")), deps({ enabled: false }));
     expect(res.status).toBe(404);
-    expect(handleMcpGet(new Request(URL_), { enabled: false }).status).toBe(404);
+    expect(handleMcpGet(new Request(URL_), { enabled: false, siteUrl: "https://prebell.site" }).status).toBe(404);
   });
 
   it("GET describes the server for a person, and refuses an event stream", async () => {
-    const page = handleMcpGet(new Request(URL_, { headers: { Accept: "text/html" } }), { enabled: true });
+    const page = handleMcpGet(new Request(URL_, { headers: { Accept: "text/html" } }), { enabled: true, siteUrl: "https://prebell.site" });
     expect(page.status).toBe(200);
     expect(page.headers.get("content-type")).toBe("text/plain; charset=utf-8");
     const text = await page.text();
     expect(text).toContain("claude mcp add --transport http prebell https://prebell.site/mcp");
     expect(text).toMatch(/not investment advice/);
-    const sse = handleMcpGet(new Request(URL_, { headers: { Accept: "text/event-stream" } }), { enabled: true });
+    const sse = handleMcpGet(new Request(URL_, { headers: { Accept: "text/event-stream" } }), { enabled: true, siteUrl: "https://prebell.site" });
     expect(sse.status).toBe(405);
     expect(sse.headers.get("allow")).toBe("POST");
+  });
+});
+
+describe("review fixes", () => {
+  it("B1: the reviewer's 9999-12-31 calendar request answers at once with an argument error", async () => {
+    const started = Date.now();
+    const { status, body } = await send(req(legacy("tools/call", { name: "earnings_calendar", arguments: { from: "9999-12-31", to: "9999-12-31" } })));
+    expect(Date.now() - started).toBeLessThan(1000);
+    expect(status).toBe(200);
+    expect(body.result.isError).toBe(true);
+    expect(body.result.content[0].text).toBe("from must be a date written YYYY-MM-DD.");
+  });
+
+  it("S3: only the canonical host is served; workers.dev and other hosts get 404", async () => {
+    for (const host of ["https://prebell-web.example.workers.dev/mcp", "https://www.prebell.site/mcp", "https://evil.example/mcp"]) {
+      const post = new Request(host, { method: "POST", body: JSON.stringify(legacy("tools/list")) });
+      expect((await handleMcpPost(post, deps())).status).toBe(404);
+      expect(handleMcpGet(new Request(host), { enabled: true, siteUrl: "https://prebell.site" }).status).toBe(404);
+    }
+    // Local preview: SITE_URL is prebell.site but the address is loopback.
+    for (const host of ["http://localhost:8871/mcp", "http://127.0.0.1:8787/mcp"]) {
+      const post = new Request(host, { method: "POST", body: JSON.stringify(legacy("ping")) });
+      expect((await handleMcpPost(post, deps())).status).toBe(200);
+    }
+    // Without SITE_URL (next dev) any host is served.
+    const any = new Request("https://whatever.example/mcp", { method: "POST", body: JSON.stringify(legacy("ping")) });
+    expect((await handleMcpPost(any, deps({ siteUrl: undefined }))).status).toBe(200);
+  });
+
+  it("S5: a deeply nested tool name is a JSON-RPC error, not a crash", async () => {
+    const depth = 7000;
+    const body = `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":${"[".repeat(depth)}${"]".repeat(depth)}}}`;
+    expect(body.length).toBeLessThan(MAX_BODY_BYTES);
+    const res = await send(req(body));
+    expect(res.status).toBe(200);
+    expect(res.body.error.code).toBe(-32602);
+    expect(res.body.error.message).toBe("Unknown tool: object");
+  });
+
+  it("S5: any unexpected failure is a JSON-RPC internal error with no-store, never an HTML 500", async () => {
+    const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const d = deps({
+      log: () => {
+        throw new Error("logger broke");
+      },
+    });
+    const res = await handleMcpPost(req(legacy("tools/list")), d);
+    spy.mockRestore();
+    expect(res.status).toBe(500);
+    expect(res.headers.get("content-type")).toBe("application/json");
+    expect(res.headers.get("cache-control")).toBe("no-store");
+    expect(await res.json()).toEqual({ jsonrpc: "2.0", id: null, error: { code: -32603, message: "Internal error" } });
+  });
+
+  it("N1: degraded answers are not cached", async () => {
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const failing = { async get(): Promise<null> { throw new Error("r2 down"); } };
+    const d = deps({ bucket: failing, cache: memoryCache(), onError: () => {} });
+    const call = () => req(legacy("tools/call", { name: "latest_brief", arguments: {} }));
+    expect((await send(call(), d)).body.result.structuredContent.market_data_available).toBe(false);
+    await send(call(), d);
+    errSpy.mockRestore();
+    expect(d.lines).toEqual([
+      expect.stringMatching(/^mcp tool=latest_brief cache=miss degraded ms=\d+$/),
+      expect.stringMatching(/^mcp tool=latest_brief cache=miss degraded ms=\d+$/),
+    ]);
+    // A healthy answer is cached as before.
+    const ok = deps({ cache: memoryCache() });
+    await send(call(), ok);
+    await send(call(), ok);
+    expect(ok.lines[1]).toMatch(/cache=hit/);
   });
 });

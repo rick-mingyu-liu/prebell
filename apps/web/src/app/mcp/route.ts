@@ -4,9 +4,13 @@ import { handleMcpGet, handleMcpPost } from "@/lib/mcp";
 import { resolveOrigin } from "@/lib/seo";
 import type { EdgeCache } from "@/lib/sitemap";
 
-/** The read-only MCP server (src/lib/mcp.ts). `MCP_ENABLED` other than "true" turns it off (404). */
+/**
+ * The read-only MCP server (src/lib/mcp.ts). `MCP_ENABLED` other than "true" turns it off (404), and only
+ * `SITE_URL`'s host (and loopback, for the preview) is served.
+ */
 export function GET(req: Request) {
-  return handleMcpGet(req, { enabled: getCloudflareContext().env.MCP_ENABLED === "true" });
+  const { env } = getCloudflareContext();
+  return handleMcpGet(req, { enabled: env.MCP_ENABLED === "true", siteUrl: env.SITE_URL });
 }
 
 export async function POST(req: Request) {
