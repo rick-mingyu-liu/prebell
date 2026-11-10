@@ -98,8 +98,9 @@ fn loss_before(quote: &str, at: usize) -> bool {
 pub fn label_keywords(m: Metric) -> &'static [&'static str] {
     match m {
         Metric::Revenue => &["revenue", "revenues", "net sales", "total revenues"],
-        // A loss is reported on the net income line.
-        Metric::NetIncome => &["net income", "net loss"],
+        // A loss is reported on the net income line; Berkshire's is "Net
+        // earnings attributable to Berkshire shareholders".
+        Metric::NetIncome => &["net income", "net loss", "net earnings"],
         Metric::EpsGaap | Metric::EpsNonGaap => &["diluted", "per share", "eps"],
         Metric::GrossMargin => &["gross margin"],
         Metric::OperatingMargin => &["operating margin"],
@@ -4030,5 +4031,59 @@ mod tests {
             }
         );
         assert!(matches!(&x.metrics.eps_gaap, Field::Value(f) if f.value == 10.33));
+    }
+
+    #[test]
+    fn net_earnings_names_net_income() {
+        let text = html_to_text(BRK);
+        let row =
+            "Net earnings attributable to Berkshire shareholders $22,112 $30,796 $57,885 $47,769";
+        let f = verify_figure(
+            &text,
+            Metric::NetIncome,
+            &raw("$22,112", "millions", false, row),
+        )
+        .unwrap();
+        assert_eq!(f.value, 22_112e6);
+        // The prior-year and nine-month columns, operating earnings (a
+        // non-GAAP measure here) and the per-share rows are not net income.
+        for (amount, q) in [
+            ("$30,796", row),
+            ("$57,885", row),
+            ("12,705", "Operating earnings 12,705 13,485 37,034 34,286"),
+            (
+                "$15,502",
+                "Net earnings per average equivalent Class A Share $15,502 $21,413 $40,377 $33,214",
+            ),
+        ] {
+            let r = verify_figure(&text, Metric::NetIncome, &raw(amount, "millions", false, q));
+            assert!(r.is_err(), "{q:?}: {r:?}");
+        }
+        // Others' share, a segment's, and per-share rows, in a table of
+        // millions.
+        for q in [
+            "Net earnings attributable to noncontrolling interests 1,210 1,180",
+            "Segment net earnings 1,210 1,180",
+            "Insurance segment net earnings 1,210 1,180",
+            "Net earnings per common share 1,210 1,180",
+            "Net earnings per Class B share 1,210 1,180",
+        ] {
+            let t = format!("(In millions)\nThree Months Ended September 30,\n2026 2025\n{q}");
+            let r = verify_figure(&t, Metric::NetIncome, &raw("1,210", "millions", false, q));
+            assert!(r.is_err(), "{q:?}: {r:?}");
+        }
+        // Adjusted net earnings is not GAAP net income, as adjusted net
+        // income is not.
+        let t = "(In millions)\nThree Months Ended September 30,\n2026 2025\nAdjusted net earnings 1,210 1,180\nAdjusted net income 1,210 1,180";
+        for q in [
+            "Adjusted net earnings 1,210 1,180",
+            "Adjusted net income 1,210 1,180",
+        ] {
+            let reply = json!({"metrics": {"net_income": {"amount": "1,210", "scale": "millions", "negative": false, "quote": q}}});
+            assert!(
+                matches!(&from_reply(t, &reply).metrics.net_income, Field::Missing { reason } if reason.contains("non-GAAP wording")),
+                "{q}"
+            );
+        }
     }
 }
