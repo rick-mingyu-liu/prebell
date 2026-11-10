@@ -393,9 +393,10 @@ fn names_metric(
     }
     let near_after: String = after.chars().take(30).collect();
     if m == Metric::NetIncome
-        && ["per share", "per diluted share", "per basic share"]
+        && (["per share", "per diluted share", "per basic share"]
             .iter()
             .any(|w| has_word(label, w) || has_word(&near_after, w))
+            || per_class_share(label).is_some())
     {
         return Err("a per share figure is not net income".into());
     }
@@ -413,7 +414,11 @@ fn names_metric(
     // $3.09" under an FFO group) is that measure.
     let group = group.filter(|_| per_share);
     let words = label_keywords(m);
-    let own = per_share_after || words.iter().any(|w| has_word(label, w));
+    // Berkshire's "Net earnings per average equivalent Class B Share": net
+    // earnings per share of a class, not basic.
+    let per_class =
+        per_share && net_per_class_share(label).is_some_and(|between| !has_word(between, "basic"));
+    let own = per_share_after || per_class || words.iter().any(|w| has_word(label, w));
     let any = |s: &str, ws: &[&str]| ws.iter().any(|w| has_word(s, w));
     let basic = |s: &str| has_word(s, "basic") && !has_word(s, "diluted");
     let group_basis = group.is_some_and(|g| {
@@ -469,6 +474,31 @@ fn names_metric(
         "the quote's label does not name {} (needs one of {words:?})",
         words[0]
     ))
+}
+
+/// The words between "per" and "share" in a label naming a share of some
+/// kind ("per average equivalent Class B Share"), up to four.
+fn per_class_share(label: &str) -> Option<&str> {
+    static R: OnceLock<Regex> = OnceLock::new();
+    R.get_or_init(|| {
+        Regex::new(r"(?i)\bper\s+((?:[a-z]+\s+){1,4})shares?\b").expect("valid built-in regex")
+    })
+    .captures(label)
+    .and_then(|c| c.get(1))
+    .map(|m| m.as_str())
+}
+
+/// The same words when the label names net earnings, income or loss per
+/// that share ("Net earnings per average equivalent Class B Share").
+fn net_per_class_share(label: &str) -> Option<&str> {
+    static R: OnceLock<Regex> = OnceLock::new();
+    R.get_or_init(|| {
+        Regex::new(r"(?i)\bnet\s+(?:earnings|income|loss)\s+per\s+((?:[a-z]+\s+){1,4})shares?\b")
+            .expect("valid built-in regex")
+    })
+    .captures(label)
+    .and_then(|c| c.get(1))
+    .map(|m| m.as_str())
 }
 
 /// A table row's revenue label is the company's total revenue, not a
@@ -1127,6 +1157,11 @@ fn period_words_only(s: &str) -> bool {
         "nine",
         "twelve",
         "thirteen",
+        // Berkshire's "Third Quarter First Nine Months".
+        "first",
+        "second",
+        "third",
+        "fourth",
         "months",
         "month",
         "weeks",
@@ -1403,14 +1438,22 @@ fn verify_period(text: &str, v: &Value) -> Result<FiscalPeriod, String> {
 /// The text has a revenue or sales label with a number soon after it, in
 /// the same sentence ("Total revenues 8,893", "Revenue for the third
 /// quarter was a record $8.9 billion"); boilerplate such as "projected
-/// revenues, costs and plans" does not count. Erring towards a match only
-/// keeps revenue required.
+/// revenues, costs and plans" does not count, nor does a gain, loss or
+/// proceeds on sales ("realized gains on sales of investments of $1.7
+/// billion", Berkshire's). Erring towards a match only keeps revenue
+/// required.
 fn states_revenue(text: &str) -> bool {
     static R: OnceLock<Regex> = OnceLock::new();
+    static ON_SALES: OnceLock<Regex> = OnceLock::new();
+    let on_sales = ON_SALES.get_or_init(|| {
+        Regex::new(r"(?i)\b(?:gains?|loss|losses|proceeds)(?:\s*\((?:gains?|loss|losses)\))?\s+(?:on|from)\s+(?:the\s+)?$")
+            .expect("valid built-in regex")
+    });
     R.get_or_init(|| {
         Regex::new(r"(?i)\b(?:revenues?|sales)\b[^.\d]{0,60}\d").expect("valid built-in regex")
     })
-    .is_match(text)
+    .find_iter(text)
+    .any(|m| !on_sales.is_match(&text[..m.start()]))
 }
 
 /// The claimed quarter re-anchored to a line in the exhibit's opening that
@@ -3830,5 +3873,114 @@ mod tests {
             "AAPL",
         );
         assert_eq!(p.to_ascii_lowercase().matches("</document>").count(), 1);
+    }
+
+    /// Berkshire Hathaway's third-quarter 2026 release (0001193125-26-452530),
+    /// which states after-tax earnings only: no revenue line, and earnings
+    /// per average equivalent Class A and Class B share, not "diluted".
+    const BRK: &str = include_str!("../../tests/fixtures/edgar_ex991_BRK.htm");
+
+    #[test]
+    fn a_release_with_no_revenue_line_waives_revenue_whatever_it_sold() {
+        let none = json!({"metrics": {}});
+        let reason = |t: &str| match from_reply(t, &none).metrics.revenue {
+            Field::Missing { reason } => reason,
+            Field::Value(_) => panic!("no figure was given"),
+        };
+        // "gains on sales of investments of $1.7 billion" is a gain, not
+        // sales.
+        assert_eq!(reason(&html_to_text(BRK)), NOT_STATED);
+        for t in [
+            "Investment gains include after-tax realized gains on sales of investments of $1.7 billion.",
+            "Losses on sales of securities of $12 million were recorded.",
+            "Proceeds from sales of businesses were $310 million.",
+            "Net gain (loss) on sales of assets 14 (3)",
+        ] {
+            assert_eq!(reason(t), NOT_STATED, "{t}");
+        }
+        // A sales or revenue figure next to one is still required.
+        for t in [
+            "Net sales of $4.2 billion; gains on sales of investments of $1.7 billion.",
+            "Gains on sales of investments of $1.7 billion. Revenues were $93.4 billion.",
+            "Sales of $8.9 billion rose 5%.",
+            "Same-store sales rose 4%.",
+        ] {
+            assert_ne!(reason(t), NOT_STATED, "{t}");
+        }
+    }
+
+    #[test]
+    fn net_earnings_per_share_of_the_listed_class_is_eps() {
+        let text = html_to_text(BRK);
+        let row_b = "Net earnings per average equivalent Class B Share $10.33 $14.28 $26.92 $22.14";
+        let row_a =
+            "Net earnings per average equivalent Class A Share $15,502 $21,413 $40,377 $33,214";
+        let f = verify_figure(
+            &text,
+            Metric::EpsGaap,
+            &raw("$10.33", "units", false, row_b),
+        )
+        .unwrap();
+        assert_eq!(f.value, 10.33);
+        // The prior-year and nine-month columns, the Class A figure (a
+        // share worth 1,500 Class B shares), the share count and the
+        // operating earnings row are not this quarter's EPS.
+        for (amount, q) in [
+            ("$14.28", row_b),
+            ("$26.92", row_b),
+            ("$15,502", row_a),
+            ("2,139,557,257", "Average equivalent Class B shares outstanding 2,139,557,257 2,157,335,139 2,150,404,500 2,157,335,139"),
+            ("12,705", "Operating earnings 12,705 13,485 37,034 34,286"),
+            ("1,500", "Note: Per share amounts for Class B shares are 1/1,500thof those shown for Class A shares."),
+        ] {
+            for m in [Metric::EpsGaap, Metric::EpsNonGaap] {
+                let r = verify_figure(&text, m, &raw(amount, "units", false, q));
+                assert!(r.is_err(), "{m:?} {q:?}: {r:?}");
+            }
+        }
+        // Other per-something-share rows name no EPS.
+        for q in [
+            "Net earnings per basic share $1.54 $1.86",
+            "Book value per Class B share $1.54 $1.86",
+            "Operating earnings per Class B share $1.54 $1.86",
+            "Dividends declared per Class B share $1.54 $1.86",
+        ] {
+            let t = format!(
+                "(In millions, except per share amounts)\nThree Months Ended\n2026 2025\n{q}"
+            );
+            let r = verify_figure(&t, Metric::EpsGaap, &raw("$1.54", "units", false, q));
+            assert!(r.is_err(), "{q:?}: {r:?}");
+        }
+        // A per-class-share row is not net income.
+        let r = verify_figure(
+            &text,
+            Metric::NetIncome,
+            &raw("$10.33", "millions", false, row_b),
+        );
+        assert!(r.is_err(), "{r:?}");
+        // "Third Quarter First Nine Months" puts the quarter first; with the
+        // nine months first the quarter is not the first column.
+        let swapped = text.replacen(
+            "Third Quarter First Nine Months\n2026 2025 2026 2025\nNet earnings attributable",
+            "First Nine Months Third Quarter\n2026 2025 2026 2025\nNet earnings attributable",
+            1,
+        );
+        assert_ne!(swapped, text);
+        let r = verify_figure(
+            &swapped,
+            Metric::EpsGaap,
+            &raw("$10.33", "units", false, row_b),
+        );
+        assert!(r.is_err(), "{r:?}");
+        // The whole reply: revenue waived, Class B EPS kept.
+        let reply = json!({"metrics": {"revenue": null, "eps_gaap_diluted": {"amount": "$10.33", "scale": "units", "negative": false, "quote": row_b}}});
+        let x = from_reply(&text, &reply);
+        assert_eq!(
+            x.metrics.revenue,
+            Field::Missing {
+                reason: NOT_STATED.into()
+            }
+        );
+        assert!(matches!(&x.metrics.eps_gaap, Field::Value(f) if f.value == 10.33));
     }
 }
