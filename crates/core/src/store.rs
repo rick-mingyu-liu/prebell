@@ -56,6 +56,21 @@ pub struct TranslationRow {
     pub cover_line2: Option<String>,
 }
 
+/// An `earnings_calendar` row marked `reported`, with this site's earnings
+/// check for it (an earnings post with a published EN translation, matched by
+/// ticker and ET date, as the web's calendar matches them).
+#[derive(Debug, Clone, PartialEq)]
+pub struct ReportRow {
+    pub ticker: String,
+    /// ET `YYYY-MM-DD`.
+    pub report_date: String,
+    /// bmo | amc | unknown.
+    pub time_slot: String,
+    /// The SEC filing index, for a row EDGAR marked reported.
+    pub proof_url: Option<String>,
+    pub post_slug: Option<String>,
+}
+
 #[async_trait(?Send)]
 pub trait Store {
     /// Reads return `Err` on a store failure and `Ok(None)` only when the row is absent.
@@ -111,6 +126,12 @@ pub trait Store {
     async fn put_bytes(&self, key: &str, bytes: &[u8], content_type: &str) -> Result<(), String>;
     /// Insert or replace the kv row `key`; `now` is its `updated_at`.
     async fn kv_set(&self, key: &str, value: &str, now: &str) -> Result<(), String>;
+    /// Reported calendar rows with `from <= report_date <= to` (ET dates), by
+    /// date then ticker, in one query. A store without the earnings tables
+    /// has none.
+    async fn reported_between(&self, _from: &str, _to: &str) -> Result<Vec<ReportRow>, String> {
+        Ok(vec![])
+    }
 }
 
 /// In-memory `Store` for tests.
@@ -134,6 +155,10 @@ pub struct MemStore {
     pub fail_put_bytes: Cell<bool>,
     /// Makes `revise_post` fail and write nothing, as a failed D1 batch would.
     pub fail_revise_post: Cell<bool>,
+    /// The rows `reported_between` reads.
+    pub reports: RefCell<Vec<ReportRow>>,
+    /// Makes `reported_between` fail, as a D1 error would.
+    pub fail_reports: Cell<bool>,
 }
 
 #[async_trait(?Send)]
@@ -286,6 +311,20 @@ impl Store for MemStore {
     async fn kv_set(&self, key: &str, value: &str, _now: &str) -> Result<(), String> {
         self.kv.borrow_mut().insert(key.into(), value.into());
         Ok(())
+    }
+    async fn reported_between(&self, from: &str, to: &str) -> Result<Vec<ReportRow>, String> {
+        if self.fail_reports.get() {
+            return Err("d1: reported_between failed".into());
+        }
+        let mut out: Vec<ReportRow> = self
+            .reports
+            .borrow()
+            .iter()
+            .filter(|r| (from..=to).contains(&r.report_date.as_str()))
+            .cloned()
+            .collect();
+        out.sort_by(|a, b| (&a.report_date, &a.ticker).cmp(&(&b.report_date, &b.ticker)));
+        Ok(out)
     }
 }
 

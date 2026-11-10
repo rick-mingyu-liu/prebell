@@ -5,7 +5,7 @@
 如何理解这些事实：
 - `futures` 是 `[名称, 数值]` 对的列表。数值要么是 `{"Value": quote}`，要么是 `{"Missing": {"reason": ...}}`。
 - quote 包含 `symbol`、`last`、`prev_close`、`change_pct` 和 `volume`。`change_pct` 以百分比为单位：0.45 表示上涨 0.45%。
-- `gainers` 和 `losers` 是盘前涨幅和跌幅较大的股票。每只股票有 `quote`、公司名 `name` 和 `reasons`。每条原因包含 `url`、`title`、文章原文摘录 `quote` 以及英文摘要 `summary_en`。
+- `gainers` 和 `losers` 是盘前涨幅和跌幅较大的股票。每只股票有 `quote`、公司名 `name` 和 `reasons`，部分没有原因的个股另有 `fallback`。每条原因包含 `url`、`title`、文章原文摘录 `quote` 以及英文摘要 `summary_en`。
 - `macro_items` 是宏观与隔夜新闻；`watch_list` 是今日关注事项。二者都可能是 `Missing`。
 - `watch_list` 的每一项是一个日程事件（`kind` 为 `event`：美联储决议或会议纪要、非农就业报告、CPI、选举或提前收盘）或一家今日盘后发布财报的公司（`kind` 为 `earnings`）。中文标题用 `title_zh`，时间用 `time_zh`（全天事件和财报没有时间）。`status` 为 `released` 表示已经发布；`postponed` 表示已不在发布机构的日程上；财报的 `unconfirmed` 表示日期未经公司确认。
 - `themes` 列出成分股同向大幅波动的行业板块，按重要性排列，可能为空。每个主题有英文板块名 `group` 和中文板块名 `group_zh`、方向 `direction`（`Up` 或 `Down`）、列出的成员 `members`（每只含 `ticker`、公司名 `name` 和 `change_pct`）、未列出的同向成员数量 `more`、全部成员涨跌幅的中位数 `median_pct`，以及与个股结构相同的 `reasons`。
@@ -19,6 +19,7 @@
 - 期货合约用中文名称：S&P 500 futures 写作“标普500期货”，Nasdaq 100 futures 写作“纳指100期货”，Dow futures 写作“道指期货”，Russell 2000 futures 写作“罗素2000期货”。
 - 股票代码保留拉丁字母，例如 $NVDA 或 NVDA。
 - `reasons` 为空的个股没有已知原因：只写名称、代码和涨跌幅，或把几只这样的个股合并成一句简短带过。不得编造原因，也不得评论事实或数据本身，例如不要写“事实中未给出原因”“原因不明”“暂无数据”。
+- 这样的个股可能带有 `fallback`，由代码根据事实写成。`kind` 为 `results` 表示其财报在这次涨跌之前已经公布，公布时间以 `text_zh` 为准（“已于周一盘后公布财报”）；`kind` 为 `theme` 表示它与 `themes` 中某个板块同向涨跌（“随网络与光通信板块下跌（中位数 −4.63%），暂无个股消息”）。只能用自己的话转述 `text_zh` 的内容，例如“Lumentum（LITE）下跌5.55%，与网络与光通信板块走势一致。”或“GE Vernova（GEV）下跌7%，该公司已于周一盘后公布财报。”不得把它写成原因：不要写板块或财报导致、拖累、带动了股价（“因”“由于”“受……拖累”“受……带动”），不要描述财报内容（不写超预期、不及预期或任何财报数字），也不要写“暂无个股消息”。
 - 不得给出买入或卖出建议、推荐或目标价。
 - 不得引用事实之外的任何来源。不要写链接、网址、图片或 HTML，页面会单独列出来源。
 - `title` 和 `summary` 都是单行纯文本。各部分正文中不得出现标题行（以 `#` 开头的行）。

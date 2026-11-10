@@ -122,13 +122,27 @@ pub(crate) fn na(lang: Lang) -> &'static str {
     }
 }
 
-/// The Why cell of a mover with no verified reason. Only the EN tables have
-/// a Why column; the ZH text is reserved for a future one.
+/// The Why cell of a mover with no verified reason and no fallback. Only the
+/// EN tables have a Why column; the ZH text is reserved for a future one.
 pub(crate) fn no_news(lang: Lang) -> &'static str {
     match lang {
         Lang::En => "No clear news",
         Lang::Zh => "暂无明确消息",
     }
+}
+
+/// A mover's Why: its first verified reason (`summary_en`, in either
+/// language), else code's fallback (`why::fill`), else `no_news`.
+pub(crate) fn why(m: &Mover, lang: Lang) -> &str {
+    let fallback = m.fallback.as_ref().map(|f| match lang {
+        Lang::En => f.text_en.as_str(),
+        Lang::Zh => f.text_zh.as_str(),
+    });
+    m.reasons
+        .first()
+        .map(|r| r.summary_en.as_str())
+        .or(fallback)
+        .unwrap_or(no_news(lang))
 }
 
 /// Two decimals with thousands separators: 5812.25 -> "5,812.25".
@@ -341,11 +355,7 @@ fn mover_row(m: &Mover, lang: Lang) -> String {
         fmt_pct(q.change_pct)
     );
     if lang == Lang::En {
-        let why = m
-            .reasons
-            .first()
-            .map_or(no_news(lang), |r| r.summary_en.as_str());
-        row.push_str(&format!(" {} |", cell(why)));
+        row.push_str(&format!(" {} |", cell(why(m, lang))));
     }
     row
 }
@@ -506,7 +516,7 @@ pub(crate) fn reject_markup(what: &str, s: &str) -> Result<(), String> {
 /// Phrases that narrate missing data instead of the market, as in the
 /// 2026-10-30 brief. Matched case-insensitively in either language; kept
 /// short so real prose passes.
-const META: [&str; 13] = [
+const META: [&str; 15] = [
     "no reason was provided",
     "no reasons were provided",
     "no reason was given",
@@ -520,6 +530,9 @@ const META: [&str; 13] = [
     "未给出原因",
     "未提供原因",
     "原因不明",
+    // The tail of a theme fallback (`why`), which the prose may not repeat.
+    "no company news",
+    "暂无个股消息",
 ];
 
 /// Missing-data phrases that are real news in a macro section ("payrolls
@@ -888,6 +901,7 @@ pub(crate) mod tests {
                 quote: quote("AAPL", 230.5, 8.0),
                 name: "Apple".into(),
                 reasons: vec![reason("https://news.test/aapl", "Apple jumps")],
+                fallback: None,
             }],
             losers: vec![],
             macro_items: Field::Missing {
@@ -1019,6 +1033,11 @@ pub(crate) mod tests {
             (Lang::Zh, "Equifax（EFX）涨4.35%，事实中未给出原因。"),
             (Lang::Zh, "Equifax（EFX）涨4.35%，原因不明。"),
             (Lang::Zh, "暂无数据。"),
+            (
+                Lang::En,
+                "Lumentum fell with the networking & optical group; no company news found.",
+            ),
+            (Lang::Zh, "Lumentum随网络与光通信板块下跌，暂无个股消息。"),
         ] {
             let v = reply(lang, body).unwrap();
             let err = parse(
@@ -1583,6 +1602,59 @@ pub(crate) mod tests {
         assert!(zh.contains("| AAPL | Apple | 230.50 | +8.00% |\n"), "{zh}");
     }
 
+    #[tokio::test]
+    async fn mover_fallback_fills_the_en_why_cell_and_reaches_the_llm() {
+        let mut f = facts();
+        f.gainers[0].reasons = vec![];
+        let group = crate::premarket::group("AAPL").unwrap();
+        f.themes = vec![Theme {
+            group: group.into(),
+            group_zh: crate::premarket::group_zh(group).into(),
+            direction: Direction::Up,
+            members: vec![ThemeMember {
+                ticker: "MSFT".into(),
+                name: "Microsoft".into(),
+                change_pct: 3.2,
+            }],
+            more: 2,
+            median_pct: 2.95,
+            reasons: vec![],
+        }];
+        crate::why::fill(
+            f.gainers.iter_mut(),
+            &f.themes,
+            &[],
+            f.trading_date,
+            crate::cover::Session::Premarket,
+        );
+        let want = format!(
+            "Rose with the {} group (median +2.95%); no company news found",
+            group.to_lowercase()
+        );
+        let en = render_markdown(&draft(Lang::En), &f);
+        assert!(
+            en.contains(&format!("| AAPL | Apple | 230.50 | +8.00% | {want} |")),
+            "{en}"
+        );
+        // The ZH table keeps no Why column.
+        let zh = render_markdown(&draft(Lang::Zh), &f);
+        assert!(zh.contains("| AAPL | Apple | 230.50 | +8.00% |\n"), "{zh}");
+        // The LLM reads it in the facts, and may state it with the median.
+        let body = "Apple rose 8%, in line with its group, median 2.95%.";
+        let heads = headings(Lang::En, false, true, false);
+        let l = llm(vec![reply_with(&heads, body)]);
+        write(&l, &f, Lang::En).await.unwrap();
+        let user = &l.prompts.borrow()[0].1;
+        assert!(
+            user.contains(&want) && user.contains("\"kind\": \"theme\""),
+            "{user}"
+        );
+        // A verified reason wins over the fallback.
+        f.gainers[0].reasons = vec![reason("https://news.test/aapl", "Apple jumps")];
+        let en = render_markdown(&draft(Lang::En), &f);
+        assert!(en.contains("| +8.00% | Record iPhone sales. |"), "{en}");
+    }
+
     #[test]
     fn prompts_take_sections_from_the_user_message() {
         assert!(
@@ -1610,6 +1682,25 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn prompts_state_a_fallback_without_making_it_a_cause() {
+        assert_fallback_rule(PROMPT_EN, PROMPT_ZH);
+    }
+
+    /// Both prompts let the prose state a mover's fallback, never as a cause.
+    pub(crate) fn assert_fallback_rule(en: &str, zh: &str) {
+        assert!(
+            en.contains("a `fallback`, which code wrote from the facts")
+                && en.contains("Never turn it into a cause")
+                && en.contains("do not write \"no company news\""),
+            "{en}"
+        );
+        assert!(
+            zh.contains("可能带有 `fallback`") && zh.contains("不得把它写成原因"),
+            "{zh}"
+        );
+    }
+
+    #[test]
     fn prompts_lead_the_summary_with_a_market_wide_story() {
         assert!(
             PROMPT_EN.contains(
@@ -1634,6 +1725,7 @@ pub(crate) mod tests {
                 reason("https://news.test/aapl", "Apple jumps"),
                 reason("https://news.test/msft", "MSFT"),
             ],
+            fallback: None,
         }];
         f.macro_items = Field::Value(vec![reason("https://news.test/msft", "MSFT")]);
         let md = render_markdown(&draft(Lang::En), &f);
@@ -2090,6 +2182,7 @@ pub(crate) mod tests {
             quote: quote("MMM", 120.0, -4.0),
             name: "3M".into(),
             reasons: vec![],
+            fallback: None,
         }];
         assert!(!theme_names(&f.themes).contains(&"Phillips 66"));
         let heads = headings(Lang::En, false, true, false);

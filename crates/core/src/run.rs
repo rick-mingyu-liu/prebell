@@ -20,6 +20,7 @@ use crate::premarket::build_facts;
 use crate::premarket::draft::{source_reasons, write, Draft, TEMPLATE_ID};
 use crate::providers::{LlmProvider, MarketData, NewsSearch};
 use crate::store::{PostRow, RunRow, Store, TranslationRow};
+use crate::why;
 
 pub mod update;
 
@@ -85,6 +86,9 @@ pub struct Premarket<'a> {
     /// Today's events and after-close earnings for "What to watch"; `None`
     /// leaves the section out.
     pub watch: Option<&'a dyn WatchSource>,
+    /// Read once for the reported results that explain a mover without a
+    /// news reason (`why`); `None` leaves only the theme fallback.
+    pub reports: Option<&'a dyn Store>,
 }
 
 #[async_trait(?Send)]
@@ -121,6 +125,23 @@ impl Content for Premarket<'_> {
         if let Some(w) = self.watch {
             f.watch_list = w.watch_list(date, now, budget).await;
         }
+        let needed = f
+            .gainers
+            .iter()
+            .chain(&f.losers)
+            .any(|m| m.reasons.is_empty());
+        let (reports, reports_err) = match self.reports {
+            Some(s) => why::read_reports(s, date, needed).await,
+            None => (vec![], 0),
+        };
+        let counts = why::fill(
+            f.gainers.iter_mut().chain(f.losers.iter_mut()),
+            &f.themes,
+            &reports,
+            date,
+            Session::Premarket,
+        );
+        f.diagnostics.extend(why::diagnostics(counts, reports_err));
         f
     }
     fn missing_required(&self, f: &PremarketFacts) -> Vec<&'static str> {
@@ -219,7 +240,13 @@ pub async fn tick_with_watch(
     watch: Option<&dyn WatchSource>,
     hooks: &Hooks<'_>,
 ) -> TickOutcome {
-    let c = Premarket { md, ns, llm, watch };
+    let c = Premarket {
+        md,
+        ns,
+        llm,
+        watch,
+        reports: Some(store),
+    };
     tick_content(now, store, &c, hooks).await
 }
 
@@ -882,6 +909,7 @@ mod tests {
             ns: &FakeNs,
             llm: &llm,
             watch: Some(&w),
+            reports: None,
         };
         let date = "2026-10-29".parse().unwrap();
         let f = c
@@ -896,6 +924,91 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn premarket_facts_fall_back_to_reported_results_then_themes() {
+        use crate::facts::FallbackKind;
+        use crate::store::ReportRow;
+        /// AAPL up 8% (its news is found), and three optical names down
+        /// without news.
+        struct OpticalMd;
+        #[async_trait(?Send)]
+        impl MarketData for OpticalMd {
+            async fn quote(&self, symbol: &str) -> Result<Quote, ProviderError> {
+                Ok(q(symbol, 5800.0, 0.4))
+            }
+            async fn premarket_quotes(
+                &self,
+                symbols: &[String],
+                _now: DateTime<Utc>,
+            ) -> Vec<(String, Result<Quote, ProviderError>)> {
+                let moves = [
+                    ("AAPL", 8.0),
+                    ("LITE", -5.55),
+                    ("COHR", -5.45),
+                    ("CIEN", -4.63),
+                ];
+                symbols
+                    .iter()
+                    .map(|s| {
+                        let r = moves
+                            .iter()
+                            .find(|(t, _)| t == s)
+                            .map(|(t, p)| q(t, 100.0, *p))
+                            .ok_or(ProviderError::Http(404));
+                        (s.clone(), r)
+                    })
+                    .collect()
+            }
+        }
+        let s = MemStore::default();
+        *s.reports.borrow_mut() = vec![ReportRow {
+            ticker: "LITE".into(),
+            report_date: "2026-10-28".into(),
+            time_slot: "amc".into(),
+            proof_url: Some(
+                "https://www.sec.gov/Archives/edgar/data/1633978/000163397826000041/0001633978-26-000041-index.htm"
+                    .into(),
+            ),
+            post_slug: None,
+        }];
+        let llm = llm(true, true);
+        let c = Premarket {
+            md: &OpticalMd,
+            ns: &FakeNs,
+            llm: &llm,
+            watch: None,
+            reports: Some(&s),
+        };
+        let date = "2026-10-29".parse().unwrap();
+        let f = c
+            .build_facts(date, utc("2026-10-29T12:00:00Z"), &|| 0)
+            .await;
+        assert_eq!(f.themes[0].group, "Networking & optical");
+        assert_eq!(f.gainers[0].fallback, None);
+        let fb = |sym: &str| {
+            f.losers
+                .iter()
+                .find(|m| m.quote.symbol == sym)
+                .and_then(|m| m.fallback.clone())
+                .unwrap()
+        };
+        assert_eq!(fb("LITE").kind, FallbackKind::Results);
+        assert_eq!(
+            fb("LITE").text_en,
+            "Reported results after Wednesday's close"
+        );
+        assert!(fb("LITE").filing_url.is_some());
+        assert_eq!(fb("COHR").kind, FallbackKind::Theme);
+        assert_eq!(
+            fb("COHR").text_en,
+            "Fell with the networking & optical group (median −5.45%); no company news found"
+        );
+        assert_eq!(
+            f.diagnostics.last().unwrap(),
+            "why results=1 theme=2 reports_err=0"
+        );
+    }
+
     #[test]
     fn premarket_cover_and_snapshot_come_from_the_futures() {
         let (md, llm) = (md(true), llm(true, true));
@@ -904,6 +1017,7 @@ mod tests {
             ns: &FakeNs,
             llm: &llm,
             watch: None,
+            reports: None,
         };
         let f = PremarketFacts {
             trading_date: "2026-10-29".parse().unwrap(),
@@ -924,6 +1038,7 @@ mod tests {
                 quote: q("AAPL", 230.0, 8.0),
                 name: "Apple".into(),
                 reasons: vec![],
+                fallback: None,
             }],
             losers: vec![],
             macro_items: Field::Missing {
@@ -1869,6 +1984,7 @@ mod tests {
             ns: &FakeNs,
             llm: &l,
             watch: None,
+            reports: None,
         };
         c.cover_lines(&f)
     }
