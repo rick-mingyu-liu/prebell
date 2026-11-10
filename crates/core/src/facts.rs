@@ -84,6 +84,11 @@ pub struct Mover {
     pub quote: Quote,
     pub name: String,
     pub reasons: Vec<NewsReason>,
+    /// True when the mover's news search or reason extraction failed, so no
+    /// search completed and `reasons` being empty says nothing. Absent
+    /// (false) in facts stored before it existed.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub search_failed: bool,
     /// What code can prove about a mover with no verified reason (`why`).
     /// Absent when it has a reason or nothing is known, and in facts stored
     /// before it existed.
@@ -257,6 +262,7 @@ mod tests {
             quote: quote("ABC"),
             name: "ABC Inc".into(),
             reasons,
+            search_failed: false,
             fallback: None,
         }
     }
@@ -352,7 +358,17 @@ mod tests {
         assert_eq!(serde_json::from_str::<PremarketFacts>(&s).unwrap(), f);
         // A mover stored before the field existed reads as having none.
         let old = r#"{"quote":{"symbol":"ABC","last":1.0,"prev_close":1.0,"change_pct":0.0,"volume":null},"name":"ABC Inc","reasons":[]}"#;
-        assert_eq!(serde_json::from_str::<Mover>(old).unwrap().fallback, None);
+        let old: Mover = serde_json::from_str(old).unwrap();
+        assert_eq!((old.fallback, old.search_failed), (None, false));
+        // `search_failed` is stored only when set.
+        assert!(!s.contains("search_failed"), "{s}");
+        let failed = Mover {
+            search_failed: true,
+            ..mover(vec![])
+        };
+        let j = serde_json::to_string(&failed).unwrap();
+        assert!(j.contains(r#""search_failed":true"#), "{j}");
+        assert_eq!(serde_json::from_str::<Mover>(&j).unwrap(), failed);
     }
 
     #[test]

@@ -5,9 +5,9 @@
 //! is stated, never a cause. The text and its one figure (the theme's
 //! median, already in the facts) come from code, never from the LLM.
 
-use chrono::{Datelike, NaiveDate, Weekday};
+use chrono::{DateTime, Datelike, NaiveDate, NaiveTime, Utc, Weekday};
 
-use crate::clock::{trading_day, DayKind};
+use crate::clock::{et, trading_day, DayKind};
 use crate::cover::{fmt_signed_pct, Session};
 use crate::facts::{Direction, Fallback, FallbackKind, Mover, Theme};
 use crate::premarket::group;
@@ -49,24 +49,70 @@ pub async fn read_reports(
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum Landed {
     BeforeOpen,
+    /// During today's regular session (the recap only).
+    DuringSession,
     /// After the close of this trading day (the previous one).
     AfterClose(NaiveDate),
 }
 
-/// When `r` came out, if the calendar proves that was before the move that
-/// `session` covers on `date`: today before the open, or after the previous
-/// trading day's close (a date in between, such as a Saturday filing, is
-/// after that close too). The premarket brief is built before the open, so a
-/// report already out today came before it, whatever its slot; the recap
-/// needs the `bmo` slot, since a report out after today's close does not
-/// explain today's session. The calendar has no slot for during the day.
+fn hm(h: u32, m: u32) -> NaiveTime {
+    NaiveTime::from_hms_opt(h, m, 0).expect("valid built-in time")
+}
+
+/// The ET close of trading day `d`: 13:00 on an early-close day, else 16:00.
+fn close_of(d: NaiveDate) -> NaiveTime {
+    match trading_day(d) {
+        DayKind::EarlyClose => hm(13, 0),
+        _ => hm(16, 0),
+    }
+}
+
+/// The ET time of the report's first filing: the earliest acceptance of the
+/// ticker's earnings filings on the report's ET date. `None` without one (a
+/// foreign 6-K filer's report has no filing row).
+fn filed_at(r: &ReportRow, day: NaiveDate) -> Option<NaiveTime> {
+    r.accepted_at
+        .iter()
+        .filter_map(|s| DateTime::parse_from_rfc3339(s).ok())
+        .map(|t| et(t.with_timezone(&Utc)))
+        .filter(|t| t.date_naive() == day)
+        .map(|t| t.time())
+        .min()
+}
+
+/// When `r` came out, if that is proven to precede the move `session` covers
+/// on `date`. The measured filing time decides, never the calendar's
+/// expected slot (an aggregator's guess):
+/// - today: the premarket brief is built before the open, so a report the
+///   calendar already marks out today came before it, timed or not; the
+///   recap needs the filing time: before 09:30 ET is before the open,
+///   during the session is during it, after the close explains nothing;
+/// - the previous trading day: filed at or after its close;
+/// - a day in between (a holiday): filed then, so after that close.
+///
+/// A report without a filing time gets no results fallback outside the
+/// premarket's today: a reported row keeps no record of whether its slot was
+/// ever confirmed.
 fn landed(r: &ReportRow, date: NaiveDate, session: Session) -> Option<Landed> {
     let day: NaiveDate = r.report_date.parse().ok()?;
     let prev = previous_trading_day(date);
+    let at = filed_at(r, day);
     if day == date {
-        (session == Session::Premarket || r.time_slot == "bmo").then_some(Landed::BeforeOpen)
-    } else if (day > prev && day < date) || (day == prev && r.time_slot == "amc") {
-        Some(Landed::AfterClose(prev))
+        if session == Session::Premarket {
+            return Some(Landed::BeforeOpen);
+        }
+        let t = at?;
+        if t < hm(9, 30) {
+            Some(Landed::BeforeOpen)
+        } else if t < close_of(date) {
+            Some(Landed::DuringSession)
+        } else {
+            None
+        }
+    } else if day == prev {
+        (at? >= close_of(prev)).then_some(Landed::AfterClose(prev))
+    } else if day > prev && day < date {
+        at.map(|_| Landed::AfterClose(prev))
     } else {
         None
     }
@@ -84,13 +130,17 @@ fn weekday_zh(d: Weekday) -> &'static str {
     }
 }
 
-/// "Reported results before the open" / "Reported results after Monday's
-/// close", and the ZH.
+/// "Reported results before the open" / "... during the session" /
+/// "... after Monday's close", and the ZH.
 fn results(r: &ReportRow, landed: Landed) -> Fallback {
     let (text_en, text_zh) = match landed {
         Landed::BeforeOpen => (
             "Reported results before the open".to_string(),
             "已于盘前公布财报".to_string(),
+        ),
+        Landed::DuringSession => (
+            "Reported results during the session".to_string(),
+            "已于盘中公布财报".to_string(),
         ),
         Landed::AfterClose(d) => (
             format!("Reported results after {}'s close", d.format("%A")),
@@ -131,7 +181,8 @@ fn in_sentence(group: &str) -> String {
 /// "Fell with the networking & optical group (median −4.63%); no company
 /// news found", when the mover is in a theme's group (any member, not only
 /// the listed ones) and moved the theme's way. The median is the theme's,
-/// as its list line prints it.
+/// as its list line prints it. The "no company news found" tail only when
+/// the mover's news search completed (`Mover::search_failed`).
 fn theme(m: &Mover, themes: &[Theme]) -> Option<Fallback> {
     let g = group(&m.quote.symbol)?;
     let t = themes.iter().find(|t| t.group == g)?;
@@ -147,13 +198,18 @@ fn theme(m: &Mover, themes: &[Theme]) -> Option<Fallback> {
         Direction::Down => ("Fell", "下跌"),
     };
     let median = fmt_signed_pct(t.median_pct);
+    let (tail_en, tail_zh) = if m.search_failed {
+        ("", "")
+    } else {
+        ("; no company news found", "，暂无个股消息")
+    };
     Some(Fallback {
         kind: FallbackKind::Theme,
         text_en: format!(
-            "{en} with the {} group (median {median}); no company news found",
+            "{en} with the {} group (median {median}){tail_en}",
             in_sentence(&t.group)
         ),
-        text_zh: format!("随{}板块{zh}（中位数 {median}），暂无个股消息", t.group_zh),
+        text_zh: format!("随{}板块{zh}（中位数 {median}）{tail_zh}", t.group_zh),
         post_slug: None,
         filing_url: None,
     })
@@ -228,6 +284,7 @@ mod tests {
             },
             name: sym.into(),
             reasons: vec![],
+            search_failed: false,
             fallback: None,
         }
     }
@@ -256,11 +313,18 @@ mod tests {
             reasons: vec![],
         }
     }
-    fn row(ticker: &str, date: &str, slot: &str) -> ReportRow {
+    /// Filing times, in UTC (ET is UTC−5 in these November weeks).
+    const MON_0700: &str = "2026-11-09T12:00:00Z";
+    const MON_1605: &str = "2026-11-09T21:05:00Z";
+    const TUE_0700: &str = "2026-11-10T12:00:00Z";
+    const TUE_1200: &str = "2026-11-10T17:00:00Z";
+    const TUE_1610: &str = "2026-11-10T21:10:00Z";
+    /// A reported row with these filing acceptance times.
+    fn row(ticker: &str, date: &str, accepted: &[&str]) -> ReportRow {
         ReportRow {
             ticker: ticker.into(),
             report_date: date.into(),
-            time_slot: slot.into(),
+            accepted_at: accepted.iter().map(|a| a.to_string()).collect(),
             proof_url: Some(
                 "https://www.sec.gov/Archives/edgar/data/1633978/000163397826000041/0001633978-26-000041-index.htm"
                     .into(),
@@ -294,7 +358,7 @@ mod tests {
     #[test]
     fn news_beats_results_beats_theme_beats_none() {
         let themes = [optical()];
-        let reports = [row("LITE", "2026-11-09", "amc")];
+        let reports = [row("LITE", "2026-11-09", &[MON_1605])];
         let mut with_news = mover("LITE", -5.55);
         with_news.reasons = vec![reason()];
         // A stale fallback from an earlier fill goes once a reason is in.
@@ -338,6 +402,20 @@ mod tests {
             f.text_zh,
             "随网络与光通信板块上涨（中位数 +3.10%），暂无个股消息"
         );
+    }
+
+    #[test]
+    fn theme_text_drops_the_no_news_tail_when_the_search_failed() {
+        let mut m = mover("LITE", -5.55);
+        m.search_failed = true;
+        let f = one(m, &[optical()], &[], Session::Premarket).unwrap();
+        assert_eq!(
+            f.text_en,
+            "Fell with the networking & optical group (median −4.63%)"
+        );
+        assert_eq!(f.text_zh, "随网络与光通信板块下跌（中位数 −4.63%）");
+        assert_eq!(check(&f.text_en, Lang::En, &[-4.63]), Ok(()));
+        assert_eq!(check(&f.text_zh, Lang::Zh, &[-4.63]), Ok(()));
     }
 
     #[test]
@@ -391,82 +469,99 @@ mod tests {
     }
 
     #[test]
-    fn premarket_results_today_any_slot_or_after_the_previous_close() {
+    fn premarket_results_today_timed_or_not_or_after_the_previous_close() {
         let p = Session::Premarket;
-        for slot in ["bmo", "amc", "unknown"] {
+        // The brief is built before the open: a report out today preceded it.
+        for accepted in [&[TUE_0700][..], &[]] {
             let f = one(
                 mover("LITE", -5.0),
                 &[],
-                &[row("LITE", "2026-11-10", slot)],
+                &[row("LITE", "2026-11-10", accepted)],
                 p,
             );
-            assert_eq!(text(&f), Some("Reported results before the open"), "{slot}");
+            assert_eq!(text(&f), Some("Reported results before the open"));
             assert_eq!(f.unwrap().text_zh, "已于盘前公布财报");
         }
         let f = one(
             mover("LITE", -5.0),
             &[],
-            &[row("LITE", "2026-11-09", "amc")],
+            &[row("LITE", "2026-11-09", &[MON_1605])],
             p,
-        )
-        .unwrap();
-        assert_eq!(f.text_zh, "已于周一盘后公布财报");
-        // Before Monday's open, or at a time the calendar does not know:
-        // Monday's session already had it.
-        for slot in ["bmo", "unknown"] {
-            let r = [row("LITE", "2026-11-09", slot)];
-            assert_eq!(one(mover("LITE", -5.0), &[], &r, p), None, "{slot}");
+        );
+        assert_eq!(text(&f), Some("Reported results after Monday's close"));
+        assert_eq!(f.unwrap().text_zh, "已于周一盘后公布财报");
+        // Filed before Monday's close (whatever slot an aggregator listed),
+        // or with no filing time: Monday's session may already have had it.
+        for accepted in [&[MON_0700][..], &[]] {
+            let r = [row("LITE", "2026-11-09", accepted)];
+            assert_eq!(one(mover("LITE", -5.0), &[], &r, p), None, "{accepted:?}");
         }
-        // Monday's brief: a Saturday filing came after Friday's close.
+        // The earliest filing of the day decides.
+        let r = [row("LITE", "2026-11-09", &[MON_1605, MON_0700])];
+        assert_eq!(one(mover("LITE", -5.0), &[], &r, p), None);
+        // A filing time on another ET date is not this report's.
+        let r = [row("LITE", "2026-11-09", &["2026-11-09T03:00:00Z"])];
+        assert_eq!(one(mover("LITE", -5.0), &[], &r, p), None);
+        // Friday's brief after Thanksgiving: a holiday filing came after
+        // Wednesday's close.
+        let mut ms = [mover("LITE", -5.0)];
+        let r = [row("LITE", "2026-11-26", &["2026-11-26T15:00:00Z"])];
+        fill(ms.iter_mut(), &[], &r, d("2026-11-27"), p);
+        assert_eq!(
+            text(&ms[0].fallback),
+            Some("Reported results after Wednesday's close")
+        );
+        assert_eq!(
+            ms[0].fallback.as_ref().unwrap().text_zh,
+            "已于周三盘后公布财报"
+        );
+        // Untimed, the holiday row proves nothing.
         let mut ms = [mover("LITE", -5.0)];
         fill(
             ms.iter_mut(),
             &[],
-            &[row("LITE", "2026-11-07", "unknown")],
-            d("2026-11-09"),
+            &[row("LITE", "2026-11-26", &[])],
+            d("2026-11-27"),
             p,
         );
-        assert_eq!(
-            text(&ms[0].fallback),
-            Some("Reported results after Friday's close")
-        );
-        assert_eq!(
-            ms[0].fallback.as_ref().unwrap().text_zh,
-            "已于周五盘后公布财报"
-        );
+        assert_eq!(ms[0].fallback, None);
     }
 
     #[test]
-    fn recap_results_need_the_bmo_slot_today() {
+    fn recap_results_follow_the_filing_time_today() {
         let r = Session::Recap;
-        let f = one(
-            mover("LITE", -5.0),
-            &[],
-            &[row("LITE", "2026-11-10", "bmo")],
-            r,
+        let today = |a: &[&str]| one(mover("LITE", -5.0), &[], &[row("LITE", "2026-11-10", a)], r);
+        assert_eq!(
+            text(&today(&[TUE_0700])),
+            Some("Reported results before the open")
         );
-        assert_eq!(text(&f), Some("Reported results before the open"));
-        // After today's close, or at an unknown time today: not before the move.
-        for slot in ["amc", "unknown"] {
-            let rows = [row("LITE", "2026-11-10", slot)];
-            assert_eq!(one(mover("LITE", -5.0), &[], &rows, r), None, "{slot}");
-        }
+        let f = today(&[TUE_1200]);
+        assert_eq!(text(&f), Some("Reported results during the session"));
+        assert_eq!(f.unwrap().text_zh, "已于盘中公布财报");
+        // After today's close, or untimed: not shown to precede the move.
+        assert_eq!(today(&[TUE_1610]), None);
+        assert_eq!(today(&[]), None);
         let f = one(
             mover("LITE", -5.0),
             &[],
-            &[row("LITE", "2026-11-09", "amc")],
+            &[row("LITE", "2026-11-09", &[MON_1605])],
             r,
         );
         assert_eq!(text(&f), Some("Reported results after Monday's close"));
         // Another ticker's report is not this mover's.
-        let rows = [row("COHR", "2026-11-10", "bmo")];
+        let rows = [row("COHR", "2026-11-10", &[TUE_0700])];
         assert_eq!(one(mover("LITE", -5.0), &[], &rows, r), None);
+        // The early close (Friday 2026-11-27, 13:00 ET) ends the session.
+        let mut ms = [mover("LITE", -5.0)];
+        let rows = [row("LITE", "2026-11-27", &["2026-11-27T18:30:00Z"])];
+        fill(ms.iter_mut(), &[], &rows, d("2026-11-27"), r);
+        assert_eq!(ms[0].fallback, None);
     }
 
     #[test]
     fn results_link_the_earnings_check_else_the_sec_filing() {
         let p = Session::Premarket;
-        let mut r = row("LITE", "2026-11-09", "amc");
+        let mut r = row("LITE", "2026-11-09", &[MON_1605]);
         r.post_slug = Some("lite-q1-fy2027-earnings".into());
         let f = one(mover("LITE", -5.0), &[], &[r.clone()], p).unwrap();
         assert_eq!(f.post_slug.as_deref(), Some("lite-q1-fy2027-earnings"));
@@ -496,7 +591,7 @@ mod tests {
         let counts = fill(
             ms.iter_mut(),
             &[optical()],
-            &[row("LITE", "2026-11-10", "bmo")],
+            &[row("LITE", "2026-11-10", &[TUE_0700])],
             tue(),
             Session::Premarket,
         );
@@ -516,9 +611,9 @@ mod tests {
     async fn reports_are_one_read_over_the_previous_trading_day_and_today() {
         let s = MemStore::default();
         *s.reports.borrow_mut() = vec![
-            row("LITE", "2026-11-06", "amc"),
-            row("LITE", "2026-11-09", "amc"),
-            row("COHR", "2026-11-10", "bmo"),
+            row("LITE", "2026-11-06", &[]),
+            row("LITE", "2026-11-09", &[MON_1605]),
+            row("COHR", "2026-11-10", &[TUE_0700]),
         ];
         let (rows, err) = read_reports(&s, tue(), true).await;
         let got: Vec<_> = rows.iter().map(|r| r.report_date.as_str()).collect();

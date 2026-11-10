@@ -170,6 +170,7 @@ async fn mover(
         .to_string();
     let ticker = &quote.symbol;
     let query = format!("{name} ({ticker}) stock");
+    // `None` when the search or the extraction call failed.
     let reasons = match fresh_news(ns, &query, HITS_PER_MOVER, now, d).await {
         Ok(hits) => {
             let system = format!(
@@ -194,17 +195,18 @@ async fn mover(
                 d,
             )
             .await
-            .unwrap_or_default()
+            .ok()
         }
         Err(_) => {
             d.search_err += 1;
-            vec![]
+            None
         }
     };
     Mover {
         quote,
         name,
-        reasons,
+        search_failed: reasons.is_none(),
+        reasons: reasons.unwrap_or_default(),
         fallback: None,
     }
 }
@@ -851,15 +853,19 @@ mod tests {
         use crate::store::ReportRow;
         let m = md(&[q("NVDA", 182.35, 3.08, Some(210_000_000))]);
         let s = MemStore::default();
-        let row = |date: &str, slot: &str| ReportRow {
+        let row = |date: &str, accepted: &str| ReportRow {
             ticker: "NVDA".into(),
             report_date: date.into(),
-            time_slot: slot.into(),
+            accepted_at: vec![accepted.into()],
             proof_url: None,
             post_slug: Some("nvda-q3-fy2027-earnings".into()),
         };
         // A report after today's close does not explain today's session.
-        *s.reports.borrow_mut() = vec![row("2026-10-28", "amc"), row("2026-10-29", "amc")];
+        // Filed at 16:05 ET on Wednesday and at 16:10 ET today.
+        *s.reports.borrow_mut() = vec![
+            row("2026-10-28", "2026-10-28T20:05:00Z"),
+            row("2026-10-29", "2026-10-29T20:10:00Z"),
+        ];
         let f = build_facts(&m, &ns(vec![]), &llm(vec![]), &s, date(), now(), &|| 0).await;
         let fb = f.gainers[0].fallback.as_ref().unwrap();
         assert_eq!(fb.kind, FallbackKind::Results);
@@ -878,6 +884,42 @@ mod tests {
             f.diagnostics.last().unwrap(),
             "why results=0 theme=0 reports_err=1"
         );
+    }
+
+    #[tokio::test]
+    async fn the_no_news_tail_needs_a_completed_search() {
+        // Semiconductors rise together; none of the three has news.
+        let m = md(&[
+            q("NVDA", 182.35, 4.0, Some(210_000_000)),
+            q("AMD", 250.0, 4.5, Some(50_000_000)),
+            q("AVGO", 350.0, 5.0, Some(20_000_000)),
+        ]);
+        // NVDA's search completes empty; AMD's extraction call fails; AVGO's
+        // search fails.
+        let n = ns(vec![
+            ("Nvidia (NVDA) stock", Ok(vec![])),
+            (
+                "Advanced Micro Devices (AMD) stock",
+                Ok(vec![hit("https://news.test/amd", "AMD shares rose today.")]),
+            ),
+        ]);
+        let l = llm(vec![("Ticker: AMD", Err(ProviderError::Http(500)))]);
+        let f = build_facts(&m, &n, &l, &MemStore::default(), date(), now(), &|| 0).await;
+        assert_eq!(f.themes[0].group, "Semiconductors");
+        let why = |sym: &str| {
+            let m = f.gainers.iter().find(|m| m.quote.symbol == sym).unwrap();
+            (
+                m.search_failed,
+                m.fallback.as_ref().unwrap().text_en.as_str(),
+            )
+        };
+        let group = "Rose with the semiconductors group (median +4.50%)";
+        assert_eq!(
+            why("NVDA"),
+            (false, &*format!("{group}; no company news found"))
+        );
+        assert_eq!(why("AMD"), (true, group));
+        assert_eq!(why("AVGO"), (true, group));
     }
 
     #[tokio::test]
@@ -2432,6 +2474,7 @@ mod run_tests {
                 quote: q("FIS", 60.0, -23.67),
                 name: "Fidelity National".into(),
                 reasons: vec![],
+                search_failed: false,
                 fallback: None,
             }],
             macro_items: Field::Missing {
