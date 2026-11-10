@@ -81,3 +81,10 @@ they are never asked twice. Things decided *not* to do go in `declined.md`.
   - no rule breaks for Sonnet, 4 for DeepSeek;
   - about $23–32 a month at current volume, against the $100 credit;
   - Opus costs 2.5× as much and is no more accurate.
+
+## 2026-11-10
+
+- **Three reader gaps in the briefs and earnings checks are fixed** (Rick, 2026-11-10: "fix 2", on a review of the live site that listed them: "Fall back to the sector reason for movers, state the CPI figure, and write the earnings headline as the takeaway plus the share reaction"):
+  - **A mover without a verified news reason says what code can prove instead of "No clear news"**: that the company reported results (from the calendar), else that it moved with a theme group of this brief (the group and its median move). "No clear news" stays for a mover with neither. Co-movement is stated, never a cause.
+  - **A released CPI or jobs report shows its headline figures in the brief**, read from the BLS release page by code, with the release link. This replaces "Link only for now" (2026-11-06) for the reported figures; "never consensus" stands, so the brief does not say whether a figure was above or below forecasts.
+  - **An earnings check's headline is the quarter's takeaway with a figure**, not the press release's title ("X Reports Third Quarter Results"); a result that swings sharply names the item the release gives as the cause; and the page shows the share move at the time of publishing, with its session and time. The no-estimates rule stands.
