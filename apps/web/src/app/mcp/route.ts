@@ -6,7 +6,7 @@ import type { EdgeCache } from "@/lib/sitemap";
 
 /**
  * The read-only MCP server (src/lib/mcp.ts). `MCP_ENABLED` other than "true" turns it off (404), and only
- * `SITE_URL`'s host (and loopback, for the preview) is served.
+ * `SITE_URL`'s host (and loopback, for local dev) is served.
  */
 export function GET(req: Request) {
   const { env } = getCloudflareContext();

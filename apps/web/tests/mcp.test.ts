@@ -353,7 +353,7 @@ describe("review fixes", () => {
       expect((await handleMcpPost(post, deps())).status).toBe(404);
       expect(handleMcpGet(new Request(host), { enabled: true, siteUrl: "https://prebell.site" }).status).toBe(404);
     }
-    // Local preview: SITE_URL is prebell.site but the address is loopback.
+    // next dev: SITE_URL is prebell.site but the address is loopback.
     for (const host of ["http://localhost:8871/mcp", "http://127.0.0.1:8787/mcp"]) {
       const post = new Request(host, { method: "POST", body: JSON.stringify(legacy("ping")) });
       expect((await handleMcpPost(post, deps())).status).toBe(200);

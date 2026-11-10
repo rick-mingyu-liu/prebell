@@ -42,8 +42,8 @@ export interface McpDeps extends ToolContext {
   /** `MCP_ENABLED === "true"`; otherwise the route answers 404. */
   enabled: boolean;
   /**
-   * `SITE_URL` as configured: only its host (and loopback, for the local preview) is served, and browser origins
-   * other than its own are refused. Unset only in local dev, where any host is served.
+   * `SITE_URL` as configured: only its host (and loopback, for local dev) is served, and browser origins other
+   * than its own are refused. Unset only in local dev, where any host is served.
    */
   siteUrl: string | undefined;
   /** Workers' `caches.default`; null where there is none (`next dev`, tests). */
@@ -82,8 +82,9 @@ const short = (v: unknown) => (typeof v === "string" ? v.replace(/[^\w./-]/g, "?
 
 /**
  * Whether `/mcp` is served at this request's host: `SITE_URL`'s host only, so the workers.dev address (no WAF
- * rule, no Cache API) and any other host get 404; loopback too, for the local preview, whose `SITE_URL` is the
- * production one. Without `SITE_URL` (local dev) every host is served.
+ * rule, no Cache API) and any other host get 404. Loopback is served too: `next dev` reads the production
+ * `SITE_URL` but answers on localhost (the wrangler preview already presents the route's host, prebell.site).
+ * Without `SITE_URL` every host is served.
  */
 export function hostAllowed(requestUrl: string, siteUrl: string | undefined): boolean {
   if (!siteUrl) return true;
