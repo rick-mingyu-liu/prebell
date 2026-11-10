@@ -3,6 +3,7 @@ import {
   chartResponse,
   getPostCharts,
   isDate,
+  listCalendarRange,
   listCalendarWeek,
   listLatestEarnings,
   listRecentBriefs,
@@ -95,6 +96,25 @@ describe("listCalendarWeek", () => {
     const days = await listCalendarWeek(db, "2026-10-26", "zh");
     expect(days[2].entries[0].postSlug).toBe("msft-2026-10-28-earnings");
     expect(days[3].entries.map((e) => [e.ticker, e.postSlug])).toEqual([["NVDA", null]]);
+  });
+});
+
+describe("listCalendarRange", () => {
+  it("reads any date range, hides quarantined dates and keeps the week's order", async () => {
+    const rows = await listCalendarRange(memoryD1(seed), "2026-10-28", "2026-11-02", "en");
+    expect(rows.map((e) => [e.date, e.ticker, e.postSlug])).toEqual([
+      ["2026-10-28", "MSFT", "msft-2026-10-28-earnings"],
+      ["2026-10-30", "CVX", null],
+      ["2026-10-30", "XOM", null],
+      ["2026-10-30", "AAPL", "aapl-2026-10-30-earnings"],
+      ["2026-11-02", "AMZN", null],
+    ]);
+  });
+
+  it("filters by ticker", async () => {
+    const rows = await listCalendarRange(memoryD1(seed), "2026-10-01", "2026-11-30", "zh", ["AAPL", "AMZN", "TSLA"]);
+    expect(rows.map((e) => e.ticker)).toEqual(["AAPL", "AMZN"]);
+    await expect(listCalendarRange(memoryD1(seed), "2026-10-01", "2026-10-02", "en", Array(51).fill("A"))).rejects.toThrow();
   });
 });
 

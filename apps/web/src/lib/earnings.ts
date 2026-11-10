@@ -151,6 +151,34 @@ export async function listCalendarWeek(db: D1Like, monday: string, lang: Lang): 
   });
 }
 
+/**
+ * Calendar entries from `from` to `to` (ET dates), optionally only `tickers` (at most 50: D1 binds at most 100
+ * values), in one D1 read; by date, write-up companies first within a day, then slot and ticker. Quarantined
+ * dates are not shown.
+ */
+export async function listCalendarRange(
+  db: D1Like,
+  from: string,
+  to: string,
+  lang: Lang,
+  tickers: string[] = [],
+): Promise<CalendarEntry[]> {
+  if (tickers.length > 50) throw new Error("listCalendarRange: at most 50 tickers");
+  const only = tickers.length ? `AND c.ticker IN (${tickers.map(() => "?").join(",")})` : "";
+  const { results } = await db
+    .prepare(
+      `SELECT ${CAL_COLUMNS}
+       FROM earnings_calendar c
+       LEFT JOIN (${POSTS_BETWEEN}) x ON x.ticker = c.ticker AND x.trading_date = c.report_date
+       WHERE c.report_date BETWEEN ? AND ? AND c.status IN ('unconfirmed','confirmed','reported') ${only}
+       ORDER BY c.report_date, CASE c.time_slot WHEN 'bmo' THEN 0 WHEN 'amc' THEN 1 ELSE 2 END, c.ticker`,
+    )
+    .bind(lang, from, to, from, to, ...tickers)
+    .all<CalRow>();
+  const entries = results.map(toEntry);
+  return [...new Set(entries.map((e) => e.date))].flatMap((d) => writeUpsFirst(entries.filter((e) => e.date === d)));
+}
+
 /** The earnings strip's day: its entries grouped by report slot. */
 export interface StripDay {
   date: string;
