@@ -211,6 +211,40 @@ The site is the OpenNext Worker in `apps/web` (`wrangler.jsonc`, name `prebell-w
 - **One-off for the data-graphic covers change:** deploy the site (step 3) before the generator (step 2) this one time. The new site serves `.svg` covers and draws them on paper. A new generator deployed first would point posts at `covers/<slug>.svg`, which the old site answers with a 404. Then run the graphics backfill above. Later deploys go back to the order above.
 - **Local preview:** the site's preview uses the generator's local state (`--persist-to ../../crates/generator/.wrangler/state`), so the local D1 needs the migrations too. From `crates/generator`: `pnpm exec wrangler d1 migrations apply prebell --local`, then `pnpm exec wrangler d1 execute prebell --local --file ../../db/seed-preview.sql` and `bash ../../db/load-preview-facts.sh`. Then `cd ../../apps/web && pnpm preview` (add `--port <n>` if 8787 is taken). Without migrations 0006 and 0007 the post queries fail with a `no such column` error.
 
+### MCP server
+
+`https://prebell.site/mcp` is a read-only [MCP](https://modelcontextprotocol.io) server in the site Worker (`apps/web/src/app/mcp/route.ts`, `src/lib/mcp.ts`, `src/lib/mcptools.ts`; design in `docs/superpowers/specs/2026-11-10-mcp-server-design.md`). It lets a person's own agent read what the site has published. No sign-in, no writes, no live quotes. It ships with the site; there is nothing else to deploy.
+
+- **Tools:** `earnings_calendar` (who reports on which days, up to 21 days and 50 tickers per call, with the day's macro events), `earnings_report` (one company's latest check: figures with the press-release sentence each came from, guidance, the share move if recorded, filing and press-release links; or why there is no check), `latest_brief` (the newest premarket brief or recap as a snapshot with its `as_of` time; `is_today: false` and the next due time when today's is not out). Every answer has `lang` `en` or `zh`, a `source` link on prebell.site, its time, and the fixed not-advice / not-real-time sentence.
+- **Protocol:** Streamable HTTP, stateless, one JSON response per POST. It answers MCP 2026-07-28 requests (`server/discover`, per-request `_meta`, the `MCP-Protocol-Version` / `Mcp-Method` / `Mcp-Name` headers) and the earlier handshake revisions 2025-11-25, 2025-06-18 and 2025-03-26 (`initialize`, `ping`), which is what most clients still speak. `GET /mcp` shows a short plain-text description for a person; a client asking `GET` for an event stream gets 405.
+- **Connect a client.** Claude Code, one line:
+
+  ```bash
+  claude mcp add --transport http prebell https://prebell.site/mcp
+  ```
+
+  Clients that take a JSON config (Claude Desktop through a connector, Cursor, VS Code and others; the key may be `mcpServers` or `servers`, and `type` may be `http` or `streamable-http` depending on the client):
+
+  ```json
+  { "mcpServers": { "prebell": { "type": "http", "url": "https://prebell.site/mcp" } } }
+  ```
+
+  To try it by hand: `npx @modelcontextprotocol/inspector --cli https://prebell.site/mcp --transport http --method tools/list`.
+- **Off switch:** `MCP_ENABLED` in `apps/web/wrangler.jsonc` `vars` is `"true"`. Set it to `"false"` (anything other than `"true"`) and redeploy the site (step 3 above): `/mcp` then answers 404 to everything. Set it back and redeploy to turn it on. A var changed only in the dashboard is dropped by the next `wrangler deploy`, so change the file.
+- **Counting calls.** Every POST logs one line without the caller's address: `mcp tool=<name> cache=hit|miss ms=<n>` for a tool call, `mcp tool=<name> error=arguments|internal ...` when it failed, `mcp method=<method> ms=<n>` for the rest (`initialize` is roughly one per client connection), `mcp error=<kind>` for refused requests (`origin`, `too_large`, `parse`, `batch`, ...). Live: `cd apps/web && pnpm exec wrangler tail prebell-web --format pretty | grep '^mcp '` (or `--search "mcp tool="`). `wrangler tail` shows only what happens while it runs. To keep counts for days, Workers Logs has to be switched on for `prebell-web` (an `"observability": { "enabled": true }` block in `wrangler.jsonc` and a redeploy; Free plan: 200,000 log events a day, kept 3 days, shared with the site's other requests). That is a deploy-config change and is not on yet; then search the Worker's Observability tab for `mcp tool=`.
+- **Rate limit (owner, dashboard, before or with the first deploy that ships `/mcp`).** The Workers rate-limiting binding is not used: Cloudflare's docs do not say it is included on Workers Free, and this project stays on Free. The zone's Free plan includes one WAF rate-limiting rule (matching on path only, counted per IP, 10-second period, 10-second block). Add it:
+  1. Cloudflare dashboard → `prebell.site` → Security → Security rules → Create rule → Rate limiting rules.
+  2. Rule name: `MCP per-IP limit`.
+  3. When incoming requests match: Field `URI Path`, Operator `equals`, Value `/mcp` (expression `(http.request.uri.path eq "/mcp")`).
+  4. With the same characteristics: `IP` (the only choice on Free).
+  5. When rate exceeds: `15` requests per `10 seconds`.
+  6. Then take action: `Block`. Duration: `10 seconds`.
+  7. Deploy. Check: `for i in $(seq 1 20); do curl -s -o /dev/null -w '%{http_code} ' -X POST https://prebell.site/mcp -d '{}'; done` shows 400s (malformed request) then 429s.
+
+  15 per 10 seconds leaves room for one agent's session (a connection is about 4 requests, then one per tool call) and holds one address to roughly 1 request a second, so a single address cannot spend the 100,000 requests a day the site's Free plan shares. It does not stop many addresses at once; neither does anything else on Free, and the site's pages have the same exposure. If the rule ever blocks a real user, raise the number. The rule does not cover the `workers.dev` address (`workers_dev: true` in `wrangler.jsonc`), which bypasses the zone; turning that off is a separate decision.
+- **What else protects the site:** bodies over 16 KB are refused (413), batches are refused, a browser `Origin` other than `https://prebell.site` is refused (403), arguments are checked before any read, each call does at most three small D1 reads and one R2 read, and identical calls are answered for 60 seconds from the colo's Cache API (`caches.default`, keyed by a synthetic GET URL of the normalized arguments). The cache saves D1 and R2 reads; a cached answer still counts as a Worker request.
+- **Text safety:** the tools return only stored fields of published posts and their facts, as data. Mover reasons, guidance and highlight summaries are English only, as on the page; quotes are verbatim English; figure labels follow `lang` from a table that a test keeps equal to `label_en` / `label_zh` in `crates/core/src/earnings/facts.rs`. The server's instructions tell the agent that summaries and reasons are machine-written from the linked sources.
+
 ## Earnings
 
 - Apply the D1 migrations before the first deploy: `pnpm exec wrangler d1 migrations apply prebell --remote` (in `crates/generator`).

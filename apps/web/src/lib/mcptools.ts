@@ -552,8 +552,8 @@ async function earningsCalendar(ctx: ToolContext, from: string, to: string, tick
 
 const MSG = {
   unknown: {
-    en: (t: string) => `PreBell has no calendar date or earnings check for ${t}. It covers S&P 500 companies and a few more.`,
-    zh: (t: string) => `盘前铃没有 ${t} 的财报日期或财报核查。它覆盖标普500成分股及少量其他公司。`,
+    en: (t: string) => `PreBell has no calendar date or earnings check for ${t}. It covers the S&P 500 and Nasdaq-100.`,
+    zh: (t: string) => `盘前铃没有 ${t} 的财报日期或财报核查。它覆盖标普500和纳斯达克100成分股。`,
   },
   calendarOnly: {
     en: "PreBell writes no earnings check for this company (calendar only).",
