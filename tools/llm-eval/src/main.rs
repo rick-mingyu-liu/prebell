@@ -23,6 +23,10 @@
 //! file name's prefix (earnings_, premarket_, recap_) picks the content type.
 //! `analyze.py` turns the results into the report's tables.
 //!
+//! `--extract-html EXHIBIT --company NAME --ticker TICKER [--runs N]` runs the
+//! earnings fact extraction (`extract`, then `from_reply`) on one exhibit
+//! instead, and prints what verified and whether the publish gate passes.
+//!
 //! Writes `results.jsonl` (one line per post x model x language), each final
 //! draft as markdown under `out/<model>/`, and appends every call's cost to
 //! the ledger (default `out/spend.jsonl`), which later runs read back so the
@@ -478,6 +482,92 @@ async fn run_job(cfg: &Cfg, post: &str, facts: &Facts, model: &str, lang: Lang) 
     }
 }
 
+/// Extraction mode: the production earnings extraction (`extract`: prompt, LLM
+/// call, then `from_reply`'s verification) on one exhibit, `runs` times.
+/// Prints each run's verified figures and the publish gate's view of them
+/// (revenue verified or waived as not stated, and an EPS), and saves the raw
+/// replies as `out/extract/<model>.<run>.json`.
+async fn run_extract(cfg: &Cfg, html: &str, company: &str, ticker: &str, model: &str, runs: usize) {
+    use prebell_core::earnings::extract::extract;
+    use prebell_core::earnings::facts::{Metric, NOT_STATED};
+    use prebell_core::facts::Field;
+    let text = prebell_core::edgar::html_to_text(&fs::read_to_string(html).expect("read exhibit"));
+    let provider = if model.starts_with("claude") {
+        "claude"
+    } else {
+        "deepseek"
+    };
+    let key_var = prebell_core::llm::api_key_var(provider).expect("known provider");
+    let dir = cfg.out.join("extract");
+    fs::create_dir_all(&dir).expect("out dir");
+    for run in 1..=runs {
+        let http = RecordingHttp {
+            client: cfg.client.clone(),
+            model: model.to_string(),
+            budget: cfg.budget.clone(),
+            calls: Rc::new(RefCell::new(vec![])),
+        };
+        let llm = llm_from_env(
+            provider,
+            http.clone(),
+            cfg.keys.get(key_var).cloned().unwrap_or_default(),
+            Some(model.to_string()),
+            cfg.effort.clone(),
+            warn,
+        )
+        .expect("provider config");
+        let x = extract(llm.as_ref(), &text, company, ticker).await;
+        let calls = http.calls.borrow();
+        let c = calls.last().expect("one call");
+        fs::write(dir.join(format!("{model}.{run}.json")), &c.reply).expect("write reply");
+        let reply: Value =
+            serde_json::from_str(prebell_core_strip(&c.reply)).unwrap_or(Value::Null);
+        let show = |m: Metric| match x.metrics.value(m) {
+            Some(f) => format!("{} (= {})", f.amount, f.value),
+            None => match &x.metrics.get(m) {
+                Field::Missing { reason } => format!("Missing: {reason}"),
+                Field::Value(_) => unreachable!(),
+            },
+        };
+        let revenue_ok = x.metrics.value(Metric::Revenue).is_some()
+            || matches!(&x.metrics.revenue, Field::Missing { reason } if reason == NOT_STATED);
+        let eps_ok = x.metrics.value(Metric::EpsGaap).is_some()
+            || x.metrics.value(Metric::EpsNonGaap).is_some();
+        println!(
+            "run {run} {model}: {:.1}s in={} out={} ${:.4} stop={}\n  reply eps_gaap_diluted: {}\n  verified eps_gaap: {}\n  verified eps_non_gaap: {}\n  revenue: {}\n  net_income: {}\n  fiscal_period: {}\n  gate: revenue {} / eps {} => {}",
+            c.ms as f64 / 1000.0,
+            c.input_tokens,
+            c.output_tokens,
+            c.cost_usd,
+            c.stop_reason,
+            reply.pointer("/metrics/eps_gaap_diluted").map_or("(none)".into(), Value::to_string),
+            show(Metric::EpsGaap),
+            show(Metric::EpsNonGaap),
+            show(Metric::Revenue),
+            show(Metric::NetIncome),
+            match &x.fiscal_period {
+                Field::Value(p) => format!("{p:?}"),
+                Field::Missing { reason } => format!("Missing: {reason}"),
+            },
+            if revenue_ok { "ok" } else { "BLOCKS" },
+            if eps_ok { "ok" } else { "BLOCKS" },
+            if revenue_ok && eps_ok { "publishable" } else { "blocked" },
+        );
+    }
+}
+
+/// The reply text without a Markdown fence, as the providers parse it.
+fn prebell_core_strip(s: &str) -> &str {
+    let s = s.trim();
+    match s.strip_prefix("```") {
+        Some(rest) => {
+            let rest = rest.strip_suffix("```").unwrap_or(rest);
+            rest.strip_prefix("json").unwrap_or(rest).trim()
+        }
+        None => s,
+    }
+}
+
 /// `KEY=value` lines (optionally quoted); only the two LLM keys are kept.
 fn load_keys(dev_vars: Option<&str>) -> HashMap<String, String> {
     let wanted = ["ANTHROPIC_API_KEY", "DEEPSEEK_API_KEY"];
@@ -508,7 +598,6 @@ fn arg(args: &[String], name: &str) -> Option<String> {
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
     let args: Vec<String> = std::env::args().collect();
-    let facts_dir = PathBuf::from(arg(&args, "--facts").expect("--facts DIR"));
     let out = PathBuf::from(arg(&args, "--out").expect("--out DIR"));
     let models: Vec<String> = arg(&args, "--models")
         .unwrap_or_else(|| "deepseek-chat,claude-sonnet-5-5,claude-opus-5-5".into())
@@ -553,6 +642,17 @@ async fn main() {
         };
         assert!(cfg.keys.contains_key(var), "{var} not set for {m}");
     }
+    if let Some(html) = arg(&args, "--extract-html") {
+        let runs = arg(&args, "--runs").map_or(1, |v| v.parse().expect("--runs N"));
+        let company = arg(&args, "--company").expect("--company NAME");
+        let ticker = arg(&args, "--ticker").expect("--ticker TICKER");
+        for m in &models {
+            run_extract(&cfg, &html, &company, &ticker, m, runs).await;
+        }
+        eprintln!("spent: ${:.4} of ${cap:.2}", budget.spent.get());
+        return;
+    }
+    let facts_dir = PathBuf::from(arg(&args, "--facts").expect("--facts DIR"));
 
     let mut paths: Vec<PathBuf> = fs::read_dir(&facts_dir)
         .expect("facts dir")
