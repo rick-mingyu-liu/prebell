@@ -101,15 +101,42 @@ fn verdict_re(lang: Lang) -> &'static Regex {
     }
 }
 
-/// Longest title, in characters. The front page shows earnings checks in a
-/// three-column grid at 16px (about 26 Latin or 13 CJK characters a line):
-/// 90 English or 40 Chinese characters is at most four lines there, and two
-/// in the 32px post heading.
+/// Longest title, in display columns (`title_width`). The front page shows
+/// earnings checks in a three-column grid at 16px, about 26 columns a line
+/// (26 Latin letters or 13 Chinese characters): 90 columns of English or 80
+/// (40 Chinese characters) is at most four lines there, and two in the 32px
+/// post heading.
 fn title_max(lang: Lang) -> usize {
     match lang {
         Lang::En => 90,
-        Lang::Zh => 40,
+        Lang::Zh => 80,
     }
+}
+
+/// A Chinese, Japanese or Korean character or a full-width mark, which takes
+/// two columns.
+fn is_wide(c: char) -> bool {
+    matches!(c,
+        '\u{1100}'..='\u{115F}'
+        | '\u{2E80}'..='\u{A4CF}'
+        | '\u{AC00}'..='\u{D7A3}'
+        | '\u{F900}'..='\u{FAFF}'
+        | '\u{FE30}'..='\u{FE4F}'
+        | '\u{FF00}'..='\u{FF60}'
+        | '\u{FFE0}'..='\u{FFE6}')
+}
+
+/// The title's display width: two columns for a wide character, one for
+/// anything else. The company's name counts as its ticker: a model cannot
+/// shorten "American International Group" or "Hewlett Packard Enterprise"
+/// faithfully, and the Chinese prompt keeps names it has no Chinese for.
+fn title_width(title: &str, f: &EarningsFacts) -> usize {
+    let title = if f.company.is_empty() {
+        title.to_string()
+    } else {
+        title.replace(&f.company, &f.ticker)
+    };
+    title.chars().map(|c| if is_wide(c) { 2 } else { 1 }).sum()
 }
 
 /// The press release's own kind of headline: "Charter Communications
@@ -125,9 +152,10 @@ fn boilerplate_re(lang: Lang) -> &'static Regex {
             const P: &str = r"(?:first|second|third|fourth|q[1-4]|quarter(?:ly)?|full|year(?:-end)?|fiscal|annual|fy\s?\d{2,4}|\d{4}|and|its|their|financial|operating)";
             // "earnings" alone is a takeaway's subject ("fourth-quarter
             // earnings rise 91%"); only a headline that ends on it is boilerplate.
-            const END: &str = r"(?:results\b|earnings\s*(?:[:;,.!–—-]|$))";
+            const END: &str = r"(?:results\b|earnings\s*(?:[:;,.!-]|(?u:[–—])|$))";
+            // ASCII classes (`-u`): far cheaper to compile than Unicode ones.
             Regex::new(&format!(
-                r"(?i)\b(?:report(?:s|ed)?|announce(?:s|d)?|post(?:s|ed)?|release(?:s|d)?|deliver(?:s|ed)?|unveil(?:s|ed)?)\s+(?:{P}[-\s]+)*{END}|\b(?:first|second|third|fourth|q[1-4]|fiscal|full|annual|fy\s?\d{{2,4}}|\d{{4}})(?:[-\s]+{P})*[-\s]+{END}"
+                r"(?i-u)\b(?:report(?:s|ed)?|announce(?:s|d)?|post(?:s|ed)?|release(?:s|d)?|deliver(?:s|ed)?|unveil(?:s|ed)?)\s+(?:{P}[-\s]+)*{END}|\b(?:first|second|third|fourth|q[1-4]|fiscal|full|annual|fy\s?\d{{2,4}}|\d{{4}})(?:[-\s]+{P})*[-\s]+{END}"
             ))
             .expect("valid built-in regex")
         }),
@@ -153,12 +181,18 @@ fn has_figure(text: &str, lang: Lang) -> bool {
 /// The headline states the quarter's takeaway: short, with a figure, and
 /// not the press release's title. Its numbers are checked with the page's.
 fn check_title(title: &str, lang: Lang, f: &EarningsFacts) -> Result<(), String> {
-    let n = title.chars().count();
-    if n > title_max(lang) {
-        return Err(format!(
-            "the title is {n} characters; keep it to {} or fewer",
-            title_max(lang)
-        ));
+    let n = title_width(title, f);
+    let max = title_max(lang);
+    if n > max {
+        return Err(match lang {
+            Lang::En => format!(
+                "the title is {n} characters (the company's name counted as its ticker); keep it to {max} or fewer"
+            ),
+            Lang::Zh => format!(
+                "the title is {n} columns wide (a Chinese character or full-width mark counts 2, a Latin letter, digit or space 1, the company's name as its ticker); keep it to {max}, about {} Chinese characters",
+                max / 2
+            ),
+        });
     }
     if let Some(m) = boilerplate_re(lang).find(title) {
         return Err(format!(
@@ -176,45 +210,117 @@ fn check_title(title: &str, lang: Lang, f: &EarningsFacts) -> Result<(), String>
     Ok(())
 }
 
-/// Items a draft may give as the cause of a result only when the facts
-/// quote them: (English words, Chinese words, what a quote must contain).
-/// A swing with no such quote is stated without a cause.
-const CAUSE_WORDS: [(&str, &str, &str); 9] = [
-    (r"impair\w*", "减值", r"impair|write-?down|written down"),
-    (
-        r"write-?(?:down|off)s?|written\s+(?:down|off)",
-        "核销|冲销|注销|撇减",
-        r"write-?(?:down|off)|written (?:down|off)",
-    ),
-    (r"restructur\w*", "重组", r"restructur"),
-    (r"litigation|lawsuits?", "诉讼", r"litigation|lawsuit|legal"),
-    (r"settlements?", "和解", r"settlement"),
-    (r"severance", "遣散", r"severance"),
-    (r"goodwill", "商誉", r"goodwill"),
-    (
-        r"one-?time|non-?recurring",
-        "一次性",
-        r"one-?time|non-?recurring",
-    ),
-    (r"non-?cash", "非现金", r"non-?cash"),
+/// An item a draft may give as the cause of a result only when the facts
+/// quote it.
+struct CauseItem {
+    /// English words, an ASCII pattern (case-insensitive, whole words).
+    en: &'static str,
+    /// Chinese words, matched as plain text.
+    zh: &'static [&'static str],
+    /// What some quote in the facts must contain (lowercase plain text).
+    backing: &'static [&'static str],
+}
+
+const WRITE_DOWNS: &[&str] = &[
+    "write-down",
+    "writedown",
+    "write down",
+    "written down",
+    "wrote down",
+];
+const WRITE_OFFS: &[&str] = &[
+    "write-off",
+    "writeoff",
+    "write off",
+    "written off",
+    "wrote off",
+];
+
+/// The items, each backed by the stem a quote would use, paraphrase
+/// included ("settled" backs "settlement", "wrote down" backs "write-down").
+/// "One-time", "non-recurring" and "non-cash" name no item on their own
+/// ("non-GAAP EPS excludes one-time items"), so they count only as a
+/// charge's adjectives.
+const CAUSE_ITEMS: [CauseItem; 12] = [
+    CauseItem {
+        en: r"impair[a-z]*",
+        zh: &["减值"],
+        backing: &[
+            "impair",
+            "write-down",
+            "writedown",
+            "write down",
+            "written down",
+            "wrote down",
+        ],
+    },
+    CauseItem {
+        en: r"write-?downs?|wr(?:itten|ote) down",
+        zh: &["撇减"],
+        backing: WRITE_DOWNS,
+    },
+    CauseItem {
+        en: r"write-?offs?|wr(?:itten|ote) off",
+        zh: &["核销", "冲销", "注销"],
+        backing: WRITE_OFFS,
+    },
+    CauseItem {
+        en: r"restructur[a-z]*",
+        zh: &["重组"],
+        backing: &["restructur"],
+    },
+    CauseItem {
+        en: r"litigation|lawsuits?",
+        zh: &["诉讼"],
+        backing: &["litigation", "lawsuit", "legal"],
+    },
+    CauseItem {
+        en: r"settle(?:d|ments?)",
+        zh: &["和解"],
+        backing: &["settl"],
+    },
+    CauseItem {
+        en: r"severance",
+        zh: &["遣散"],
+        backing: &["severance"],
+    },
+    CauseItem {
+        en: r"goodwill",
+        zh: &["商誉"],
+        backing: &["goodwill"],
+    },
+    CauseItem {
+        en: r"(?:one-?time|non-?cash|non-?recurring|special|legal|tax) charges?",
+        zh: &["一次性费用", "一次性支出", "非现金费用", "特别费用"],
+        backing: &["charge"],
+    },
+    CauseItem {
+        en: r"tax (?:benefits?|expenses?|items?)",
+        zh: &["税收优惠", "税项", "所得税费用"],
+        backing: &["tax"],
+    },
+    CauseItem {
+        en: r"gains? (?:on|from) (?:the )?(?:sale|disposal|divestiture)",
+        zh: &["出售收益", "处置收益"],
+        backing: &["gain"],
+    },
+    CauseItem {
+        en: r"loss(?:es)? (?:on|from) (?:the )?(?:sale|disposal|divestiture|extinguishment)",
+        zh: &["出售亏损", "出售损失", "处置损失"],
+        backing: &["loss on", "losses on", "loss from", "losses from"],
+    },
 ];
 
 /// The draft names no cause item the facts do not quote (spec: never
 /// outside knowledge), so a loss without a cause note is not explained.
+/// One ASCII pattern finds every English item (one capture group each):
+/// compiling one alternation is far cheaper than one pattern per item, and
+/// the Worker pays it once per isolate. The rest is plain text search.
 fn check_causes(d: &Draft, f: &EarningsFacts) -> Result<(), String> {
-    static RES: OnceLock<Vec<(Regex, Regex, Regex)>> = OnceLock::new();
-    let res = RES.get_or_init(|| {
-        let re = |p: String| Regex::new(&p).expect("valid built-in regex");
-        CAUSE_WORDS
-            .iter()
-            .map(|(en, zh, backing)| {
-                (
-                    re(format!(r"(?i)\b(?:{en})\b")),
-                    re(zh.to_string()),
-                    re(format!("(?i){backing}")),
-                )
-            })
-            .collect()
+    static EN: OnceLock<Regex> = OnceLock::new();
+    let en = EN.get_or_init(|| {
+        let groups: Vec<String> = CAUSE_ITEMS.iter().map(|i| format!("({})", i.en)).collect();
+        Regex::new(&format!(r"(?i-u)\b(?:{})\b", groups.join("|"))).expect("valid built-in regex")
     });
     let mut quotes: Vec<&str> = Metric::ALL
         .iter()
@@ -229,22 +335,34 @@ fn check_causes(d: &Draft, f: &EarningsFacts) -> Result<(), String> {
             );
         }
     }
-    let quoted = quotes.join("\n");
+    let quoted = quotes.join("\n").to_lowercase();
+    let backed = |i: &CauseItem| i.backing.iter().any(|b| quoted.contains(b));
     let text = std::iter::once(d.title.as_str())
         .chain([d.summary.as_str()])
         .chain(d.sections.iter().map(|(_, m)| m.as_str()))
         .collect::<Vec<_>>()
         .join("\n");
-    for (en, zh, backing) in res {
-        let word = match d.lang {
-            Lang::En => en.find(&text),
-            Lang::Zh => zh.find(&text).or_else(|| en.find(&text)),
+    let unbacked = |word: &str| {
+        Err(format!(
+            "give only a cause the facts quote: {word:?} is in no quote; state a swing without a cause when no highlight has \"cause\": true"
+        ))
+    };
+    // Chinese drafts carry English words too.
+    for c in en.captures_iter(&text) {
+        let Some(i) = (1..=CAUSE_ITEMS.len()).find(|g| c.get(*g).is_some()) else {
+            continue;
         };
-        if let (Some(w), false) = (word, backing.is_match(&quoted)) {
-            return Err(format!(
-                "give only a cause the facts quote: {:?} is in no quote; state a swing without a cause when no highlight has \"cause\": true",
-                w.as_str()
-            ));
+        if !backed(&CAUSE_ITEMS[i - 1]) {
+            return unbacked(&c[0]);
+        }
+    }
+    if d.lang == Lang::Zh {
+        for item in &CAUSE_ITEMS {
+            if let Some(w) = item.zh.iter().find(|w| text.contains(*w)) {
+                if !backed(item) {
+                    return unbacked(w);
+                }
+            }
         }
     }
     Ok(())
@@ -873,7 +991,7 @@ pub(crate) mod tests {
     fn title_length_cap() {
         let f = facts();
         let en = format!(
-            "Apple revenue reaches $102.5 billion{}",
+            "Revenue reaches $102.5 billion{} again",
             " and more".repeat(6)
         );
         assert_eq!(en.chars().count(), 90);
@@ -883,13 +1001,46 @@ pub(crate) mod tests {
             e.contains("91 characters") && e.contains("90 or fewer"),
             "{e}"
         );
-        let zh: String = format!("苹果营收1025亿美元{}", "，同比增长".repeat(6))
+        // 40 Chinese characters are 80 columns.
+        let zh: String = format!("苹果营收增至一千亿美元{}", "，同比增长".repeat(6))
             .chars()
-            .take(40)
-            .collect();
-        assert_eq!(zh.chars().count(), 40);
+            .take(39)
+            .collect::<String>()
+            + "8%";
+        assert_eq!(title_width(&zh, &f), 80);
         assert_eq!(check_title(&zh, Lang::Zh, &f), Ok(()));
-        assert!(check_title(&format!("{zh}。"), Lang::Zh, &f).is_err());
+        let e = check_title(&format!("{zh}。"), Lang::Zh, &f).unwrap_err();
+        assert!(
+            e.contains("82 columns") && e.contains("about 40 Chinese characters"),
+            "{e}"
+        );
+        // An English name in a Chinese title counts its letters as half a
+        // Chinese character each (50 characters, 68 columns).
+        let hpe = "Hewlett Packard Enterprise第四财季营收增至93亿美元，每股收益0.44美元";
+        assert_eq!(hpe.chars().count(), 50);
+        assert_eq!(title_width(hpe, &f), 68);
+        assert_eq!(check_title(hpe, Lang::Zh, &f), Ok(()));
+    }
+
+    #[test]
+    fn long_company_names_count_as_their_ticker() {
+        let mut f = facts();
+        f.company = "American International Group".into();
+        f.ticker = "AIG".into();
+        let t = "American International Group swings to a $1.85-a-share loss as revenue reaches $102.5 billion";
+        assert_eq!(t.chars().count(), 93);
+        assert_eq!(title_width(t, &f), 68);
+        assert_eq!(check_title(t, Lang::En, &f), Ok(()));
+        // The same takeaway with padding past 90 still fails.
+        let long = format!("{t}, while gross margin holds at 47.2%");
+        assert!(check_title(&long, Lang::En, &f)
+            .unwrap_err()
+            .contains("characters"));
+        let mut f = facts();
+        f.company = "Hewlett Packard Enterprise".into();
+        f.ticker = "HPE".into();
+        let zh = "Hewlett Packard Enterprise第四财季营收增至1025亿美元，GAAP每股收益1.85美元，毛利率47.2%";
+        assert_eq!(check_title(zh, Lang::Zh, &f), Ok(()));
     }
 
     #[tokio::test]
@@ -941,7 +1092,10 @@ pub(crate) mod tests {
             PROMPT_EN.contains("most important result")
                 && PROMPT_EN.contains("at most 90 characters")
         );
-        assert!(PROMPT_ZH.contains("最重要的结果") && PROMPT_ZH.contains("不超过 40 个字"));
+        assert!(
+            PROMPT_ZH.contains("最重要的结果")
+                && PROMPT_ZH.contains("不超过 40 个汉字（英文字母、数字和空格按半个汉字计）")
+        );
     }
 
     /// A profit a year earlier, a loss now (`extract::tests::SWING`), with
@@ -1057,7 +1211,7 @@ pub(crate) mod tests {
         let mut f = facts();
         f.share_move = Field::Value(ShareMove {
             session: ShareSession::Premarket,
-            change_pct: -4.23,
+            change_pct: -4.2,
             last: 221.6,
             ref_close: 231.39,
             as_of: "2026-10-30T12:12:00Z".parse().unwrap(),
@@ -1065,12 +1219,12 @@ pub(crate) mod tests {
         for (lang, line, mention) in [
             (
                 Lang::En,
-                "Shares: \u{2212}4.2% in premarket trading (as of 8:12 AM ET)",
+                "Shares: -4.2% in premarket trading (as of 8:12 AM ET)",
                 "Shares fell 4.2% in premarket trading after the report.",
             ),
             (
                 Lang::Zh,
-                "股价：盘前交易跌4.2%（截至美东时间上午8:12）",
+                "股价：盘前下跌4.2%（截至美东时间上午8:12）",
                 "财报公布后，股价盘前下跌4.2%。",
             ),
         ] {
@@ -1081,7 +1235,7 @@ pub(crate) mod tests {
             assert!(md.contains(&format!(" · {}", period_label(&f, lang).unwrap())));
             assert!(md.contains(&format!("\n\n{line}\n\n|")), "{md}");
             // The model is given the move.
-            assert!(l.prompts.borrow()[0].contains("\"change_pct\": -4.23"));
+            assert!(l.prompts.borrow()[0].contains("\"change_pct\": -4.2"));
         }
         // Without the move, the same mention is an unbacked number.
         let mut r = reply(Lang::En, "Quiet.");
@@ -1090,6 +1244,94 @@ pub(crate) mod tests {
         assert_eq!(
             write(&l, &facts(), Lang::En).await.unwrap_err(),
             vec!["4.2%".to_string()]
+        );
+    }
+
+    /// `check_causes` on one Results body, with `quote` as a highlight.
+    fn causes(lang: Lang, quote: Option<&str>, body: &str) -> Result<(), String> {
+        let mut f = facts();
+        if let Some(q) = quote {
+            f.highlights = Field::Value(vec![Note {
+                quote: q.into(),
+                summary_en: "x".into(),
+                cause: false,
+            }]);
+        }
+        let d = Draft {
+            lang,
+            title: "t".into(),
+            summary: "s".into(),
+            sections: vec![("Results".into(), body.into())],
+        };
+        check_causes(&d, &f)
+    }
+
+    #[test]
+    fn cause_words_match_paraphrase_and_need_a_quote() {
+        // Paraphrase on either side is backed by the same stem.
+        for (quote, body) in [
+            (
+                "Acme settled the patent litigation for $900 million",
+                "The loss reflects a litigation settlement.",
+            ),
+            (
+                "Acme wrote down the value of its franchise rights",
+                "A write-down of franchise rights caused the loss.",
+            ),
+            (
+                "a $4.6 billion non-cash impairment charge",
+                "The loss came from a non-cash charge.",
+            ),
+            (
+                "an income tax benefit of $0.40 per share",
+                "A tax benefit lifted EPS.",
+            ),
+            (
+                "a gain on the sale of its towers business",
+                "A gain on the sale lifted net income.",
+            ),
+        ] {
+            assert_eq!(causes(Lang::En, Some(quote), body), Ok(()), "{body}");
+        }
+        // Without a quote, the same words are an invented cause.
+        for body in [
+            "The loss reflects a litigation settlement.",
+            "A write-down of franchise rights caused the loss.",
+            "The loss reflects a one-time charge.",
+            "A tax benefit lifted EPS.",
+            "Net income rose on a gain from the sale of a unit.",
+            "The loss includes a loss on the extinguishment of debt.",
+        ] {
+            let e = causes(Lang::En, None, body).unwrap_err();
+            assert!(e.contains("is in no quote"), "{body}: {e}");
+        }
+        for body in [
+            "亏损主要由于出售亏损。",
+            "净利润受一次性费用拖累。",
+            "利润增长来自税收优惠。",
+        ] {
+            assert!(causes(Lang::Zh, None, body).is_err(), "{body}");
+        }
+        assert_eq!(
+            causes(
+                Lang::Zh,
+                Some("a gain on the sale of its towers business"),
+                "净利润增长主要来自出售收益。"
+            ),
+            Ok(())
+        );
+        // An adjective names no item.
+        assert_eq!(
+            causes(
+                Lang::En,
+                None,
+                "Non-GAAP EPS, which excludes one-time items, was $1.85."
+            ),
+            Ok(())
+        );
+        assert_eq!(
+            causes(Lang::Zh, None, "非GAAP每股收益剔除了一次性项目。"),
+            Ok(())
         );
     }
 

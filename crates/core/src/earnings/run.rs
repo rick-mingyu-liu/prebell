@@ -737,7 +737,7 @@ async fn build(
         return not_ready(now, es, store, f, row, err).await;
     }
     // Best effort: a missing move never holds the check back.
-    facts.share_move = read_share_move(shares, &facts.ticker, now).await;
+    facts.share_move = read_share_move(shares, &facts.ticker, facts.accepted_at, now).await;
     if shares.is_some() {
         log(&match &facts.share_move {
             Field::Value(_) => "share_move=ok".to_string(),
@@ -1897,12 +1897,12 @@ mod tests {
         );
         let en = body_of(&base, "en");
         assert!(
-            en.contains("Form 8-K filed Oct 30, 2026\n\nShares: \u{2212}4.0% after hours (as of 4:40 PM ET)\n\n| Key figure"),
+            en.contains("Form 8-K filed Oct 30, 2026\n\nShares: -4.0% after hours (as of 4:40 PM ET)\n\n| Key figure"),
             "{en}"
         );
         let zh = body_of(&base, "zh");
         assert!(
-            zh.contains("\n\n股价：盘后交易跌4.0%（截至美东时间下午4:40）\n\n| 关键数据"),
+            zh.contains("\n\n股价：盘后下跌4.0%（截至美东时间下午4:40）\n\n| 关键数据"),
             "{zh}"
         );
         assert_eq!(*logs.borrow(), ["share_move=ok", "cover=ok"]);

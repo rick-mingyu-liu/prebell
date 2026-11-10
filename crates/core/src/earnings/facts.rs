@@ -217,7 +217,8 @@ pub enum ShareSession {
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct ShareMove {
     pub session: ShareSession,
-    /// Percent units, two decimals: -4.2 means -4.2%.
+    /// Percent units, one decimal (as printed), from the two prices: -4.2
+    /// means -4.2%.
     pub change_pct: f64,
     pub last: f64,
     /// The close `change_pct` is measured from.
@@ -226,11 +227,20 @@ pub struct ShareMove {
     pub as_of: DateTime<Utc>,
 }
 
-/// Facts stored before the share move existed.
+/// Why facts carry no share move when it was never read: stored before
+/// the field existed, or not yet publishable.
+const NOT_READ: &str = "not read";
+
 fn share_move_not_read() -> Field<ShareMove> {
     Field::Missing {
-        reason: "not read".into(),
+        reason: NOT_READ.into(),
     }
+}
+
+/// Facts that never read the move store no key, so facts written before the
+/// field existed serialize byte for byte as they did.
+fn share_move_unread(f: &Field<ShareMove>) -> bool {
+    matches!(f, Field::Missing { reason } if reason == NOT_READ)
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -251,7 +261,10 @@ pub struct EarningsFacts {
     pub highlights: Field<Vec<Note>>,
     pub trend: Field<Trend>,
     /// Best effort: `Missing` whenever the quote is unavailable or stale.
-    #[serde(default = "share_move_not_read")]
+    #[serde(
+        default = "share_move_not_read",
+        skip_serializing_if = "share_move_unread"
+    )]
     pub share_move: Field<ShareMove>,
 }
 
@@ -480,6 +493,19 @@ pub(crate) mod tests {
         let f: EarningsFacts = serde_json::from_value(v).unwrap();
         assert_eq!(f, facts());
         assert!(matches!(f.share_move, Field::Missing { .. }));
+        // Written back, they are as they were.
+        assert!(!serde_json::to_string(&f).unwrap().contains("share_move"));
+        // A move that was read and is missing is stored with its reason.
+        let mut f = facts();
+        f.share_move = Field::Missing {
+            reason: "market closed".into(),
+        };
+        let s = serde_json::to_string(&f).unwrap();
+        assert!(
+            s.contains(r#""share_move":{"Missing":{"reason":"market closed"}}"#),
+            "{s}"
+        );
+        assert_eq!(serde_json::from_str::<EarningsFacts>(&s).unwrap(), f);
     }
 
     #[test]
@@ -487,7 +513,7 @@ pub(crate) mod tests {
         let mut f = facts();
         f.share_move = Field::Value(ShareMove {
             session: ShareSession::Premarket,
-            change_pct: -4.23,
+            change_pct: -4.2,
             last: 325.72,
             ref_close: 340.0,
             as_of: "2026-11-10T13:12:00Z".parse().unwrap(),
