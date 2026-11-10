@@ -33,7 +33,10 @@
   "workers_dev": true,
   "vars": {
     // Origin for canonical and hreflang URLs.
-    "SITE_URL": "https://prebell.site"
+    "SITE_URL": "https://prebell.site",
+    // The read-only MCP server at /mcp (docs/runbook.md, "MCP server"). Any value other than "true" turns it
+    // off: the route answers 404. Changing it needs a redeploy of this Worker.
+    "MCP_ENABLED": "true"
     // CF_BEACON_TOKEN (Cloudflare Web Analytics) is optional; set it as a var to enable the beacon.
   }
 }
