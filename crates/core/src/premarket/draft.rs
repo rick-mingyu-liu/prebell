@@ -10,6 +10,7 @@ use regex::Regex;
 use serde_json::Value;
 
 use crate::cover::fmt_signed_pct;
+use crate::events::figures::figures_text;
 use crate::events::watch::{WatchItem, WatchKind};
 use crate::facts::{numbers_in_facts, Direction, Field, Mover, NewsReason, PremarketFacts, Theme};
 use crate::numbers::{check, Lang};
@@ -227,7 +228,9 @@ fn one_line_text(s: &str) -> String {
 
 /// The code-rendered "What to watch" list, one line per item, so times,
 /// titles and links never pass through the LLM: "- **8:30 AM ET** October
-/// CPI · [Schedule](url)"; once out, "· ✓ Released · [Release](url)".
+/// CPI · [Schedule](url)"; once out, "· ✓ Released · [Release](url)", with
+/// a CPI or jobs report's figures as "· ✓ Released: +0.4% on the month; core
+/// +0.3% on the month · [Release](url)".
 pub fn render_watch(items: &[WatchItem], lang: Lang) -> String {
     let zh = lang == Lang::Zh;
     let pick = |en: &'static str, z: &'static str| if zh { z } else { en };
@@ -265,7 +268,14 @@ pub fn render_watch(items: &[WatchItem], lang: Lang) -> String {
                     }
                 });
             let flag = match (i.kind, i.status.as_str()) {
-                (WatchKind::Event, "released") => Some(pick("✓ Released", "✓ 已发布").into()),
+                (WatchKind::Event, "released") => Some(match figures_text(&i.figures, lang) {
+                    Some(t) => format!(
+                        "{}{}",
+                        pick("✓ Released: ", "✓ 已发布："),
+                        one_line_text(&t)
+                    ),
+                    None => pick("✓ Released", "✓ 已发布").into(),
+                }),
                 (WatchKind::Event, "postponed") => Some(pick("Postponed", "已推迟").into()),
                 (WatchKind::Event, "moved") => moved,
                 (WatchKind::Earnings, "unconfirmed") => {
@@ -727,7 +737,19 @@ pub async fn write(
         .chain(theme_names(&f.themes))
         .chain(watch_names(&f.watch_list))
         .collect();
-    write_with(
+    // "What to watch" states no figure, never a consensus or a result: only
+    // the trading year and its neighbours, and a released report's figures.
+    let figures = watch_figures(&f.watch_list);
+    let mut watch_allowed = trading_years(f).to_vec();
+    watch_allowed.extend(&figures);
+    let guard = |d: &Draft| {
+        if figures.is_empty() {
+            Ok(())
+        } else {
+            reject_forecast_talk(d, lang)
+        }
+    };
+    write_with_guard(
         llm,
         prompt(lang),
         &facts_json,
@@ -740,13 +762,73 @@ pub async fn write(
             has_items(&f.watch_list),
         ),
         &all_headings(lang),
-        // "What to watch" states no figure, never a consensus or a result:
-        // only the trading year and its neighbours.
-        (&[all_headings(lang)[WATCH]], &trading_years(f)),
+        (&[all_headings(lang)[WATCH]], &watch_allowed),
         lang,
+        &guard,
         |d| render_markdown(d, f),
     )
     .await
+}
+
+/// The values of the watch list's release figures.
+pub(crate) fn watch_figures(w: &Field<Vec<WatchItem>>) -> Vec<f64> {
+    match w {
+        Field::Value(items) => items
+            .iter()
+            .flat_map(|i| i.figures.iter().map(|f| f.value))
+            .collect(),
+        Field::Missing { .. } => vec![],
+    }
+}
+
+/// Wording that sets a figure against forecasts or calls it hot or cool
+/// (the "never consensus" rule): checked in the title, the summary and the
+/// macro section, where news of the day may use it.
+fn forecast_res() -> &'static [Regex; 2] {
+    static R: OnceLock<[Regex; 2]> = OnceLock::new();
+    R.get_or_init(|| {
+        [
+            Regex::new(r"(?i)\b(?:than\s+(?:expected|anticipated|forecasts?|estimated|estimates?|feared)|(?:above|below|in\s+line\s+with|ahead\s+of|short\s+of|matched|matching|beat|beats|missed|misses|topped|exceeded|exceeding)\s+(?:the\s+)?(?:\w+\s+){0,2}?(?:expectations?|forecasts?|estimates?|consensus)|consensus|hot|hotter|cool|cooler)\b"),
+            Regex::new(r"(?:超|不及|低于|高于|符合|好于|差于|强于|弱于|优于|逊于|超出|未达|大于|小于)(?:市场|经济学家|分析师)?的?(?:预期|预估|预测|共识)|预期之[内外]|共识|过热|偏热|偏冷|(?:通胀|物价|CPI)[^，。；\n]{0,6}(?:升温|降温)"),
+        ]
+        .map(|r| r.expect("valid built-in regex"))
+    })
+}
+
+/// Any word of forecasts in "What to watch", which states a released
+/// report's figures and nothing to compare them with.
+fn watch_forecast_re() -> &'static Regex {
+    static R: OnceLock<Regex> = OnceLock::new();
+    R.get_or_init(|| {
+        Regex::new(r"(?i)\b(?:expect\w*|forecast\w*|estimat\w*|anticipat\w*|economists?|surpris\w*)\b|预期|预估|预测|经济学家|意外")
+            .expect("valid built-in regex")
+    })
+}
+
+/// Rejects a draft that judges a released report's figures against
+/// forecasts or calls them hot or cool.
+fn reject_forecast_talk(d: &Draft, lang: Lang) -> Result<(), String> {
+    let heads = all_headings(lang);
+    let mut texts = vec![("title", d.title.as_str()), ("summary", d.summary.as_str())];
+    for (h, m) in &d.sections {
+        if *h == heads[1] || *h == heads[WATCH] {
+            texts.push((h.as_str(), m.as_str()));
+        }
+    }
+    for (what, text) in texts {
+        let watch = what == heads[WATCH];
+        let hit = forecast_res()
+            .iter()
+            .chain(watch.then(watch_forecast_re))
+            .find_map(|r| r.find(text));
+        if let Some(m) = hit {
+            return Err(format!(
+                "{what} compares a released figure with forecasts or calls it hot or cool ({:?}): state the figure only",
+                m.as_str()
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// The trading year and its neighbours ("2026's last quarter").
@@ -795,6 +877,37 @@ pub(crate) async fn write_with(
     lang: Lang,
     render: impl Fn(&Draft) -> String,
 ) -> Result<(Draft, String), Vec<String>> {
+    write_with_guard(
+        llm,
+        system,
+        facts_json,
+        allowed,
+        names,
+        headings,
+        known,
+        figure_free,
+        lang,
+        &|_| Ok(()),
+        render,
+    )
+    .await
+}
+
+/// `write_with`, also retrying a draft `guard` rejects.
+#[allow(clippy::too_many_arguments)]
+async fn write_with_guard(
+    llm: &dyn LlmProvider,
+    system: &str,
+    facts_json: &str,
+    allowed: &[f64],
+    names: &[&str],
+    headings: &[&str],
+    known: &[&str],
+    figure_free: (&[&str], &[f64]),
+    lang: Lang,
+    guard: &dyn Fn(&Draft) -> Result<(), String>,
+    render: impl Fn(&Draft) -> String,
+) -> Result<(Draft, String), Vec<String>> {
     let base = format!("{facts_json}\n\n{}", sections_line(lang, headings));
     let mut user = base.clone();
     let mut last = None;
@@ -807,7 +920,9 @@ pub(crate) async fn write_with(
             allowed,
             names,
             figure_free,
-        ) {
+        )
+        .and_then(|d| guard(&d).map(|()| d).map_err(Problem::Malformed))
+        {
             Ok(d) => {
                 let md = render(&d);
                 return Ok((d, md));
@@ -824,6 +939,7 @@ pub(crate) async fn write_with(
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+    use crate::events::figures::{FigureKey, ReleaseFigure};
     use crate::facts::{Direction, Field, Mover, NewsReason, Quote, Theme, ThemeMember};
     use async_trait::async_trait;
     use chrono::NaiveDate;
@@ -1334,6 +1450,7 @@ pub(crate) mod tests {
             ),
             source_only: false,
             moved_from: None,
+            figures: vec![],
         }
     }
 
@@ -1379,6 +1496,173 @@ pub(crate) mod tests {
                  - **盘后** Apple (AAPL) · 日期未确认"
             )
         );
+    }
+
+    fn figure(key: FigureKey, value: f64) -> ReleaseFigure {
+        ReleaseFigure {
+            key,
+            value,
+            quote: "The release's sentence.".into(),
+        }
+    }
+
+    /// Today's CPI after its release, with the figures the October 2026
+    /// page states.
+    fn released_cpi() -> WatchItem {
+        WatchItem {
+            figures: vec![
+                figure(FigureKey::CpiMonth, 0.4),
+                figure(FigureKey::CoreMonth, 0.3),
+            ],
+            ..cpi_item(
+                "released",
+                Some("https://www.bls.gov/news.release/archives/cpi_11102026.htm"),
+            )
+        }
+    }
+
+    #[test]
+    fn render_watch_states_a_released_reports_figures() {
+        let url = "https://www.bls.gov/news.release/archives/cpi_11102026.htm";
+        let full = WatchItem {
+            figures: vec![
+                figure(FigureKey::CpiMonth, 0.3),
+                figure(FigureKey::CpiYear, 3.0),
+                figure(FigureKey::CoreMonth, 0.2),
+                figure(FigureKey::CoreYear, 3.0),
+            ],
+            ..released_cpi()
+        };
+        let jobs = WatchItem {
+            id: "bls:jobs:2026-09".into(),
+            title: "September jobs report".into(),
+            title_zh: "9月非农就业报告".into(),
+            figures: vec![
+                figure(FigureKey::Payrolls, 119_000.0),
+                figure(FigureKey::UnemploymentRate, 4.4),
+            ],
+            ..released_cpi()
+        };
+        let cases = [
+            (
+                released_cpi(),
+                Lang::En,
+                format!("- **8:30 AM ET** October CPI · ✓ Released: +0.4% on the month; core +0.3% on the month · [Release]({url})"),
+            ),
+            (
+                released_cpi(),
+                Lang::Zh,
+                format!("- **上午8:30（美东）** 10月消费者物价指数（CPI） · ✓ 已发布：环比 +0.4%；核心环比 +0.3% · [发布原文]({url})"),
+            ),
+            (
+                full.clone(),
+                Lang::En,
+                format!("- **8:30 AM ET** October CPI · ✓ Released: +0.3% on the month, +3.0% from a year earlier; core +0.2% on the month, +3.0% from a year earlier · [Release]({url})"),
+            ),
+            (
+                full,
+                Lang::Zh,
+                format!("- **上午8:30（美东）** 10月消费者物价指数（CPI） · ✓ 已发布：环比 +0.3%，同比 +3.0%；核心环比 +0.2%，同比 +3.0% · [发布原文]({url})"),
+            ),
+            (
+                jobs.clone(),
+                Lang::En,
+                format!("- **8:30 AM ET** September jobs report · ✓ Released: Payrolls +119,000; unemployment rate 4.4% · [Release]({url})"),
+            ),
+            (
+                jobs,
+                Lang::Zh,
+                format!("- **上午8:30（美东）** 9月非农就业报告 · ✓ 已发布：非农就业 +11.9万人；失业率 4.4% · [发布原文]({url})"),
+            ),
+        ];
+        for (item, lang, want) in cases {
+            let line = render_watch(std::slice::from_ref(&item), lang);
+            assert_eq!(line, want);
+            // Every figure on the page traces to the facts.
+            let allowed = watch_figures(&Field::Value(vec![item]));
+            assert_eq!(
+                check(&without_link_targets(&line), lang, &allowed),
+                Ok(()),
+                "{line}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn released_figures_may_be_stated_but_never_set_against_forecasts() {
+        let mut f = facts();
+        f.watch_list = Field::Value(vec![released_cpi()]);
+        let heads = headings(Lang::En, false, false, true);
+        let draft = |summary: &str, watch: &str| {
+            Ok(json!({
+                "title": "Futures steady after CPI",
+                "summary": summary,
+                "sections": heads.iter().map(|h| {
+                    let body = if *h == "What to watch" { watch } else { "Quiet." };
+                    json!({"heading": h, "markdown": body})
+                }).collect::<Vec<_>>(),
+            }))
+        };
+        let l = llm(vec![
+            draft(
+                "Consumer prices rose 0.4% in October, hotter than expected.",
+                "Core prices rose 0.3%.",
+            ),
+            draft(
+                "Consumer prices rose 0.4% in October; core prices rose 0.3%.",
+                "October CPI rose 0.4% on the month and core 0.3%, setting the tone before the open.",
+            ),
+        ]);
+        let (d, md) = write(&l, &f, Lang::En).await.unwrap();
+        let retry = l.prompts.borrow()[1].1.clone();
+        assert!(
+            retry.contains("summary compares a released figure with forecasts"),
+            "{retry}"
+        );
+        assert!(d.summary.starts_with("Consumer prices rose 0.4%"));
+        assert!(md.contains("✓ Released: +0.4% on the month"), "{md}");
+
+        // Each wording is refused, in either language and in "What to watch".
+        for (lang, summary, watch) in [
+            (Lang::En, "CPI rose 0.4%, above expectations.", "Quiet."),
+            (Lang::En, "CPI rose 0.4%.", "Economists had expected 0.3%."),
+            (Lang::En, "A hot CPI print: prices rose 0.4%.", "Quiet."),
+            (
+                Lang::En,
+                "CPI rose 0.4%, in line with the consensus.",
+                "Quiet.",
+            ),
+            (Lang::Zh, "10月CPI环比上涨0.4%，高于市场预期。", "平静。"),
+            (Lang::Zh, "10月CPI环比上涨0.4%。", "此前市场预期为0.3%。"),
+            (Lang::Zh, "通胀明显升温，CPI环比上涨0.4%。", "平静。"),
+        ] {
+            let heads = headings(lang, false, false, true);
+            let watch_head = all_headings(lang)[WATCH];
+            let reply = || {
+                Ok(json!({
+                    "title": "T",
+                    "summary": summary,
+                    "sections": heads.iter().map(|h| {
+                        let body = if *h == watch_head { watch } else { "Quiet." };
+                        json!({"heading": h, "markdown": body})
+                    }).collect::<Vec<_>>(),
+                }))
+            };
+            let l = llm(vec![reply(), reply()]);
+            let err = write(&l, &f, lang).await.unwrap_err();
+            assert!(
+                err.iter().any(|e| e.contains("forecasts")),
+                "{summary} / {watch}: {err:?}"
+            );
+        }
+
+        // Without figures the guard is off: a preview may say what is expected
+        // outside "What to watch", as before.
+        let mut f = facts();
+        f.watch_list = Field::Value(vec![cpi_item("scheduled", None)]);
+        let mut v = reply_with(&headings(Lang::En, false, false, true), "Quiet.").unwrap();
+        v["summary"] = json!("Futures edge up as traders await a CPI report expected to cool.");
+        assert!(write(&llm(vec![Ok(v)]), &f, Lang::En).await.is_ok());
     }
 
     #[tokio::test]

@@ -1,16 +1,21 @@
 //! "What to watch" for the premarket brief: today's events (tier 1-2) from
 //! `macro_events`, with the released check for those already past (so the
-//! 8:35 update sees the 8:30 release), and the write-up companies that
-//! report after today's close.
+//! 8:35 update sees the 8:30 release) and, for a released CPI or jobs
+//! report, its headline figures read from that same page; and the write-up
+//! companies that report after today's close.
 
 use async_trait::async_trait;
 use chrono::{DateTime, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
 
-use super::check::{check_releases, last_loaded, new_row};
+use std::collections::HashMap;
+
+use super::check::{check_release_pages, last_loaded, new_row, release_page};
+use super::figures::{has_figures, parse_figures, ReleaseFigure};
 use super::store::{EventRow, EventStore};
 use super::{et_time, has_release, note, planned, title, TIER_NOTABLE};
 use crate::budget::allows;
+use crate::clock::et;
 use crate::earnings::store::EarningsStore;
 use crate::earnings::{find, Tier};
 use crate::facts::Field;
@@ -19,7 +24,8 @@ use crate::providers::Http;
 
 /// Release-page fetches the brief may spend on today's events. Optional
 /// work: they run only while `budget::allows` them, and skipping them leaves
-/// an event as scheduled with its schedule link.
+/// an event as scheduled with its schedule link (or a released one without
+/// its figures).
 pub const BRIEF_RELEASE_CHECKS: usize = 2;
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
@@ -60,6 +66,11 @@ pub struct WatchItem {
     /// The previous ET date of an event moved onto today.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub moved_from: Option<String>,
+    /// A released CPI or jobs report's headline figures, each with the
+    /// release's sentence; empty for every other item and in facts stored
+    /// before figures existed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub figures: Vec<ReleaseFigure>,
 }
 
 /// Gives the brief its watch list. The Worker's is `StoreWatch`.
@@ -99,6 +110,7 @@ fn event_item(r: &EventRow) -> Option<WatchItem> {
         link: Some(r.release_url.clone().unwrap_or_else(|| r.proof_url.clone())),
         source_only: !has_release(&r.series),
         moved_from: r.moved_from.clone().filter(|_| r.status == "moved"),
+        figures: vec![],
     })
 }
 
@@ -133,14 +145,42 @@ impl WatchSource for StoreWatch<'_> {
             .rev()
             .find(|n| allows(used, *n))
             .unwrap_or(0);
-        let released = check_releases(now, &rows, self.http, fetches).await;
+        let (released, mut tried) = check_release_pages(now, &rows, self.http, fetches).await;
+        let mut figures: HashMap<String, Vec<ReleaseFigure>> = HashMap::new();
         if !released.is_empty() {
+            let updated: Vec<EventRow> = released.iter().map(|(r, _)| r.clone()).collect();
             // Best effort: the brief's facts carry the status either way.
-            let _ = self.events.write_events(&released).await;
-            for u in released {
+            let _ = self.events.write_events(&updated).await;
+            for (u, page) in released {
+                figures.insert(u.id.clone(), parse_figures(&u.series, &page));
                 if let Some(r) = rows.iter_mut().find(|r| r.id == u.id) {
                     *r = u;
                 }
+            }
+        }
+        // A CPI or jobs report of today released before this run (by the
+        // poll's check, or for an earlier brief) has no figures in the
+        // table: its page is read again with the fetches left.
+        let today = et(now).date_naive().format("%Y-%m-%d").to_string();
+        let again: Vec<&EventRow> = rows
+            .iter()
+            .filter(|r| {
+                r.status == "released"
+                    && has_figures(&r.series)
+                    && r.et_date == today
+                    && !figures.contains_key(&r.id)
+            })
+            .collect();
+        for r in again {
+            let Some(url) = r.release_url.as_deref() else {
+                continue;
+            };
+            if tried >= fetches {
+                break;
+            }
+            tried += 1;
+            if let Some(page) = release_page(self.http, url, &r.series).await {
+                figures.insert(r.id.clone(), parse_figures(&r.series, &page));
             }
         }
         // All-day events first, then by time.
@@ -150,7 +190,12 @@ impl WatchSource for StoreWatch<'_> {
         let mut items: Vec<WatchItem> = rows
             .iter()
             .filter(|r| r.tier <= i64::from(TIER_NOTABLE) && r.series != "closed")
-            .filter_map(event_item)
+            .filter_map(|r| {
+                Some(WatchItem {
+                    figures: figures.remove(&r.id).unwrap_or_default(),
+                    ..event_item(r)?
+                })
+            })
             .collect();
 
         if let Ok(cal) = self.earnings.calendar_between(&day, &day).await {
@@ -174,6 +219,7 @@ impl WatchSource for StoreWatch<'_> {
                     link: None,
                     source_only: false,
                     moved_from: None,
+                    figures: vec![],
                 });
             }
         }
@@ -191,6 +237,7 @@ impl WatchSource for StoreWatch<'_> {
 mod tests {
     use super::*;
     use crate::earnings::store::{CalendarRow, MemEarningsStore};
+    use crate::events::figures::FigureKey;
     use crate::events::store::MemEventStore;
     use crate::providers::{HttpResp, ProviderError};
     use std::cell::RefCell;
@@ -205,6 +252,8 @@ mod tests {
     #[derive(Default)]
     struct Http200 {
         ok: Vec<String>,
+        /// The body every url answers; a bare CPI title when `None`.
+        page: Option<String>,
         seen: RefCell<Vec<String>>,
     }
     #[async_trait(?Send)]
@@ -218,7 +267,10 @@ mod tests {
             };
             Ok(HttpResp {
                 status,
-                body: "<title>Consumer Price Index News Release</title>".into(),
+                body: self
+                    .page
+                    .clone()
+                    .unwrap_or_else(|| "<title>Consumer Price Index News Release</title>".into()),
                 set_cookie: None,
             })
         }
@@ -328,6 +380,219 @@ mod tests {
         assert_eq!(items[0].status, "released");
         assert_eq!(items[0].link.as_deref(), Some(url));
         assert_eq!(ev.rows.borrow()["bls:cpi:2026-10"].status, "released");
+        // A release page whose opening states no figure gives none.
+        assert!(items[0].figures.is_empty());
+    }
+
+    const CPI_RELEASE: &str = include_str!("../../tests/fixtures/bls_cpi_release.htm");
+    const JOBS_RELEASE: &str = include_str!("../../tests/fixtures/bls_empsit_release.htm");
+
+    /// A release page as BLS serves it: the opening summary after ~34 KB of
+    /// site navigation (its offset on the 2026-11-10 CPI page), then 1.3 MB.
+    fn real_page(fixture: &str) -> String {
+        format!("{}{fixture}{}", " ".repeat(33_942), "x".repeat(1_300_000))
+    }
+
+    #[tokio::test]
+    async fn the_835_update_states_the_cpi_figures_from_the_same_fetch() {
+        let ev = seeded();
+        let es = MemEarningsStore::default();
+        let url = "https://www.bls.gov/news.release/archives/cpi_11102026.htm";
+        let http = Http200 {
+            ok: vec![url.into()],
+            page: Some(real_page(CPI_RELEASE)),
+            ..Default::default()
+        };
+        let w = StoreWatch {
+            events: &ev,
+            earnings: &es,
+            http: &http,
+        };
+        let Field::Value(items) = w
+            .watch_list(d("2026-11-10"), utc("2026-11-10T13:35:00Z"), &|| 0)
+            .await
+        else {
+            panic!("missing");
+        };
+        // One fetch marks it released and gives the figures.
+        assert_eq!(http.seen.borrow().len(), 1);
+        assert_eq!(items[0].status, "released");
+        let got: Vec<(FigureKey, f64)> =
+            items[0].figures.iter().map(|f| (f.key, f.value)).collect();
+        assert_eq!(
+            got,
+            [(FigureKey::CpiMonth, 0.4), (FigureKey::CoreMonth, 0.3)]
+        );
+        assert!(items[0].figures[0].quote.starts_with(
+            "The Consumer Price Index for All Urban Consumers (CPI-U) increased 0.4 percent"
+        ));
+        // The summary ends within the bytes read.
+        let end = 33_942 + CPI_RELEASE.find("</PRE>").unwrap();
+        assert!(end < crate::events::check::RELEASE_PREFIX_BYTES, "{end}");
+    }
+
+    #[tokio::test]
+    async fn jobs_day_states_payrolls_and_the_rate() {
+        let ev = MemEventStore::default();
+        for p in planned(d("2026-11-06"), d("2026-11-06")) {
+            ev.rows
+                .borrow_mut()
+                .insert(p.id.clone(), new_row(&p, utc("2026-11-01T11:00:00Z")));
+        }
+        let es = MemEarningsStore::default();
+        let url = "https://www.bls.gov/news.release/archives/empsit_11062026.htm";
+        let http = Http200 {
+            ok: vec![url.into()],
+            page: Some(real_page(JOBS_RELEASE)),
+            ..Default::default()
+        };
+        let w = StoreWatch {
+            events: &ev,
+            earnings: &es,
+            http: &http,
+        };
+        let Field::Value(items) = w
+            .watch_list(d("2026-11-06"), utc("2026-11-06T13:35:00Z"), &|| 0)
+            .await
+        else {
+            panic!("missing");
+        };
+        let jobs = items.iter().find(|i| i.id == "bls:jobs:2026-10").unwrap();
+        let got: Vec<(FigureKey, f64)> = jobs.figures.iter().map(|f| (f.key, f.value)).collect();
+        assert_eq!(
+            got,
+            [
+                (FigureKey::Payrolls, 165_000.0),
+                (FigureKey::UnemploymentRate, 4.1)
+            ]
+        );
+    }
+
+    /// The store as the poll's check leaves it: the CPI row released, with
+    /// its release link and no figures.
+    fn released_by_the_poll() -> (MemEventStore, &'static str) {
+        let ev = seeded();
+        let url = "https://www.bls.gov/news.release/archives/cpi_11102026.htm";
+        {
+            let mut rows = ev.rows.borrow_mut();
+            let r = rows.get_mut("bls:cpi:2026-10").unwrap();
+            r.status = "released".into();
+            r.release_url = Some(url.into());
+        }
+        (ev, url)
+    }
+
+    #[tokio::test]
+    async fn a_report_released_before_the_brief_is_read_again_for_its_figures() {
+        let (ev, url) = released_by_the_poll();
+        let es = MemEarningsStore::default();
+        let http = Http200 {
+            ok: vec![url.into()],
+            page: Some(real_page(CPI_RELEASE)),
+            ..Default::default()
+        };
+        let w = StoreWatch {
+            events: &ev,
+            earnings: &es,
+            http: &http,
+        };
+        let at = utc("2026-11-10T13:40:00Z");
+        let calls = ev.calls.get();
+        let Field::Value(items) = w.watch_list(d("2026-11-10"), at, &|| 0).await else {
+            panic!("missing");
+        };
+        assert_eq!(*http.seen.borrow(), [url]);
+        assert_eq!(items[0].figures.len(), 2);
+        // Read only: one ranged read, nothing written.
+        assert_eq!(ev.calls.get(), calls + 1);
+
+        // 39 used: the one fetch still fits.
+        let http = Http200 {
+            ok: vec![url.into()],
+            page: Some(real_page(CPI_RELEASE)),
+            ..Default::default()
+        };
+        let w = StoreWatch {
+            events: &ev,
+            earnings: &es,
+            http: &http,
+        };
+        let Field::Value(items) = w.watch_list(d("2026-11-10"), at, &|| 39).await else {
+            panic!("missing");
+        };
+        assert_eq!(http.seen.borrow().len(), 1);
+        assert_eq!(items[0].figures.len(), 2);
+
+        // At the limit: no fetch, released without figures (today's line).
+        let http = Http200 {
+            ok: vec![url.into()],
+            page: Some(real_page(CPI_RELEASE)),
+            ..Default::default()
+        };
+        let w = StoreWatch {
+            events: &ev,
+            earnings: &es,
+            http: &http,
+        };
+        let Field::Value(items) = w.watch_list(d("2026-11-10"), at, &|| 40).await else {
+            panic!("missing");
+        };
+        assert!(http.seen.borrow().is_empty());
+        assert_eq!(
+            (items[0].status.as_str(), items[0].link.as_deref()),
+            ("released", Some(url))
+        );
+        assert!(items[0].figures.is_empty());
+
+        // A brief built the next day for the release day reads nothing.
+        let Field::Value(_) = w
+            .watch_list(d("2026-11-10"), utc("2026-11-11T13:40:00Z"), &|| 0)
+            .await
+        else {
+            panic!("missing");
+        };
+        assert!(http.seen.borrow().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_bot_wall_on_the_second_read_leaves_the_released_line() {
+        let (ev, url) = released_by_the_poll();
+        let es = MemEarningsStore::default();
+        for page in [
+            "<title>Access Denied</title>",
+            "<title>Consumer Price Index News Release</title>",
+        ] {
+            let http = Http200 {
+                ok: vec![url.into()],
+                page: Some(page.into()),
+                ..Default::default()
+            };
+            let w = StoreWatch {
+                events: &ev,
+                earnings: &es,
+                http: &http,
+            };
+            let Field::Value(items) = w
+                .watch_list(d("2026-11-10"), utc("2026-11-10T13:40:00Z"), &|| 0)
+                .await
+            else {
+                panic!("missing");
+            };
+            assert_eq!(http.seen.borrow().len(), 1);
+            assert_eq!(items[0].status, "released");
+            assert!(items[0].figures.is_empty(), "{page}");
+        }
+    }
+
+    #[test]
+    fn items_stored_before_figures_load_and_items_without_figures_store_as_before() {
+        let old = serde_json::json!({"kind": "event", "id": "bls:cpi:2026-10",
+            "time_et": "8:30 AM ET", "time_zh": "上午8:30（美东）", "title": "October CPI",
+            "title_zh": "10月消费者物价指数（CPI）", "status": "released",
+            "link": "https://www.bls.gov/news.release/archives/cpi_11102026.htm"});
+        let w: WatchItem = serde_json::from_value(old.clone()).unwrap();
+        assert!(w.figures.is_empty());
+        assert_eq!(serde_json::to_value(&w).unwrap(), old);
     }
 
     #[tokio::test]

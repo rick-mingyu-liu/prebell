@@ -71,7 +71,12 @@ fn sentence(text: &str, start: usize) -> Option<String> {
 
 /// +1, -1 or 0 for the verb a release uses ("edged up", "was unchanged").
 fn direction(verb: &str) -> Option<f64> {
-    match verb.split_whitespace().collect::<Vec<_>>().join(" ").as_str() {
+    match verb
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .as_str()
+    {
         "increased" | "rose" | "grew" | "edged up" => Some(1.0),
         "decreased" | "fell" | "declined" | "edged down" => Some(-1.0),
         "was unchanged" => Some(0.0),
@@ -82,11 +87,11 @@ fn direction(verb: &str) -> Option<f64> {
 /// The signed percent change from a verb and its amount: "was unchanged"
 /// takes no amount, every other verb needs one.
 fn change(verb: &str, amount: Option<&str>) -> Option<f64> {
-    match (direction(verb)?, amount) {
-        (d, _) if d == 0.0 => Some(0.0),
-        (d, Some(a)) => Some(d * a.parse::<f64>().ok()?),
-        (_, None) => None,
+    let d = direction(verb)?;
+    if d == 0.0 {
+        return Some(0.0);
     }
+    Some(d * amount?.parse::<f64>().ok()?)
 }
 
 const VERB: &str = r"(increased|rose|decreased|fell|declined|was\s+unchanged)";
@@ -191,7 +196,11 @@ fn jobs(text: &str) -> Vec<ReleaseFigure> {
                 .zip(persons(&c[2], c.get(3).is_some()))
                 .map(|(d, v)| d * v)
         } else {
-            let sign = if matches!(&c[4], "-" | "−") { -1.0 } else { 1.0 };
+            let sign = if matches!(&c[4], "-" | "−") {
+                -1.0
+            } else {
+                1.0
+            };
             persons(&c[5], c.get(6).is_some()).map(|v| sign * v)
         };
         payroll_sentence = sentence(text, c.get(0).map_or(0, |m| m.start()));
@@ -271,18 +280,21 @@ pub fn figures_text(figures: &[ReleaseFigure], lang: Lang) -> Option<String> {
     let zh = lang == Lang::Zh;
     // One CPI group: its monthly and 12-month changes.
     let group = |month: FigureKey, year: FigureKey| -> Vec<String> {
-        [(month, "on the month", "环比"), (year, "from a year earlier", "同比")]
-            .into_iter()
-            .filter_map(|(k, en, z)| {
-                let v = get(k)?;
-                Some(match (zh, v == 0.0) {
-                    (false, false) => format!("{} {en}", pct(v)),
-                    (false, true) => format!("unchanged {en}"),
-                    (true, false) => format!("{z} {}", pct(v)),
-                    (true, true) => format!("{z}持平"),
-                })
+        [
+            (month, "on the month", "环比"),
+            (year, "from a year earlier", "同比"),
+        ]
+        .into_iter()
+        .filter_map(|(k, en, z)| {
+            let v = get(k)?;
+            Some(match (zh, v == 0.0) {
+                (false, false) => format!("{} {en}", pct(v)),
+                (false, true) => format!("unchanged {en}"),
+                (true, false) => format!("{z} {}", pct(v)),
+                (true, true) => format!("{z}持平"),
             })
-            .collect()
+        })
+        .collect()
     };
     let sep = if zh { "，" } else { ", " };
     let mut parts = Vec::new();
@@ -381,9 +393,13 @@ mod tests {
             "The Consumer Price Index for All Urban Consumers (CPI-U) was unchanged in July"
         ));
         // The second wording of the 12-month change, when the first is absent.
-        let alt = "<pre>The all items index rose 3.0 percent for the 12 months ending September, after \
+        let alt =
+            "<pre>The all items index rose 3.0 percent for the 12 months ending September, after \
                    rising 2.9 percent over the 12 months ending August.</pre>";
-        assert_eq!(values(&parse_figures("cpi", alt)), [(FigureKey::CpiYear, 3.0)]);
+        assert_eq!(
+            values(&parse_figures("cpi", alt)),
+            [(FigureKey::CpiYear, 3.0)]
+        );
     }
 
     #[test]
@@ -421,8 +437,10 @@ mod tests {
             ]
         );
         assert_eq!(
-            v("Total nonfarm payroll employment changed little in August (+22,000), and the \
-               unemployment rate was little changed at 4.3 percent, the U.S. Bureau reported."),
+            v(
+                "Total nonfarm payroll employment changed little in August (+22,000), and the \
+               unemployment rate was little changed at 4.3 percent, the U.S. Bureau reported."
+            ),
             [
                 (FigureKey::Payrolls, 22_000.0),
                 (FigureKey::UnemploymentRate, 4.3)
@@ -521,7 +539,11 @@ mod tests {
         );
         for lang in [Lang::En, Lang::Zh] {
             let text = figures_text(&down, lang).unwrap();
-            assert_eq!(check(&text, lang, &[0.0, -0.1, -13_000.0]), Ok(()), "{text}");
+            assert_eq!(
+                check(&text, lang, &[0.0, -0.1, -13_000.0]),
+                Ok(()),
+                "{text}"
+            );
         }
         assert_eq!(figures_text(&[], Lang::En), None);
     }
