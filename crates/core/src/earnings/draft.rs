@@ -13,7 +13,7 @@ use serde_json::Value;
 
 use crate::earnings::facts::{numbers_in_facts, EarningsFacts, Metric, Unit};
 use crate::facts::Field;
-use crate::numbers::{check, Lang};
+use crate::numbers::{check, extract as extract_numbers, Lang};
 use crate::premarket::draft::{
     fmt_num, is_setext_underline, match_sections, one_line, reject_markup, sections_line,
     without_link_targets, Draft,
@@ -98,6 +98,81 @@ fn verdict_re(lang: Lang) -> &'static Regex {
             Regex::new(r"预期|预估|共识|預期|預估|共識|华尔街|分析师|估计").expect("valid built-in regex")
         }),
     }
+}
+
+/// Longest title, in characters. The front page shows earnings checks in a
+/// three-column grid at 16px (about 26 Latin or 13 CJK characters a line):
+/// 90 English or 40 Chinese characters is at most four lines there, and two
+/// in the 32px post heading.
+fn title_max(lang: Lang) -> usize {
+    match lang {
+        Lang::En => 90,
+        Lang::Zh => 40,
+    }
+}
+
+/// The press release's own kind of headline: "Charter Communications
+/// Reports Third Quarter 2026 Results", "Duke Energy reports third-quarter
+/// 2026 results", "Simon Property Group: third-quarter 2026 results",
+/// "苹果公布2026财年第四季度业绩".
+fn boilerplate_re(lang: Lang) -> &'static Regex {
+    static EN: OnceLock<Regex> = OnceLock::new();
+    static ZH: OnceLock<Regex> = OnceLock::new();
+    match lang {
+        Lang::En => EN.get_or_init(|| {
+            // Period words that may sit between the verb and "results".
+            const P: &str = r"(?:first|second|third|fourth|q[1-4]|quarter(?:ly)?|full|year(?:-end)?|fiscal|annual|fy\s?\d{2,4}|\d{4}|and|its|their|financial|operating)";
+            // "earnings" alone is a takeaway's subject ("fourth-quarter
+            // earnings rise 91%"); only a headline that ends on it is boilerplate.
+            const END: &str = r"(?:results\b|earnings\s*(?:[:;,.!–—-]|$))";
+            Regex::new(&format!(
+                r"(?i)\b(?:report(?:s|ed)?|announce(?:s|d)?|post(?:s|ed)?|release(?:s|d)?|deliver(?:s|ed)?|unveil(?:s|ed)?)\s+(?:{P}[-\s]+)*{END}|\b(?:first|second|third|fourth|q[1-4]|fiscal|full|annual|fy\s?\d{{2,4}}|\d{{4}})(?:[-\s]+{P})*[-\s]+{END}"
+            ))
+            .expect("valid built-in regex")
+        }),
+        Lang::Zh => ZH.get_or_init(|| {
+            Regex::new(r"(?:公布|发布|披露|宣布|发表|交出)[^，。；：,;:]{0,20}?(?:财报|业绩|财务结果)(?:报告)?(?:[，。；：,;:\s]|$)|(?:季度|财年|年度|Q[1-4])\s*(?:财报|业绩)\s*$")
+                .expect("valid built-in regex")
+        }),
+    }
+}
+
+/// A figure the title states: a percent, a dollar or scaled amount, a
+/// decimal, or a whole number that is neither a small count nor a year.
+fn has_figure(text: &str, lang: Lang) -> bool {
+    extract_numbers(text, lang).iter().any(|n| {
+        n.is_percent
+            || n.raw.contains('$')
+            || n.multiplier != 1.0
+            || n.decimals > 0
+            || (n.value.abs() > 10.0 && !(1900.0..=2100.0).contains(&n.value.abs()))
+    })
+}
+
+/// The headline states the quarter's takeaway: short, with a figure, and
+/// not the press release's title. Its numbers are checked with the page's.
+fn check_title(title: &str, lang: Lang, f: &EarningsFacts) -> Result<(), String> {
+    let n = title.chars().count();
+    if n > title_max(lang) {
+        return Err(format!(
+            "the title is {n} characters; keep it to {} or fewer",
+            title_max(lang)
+        ));
+    }
+    if let Some(m) = boilerplate_re(lang).find(title) {
+        return Err(format!(
+            "the title must state the quarter's most important result, not repeat the press release's headline (found {:?})",
+            m.as_str().trim()
+        ));
+    }
+    // "3M" is a name, not three million.
+    if !has_figure(&mask_names(title, f), lang) {
+        return Err(
+            "the title must state the quarter's most important result with at least one figure from the facts"
+                .into(),
+        );
+    }
+    Ok(())
 }
 
 /// Up to `max` decimals, trailing zeros dropped: 47.20 -> "47.2".
@@ -327,6 +402,7 @@ fn attempt(
 ) -> Result<(Draft, String), Problem> {
     let v = v.map_err(Problem::Llm)?;
     let d = parse(&v, lang, want).map_err(Problem::Malformed)?;
+    check_title(&d.title, lang, f).map_err(Problem::Malformed)?;
     let md = render_markdown(&d, f);
     // The whole page, code-rendered parts included, is checked. Names are
     // not figures: "3M" must not read as three million.
@@ -638,10 +714,158 @@ pub(crate) mod tests {
         f.company = "3M".into();
         f.ticker = "MMM".into();
         let mut r = reply(Lang::En, "3M reported revenue of $102.5 billion.");
-        r["title"] = "3M fiscal Q4 2026 results".into();
+        r["title"] = "3M revenue reaches $102.5 billion".into();
         let l = llm(vec![r]);
         let (_, md) = write(&l, &f, Lang::En).await.unwrap();
         assert!(md.contains("**3M (MMM)**"));
+        // The name is no figure: a title with only "3M" in it has none.
+        assert!(check_title("3M posts a strong fourth quarter", Lang::En, &f).is_err());
+    }
+
+    #[test]
+    fn titles_state_the_takeaway() {
+        let f = facts();
+        for (lang, t) in [
+            (
+                Lang::En,
+                "Apple's EPS jumps 91% to $1.85 as revenue reaches $102.5 billion",
+            ),
+            (Lang::En, "Apple fiscal Q4 2026: revenue $102.5 billion"),
+            (
+                Lang::En,
+                "Apple's fourth-quarter earnings rise 91% to $1.85 a share",
+            ),
+            (
+                Lang::En,
+                "Charter swings to a $20.50-a-share loss as revenue rises to $14.9 billion",
+            ),
+            (Lang::Zh, "苹果第四季度每股收益增长91%至1.85美元"),
+            (Lang::Zh, "苹果2026财年第四季度营收1025亿美元"),
+            (Lang::Zh, "特许通讯由盈转亏，每股亏损20.50美元"),
+        ] {
+            assert_eq!(check_title(t, lang, &f), Ok(()), "{t}");
+        }
+    }
+
+    #[test]
+    fn press_release_titles_rejected() {
+        let f = facts();
+        for (lang, t) in [
+            (
+                Lang::En,
+                "Charter Communications Reports Third Quarter 2026 Results",
+            ),
+            (Lang::En, "Simon Property Group: third-quarter 2026 results"),
+            (Lang::En, "ConocoPhillips third-quarter 2026 results"),
+            (Lang::En, "Duke Energy reports third-quarter 2026 results"),
+            (
+                Lang::En,
+                "Qualcomm Announces Fourth Quarter and Fiscal 2026 Results",
+            ),
+            (
+                Lang::En,
+                "Southern Company reports third-quarter 2026 earnings",
+            ),
+            // A figure tacked on does not make it a takeaway.
+            (
+                Lang::En,
+                "Apple Reports Fourth Quarter Results: Revenue $102.5 Billion",
+            ),
+            (Lang::Zh, "苹果公布2026财年第四季度业绩"),
+            (Lang::Zh, "苹果发布第四季度财报"),
+            (Lang::Zh, "苹果：2026年第三季度业绩"),
+            (Lang::Zh, "苹果公布第四季度业绩，营收1025亿美元"),
+        ] {
+            let e = check_title(t, lang, &f).unwrap_err();
+            assert!(e.contains("press release's headline"), "{t}: {e}");
+        }
+        // No figure at all.
+        for (lang, t) in [
+            (Lang::En, "Apple closes a record fiscal 2026"),
+            (Lang::Zh, "苹果2026财年收官"),
+        ] {
+            let e = check_title(t, lang, &f).unwrap_err();
+            assert!(e.contains("at least one figure"), "{t}: {e}");
+        }
+    }
+
+    #[test]
+    fn title_length_cap() {
+        let f = facts();
+        let en = format!(
+            "Apple revenue reaches $102.5 billion{}",
+            " and more".repeat(6)
+        );
+        assert_eq!(en.chars().count(), 90);
+        assert_eq!(check_title(&en, Lang::En, &f), Ok(()));
+        let e = check_title(&format!("{en}!"), Lang::En, &f).unwrap_err();
+        assert!(
+            e.contains("91 characters") && e.contains("90 or fewer"),
+            "{e}"
+        );
+        let zh: String = format!("苹果营收1025亿美元{}", "，同比增长".repeat(6))
+            .chars()
+            .take(40)
+            .collect();
+        assert_eq!(zh.chars().count(), 40);
+        assert_eq!(check_title(&zh, Lang::Zh, &f), Ok(()));
+        assert!(check_title(&format!("{zh}。"), Lang::Zh, &f).is_err());
+    }
+
+    #[tokio::test]
+    async fn press_release_title_is_retried_with_the_reason() {
+        for lang in [Lang::En, Lang::Zh] {
+            let mut bad = reply(lang, "Quiet.");
+            bad["title"] = match lang {
+                Lang::En => "Apple Reports Fourth Quarter Results".into(),
+                Lang::Zh => "苹果公布第四季度业绩".into(),
+            };
+            let l = llm(vec![bad.clone(), reply(lang, "Quiet.")]);
+            assert!(write(&l, &facts(), lang).await.is_ok());
+            let p = l.prompts.borrow();
+            assert!(
+                p[1].contains("not repeat the press release's headline"),
+                "{}",
+                p[1]
+            );
+            let l = llm(vec![bad.clone(), bad]);
+            let e = write(&l, &facts(), lang).await.unwrap_err();
+            assert!(e[0].starts_with("draft: the title must"), "{e:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn title_numbers_are_checked_with_the_page() {
+        let mut r = reply(Lang::En, "Quiet.");
+        r["title"] = "Apple revenue jumps 15% to $102.5 billion".into();
+        let l = llm(vec![r.clone(), r]);
+        let e = write(&l, &facts(), Lang::En).await.unwrap_err();
+        assert_eq!(e, vec!["15%".to_string()]);
+        let mut r = reply(Lang::Zh, "Quiet.");
+        r["title"] = "苹果营收增长13%".into();
+        let l = llm(vec![r.clone(), r]);
+        assert_eq!(
+            write(&l, &facts(), Lang::Zh).await.unwrap_err(),
+            vec!["13%".to_string()]
+        );
+    }
+
+    #[tokio::test]
+    async fn estimate_talk_in_the_title_rejected() {
+        let mut r = reply(Lang::En, "Quiet.");
+        r["title"] = "Apple tops estimates with $102.5 billion in revenue".into();
+        let l = llm(vec![r.clone(), r]);
+        let e = write(&l, &facts(), Lang::En).await.unwrap_err();
+        assert!(e[0].contains("estimates"), "{e:?}");
+    }
+
+    #[test]
+    fn prompts_ask_for_the_takeaway_title() {
+        assert!(
+            PROMPT_EN.contains("most important result")
+                && PROMPT_EN.contains("at most 90 characters")
+        );
+        assert!(PROMPT_ZH.contains("最重要的结果") && PROMPT_ZH.contains("不超过 40 个字"));
     }
 
     #[test]

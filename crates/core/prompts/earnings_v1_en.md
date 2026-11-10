@@ -22,7 +22,7 @@ Rules:
 Reply with JSON exactly in this shape and nothing else:
 {"title": "...", "summary": "...", "sections": [{"heading": "...", "markdown": "..."}]}
 
-- `title`: one headline line naming the company and the quarter.
+- `title`: one headline line of at most 90 characters that states the quarter's most important result in plain words. Name the company and include at least one figure from the facts, for example "Acme swings to a $1.20-a-share loss as revenue rises to $9.8 billion". It is not the press release's headline: never write "X reports third-quarter 2026 results", "X announces fourth quarter and fiscal 2026 results" or "X: third-quarter 2026 results".
 - `summary`: at most 40 words.
 - `sections`: the sections to write are listed at the end of the user message. Write exactly those sections, in that order, with those exact headings, and no others. "Results" covers revenue, net income and EPS (GAAP and, if present, non-GAAP); "Margins and cash flow" covers margins and cash flow; "Guidance" covers `guidance`; "What else stood out" covers `highlights` and `trend`.
 - Each `markdown` is the section body in Markdown, without its heading.
