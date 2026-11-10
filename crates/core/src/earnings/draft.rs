@@ -101,15 +101,42 @@ fn verdict_re(lang: Lang) -> &'static Regex {
     }
 }
 
-/// Longest title, in characters. The front page shows earnings checks in a
-/// three-column grid at 16px (about 26 Latin or 13 CJK characters a line):
-/// 90 English or 40 Chinese characters is at most four lines there, and two
-/// in the 32px post heading.
+/// Longest title, in display columns (`title_width`). The front page shows
+/// earnings checks in a three-column grid at 16px, about 26 columns a line
+/// (26 Latin letters or 13 Chinese characters): 90 columns of English or 80
+/// (40 Chinese characters) is at most four lines there, and two in the 32px
+/// post heading.
 fn title_max(lang: Lang) -> usize {
     match lang {
         Lang::En => 90,
-        Lang::Zh => 40,
+        Lang::Zh => 80,
     }
+}
+
+/// A Chinese, Japanese or Korean character or a full-width mark, which takes
+/// two columns.
+fn is_wide(c: char) -> bool {
+    matches!(c,
+        '\u{1100}'..='\u{115F}'
+        | '\u{2E80}'..='\u{A4CF}'
+        | '\u{AC00}'..='\u{D7A3}'
+        | '\u{F900}'..='\u{FAFF}'
+        | '\u{FE30}'..='\u{FE4F}'
+        | '\u{FF00}'..='\u{FF60}'
+        | '\u{FFE0}'..='\u{FFE6}')
+}
+
+/// The title's display width: two columns for a wide character, one for
+/// anything else. The company's name counts as its ticker: a model cannot
+/// shorten "American International Group" or "Hewlett Packard Enterprise"
+/// faithfully, and the Chinese prompt keeps names it has no Chinese for.
+fn title_width(title: &str, f: &EarningsFacts) -> usize {
+    let title = if f.company.is_empty() {
+        title.to_string()
+    } else {
+        title.replace(&f.company, &f.ticker)
+    };
+    title.chars().map(|c| if is_wide(c) { 2 } else { 1 }).sum()
 }
 
 /// The press release's own kind of headline: "Charter Communications
@@ -153,12 +180,18 @@ fn has_figure(text: &str, lang: Lang) -> bool {
 /// The headline states the quarter's takeaway: short, with a figure, and
 /// not the press release's title. Its numbers are checked with the page's.
 fn check_title(title: &str, lang: Lang, f: &EarningsFacts) -> Result<(), String> {
-    let n = title.chars().count();
-    if n > title_max(lang) {
-        return Err(format!(
-            "the title is {n} characters; keep it to {} or fewer",
-            title_max(lang)
-        ));
+    let n = title_width(title, f);
+    let max = title_max(lang);
+    if n > max {
+        return Err(match lang {
+            Lang::En => format!(
+                "the title is {n} characters (the company's name counted as its ticker); keep it to {max} or fewer"
+            ),
+            Lang::Zh => format!(
+                "the title is {n} columns wide (a Chinese character or full-width mark counts 2, a Latin letter, digit or space 1, the company's name as its ticker); keep it to {max}, about {} Chinese characters",
+                max / 2
+            ),
+        });
     }
     if let Some(m) = boilerplate_re(lang).find(title) {
         return Err(format!(
@@ -873,7 +906,7 @@ pub(crate) mod tests {
     fn title_length_cap() {
         let f = facts();
         let en = format!(
-            "Apple revenue reaches $102.5 billion{}",
+            "Revenue reaches $102.5 billion{} again",
             " and more".repeat(6)
         );
         assert_eq!(en.chars().count(), 90);
@@ -883,13 +916,46 @@ pub(crate) mod tests {
             e.contains("91 characters") && e.contains("90 or fewer"),
             "{e}"
         );
-        let zh: String = format!("苹果营收1025亿美元{}", "，同比增长".repeat(6))
+        // 40 Chinese characters are 80 columns.
+        let zh: String = format!("苹果营收增至一千亿美元{}", "，同比增长".repeat(6))
             .chars()
-            .take(40)
-            .collect();
-        assert_eq!(zh.chars().count(), 40);
+            .take(39)
+            .collect::<String>()
+            + "8%";
+        assert_eq!(title_width(&zh, &f), 80);
         assert_eq!(check_title(&zh, Lang::Zh, &f), Ok(()));
-        assert!(check_title(&format!("{zh}。"), Lang::Zh, &f).is_err());
+        let e = check_title(&format!("{zh}。"), Lang::Zh, &f).unwrap_err();
+        assert!(
+            e.contains("82 columns") && e.contains("about 40 Chinese characters"),
+            "{e}"
+        );
+        // An English name in a Chinese title counts its letters as half a
+        // Chinese character each (50 characters, 68 columns).
+        let hpe = "Hewlett Packard Enterprise第四财季营收增至93亿美元，每股收益0.44美元";
+        assert_eq!(hpe.chars().count(), 50);
+        assert_eq!(title_width(hpe, &f), 68);
+        assert_eq!(check_title(hpe, Lang::Zh, &f), Ok(()));
+    }
+
+    #[test]
+    fn long_company_names_count_as_their_ticker() {
+        let mut f = facts();
+        f.company = "American International Group".into();
+        f.ticker = "AIG".into();
+        let t = "American International Group swings to a $1.85-a-share loss as revenue reaches $102.5 billion";
+        assert_eq!(t.chars().count(), 93);
+        assert_eq!(title_width(t, &f), 68);
+        assert_eq!(check_title(t, Lang::En, &f), Ok(()));
+        // The same takeaway with padding past 90 still fails.
+        let long = format!("{t}, while gross margin holds at 47.2%");
+        assert!(check_title(&long, Lang::En, &f)
+            .unwrap_err()
+            .contains("characters"));
+        let mut f = facts();
+        f.company = "Hewlett Packard Enterprise".into();
+        f.ticker = "HPE".into();
+        let zh = "Hewlett Packard Enterprise第四财季营收增至1025亿美元，GAAP每股收益1.85美元，毛利率47.2%";
+        assert_eq!(check_title(zh, Lang::Zh, &f), Ok(()));
     }
 
     #[tokio::test]
@@ -941,7 +1007,10 @@ pub(crate) mod tests {
             PROMPT_EN.contains("most important result")
                 && PROMPT_EN.contains("at most 90 characters")
         );
-        assert!(PROMPT_ZH.contains("最重要的结果") && PROMPT_ZH.contains("不超过 40 个字"));
+        assert!(
+            PROMPT_ZH.contains("最重要的结果")
+                && PROMPT_ZH.contains("不超过 40 个汉字（英文字母、数字和空格按半个汉字计）")
+        );
     }
 
     /// A profit a year earlier, a loss now (`extract::tests::SWING`), with
