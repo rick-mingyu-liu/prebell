@@ -94,6 +94,48 @@ describe("parseFacts premarket", () => {
     const r = parseFacts("premarket", j)!;
     expect(r.gainers[0].reason).toBeNull();
     expect(r.gainers[0].reasonUrl).toBeNull();
+    expect(r.gainers[0].reasonPost).toBeNull();
+  });
+
+  const FILING = "https://www.sec.gov/Archives/edgar/data/1633978/000163397826000041/0001633978-26-000041-index.htm";
+  const THEME_WHY = "Fell with the networking & optical group (median −4.63%); no company news found";
+
+  it("reads a mover's fallback Why when it has no reason, linking the earnings check before the filing", () => {
+    const j = premarket();
+    const g = j.gainers as { reasons: unknown[]; fallback?: unknown }[];
+    g[0].reasons = [];
+    g[0].fallback = { kind: "theme", text_en: THEME_WHY, text_zh: "随网络与光通信板块下跌" };
+    g[1].reasons = [];
+    g[1].fallback = { kind: "results", text_en: "Reported results after Monday's close", text_zh: "x", filing_url: FILING };
+    g[2].reasons = [];
+    g[2].fallback = {
+      kind: "results",
+      text_en: "Reported results before the open",
+      text_zh: "x",
+      post_slug: "lite-q1-fy2027-earnings",
+      filing_url: FILING,
+    };
+    const r = parseFacts("premarket", j)!;
+    expect(r.gainers[0]).toMatchObject({ reason: THEME_WHY, reasonUrl: null, reasonPost: null });
+    expect(r.gainers[1]).toMatchObject({ reason: "Reported results after Monday's close", reasonUrl: FILING, reasonPost: null });
+    expect(r.gainers[2]).toMatchObject({ reasonUrl: null, reasonPost: "lite-q1-fy2027-earnings" });
+  });
+
+  it("prefers a verified reason to a fallback, and reads a malformed fallback as none", () => {
+    const j = premarket();
+    const g = j.gainers as { reasons: unknown[]; fallback?: unknown }[];
+    const summary = parseFacts("premarket", premarket())!.gainers[0].reason;
+    g[0].fallback = { kind: "theme", text_en: THEME_WHY };
+    for (const [i, bad] of [[1, "text"], [2, { text_en: 7 }], [3, { text_en: "  " }]] as const) {
+      g[i].reasons = [];
+      g[i].fallback = bad;
+    }
+    g[4].reasons = [];
+    g[4].fallback = { text_en: "Reported results before the open", post_slug: "../x", filing_url: "javascript:alert(1)" };
+    const r = parseFacts("premarket", j)!;
+    expect(r.gainers[0].reason).toBe(summary);
+    for (const i of [1, 2, 3]) expect(r.gainers[i].reason).toBeNull();
+    expect(r.gainers[4]).toMatchObject({ reason: "Reported results before the open", reasonUrl: null, reasonPost: null });
   });
 });
 

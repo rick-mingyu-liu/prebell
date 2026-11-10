@@ -184,6 +184,11 @@ impl Metrics {
 pub struct Note {
     pub quote: String,
     pub summary_en: String,
+    /// A highlight that names what the release itself gives for a sharp
+    /// swing in profit (an impairment, a charge, a gain on a deal). Absent
+    /// from facts stored before it existed, and from every other note.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub cause: bool,
     /// For a note quoting a table row, the table's scale ("(In millions)"
     /// -> 1e6: "Traditional Electric Operating Companies $2,272 ..." is
     /// $2,272 million); 1 for prose, and in facts stored before it was kept.
@@ -228,6 +233,46 @@ pub struct Trend {
     pub net_income: Vec<QuarterPoint>,
 }
 
+/// The trading session a share move was read in.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ShareSession {
+    Premarket,
+    Regular,
+    AfterHours,
+}
+
+/// The stock's move when the check was built: premarket and regular trading
+/// against the previous close, after hours against today's close.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct ShareMove {
+    pub session: ShareSession,
+    /// Percent units, one decimal (as printed), from the two prices: -4.2
+    /// means -4.2%.
+    pub change_pct: f64,
+    pub last: f64,
+    /// The close `change_pct` is measured from.
+    pub ref_close: f64,
+    /// The quote's own time (the session's last trade).
+    pub as_of: DateTime<Utc>,
+}
+
+/// Why facts carry no share move when it was never read: stored before
+/// the field existed, or not yet publishable.
+const NOT_READ: &str = "not read";
+
+fn share_move_not_read() -> Field<ShareMove> {
+    Field::Missing {
+        reason: NOT_READ.into(),
+    }
+}
+
+/// Facts that never read the move store no key, so facts written before the
+/// field existed serialize byte for byte as they did.
+fn share_move_unread(f: &Field<ShareMove>) -> bool {
+    matches!(f, Field::Missing { reason } if reason == NOT_READ)
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct EarningsFacts {
     pub ticker: String,
@@ -245,6 +290,12 @@ pub struct EarningsFacts {
     pub guidance: Field<Vec<Note>>,
     pub highlights: Field<Vec<Note>>,
     pub trend: Field<Trend>,
+    /// Best effort: `Missing` whenever the quote is unavailable or stale.
+    #[serde(
+        default = "share_move_not_read",
+        skip_serializing_if = "share_move_unread"
+    )]
+    pub share_move: Field<ShareMove>,
 }
 
 /// Why a figure is missing when the model found none in the release.
@@ -308,7 +359,7 @@ pub struct EarningsAllowed {
     pub counts: Vec<f64>,
     /// The years the trend's quarters fall in.
     pub years: Vec<f64>,
-    /// Rates in table quotes.
+    /// Rates in table quotes, and the share move's percent.
     pub rates: Vec<f64>,
     /// Table rows' current-period cells at the table's scale (SO's segment
     /// row "$2,272" is $2,272 million): only in a sentence that names the
@@ -701,6 +752,12 @@ pub fn allowed(f: &EarningsFacts) -> EarningsAllowed {
             a.years.push(f64::from(p.period_end.year()));
         }
     }
+    // The share move: its percent only as a percentage, its prices as any
+    // figure (they are dollar prices, and a draft cites them as such).
+    if let Field::Value(s) = &f.share_move {
+        a.rates.push(s.change_pct);
+        a.any.extend([s.last, s.ref_close]);
+    }
     a
 }
 
@@ -776,6 +833,7 @@ pub(crate) mod tests {
             guidance: Field::Value(vec![Note {
                 quote: "the Company expects total revenue to grow 10 to 12 percent year over year".into(),
                 summary_en: "Apple expects revenue growth of 10 to 12 percent.".into(),
+                cause: false,
                 scale: 1.0,
                 current: None,
             }]),
@@ -785,6 +843,7 @@ pub(crate) mod tests {
                 eps_diluted: vec![qp("2026-03-28", 1.80), qp("2026-06-27", 1.71)],
                 net_income: vec![],
             }),
+            share_move: share_move_not_read(),
         }
     }
 
@@ -855,6 +914,7 @@ pub(crate) mod tests {
         Note {
             quote: quote.into(),
             summary_en: String::new(),
+            cause: false,
             scale,
             current: None,
         }
@@ -1246,8 +1306,76 @@ pub(crate) mod tests {
 
     #[test]
     fn json_round_trip() {
-        let f = facts();
+        let mut f = facts();
         let s = serde_json::to_string(&f).unwrap();
         assert_eq!(serde_json::from_str::<EarningsFacts>(&s).unwrap(), f);
+        f.share_move = Field::Value(ShareMove {
+            session: ShareSession::AfterHours,
+            change_pct: -6.0,
+            last: 310.31,
+            ref_close: 330.12,
+            as_of: "2026-11-10T21:22:00Z".parse().unwrap(),
+        });
+        let s = serde_json::to_string(&f).unwrap();
+        assert!(s.contains(r#""session":"after_hours""#), "{s}");
+        assert_eq!(serde_json::from_str::<EarningsFacts>(&s).unwrap(), f);
+    }
+
+    #[test]
+    fn facts_stored_before_the_share_move_still_read() {
+        let mut v = serde_json::to_value(facts()).unwrap();
+        v.as_object_mut().unwrap().remove("share_move");
+        let f: EarningsFacts = serde_json::from_value(v).unwrap();
+        assert_eq!(f, facts());
+        assert!(matches!(f.share_move, Field::Missing { .. }));
+        // Written back, they are as they were.
+        assert!(!serde_json::to_string(&f).unwrap().contains("share_move"));
+        // A move that was read and is missing is stored with its reason.
+        let mut f = facts();
+        f.share_move = Field::Missing {
+            reason: "market closed".into(),
+        };
+        let s = serde_json::to_string(&f).unwrap();
+        assert!(
+            s.contains(r#""share_move":{"Missing":{"reason":"market closed"}}"#),
+            "{s}"
+        );
+        assert_eq!(serde_json::from_str::<EarningsFacts>(&s).unwrap(), f);
+    }
+
+    #[test]
+    fn the_share_move_is_citable() {
+        let mut f = facts();
+        f.share_move = Field::Value(ShareMove {
+            session: ShareSession::Premarket,
+            change_pct: -4.2,
+            last: 325.72,
+            ref_close: 340.0,
+            as_of: "2026-11-10T13:12:00Z".parse().unwrap(),
+        });
+        let a = allowed(&f);
+        for (t, lang) in [
+            ("Shares fell 4.2% to $325.72 from $340.", Lang::En),
+            ("Shares fell 4.2 percent in premarket trading.", Lang::En),
+            (
+                "Shares: -4.2% in premarket trading (as of 8:12 AM ET)",
+                Lang::En,
+            ),
+            ("股价下跌4.2%。", Lang::Zh),
+            ("股价：盘前下跌4.2%（截至美东时间上午8:12）", Lang::Zh),
+        ] {
+            assert_eq!(a.check(t, lang), Ok(()), "{t}");
+        }
+        // The percent is only a percentage: never an amount or a count.
+        for (t, lang) in [
+            ("A $4.2 billion charge.", Lang::En),
+            ("Revenue rose by 4.2 million units.", Lang::En),
+            ("营收42亿美元。", Lang::Zh),
+        ] {
+            assert!(a.check(t, lang).is_err(), "{t}");
+        }
+        assert!(allowed(&facts())
+            .check("Shares fell 4.2%.", Lang::En)
+            .is_err());
     }
 }

@@ -1508,12 +1508,46 @@ fn period_from_headline(text: &str, v: &Value) -> Option<FiscalPeriod> {
     })
 }
 
+/// The quote names an item a release gives for a swing in profit: an
+/// impairment, a charge, a gain or loss on a deal, a tax or legal item.
+/// "Net loss was $2.4 billion" alone names none. ASCII classes only
+/// (`(?-u)`): a Unicode pattern costs several times more to compile, and
+/// the Worker pays that once per isolate.
+fn names_item(quote: &str) -> bool {
+    static R: OnceLock<Regex> = OnceLock::new();
+    R.get_or_init(|| {
+        Regex::new(r"(?i-u)\b(?:impair[a-z]*|write-?downs?|write-?offs?|wr(?:itten|ote)\s+(?:down|off)|charges?|restructuring|severance|litigation|lawsuits?|legal|settle(?:d|ments?)|tax(?:es)?|one-?time|non-?recurring|non-?cash|gains?|loss(?:es)?\s+on|extinguishment|remeasurement|mark-to-market|valuation\s+allowance|divestitures?|(?:transaction|merger|acquisition|integration)(?:-related)?\s+(?:costs?|expenses?))\b")
+            .expect("valid built-in regex")
+    })
+    .is_match(quote)
+}
+
+/// The quote attributes a result to something, in the words 8-K releases
+/// use: "primarily due to", "driven by", "as a result of", "resulting
+/// from", "reflects", or a net income, net loss or EPS figure that
+/// "included" an item. "Results included a $50 million restructuring
+/// charge" or "a tax rate of 21%" names an item but attributes nothing.
+/// ("attributable to" is left out: "net income attributable to Acme
+/// shareholders" names whose income it is, not why.)
+fn attributes(quote: &str) -> bool {
+    static R: OnceLock<Regex> = OnceLock::new();
+    R.get_or_init(|| {
+        Regex::new(r"(?i-u)\b(?:due\s+to|driven\s+by|as\s+a\s+result\s+of|result(?:s|ed|ing)?\s+from|reflect(?:s|ed|ing)?|because\s+of|caused\s+by|attributed\s+to)\b|\b(?:net\s+(?:income|loss|earnings)|(?:loss|earnings)\s+per\s+(?:diluted\s+)?share|eps)\b[a-z0-9$,.%() -]{0,80}\binclud(?:e|es|ed|ing)\b")
+            .expect("valid built-in regex")
+    })
+    .is_match(quote)
+}
+
 /// Notes whose quote is in the exhibit and whose summary uses only the
 /// quote's numbers and no markup, each with its table's scale when it
-/// quotes a table row (`row_scale`).
-fn verify_notes(text: &str, v: Option<&Value>) -> Vec<Note> {
+/// quotes a table row (`row_scale`). With `causes`, a note marked as the
+/// cause of a swing keeps the mark only when its quote names an item and
+/// attributes a result to it, and such notes come first so the cap never
+/// drops them; otherwise no note is one.
+fn verify_notes(text: &str, v: Option<&Value>, causes: bool) -> Vec<Note> {
     let lines = Lines::new(text);
-    v.and_then(Value::as_array)
+    let mut notes: Vec<Note> = v
+        .and_then(Value::as_array)
         .into_iter()
         .flatten()
         .filter_map(|it| serde_json::from_value::<Note>(it.clone()).ok())
@@ -1521,6 +1555,7 @@ fn verify_notes(text: &str, v: Option<&Value>) -> Vec<Note> {
             let quote = collapse(&n.quote);
             let (scale, current) = row_scale(&lines, &quote).unwrap_or((1.0, None));
             Note {
+                cause: causes && n.cause && names_item(&n.quote) && attributes(&n.quote),
                 scale,
                 current,
                 quote,
@@ -1538,8 +1573,11 @@ fn verify_notes(text: &str, v: Option<&Value>) -> Vec<Note> {
             };
             verify_reason(text, &r)
         })
-        .take(MAX_NOTES)
-        .collect()
+        .collect();
+    // Stable: the model's order otherwise.
+    notes.sort_by_key(|n| !n.cause);
+    notes.truncate(MAX_NOTES);
+    notes
 }
 
 /// Whether the period lengths on year line `j` and the line above it name
@@ -1750,8 +1788,8 @@ pub fn from_reply(text: &str, v: &Value) -> Extracted {
     Extracted {
         fiscal_period,
         metrics,
-        guidance: Field::Value(verify_notes(text, v.get("guidance"))),
-        highlights: Field::Value(verify_notes(text, v.get("highlights"))),
+        guidance: Field::Value(verify_notes(text, v.get("guidance"), false)),
+        highlights: Field::Value(verify_notes(text, v.get("highlights"), true)),
     }
 }
 
@@ -3408,7 +3446,7 @@ mod tests {
             // Part of a row is not the row.
             {"quote": "Traditional Electric Operating Companies $2,272 $1,920", "summary_en": "Net income was $2,272 versus $1,920."}
         ]);
-        let notes = verify_notes(text, Some(&v));
+        let notes = verify_notes(text, Some(&v), true);
         let rows: Vec<(f64, Option<f64>)> = notes.iter().map(|n| (n.scale, n.current)).collect();
         assert_eq!(
             rows,
@@ -3427,7 +3465,7 @@ mod tests {
             {"quote": "The board approved a dividend of 24 cents and a buyback of 150 shares per holder.", "summary_en": "A dividend of 24 cents."},
             {"quote": "Customers 4,512 4,100", "summary_en": "Customers were 4,512 versus 4,100."}
         ]);
-        let notes = verify_notes(text, Some(&v));
+        let notes = verify_notes(text, Some(&v), true);
         assert_eq!(notes.len(), 3);
         assert!(notes.iter().all(|n| n.scale == 1.0), "{notes:?}");
         let text = "Acme Corp reports results\nAll amounts are in millions, except per share data, unless noted.\nHighlights\nCustomers 4,512 4,100";
@@ -3436,6 +3474,7 @@ mod tests {
             Some(
                 &json!([{"quote": "Customers 4,512 4,100", "summary_en": "Customers were 4,512."}]),
             ),
+            true,
         );
         assert_eq!(notes[0].scale, 1.0);
         // A row with no year line above it, or one that does not settle the
@@ -3453,6 +3492,7 @@ mod tests {
             let notes = verify_notes(
                 text,
                 Some(&json!([{"quote": quote, "summary_en": "A row."}])),
+                true,
             );
             assert_eq!((notes[0].scale, notes[0].current), (1.0, None), "{quote}");
         }
@@ -4054,6 +4094,97 @@ mod tests {
             from_reply(&late, &v).fiscal_period,
             Field::Missing { .. }
         ));
+    }
+
+    /// A synthetic release in the shape of CHTR's third quarter of 2026 (a
+    /// year-earlier profit, a loss now), for a fictional company: the
+    /// wording is made up, not any company's.
+    pub(crate) const SWING: &str = "Acme Cable Reports Third Quarter 2026 Results\n\
+        Net loss attributable to Acme shareholders totaled $2.4 billion in the third quarter of 2026, compared to net income of $1.1 billion in the third quarter of 2025.\n\
+        The third quarter net loss was primarily due to a $4.6 billion non-cash impairment of franchise rights recorded in connection with the Metro Transactions.\n\
+        Acme closed the Metro Transactions on August 1, 2026 and launched a new operating model.\n\
+        Diluted $(20.50) $8.34";
+
+    #[test]
+    fn a_swing_keeps_the_release_s_cause_first() {
+        let cause = "The third quarter net loss was primarily due to a $4.6 billion non-cash impairment of franchise rights recorded in connection with the Metro Transactions.";
+        let closed = "Acme closed the Metro Transactions on August 1, 2026 and launched a new operating model.";
+        let note = |quote: &str, summary: &str, cause: bool| json!({"quote": quote, "summary_en": summary, "cause": cause});
+        let v = json!({
+            "highlights": [
+                note(closed, "Acme closed the Metro Transactions and launched a new operating model.", false),
+                note(cause, "The loss was mainly due to a $4.6 billion non-cash impairment of franchise rights.", true),
+            ],
+            "guidance": [note(closed, "Acme closed the Metro Transactions.", true)],
+        });
+        let x = from_reply(SWING, &v);
+        let (Field::Value(h), Field::Value(g)) = (&x.highlights, &x.guidance) else {
+            panic!("{x:?}");
+        };
+        // The cause comes first, quoted from the release; the rest keep their order.
+        assert_eq!(h.len(), 2);
+        assert!(h[0].cause && h[0].quote == cause, "{h:?}");
+        assert!(!h[1].cause);
+        // Guidance is never a cause.
+        assert!(!g[0].cause);
+    }
+
+    #[test]
+    fn a_cause_must_be_quoted_from_the_release_and_name_an_item() {
+        let v = json!({"highlights": [
+            // Invented: not in the release.
+            {"quote": "The net loss was due to a $4.6 billion goodwill write-down.", "summary_en": "A $4.6 billion goodwill write-down caused the loss.", "cause": true},
+            // In the release, but it names no item: kept as an ordinary highlight.
+            {"quote": "Acme closed the Metro Transactions on August 1, 2026 and launched a new operating model.", "summary_en": "Acme closed the Metro Transactions.", "cause": true},
+            // The summary claims an amount its quote does not give.
+            {"quote": "The third quarter net loss was primarily due to a $4.6 billion non-cash impairment of franchise rights", "summary_en": "A $7 billion impairment caused the loss.", "cause": true},
+        ]});
+        let Field::Value(h) = from_reply(SWING, &v).highlights else {
+            panic!()
+        };
+        assert_eq!(h.len(), 1, "{h:?}");
+        assert!(!h[0].cause);
+        assert!(h[0].quote.starts_with("Acme closed"));
+        for (q, item) in [
+            ("primarily due to a $4.6 billion non-cash impairment", true),
+            ("includes a $310 million restructuring charge", true),
+            ("reflecting a gain on the sale of its towers business", true),
+            ("a discrete tax benefit of $0.40 per share", true),
+            (
+                "Net loss attributable to Acme shareholders totaled $2.4 billion",
+                false,
+            ),
+            ("launched a new operating model", false),
+        ] {
+            assert_eq!(names_item(q), item, "{q}");
+        }
+        // An item the release names but does not give as a reason is an
+        // ordinary highlight.
+        for (q, cause) in [
+            ("The third quarter net loss was primarily due to a $4.6 billion non-cash impairment", true),
+            ("Net loss for the quarter included a $4.6 billion non-cash impairment charge", true),
+            ("Diluted EPS of $(20.50) includes a $310 million restructuring charge", true),
+            ("The decline in net income reflects a $1.2 billion loss on the sale of the towers business", true),
+            ("Net income increased, driven by a gain on the sale of its towers business", true),
+            ("The net loss resulted from a $900 million litigation settlement", true),
+            ("Results included a $50 million restructuring charge", false),
+            ("The effective tax rate was 21% for the quarter", false),
+            ("Operating income benefited from gains in broadband pricing", false),
+            ("Net income attributable to Acme shareholders was $1.1 billion, with a tax rate of 21%", false),
+        ] {
+            assert_eq!(names_item(q) && attributes(q), cause, "{q}");
+        }
+    }
+
+    #[test]
+    fn notes_without_a_cause_field_still_parse() {
+        let v = json!({"highlights": [{"quote": "Acme closed the Metro Transactions on August 1, 2026", "summary_en": "Acme closed the Metro Transactions."}]});
+        let Field::Value(h) = from_reply(SWING, &v).highlights else {
+            panic!()
+        };
+        assert!(!h[0].cause);
+        // Stored without the field, as before it existed.
+        assert!(!serde_json::to_string(&h[0]).unwrap().contains("cause"));
     }
 
     struct FailLlm;
