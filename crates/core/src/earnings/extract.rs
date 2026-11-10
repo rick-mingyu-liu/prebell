@@ -355,7 +355,9 @@ fn names_metric(
     }
     // A REIT's funds from operations is not earnings; reconciling items
     // are not net income ("Total adjustments to net income (344)",
-    // "Adjustments to reconcile net income to net cash ...").
+    // "Adjustments to reconcile net income to net cash ..."), nor is a
+    // part or a wider measure of it: pre-tax, continuing operations,
+    // comprehensive income.
     let other = match m {
         Metric::NetIncome => &[
             "adjustment",
@@ -364,6 +366,11 @@ fn names_metric(
             "reconciliation",
             "pro forma",
             "pro-forma",
+            "before income taxes",
+            "pre-tax",
+            "pretax",
+            "continuing operations",
+            "comprehensive",
         ][..],
         _ => &[
             "ffo",
@@ -4084,6 +4091,42 @@ mod tests {
                 matches!(&from_reply(t, &reply).metrics.net_income, Field::Missing { reason } if reason.contains("non-GAAP wording")),
                 "{q}"
             );
+        }
+    }
+
+    #[test]
+    fn a_partial_or_broader_income_is_not_net_income() {
+        // Pre-tax, continuing-operations and comprehensive income, in
+        // either wording, are other measures; "excluding" items is
+        // non-GAAP wording, like "adjusted".
+        for net in ["Net income", "Net earnings"] {
+            for q in [
+                format!("{net} from continuing operations 1,210 1,180"),
+                format!("{net} before income taxes 1,210 1,180"),
+                format!("Pre-tax {} 1,210 1,180", net.to_lowercase()),
+                format!("Pretax {} 1,210 1,180", net.to_lowercase()),
+                format!("Comprehensive {} 1,210 1,180", net.to_lowercase()),
+                format!(
+                    "Total comprehensive income ({}) 1,210 1,180",
+                    net.to_lowercase()
+                ),
+                format!("{net}, excluding special items 1,210 1,180"),
+                format!("{net} excluding special items 1,210 1,180"),
+            ] {
+                let t = format!("(In millions)\nThree Months Ended September 30,\n2026 2025\n{q}");
+                let reply = json!({"metrics": {"net_income": {"amount": "1,210", "scale": "millions", "negative": false, "quote": q}}});
+                let x = from_reply(&t, &reply);
+                assert!(
+                    matches!(x.metrics.net_income, Field::Missing { .. }),
+                    "{q}: {:?}",
+                    x.metrics.net_income
+                );
+            }
+            // The plain row still counts.
+            let q = format!("{net} 1,210 1,180");
+            let t = format!("(In millions)\nThree Months Ended September 30,\n2026 2025\n{q}");
+            let r = verify_figure(&t, Metric::NetIncome, &raw("1,210", "millions", false, &q));
+            assert_eq!(r.map(|f| f.value), Ok(1_210e6), "{q}");
         }
     }
 }
