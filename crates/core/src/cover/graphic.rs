@@ -568,6 +568,7 @@ mod tests {
             },
             name: format!("{sym} Inc"),
             reasons: vec![],
+            search_failed: false,
             fallback: None,
         };
         assert_eq!(

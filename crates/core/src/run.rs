@@ -964,17 +964,35 @@ mod tests {
         *s.reports.borrow_mut() = vec![ReportRow {
             ticker: "LITE".into(),
             report_date: "2026-10-28".into(),
-            time_slot: "amc".into(),
+            // 16:05 ET.
+            accepted_at: vec!["2026-10-28T20:05:00Z".into()],
             proof_url: Some(
                 "https://www.sec.gov/Archives/edgar/data/1633978/000163397826000041/0001633978-26-000041-index.htm"
                     .into(),
             ),
             post_slug: None,
         }];
+        /// FakeNs, except that COHR's search completes and finds nothing;
+        /// LITE's and CIEN's fail.
+        struct OpticalNs;
+        #[async_trait(?Send)]
+        impl NewsSearch for OpticalNs {
+            async fn search(
+                &self,
+                query: &str,
+                max: usize,
+            ) -> Result<Vec<SearchHit>, ProviderError> {
+                if query.contains("COHR") {
+                    Ok(vec![])
+                } else {
+                    FakeNs.search(query, max).await
+                }
+            }
+        }
         let llm = llm(true, true);
         let c = Premarket {
             md: &OpticalMd,
-            ns: &FakeNs,
+            ns: &OpticalNs,
             llm: &llm,
             watch: None,
             reports: Some(&s),
@@ -1003,6 +1021,22 @@ mod tests {
             fb("COHR").text_en,
             "Fell with the networking & optical group (median −5.45%); no company news found"
         );
+        // CIEN's search failed: the page claims no search.
+        assert_eq!(
+            fb("CIEN").text_en,
+            "Fell with the networking & optical group (median −5.45%)"
+        );
+        assert_eq!(
+            fb("CIEN").text_zh,
+            "随网络与光通信板块下跌（中位数 −5.45%）"
+        );
+        let failed = |sym: &str| {
+            f.losers
+                .iter()
+                .any(|m| m.quote.symbol == sym && m.search_failed)
+        };
+        assert!(failed("CIEN") && failed("LITE") && !failed("COHR"));
+        assert!(!f.gainers[0].search_failed);
         assert_eq!(
             f.diagnostics.last().unwrap(),
             "why results=1 theme=2 reports_err=0"
@@ -1038,6 +1072,7 @@ mod tests {
                 quote: q("AAPL", 230.0, 8.0),
                 name: "Apple".into(),
                 reasons: vec![],
+                search_failed: false,
                 fallback: None,
             }],
             losers: vec![],

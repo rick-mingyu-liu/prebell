@@ -1017,6 +1017,7 @@ pub(crate) mod tests {
                 quote: quote("AAPL", 230.5, 8.0),
                 name: "Apple".into(),
                 reasons: vec![reason("https://news.test/aapl", "Apple jumps")],
+                search_failed: false,
                 fallback: None,
             }],
             losers: vec![],
@@ -1189,6 +1190,15 @@ pub(crate) mod tests {
             (
                 Lang::Zh,
                 "事实上，戴尔和惠普也下跌。Equifax 涨幅居前，暂无明确消息的个股不作展开。",
+            ),
+            // A theme fallback without its no-news tail (`why`).
+            (
+                Lang::En,
+                "Lumentum fell with the networking & optical group (median −4.63%).",
+            ),
+            (
+                Lang::Zh,
+                "Lumentum随网络与光通信板块下跌（中位数 −4.63%）。",
             ),
         ] {
             let v = reply(lang, body).unwrap();
@@ -2009,6 +2019,7 @@ pub(crate) mod tests {
                 reason("https://news.test/aapl", "Apple jumps"),
                 reason("https://news.test/msft", "MSFT"),
             ],
+            search_failed: false,
             fallback: None,
         }];
         f.macro_items = Field::Value(vec![reason("https://news.test/msft", "MSFT")]);
@@ -2466,6 +2477,7 @@ pub(crate) mod tests {
             quote: quote("MMM", 120.0, -4.0),
             name: "3M".into(),
             reasons: vec![],
+            search_failed: false,
             fallback: None,
         }];
         assert!(!theme_names(&f.themes).contains(&"Phillips 66"));

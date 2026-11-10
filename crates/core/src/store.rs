@@ -64,8 +64,11 @@ pub struct ReportRow {
     pub ticker: String,
     /// ET `YYYY-MM-DD`.
     pub report_date: String,
-    /// bmo | amc | unknown.
-    pub time_slot: String,
+    /// RFC 3339 acceptance times of the ticker's earnings filings around
+    /// `report_date` (from the day before to the day after, in UTC dates);
+    /// the reader keeps those on its ET date. Empty for a report without a
+    /// filing row (a foreign 6-K filer's).
+    pub accepted_at: Vec<String>,
     /// The SEC filing index, for a row EDGAR marked reported.
     pub proof_url: Option<String>,
     pub post_slug: Option<String>,

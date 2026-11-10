@@ -357,6 +357,7 @@ mod tests {
                 quote: quote("NVDA", 182.35, 3.08),
                 name: "Nvidia".into(),
                 reasons: vec![reason("https://news.test/nvda", "Nvidia rises")],
+                search_failed: false,
                 fallback: None,
             }],
             losers: vec![],
@@ -633,6 +634,7 @@ mod tests {
             quote: quote("MMM", 130.0, -2.5),
             name: "3M".into(),
             reasons: vec![],
+            search_failed: false,
             fallback: None,
         }];
         let (_, md) = write(&llm(vec![clean(Lang::En)]), &f, Lang::En)
@@ -666,6 +668,7 @@ mod tests {
             quote: quote(sym, 80.0, pct),
             name: name.into(),
             reasons: vec![],
+            search_failed: false,
             fallback: None,
         };
         f.losers = vec![
@@ -675,7 +678,8 @@ mod tests {
         let reports = [ReportRow {
             ticker: "GEV".into(),
             report_date: "2026-10-28".into(),
-            time_slot: "amc".into(),
+            // 16:05 ET.
+            accepted_at: vec!["2026-10-28T20:05:00Z".into()],
             proof_url: None,
             post_slug: Some("gev-q3-2026-earnings".into()),
         }];
@@ -729,6 +733,7 @@ mod tests {
             quote: quote("PSX", 130.0, -2.5),
             name: "Phillips 66".into(),
             reasons: vec![],
+            search_failed: false,
             fallback: None,
         }];
         let l = llm(vec![reply(Lang::En, "Phillips 66 fell 2.5%.")]);
@@ -755,6 +760,7 @@ mod tests {
             quote: quote("MMM", 130.0, -2.5),
             name: "3M".into(),
             reasons: vec![],
+            search_failed: false,
             fallback: None,
         }];
         let bad = || reply(Lang::En, "3M fell; Apple rose 9%.");
