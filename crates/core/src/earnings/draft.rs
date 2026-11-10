@@ -12,6 +12,7 @@ use regex::Regex;
 use serde_json::Value;
 
 use crate::earnings::facts::{numbers_in_facts, EarningsFacts, Metric, Unit};
+use crate::earnings::share::share_line;
 use crate::facts::Field;
 use crate::numbers::{check, extract as extract_numbers, Lang};
 use crate::premarket::draft::{
@@ -312,8 +313,8 @@ fn cell(s: &str) -> String {
     s.replace(['\n', '\r'], " ").replace('|', "\\|")
 }
 
-/// The full article: title, filing line, key-figures table, LLM sections,
-/// sources and disclaimer.
+/// The full article: title, filing line, share move (when read),
+/// key-figures table, LLM sections, sources and disclaimer.
 pub fn render_markdown(d: &Draft, f: &EarningsFacts) -> String {
     let lang = d.lang;
     let mut out = format!("# {}\n\n{}\n\n", d.title, d.summary);
@@ -334,6 +335,10 @@ pub fn render_markdown(d: &Draft, f: &EarningsFacts) -> String {
     });
     out.push_str(&meta.join(" · "));
     out.push_str("\n\n");
+    if let Field::Value(m) = &f.share_move {
+        out.push_str(&share_line(m, lang));
+        out.push_str("\n\n");
+    }
 
     out.push_str(match lang {
         Lang::En => "| Key figure | This quarter |\n|---|---:|\n",
@@ -1030,6 +1035,62 @@ pub(crate) mod tests {
             let e = write(&l, &f, lang).await.unwrap_err();
             assert!(e[0].contains("is in no quote"), "{e:?}");
         }
+    }
+
+    #[test]
+    fn prompts_bound_the_share_move() {
+        assert!(
+            PROMPT_EN.contains("`share_move`")
+                && PROMPT_EN.contains("never that the results caused it")
+                && PROMPT_EN.contains("never where the shares may go next")
+        );
+        assert!(
+            PROMPT_ZH.contains("`share_move`")
+                && PROMPT_ZH.contains("不得说业绩导致了股价变动")
+                && PROMPT_ZH.contains("不得预测股价走势")
+        );
+    }
+
+    #[tokio::test]
+    async fn the_share_line_passes_the_number_check() {
+        use crate::earnings::facts::{ShareMove, ShareSession};
+        let mut f = facts();
+        f.share_move = Field::Value(ShareMove {
+            session: ShareSession::Premarket,
+            change_pct: -4.23,
+            last: 221.6,
+            ref_close: 231.39,
+            as_of: "2026-10-30T12:12:00Z".parse().unwrap(),
+        });
+        for (lang, line, mention) in [
+            (
+                Lang::En,
+                "Shares: \u{2212}4.2% in premarket trading (as of 8:12 AM ET)",
+                "Shares fell 4.2% in premarket trading after the report.",
+            ),
+            (
+                Lang::Zh,
+                "股价：盘前交易跌4.2%（截至美东时间上午8:12）",
+                "财报公布后，股价盘前下跌4.2%。",
+            ),
+        ] {
+            let mut r = reply(lang, "Quiet.");
+            r["summary"] = mention.into();
+            let l = llm(vec![r]);
+            let (_, md) = write(&l, &f, lang).await.unwrap();
+            assert!(md.contains(&format!(" · {}", period_label(&f, lang).unwrap())));
+            assert!(md.contains(&format!("\n\n{line}\n\n|")), "{md}");
+            // The model is given the move.
+            assert!(l.prompts.borrow()[0].contains("\"change_pct\": -4.23"));
+        }
+        // Without the move, the same mention is an unbacked number.
+        let mut r = reply(Lang::En, "Quiet.");
+        r["summary"] = "Shares fell 4.2% in premarket trading after the report.".into();
+        let l = llm(vec![r.clone(), r]);
+        assert_eq!(
+            write(&l, &facts(), Lang::En).await.unwrap_err(),
+            vec!["4.2%".to_string()]
+        );
     }
 
     #[test]

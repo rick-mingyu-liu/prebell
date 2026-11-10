@@ -11,7 +11,8 @@ use chrono::{DateTime, Utc};
 use prebell_core::cover::card::{cards_tick, wants_card};
 use prebell_core::earnings::calendar::{refresh_tick, yahoo_seeding, CalendarSource};
 use prebell_core::earnings::foreign::foreign_read;
-use prebell_core::earnings::run::{build_tick, poll_job};
+use prebell_core::earnings::run::{build_tick_with_shares, poll_job};
+use prebell_core::earnings::share::Shares;
 use prebell_core::edgar::{Edgar, BUILD_GAP_MS};
 use prebell_core::events::check::{check_tick, mark_checked, missing_table};
 use prebell_core::events::watch::StoreWatch;
@@ -292,7 +293,23 @@ impl JobRunner for Runner<'_> {
                 let log = |m: &str| console_log!("{m}");
                 // Beside a poll on the other queue: slower, to stay under 10/s.
                 let edgar = edgar.paced(BUILD_GAP_MS);
-                let o = build_tick(t, store, store, &edgar, llm.as_ref(), &log).await?;
+                // The share move at build time: one Yahoo quote (cookie,
+                // crumb, quote), only while it fits the subrequest budget.
+                let yahoo = Yahoo::new(self.http.clone());
+                let shares = Shares {
+                    quotes: &yahoo,
+                    budget: &|| self.http.count(),
+                };
+                let o = build_tick_with_shares(
+                    t,
+                    store,
+                    store,
+                    &edgar,
+                    llm.as_ref(),
+                    Some(&shares),
+                    &log,
+                )
+                .await?;
                 let published = o.iter().any(|(_, outcome)| wants_card(outcome));
                 Ok((format!("{o:?}"), published))
             }

@@ -203,6 +203,36 @@ pub struct Trend {
     pub net_income: Vec<QuarterPoint>,
 }
 
+/// The trading session a share move was read in.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ShareSession {
+    Premarket,
+    Regular,
+    AfterHours,
+}
+
+/// The stock's move when the check was built: premarket and regular trading
+/// against the previous close, after hours against today's close.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct ShareMove {
+    pub session: ShareSession,
+    /// Percent units, two decimals: -4.2 means -4.2%.
+    pub change_pct: f64,
+    pub last: f64,
+    /// The close `change_pct` is measured from.
+    pub ref_close: f64,
+    /// The quote's own time (the session's last trade).
+    pub as_of: DateTime<Utc>,
+}
+
+/// Facts stored before the share move existed.
+fn share_move_not_read() -> Field<ShareMove> {
+    Field::Missing {
+        reason: "not read".into(),
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 pub struct EarningsFacts {
     pub ticker: String,
@@ -220,6 +250,9 @@ pub struct EarningsFacts {
     pub guidance: Field<Vec<Note>>,
     pub highlights: Field<Vec<Note>>,
     pub trend: Field<Trend>,
+    /// Best effort: `Missing` whenever the quote is unavailable or stale.
+    #[serde(default = "share_move_not_read")]
+    pub share_move: Field<ShareMove>,
 }
 
 /// Why a figure is missing when the model found none in the release.
@@ -279,6 +312,9 @@ pub fn numbers_in_facts(f: &EarningsFacts) -> Vec<f64> {
         for p in t.revenue.iter().chain(&t.eps_diluted).chain(&t.net_income) {
             out.push(p.value);
         }
+    }
+    if let Field::Value(s) = &f.share_move {
+        out.extend([s.change_pct, s.last, s.ref_close]);
     }
     out
 }
@@ -354,6 +390,7 @@ pub(crate) mod tests {
                 eps_diluted: vec![qp("2026-03-28", 1.80), qp("2026-06-27", 1.71)],
                 net_income: vec![],
             }),
+            share_move: share_move_not_read(),
         }
     }
 
@@ -421,8 +458,46 @@ pub(crate) mod tests {
 
     #[test]
     fn json_round_trip() {
-        let f = facts();
+        let mut f = facts();
         let s = serde_json::to_string(&f).unwrap();
         assert_eq!(serde_json::from_str::<EarningsFacts>(&s).unwrap(), f);
+        f.share_move = Field::Value(ShareMove {
+            session: ShareSession::AfterHours,
+            change_pct: -6.0,
+            last: 310.31,
+            ref_close: 330.12,
+            as_of: "2026-11-10T21:22:00Z".parse().unwrap(),
+        });
+        let s = serde_json::to_string(&f).unwrap();
+        assert!(s.contains(r#""session":"after_hours""#), "{s}");
+        assert_eq!(serde_json::from_str::<EarningsFacts>(&s).unwrap(), f);
+    }
+
+    #[test]
+    fn facts_stored_before_the_share_move_still_read() {
+        let mut v = serde_json::to_value(facts()).unwrap();
+        v.as_object_mut().unwrap().remove("share_move");
+        let f: EarningsFacts = serde_json::from_value(v).unwrap();
+        assert_eq!(f, facts());
+        assert!(matches!(f.share_move, Field::Missing { .. }));
+    }
+
+    #[test]
+    fn the_share_move_is_citable() {
+        let mut f = facts();
+        f.share_move = Field::Value(ShareMove {
+            session: ShareSession::Premarket,
+            change_pct: -4.23,
+            last: 325.72,
+            ref_close: 340.0,
+            as_of: "2026-11-10T13:12:00Z".parse().unwrap(),
+        });
+        let n = numbers_in_facts(&f);
+        assert_eq!(
+            check("Shares fell 4.2% to $325.72 from $340.", Lang::En, &n),
+            Ok(())
+        );
+        assert_eq!(check("股价下跌4.2%。", Lang::Zh, &n), Ok(()));
+        assert!(check("Shares fell 4.2%.", Lang::En, &numbers_in_facts(&facts())).is_err());
     }
 }
