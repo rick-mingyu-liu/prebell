@@ -415,9 +415,12 @@ fn names_metric(
     let group = group.filter(|_| per_share);
     let words = label_keywords(m);
     // Berkshire's "Net earnings per average equivalent Class B Share": net
-    // earnings per share of a class, not basic.
-    let per_class =
-        per_share && net_per_class_share(label).is_some_and(|between| !has_word(between, "basic"));
+    // earnings per share of a class, not basic ("Net income per common
+    // share — basic").
+    let per_class = per_share
+        && net_per_class_share(label).is_some()
+        && !has_word(label, "basic")
+        && !has_word(&near_after, "basic");
     let own = per_share_after || per_class || words.iter().any(|w| has_word(label, w));
     let any = |s: &str, ws: &[&str]| ws.iter().any(|w| has_word(s, w));
     let basic = |s: &str| has_word(s, "basic") && !has_word(s, "diluted");
@@ -1157,11 +1160,6 @@ fn period_words_only(s: &str) -> bool {
         "nine",
         "twelve",
         "thirteen",
-        // Berkshire's "Third Quarter First Nine Months".
-        "first",
-        "second",
-        "third",
-        "fourth",
         "months",
         "month",
         "weeks",
@@ -1191,10 +1189,26 @@ fn period_words_only(s: &str) -> bool {
         "non",
         "unaudited",
     ];
+    // Berkshire's "Third Quarter First Nine Months"; a bare "Fourth
+    // Quarter" titles a block and is no label line.
+    const ORDINALS: &[&str] = &["first", "second", "third", "fourth"];
     static R: OnceLock<Regex> = OnceLock::new();
+    static LENGTH: OnceLock<Regex> = OnceLock::new();
+    static YEAR: OnceLock<Regex> = OnceLock::new();
     let r = R.get_or_init(|| Regex::new(r"[A-Za-z]+").expect("valid built-in regex"));
-    r.find_iter(&strip_parens(s))
-        .all(|w| WORDS.contains(&w.as_str().to_ascii_lowercase().as_str()))
+    let length = LENGTH.get_or_init(|| {
+        Regex::new(r"(?i)\b(?:months|weeks|quarters?|years?|q[1-4]|ytd|year-to-date)\b")
+            .expect("valid built-in regex")
+    });
+    let year = YEAR.get_or_init(|| Regex::new(r"\b(?:19|20)\d\d\b").expect("valid built-in regex"));
+    let s = strip_parens(s);
+    let mut ordinal = false;
+    let words = r.find_iter(&s).all(|w| {
+        let w = w.as_str().to_ascii_lowercase();
+        ordinal |= ORDINALS.contains(&w.as_str());
+        WORDS.contains(&w.as_str()) || ORDINALS.contains(&w.as_str())
+    });
+    words && (!ordinal || length.find_iter(&s).count() >= 2 || year.is_match(&s))
 }
 
 /// The years a column header line lists ("2025 Q4 2026 Q4 Change 2025
@@ -1443,17 +1457,21 @@ fn verify_period(text: &str, v: &Value) -> Result<FiscalPeriod, String> {
 /// billion", Berkshire's). Erring towards a match only keeps revenue
 /// required.
 fn states_revenue(text: &str) -> bool {
-    static R: OnceLock<Regex> = OnceLock::new();
+    static WORD: OnceLock<Regex> = OnceLock::new();
+    static FIGURE: OnceLock<Regex> = OnceLock::new();
     static ON_SALES: OnceLock<Regex> = OnceLock::new();
+    let word = WORD
+        .get_or_init(|| Regex::new(r"(?i)\b(?:revenues?|sales)\b").expect("valid built-in regex"));
+    let figure =
+        FIGURE.get_or_init(|| Regex::new(r"^[^.\d]{0,60}\d").expect("valid built-in regex"));
     let on_sales = ON_SALES.get_or_init(|| {
         Regex::new(r"(?i)\b(?:gains?|loss|losses|proceeds)(?:\s*\((?:gains?|loss|losses)\))?\s+(?:on|from)\s+(?:the\s+)?$")
             .expect("valid built-in regex")
     });
-    R.get_or_init(|| {
-        Regex::new(r"(?i)\b(?:revenues?|sales)\b[^.\d]{0,60}\d").expect("valid built-in regex")
-    })
-    .find_iter(text)
-    .any(|m| !on_sales.is_match(&text[..m.start()]))
+    // Each word on its own: "Gains on sales of businesses and total
+    // revenues were $93.4 billion" states revenue.
+    word.find_iter(text)
+        .any(|m| !on_sales.is_match(&text[..m.start()]) && figure.is_match(&text[m.end()..]))
 }
 
 /// The claimed quarter re-anchored to a line in the exhibit's opening that
@@ -3901,6 +3919,10 @@ mod tests {
         // A sales or revenue figure next to one is still required.
         for t in [
             "Net sales of $4.2 billion; gains on sales of investments of $1.7 billion.",
+            "Net sales of $4.2 billion, including gains on sales of assets of $12 million.",
+            "Gains on sales of businesses and total revenues were $93.4 billion in the quarter.",
+            "We booked losses on sales of securities while net sales grew to $8.2 billion.",
+            "Proceeds from sales of businesses and revenues of $5.1 billion were recorded.",
             "Gains on sales of investments of $1.7 billion. Revenues were $93.4 billion.",
             "Sales of $8.9 billion rose 5%.",
             "Same-store sales rose 4%.",
@@ -3944,6 +3966,9 @@ mod tests {
             "Book value per Class B share $1.54 $1.86",
             "Operating earnings per Class B share $1.54 $1.86",
             "Dividends declared per Class B share $1.54 $1.86",
+            "Net income per common share — basic $1.54 $1.86",
+            "Net earnings per common share, basic $1.54 $1.86",
+            "Net income per common share (basic) $1.54 $1.86",
         ] {
             let t = format!(
                 "(In millions, except per share amounts)\nThree Months Ended\n2026 2025\n{q}"
@@ -3970,6 +3995,29 @@ mod tests {
             &swapped,
             Metric::EpsGaap,
             &raw("$10.33", "units", false, row_b),
+        );
+        assert!(r.is_err(), "{r:?}");
+        // Ordinals count on a label line naming two periods, not on a bare
+        // "Fourth Quarter" that titles a second block: its row's latest-year
+        // column is no current column the header above can vouch for.
+        let col = |t: &str, amount: &str, q: &str| {
+            verify_figure(t, Metric::Revenue, &raw(amount, "millions", false, q))
+        };
+        let q = "Total revenues $130 $120 $480 $450";
+        assert_eq!(
+            col(
+                &format!("(In millions)\nFourth Quarter Full Year\n2026 2025 2026 2025\n{q}"),
+                "$130",
+                q
+            )
+            .map(|f| f.value),
+            Ok(130e6)
+        );
+        let q = "Total revenues $125 $130";
+        let r = col(
+            &format!("(In millions)\n2025 2026\nTotal revenues $100 $120\nFourth Quarter\n{q}"),
+            "$130",
+            q,
         );
         assert!(r.is_err(), "{r:?}");
         // The whole reply: revenue waived, Class B EPS kept.
