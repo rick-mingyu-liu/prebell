@@ -4,11 +4,11 @@
 //! report, its headline figures read from that same page; and the write-up
 //! companies that report after today's close.
 
+use std::collections::HashMap;
+
 use async_trait::async_trait;
 use chrono::{DateTime, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
-
-use std::collections::HashMap;
 
 use super::check::{check_release_pages, last_loaded, new_row, release_page};
 use super::figures::{has_figures, parse_figures, ReleaseFigure};
