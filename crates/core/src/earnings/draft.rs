@@ -1057,7 +1057,7 @@ pub(crate) mod tests {
         let mut f = facts();
         f.share_move = Field::Value(ShareMove {
             session: ShareSession::Premarket,
-            change_pct: -4.23,
+            change_pct: -4.2,
             last: 221.6,
             ref_close: 231.39,
             as_of: "2026-10-30T12:12:00Z".parse().unwrap(),
@@ -1065,12 +1065,12 @@ pub(crate) mod tests {
         for (lang, line, mention) in [
             (
                 Lang::En,
-                "Shares: \u{2212}4.2% in premarket trading (as of 8:12 AM ET)",
+                "Shares: -4.2% in premarket trading (as of 8:12 AM ET)",
                 "Shares fell 4.2% in premarket trading after the report.",
             ),
             (
                 Lang::Zh,
-                "股价：盘前交易跌4.2%（截至美东时间上午8:12）",
+                "股价：盘前下跌4.2%（截至美东时间上午8:12）",
                 "财报公布后，股价盘前下跌4.2%。",
             ),
         ] {
@@ -1081,7 +1081,7 @@ pub(crate) mod tests {
             assert!(md.contains(&format!(" · {}", period_label(&f, lang).unwrap())));
             assert!(md.contains(&format!("\n\n{line}\n\n|")), "{md}");
             // The model is given the move.
-            assert!(l.prompts.borrow()[0].contains("\"change_pct\": -4.23"));
+            assert!(l.prompts.borrow()[0].contains("\"change_pct\": -4.2"));
         }
         // Without the move, the same mention is an unbacked number.
         let mut r = reply(Lang::En, "Quiet.");

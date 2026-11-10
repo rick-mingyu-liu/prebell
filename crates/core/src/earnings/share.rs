@@ -48,10 +48,12 @@ fn hm(h: u32, m: u32) -> NaiveTime {
     NaiveTime::from_hms_opt(h, m, 0).expect("valid built-in time")
 }
 
-/// The move for a build at `now`, or why there is none.
+/// The move for a build at `now` of a filing accepted at `accepted_at`, or
+/// why there is none.
 pub async fn read(
     shares: Option<&Shares<'_>>,
     ticker: &str,
+    accepted_at: DateTime<Utc>,
     now: DateTime<Utc>,
 ) -> Field<ShareMove> {
     let missing = |reason: String| Field::Missing { reason };
@@ -67,7 +69,7 @@ pub async fn read(
     }
     // Yahoo writes class shares with a dash; the watchlist with a dot.
     match s.quotes.session_quote(&ticker.replace('.', "-")).await {
-        Ok(q) => share_move(&q, now).map_or_else(missing, Field::Value),
+        Ok(q) => share_move(&q, accepted_at, now).map_or_else(missing, Field::Value),
         Err(e) => missing(format!("yahoo: {e}")),
     }
 }
@@ -79,8 +81,14 @@ pub async fn read(
 /// - from the close, the after-hours price against today's close.
 ///
 /// The quote's own time must fall in that session today; anything else is
-/// left over from another session and is no move at all.
-pub fn share_move(q: &SessionQuote, now: DateTime<Utc>) -> Result<ShareMove, String> {
+/// left over from another session and is no move at all. It must also be no
+/// earlier than the filing's acceptance (`accepted_at`): a trade from before
+/// the report is not the shares' answer to it.
+pub fn share_move(
+    q: &SessionQuote,
+    accepted_at: DateTime<Utc>,
+    now: DateTime<Utc>,
+) -> Result<ShareMove, String> {
     let local = et(now);
     let day = local.date_naive();
     let close = match trading_day(day) {
@@ -132,36 +140,40 @@ pub fn share_move(q: &SessionQuote, now: DateTime<Utc>) -> Result<ShareMove, Str
             at,
         )
     };
+    if at.with_timezone(&Utc) < accepted_at {
+        return Err("stale: no trade since the report".into());
+    }
     let last = last.filter(|x| x.is_finite() && *x > 0.0);
     let ref_close = ref_close.filter(|x| x.is_finite() && *x > 0.0);
     let (Some(last), Some(ref_close)) = (last, ref_close) else {
         return Err("incomplete quote".into());
     };
-    // The prices give the percent, so the three numbers always agree.
+    // The prices give the percent, so the three numbers always agree. It is
+    // rounded once, here, to the one decimal the page prints.
     let change_pct = (last - ref_close) / ref_close * 100.0;
     if pct.is_some_and(|p| !p.is_finite() || (p - change_pct).abs() > PCT_TOLERANCE) {
         return Err("stale: the percent and the prices disagree".into());
     }
     Ok(ShareMove {
         session,
-        change_pct: round2(change_pct),
+        change_pct: (change_pct * 10.0).round() / 10.0,
         last: round2(last),
         ref_close: round2(ref_close),
         as_of: at.with_timezone(&Utc),
     })
 }
 
-/// The line under the filing line: "Shares: −4.2% in premarket trading (as
-/// of 8:12 AM ET)" / "股价：盘前交易跌4.2%（截至美东时间上午8:12）". One
-/// decimal; a move that rounds to zero is "unchanged" / "持平".
+/// The line under the filing line: "Shares: -4.2% in premarket trading (as
+/// of 8:12 AM ET)" / "股价：盘前下跌4.2%（截至美东时间上午8:12）". The move
+/// is stored to one decimal; zero is "unchanged" / "持平". The sign is an
+/// ASCII "-", as in the key-figures table below it (`fmt_value`).
 pub fn share_line(m: &ShareMove, lang: Lang) -> String {
-    let tenths = (m.change_pct * 10.0).round();
-    let pct = format!("{:.1}%", tenths.abs() / 10.0);
+    let pct = format!("{:.1}%", m.change_pct.abs());
     match lang {
         Lang::En => {
-            let change = match tenths {
+            let change = match m.change_pct {
                 t if t > 0.0 => format!("+{pct}"),
-                t if t < 0.0 => format!("\u{2212}{pct}"),
+                t if t < 0.0 => format!("-{pct}"),
                 _ => "unchanged".into(),
             };
             let session = match m.session {
@@ -175,15 +187,15 @@ pub fn share_line(m: &ShareMove, lang: Lang) -> String {
             )
         }
         Lang::Zh => {
-            let change = match tenths {
-                t if t > 0.0 => format!("涨{pct}"),
-                t if t < 0.0 => format!("跌{pct}"),
+            let change = match m.change_pct {
+                t if t > 0.0 => format!("上涨{pct}"),
+                t if t < 0.0 => format!("下跌{pct}"),
                 _ => "持平".into(),
             };
             let session = match m.session {
-                ShareSession::Premarket => "盘前交易",
-                ShareSession::Regular => "常规交易",
-                ShareSession::AfterHours => "盘后交易",
+                ShareSession::Premarket => "盘前",
+                ShareSession::Regular => "盘中",
+                ShareSession::AfterHours => "盘后",
             };
             // "上午8:12（美东）" without its zone note, which leads here.
             let clock = et_time(m.as_of, Lang::Zh);
@@ -204,6 +216,10 @@ pub(crate) mod tests {
     }
     fn utc(s: &str) -> DateTime<Utc> {
         s.parse().unwrap()
+    }
+    /// A filing accepted at midnight ET on Tue 2026-11-10, before every trade.
+    fn early() -> DateTime<Utc> {
+        utc("2026-11-10T05:00:00Z")
     }
 
     /// CHTR on Tue 2026-11-10 (EST, UTC-5), as one snapshot per session:
@@ -244,7 +260,7 @@ pub(crate) mod tests {
 
     #[test]
     fn each_session_against_its_reference() {
-        let m = share_move(&premarket(), utc("2026-11-10T13:15:00Z")).unwrap();
+        let m = share_move(&premarket(), early(), utc("2026-11-10T13:15:00Z")).unwrap();
         assert_eq!(
             m,
             ShareMove {
@@ -255,12 +271,12 @@ pub(crate) mod tests {
                 as_of: utc("2026-11-10T13:12:00Z"),
             }
         );
-        let m = share_move(&regular(), utc("2026-11-10T17:40:00Z")).unwrap();
+        let m = share_move(&regular(), early(), utc("2026-11-10T17:40:00Z")).unwrap();
         assert_eq!(
             (m.session, m.change_pct, m.ref_close),
             (ShareSession::Regular, 3.1, 340.0)
         );
-        let m = share_move(&after_hours(), utc("2026-11-10T21:25:00Z")).unwrap();
+        let m = share_move(&after_hours(), early(), utc("2026-11-10T21:25:00Z")).unwrap();
         assert_eq!(
             (m.session, m.change_pct, m.last, m.ref_close),
             (ShareSession::AfterHours, -6.0, 310.31, 330.12)
@@ -269,9 +285,53 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn the_move_is_rounded_once_from_the_prices() {
+        let mut q = premarket();
+        // -4.249%: one decimal from the prices, never -4.25 then -4.3.
+        q.pre_price = Some(325.5534);
+        q.pre_change_pct = None;
+        let m = share_move(&q, early(), utc("2026-11-10T13:15:00Z")).unwrap();
+        assert_eq!((m.change_pct, m.last), (-4.2, 325.55));
+        assert_eq!(
+            share_line(&m, Lang::En),
+            "Shares: -4.2% in premarket trading (as of 8:12 AM ET)"
+        );
+    }
+
+    #[test]
+    fn a_trade_before_the_report_is_no_move() {
+        // (quote, its trade time, the build's time) for each session.
+        for (q, trade, now) in [
+            (premarket(), "2026-11-10T13:12:00Z", "2026-11-10T13:15:00Z"),
+            (regular(), "2026-11-10T17:36:00Z", "2026-11-10T17:40:00Z"),
+            (
+                after_hours(),
+                "2026-11-10T21:22:00Z",
+                "2026-11-10T21:25:00Z",
+            ),
+        ] {
+            let trade = utc(trade);
+            let at = |d: i64| share_move(&q, trade + Duration::minutes(d), utc(now));
+            // Accepted a minute after the last trade: that trade predates the report.
+            assert_eq!(
+                at(1),
+                Err("stale: no trade since the report".into()),
+                "{trade}"
+            );
+            // Accepted with the trade, or a minute before it.
+            assert_eq!(at(0).unwrap().as_of, trade);
+            assert_eq!(at(-1).unwrap().as_of, trade);
+        }
+        // The review's case: a 6:41 AM premarket print, the 8-K at 7:00 AM.
+        let mut q = premarket();
+        q.pre_time = t("2026-11-10T11:41:00Z");
+        assert!(share_move(&q, utc("2026-11-10T12:00:00Z"), utc("2026-11-10T12:05:00Z")).is_err());
+    }
+
+    #[test]
     fn stale_quotes_are_no_move() {
         let stale = |q: SessionQuote, now: &str| {
-            let e = share_move(&q, utc(now)).unwrap_err();
+            let e = share_move(&q, early(), utc(now)).unwrap_err();
             assert!(e.starts_with("stale") || e == "market closed", "{e}");
         };
         // Premarket fields from yesterday.
@@ -309,7 +369,7 @@ pub(crate) mod tests {
             post_time: t("2026-11-27T18:30:00Z"),
             ..SessionQuote::default()
         };
-        let m = share_move(&q, utc("2026-11-27T18:45:00Z")).unwrap();
+        let m = share_move(&q, early(), utc("2026-11-27T18:45:00Z")).unwrap();
         assert_eq!((m.session, m.change_pct), (ShareSession::AfterHours, 1.0));
     }
 
@@ -318,32 +378,32 @@ pub(crate) mod tests {
         let mut q = premarket();
         q.pre_price = None;
         assert_eq!(
-            share_move(&q, utc("2026-11-10T13:15:00Z")),
+            share_move(&q, early(), utc("2026-11-10T13:15:00Z")),
             Err("incomplete quote".into())
         );
     }
 
     #[test]
     fn share_lines() {
-        let at = |s| share_move(&s, utc("2026-11-10T13:15:00Z")).unwrap();
+        let at = |s| share_move(&s, early(), utc("2026-11-10T13:15:00Z")).unwrap();
         let pre = at(premarket());
-        let reg = share_move(&regular(), utc("2026-11-10T17:40:00Z")).unwrap();
-        let post = share_move(&after_hours(), utc("2026-11-10T21:25:00Z")).unwrap();
+        let reg = share_move(&regular(), early(), utc("2026-11-10T17:40:00Z")).unwrap();
+        let post = share_move(&after_hours(), early(), utc("2026-11-10T21:25:00Z")).unwrap();
         for (m, en, zh) in [
             (
                 &pre,
-                "Shares: \u{2212}4.2% in premarket trading (as of 8:12 AM ET)",
-                "股价：盘前交易跌4.2%（截至美东时间上午8:12）",
+                "Shares: -4.2% in premarket trading (as of 8:12 AM ET)",
+                "股价：盘前下跌4.2%（截至美东时间上午8:12）",
             ),
             (
                 &reg,
                 "Shares: +3.1% in regular trading (as of 12:36 PM ET)",
-                "股价：常规交易涨3.1%（截至美东时间下午12:36）",
+                "股价：盘中上涨3.1%（截至美东时间下午12:36）",
             ),
             (
                 &post,
-                "Shares: \u{2212}6.0% after hours (as of 4:22 PM ET)",
-                "股价：盘后交易跌6.0%（截至美东时间下午4:22）",
+                "Shares: -6.0% after hours (as of 4:22 PM ET)",
+                "股价：盘后下跌6.0%（截至美东时间下午4:22）",
             ),
         ] {
             assert_eq!(share_line(m, Lang::En), en);
@@ -355,14 +415,14 @@ pub(crate) mod tests {
             assert!(check(en, Lang::En, &[]).is_err());
         }
         let mut flat = pre.clone();
-        flat.change_pct = 0.04;
+        flat.change_pct = 0.0;
         assert_eq!(
             share_line(&flat, Lang::En),
             "Shares: unchanged in premarket trading (as of 8:12 AM ET)"
         );
         assert_eq!(
             share_line(&flat, Lang::Zh),
-            "股价：盘前交易持平（截至美东时间上午8:12）"
+            "股价：盘前持平（截至美东时间上午8:12）"
         );
     }
 
@@ -396,11 +456,14 @@ pub(crate) mod tests {
             quotes: &q,
             budget: &|| 0,
         };
-        assert!(matches!(read(Some(&s), "CHTR", now).await, Field::Value(_)));
+        assert!(matches!(
+            read(Some(&s), "CHTR", early(), now).await,
+            Field::Value(_)
+        ));
         // A Yahoo error.
         *q.reply.borrow_mut() = Err(ProviderError::Http(429));
         assert_eq!(
-            read(Some(&s), "CHTR", now).await,
+            read(Some(&s), "CHTR", early(), now).await,
             Field::Missing {
                 reason: "yahoo: http status 429".into()
             }
@@ -412,7 +475,7 @@ pub(crate) mod tests {
             budget: &|| 35,
         };
         assert_eq!(
-            read(Some(&s), "CHTR", now).await,
+            read(Some(&s), "CHTR", early(), now).await,
             Field::Missing {
                 reason: "subrequest budget".into()
             }
@@ -423,12 +486,12 @@ pub(crate) mod tests {
             budget: &|| 0,
         };
         assert!(matches!(
-            read(Some(&s), "BRK.B", utc("2026-11-14T15:00:00Z")).await,
+            read(Some(&s), "BRK.B", early(), utc("2026-11-14T15:00:00Z")).await,
             Field::Missing { .. }
         ));
         assert_eq!(q.calls.get(), 2);
         assert!(matches!(
-            read(None, "CHTR", now).await,
+            read(None, "CHTR", early(), now).await,
             Field::Missing { .. }
         ));
     }
