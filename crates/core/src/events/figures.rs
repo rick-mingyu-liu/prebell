@@ -43,8 +43,11 @@ pub struct ReleaseFigure {
     pub quote: String,
 }
 
+/// ASCII classes (`\s`, `\d`): the release text is ASCII, and Unicode
+/// classes make each pattern several times slower to compile, CPU the
+/// Worker pays on every brief that reads a release.
 fn re(p: &str) -> Regex {
-    Regex::new(p).expect("valid built-in regex")
+    Regex::new(&format!("(?-u){p}")).expect("valid built-in regex")
 }
 
 /// A sentence longer than this is not one of the opening sentences.
@@ -162,7 +165,7 @@ fn jobs_res() -> &'static [Regex; 3] {
             // "Total nonfarm payroll employment rose by 165,000 in October"
             // / "changed little in August (+22,000)".
             re(&format!(
-                r"Total\s+nonfarm\s+payroll\s+employment\s+(?:(rose|increased|grew|edged\s+up|declined|decreased|fell|edged\s+down)\s+by\s+{NUM}|(?:changed\s+little|was\s+little\s+changed|was\s+essentially\s+unchanged|was\s+unchanged|held\s+steady)\s+(?:in\s+[A-Z][a-z]+\s+)?\(([+\-−]?){NUM}\))"
+                r"Total\s+nonfarm\s+payroll\s+employment\s+(?:(rose|increased|grew|edged\s+up|declined|decreased|fell|edged\s+down)\s+by\s+{NUM}|(?:changed\s+little|was\s+little\s+changed|was\s+essentially\s+unchanged|was\s+unchanged|held\s+steady)\s+(?:in\s+[A-Z][a-z]+\s+)?\(((?:[+-]|(?u:−))?){NUM}\))"
             )),
             // Within that sentence: "the unemployment rate changed little at
             // 4.1 percent" / "the unemployment rate, at 4.4 percent, changed
@@ -229,13 +232,28 @@ fn jobs(text: &str) -> Vec<ReleaseFigure> {
     out
 }
 
+/// Bytes of a release read for its figures, from its `<h1>` on: the
+/// opening summary is about 2 KB.
+const OPENING_BYTES: usize = 12 * 1024;
+
+/// The release's opening, past the site navigation: from its `<h1>` (the
+/// page's start when it has none), at most `OPENING_BYTES`.
+fn opening(page: &str) -> &str {
+    let start = page.find("<h1").unwrap_or(0);
+    let mut end = page.len().min(start + OPENING_BYTES);
+    while !page.is_char_boundary(end) {
+        end -= 1;
+    }
+    &page[start..end]
+}
+
 /// The headline figures on a release page (or its first bytes) for
 /// `series` `cpi` or `jobs`; none for other kinds or a page that does not
 /// parse.
 pub fn parse_figures(series: &str, page: &str) -> Vec<ReleaseFigure> {
     match series {
-        "cpi" => cpi(page),
-        "jobs" => jobs(page),
+        "cpi" => cpi(opening(page)),
+        "jobs" => jobs(opening(page)),
         _ => vec![],
     }
 }
