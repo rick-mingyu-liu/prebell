@@ -5,10 +5,11 @@
 //! publishes without it. Nothing is retried.
 
 use async_trait::async_trait;
-use chrono::{DateTime, Duration, NaiveTime, Utc};
+use chrono::{DateTime, Duration, NaiveTime, TimeZone, Utc};
+use chrono_tz::America::New_York;
 
 use crate::budget::allows;
-use crate::clock::{et, trading_day, DayKind};
+use crate::clock::{et, previous_close, trading_day, DayKind};
 use crate::earnings::facts::{ShareMove, ShareSession};
 use crate::events::et_time;
 use crate::facts::{round2, Field};
@@ -84,6 +85,13 @@ pub async fn read(
 /// left over from another session and is no move at all. It must also be no
 /// earlier than the filing's acceptance (`accepted_at`): a trade from before
 /// the report is not the shares' answer to it.
+///
+/// Premarket and after hours, the reference close must also come no later
+/// than the acceptance, so the move is the reaction since the last close
+/// before the report (a report at noon, built at 4:10 PM, has no after-hours
+/// move: its reaction was in regular trading). Regular trading always
+/// measures from the previous close, so part of the day's move may predate a
+/// report filed during the session; the prompts never call it a reaction.
 pub fn share_move(
     q: &SessionQuote,
     accepted_at: DateTime<Utc>,
@@ -142,6 +150,17 @@ pub fn share_move(
     };
     if at.with_timezone(&Utc) < accepted_at {
         return Err("stale: no trade since the report".into());
+    }
+    let ref_time = match session {
+        ShareSession::Premarket => Some(previous_close(now)),
+        ShareSession::AfterHours => New_York
+            .from_local_datetime(&day.and_time(close))
+            .earliest()
+            .map(|t| t.with_timezone(&Utc)),
+        ShareSession::Regular => None,
+    };
+    if ref_time.is_some_and(|t| t > accepted_at) {
+        return Err("stale: the report came before the reference close".into());
     }
     let last = last.filter(|x| x.is_finite() && *x > 0.0);
     let ref_close = ref_close.filter(|x| x.is_finite() && *x > 0.0);
@@ -217,9 +236,14 @@ pub(crate) mod tests {
     fn utc(s: &str) -> DateTime<Utc> {
         s.parse().unwrap()
     }
-    /// A filing accepted at midnight ET on Tue 2026-11-10, before every trade.
+    /// A filing accepted at midnight ET on Tue 2026-11-10, before every
+    /// trade that day and after Monday's close.
     fn early() -> DateTime<Utc> {
         utc("2026-11-10T05:00:00Z")
+    }
+    /// A filing accepted at 4:05 PM ET on Tue 2026-11-10, after the close.
+    fn amc() -> DateTime<Utc> {
+        utc("2026-11-10T21:05:00Z")
     }
 
     /// CHTR on Tue 2026-11-10 (EST, UTC-5), as one snapshot per session:
@@ -276,7 +300,7 @@ pub(crate) mod tests {
             (m.session, m.change_pct, m.ref_close),
             (ShareSession::Regular, 3.1, 340.0)
         );
-        let m = share_move(&after_hours(), early(), utc("2026-11-10T21:25:00Z")).unwrap();
+        let m = share_move(&after_hours(), amc(), utc("2026-11-10T21:25:00Z")).unwrap();
         assert_eq!(
             (m.session, m.change_pct, m.last, m.ref_close),
             (ShareSession::AfterHours, -6.0, 310.31, 330.12)
@@ -329,6 +353,38 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn extended_hours_measure_from_the_last_close_before_the_report() {
+        let gone = "stale: the report came before the reference close".to_string();
+        // Filed at noon Tuesday, built after the close: the reaction was in
+        // regular trading, and the after-hours move from Tuesday's close is
+        // not it.
+        let noon = utc("2026-11-10T17:00:00Z");
+        assert_eq!(
+            share_move(&after_hours(), noon, utc("2026-11-10T21:25:00Z")),
+            Err(gone.clone())
+        );
+        // Filed at noon Monday, built Tuesday before the open: measured from
+        // Monday's close, after the report.
+        assert_eq!(
+            share_move(
+                &premarket(),
+                utc("2026-11-09T17:00:00Z"),
+                utc("2026-11-10T13:15:00Z")
+            ),
+            Err(gone)
+        );
+        // Filed after Monday's close (or at it), built Tuesday premarket.
+        for accepted in ["2026-11-09T21:00:00Z", "2026-11-09T21:05:00Z"] {
+            assert!(share_move(&premarket(), utc(accepted), utc("2026-11-10T13:15:00Z")).is_ok());
+        }
+        // Regular trading always measures from the previous close; a
+        // mid-session report keeps its move (the prompts never call it a
+        // reaction to the report).
+        let m = share_move(&regular(), noon, utc("2026-11-10T17:40:00Z")).unwrap();
+        assert_eq!(m.session, ShareSession::Regular);
+    }
+
+    #[test]
     fn stale_quotes_are_no_move() {
         let stale = |q: SessionQuote, now: &str| {
             let e = share_move(&q, early(), utc(now)).unwrap_err();
@@ -369,7 +425,7 @@ pub(crate) mod tests {
             post_time: t("2026-11-27T18:30:00Z"),
             ..SessionQuote::default()
         };
-        let m = share_move(&q, early(), utc("2026-11-27T18:45:00Z")).unwrap();
+        let m = share_move(&q, utc("2026-11-27T18:05:00Z"), utc("2026-11-27T18:45:00Z")).unwrap();
         assert_eq!((m.session, m.change_pct), (ShareSession::AfterHours, 1.0));
     }
 
@@ -388,7 +444,7 @@ pub(crate) mod tests {
         let at = |s| share_move(&s, early(), utc("2026-11-10T13:15:00Z")).unwrap();
         let pre = at(premarket());
         let reg = share_move(&regular(), early(), utc("2026-11-10T17:40:00Z")).unwrap();
-        let post = share_move(&after_hours(), early(), utc("2026-11-10T21:25:00Z")).unwrap();
+        let post = share_move(&after_hours(), amc(), utc("2026-11-10T21:25:00Z")).unwrap();
         for (m, en, zh) in [
             (
                 &pre,

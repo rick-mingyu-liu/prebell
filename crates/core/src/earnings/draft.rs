@@ -11,7 +11,7 @@ use chrono::Datelike;
 use regex::Regex;
 use serde_json::Value;
 
-use crate::earnings::facts::{numbers_in_facts, EarningsFacts, Metric, Unit};
+use crate::earnings::facts::{numbers_in_facts, EarningsFacts, Metric, ShareSession, Unit};
 use crate::earnings::share::share_line;
 use crate::facts::Field;
 use crate::numbers::{check, extract as extract_numbers, Lang};
@@ -131,13 +131,22 @@ fn is_wide(c: char) -> bool {
 /// shorten "American International Group" or "Hewlett Packard Enterprise"
 /// faithfully, and the Chinese prompt keeps names it has no Chinese for.
 fn title_width(title: &str, f: &EarningsFacts) -> usize {
-    let title = if f.company.is_empty() {
-        title.to_string()
-    } else {
-        title.replace(&f.company, &f.ticker)
-    };
-    title.chars().map(|c| if is_wide(c) { 2 } else { 1 }).sum()
+    if f.company.is_empty() {
+        return display_width(title);
+    }
+    display_width(&title.replace(&f.company, &f.ticker))
 }
+
+fn display_width(s: &str) -> usize {
+    s.chars().map(|c| if is_wide(c) { 2 } else { 1 }).sum()
+}
+
+/// The hard ceiling on the title as shown, long name and all. Nothing on
+/// the site clamps a title: at 120 columns a front-page earnings card
+/// (about 206px wide at 1280px, 358px at 390px, 16px serif) wraps to about
+/// five and three lines, and the post heading (680px at 32px, 358px at 26px)
+/// to about three and five; it wraps and never overflows.
+const TITLE_HARD_MAX: usize = 120;
 
 /// The press release's own kind of headline: "Charter Communications
 /// Reports Third Quarter 2026 Results", "Duke Energy reports third-quarter
@@ -193,6 +202,12 @@ fn check_title(title: &str, lang: Lang, f: &EarningsFacts) -> Result<(), String>
                 max / 2
             ),
         });
+    }
+    let shown = display_width(title);
+    if shown > TITLE_HARD_MAX {
+        return Err(format!(
+            "the title is {shown} columns wide with the company's full name; keep it to {TITLE_HARD_MAX} or fewer (use a shorter form of the name)"
+        ));
     }
     if let Some(m) = boilerplate_re(lang).find(title) {
         return Err(format!(
@@ -366,6 +381,45 @@ fn check_causes(d: &Draft, f: &EarningsFacts) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+/// Wording that places something after the report.
+const AFTER_REPORT: [&str; 10] = [
+    "after the report",
+    "following the report",
+    "after the results",
+    "following the results",
+    "after the earnings",
+    "after reporting",
+    "after the release",
+    "in response to the",
+    "财报后",
+    "业绩后",
+];
+
+/// A regular-session move is measured from the previous close, so part of it
+/// may predate a report filed during the session: while the facts carry
+/// one, the draft may not place anything "after the report". Premarket and
+/// after hours, `share::share_move` measures from the last close before the
+/// report, so the wording is true there.
+fn check_share_timing(d: &Draft, f: &EarningsFacts) -> Result<(), String> {
+    if !matches!(&f.share_move, Field::Value(m) if m.session == ShareSession::Regular) {
+        return Ok(());
+    }
+    let text = std::iter::once(d.title.as_str())
+        .chain([d.summary.as_str()])
+        .chain(d.sections.iter().map(|(_, m)| m.as_str()))
+        .collect::<Vec<_>>()
+        .join("\n")
+        .to_lowercase();
+    // "财报公布后" and "公布财报后" both end in a match below.
+    let text = text.replace("公布", "").replace("发布", "");
+    match AFTER_REPORT.iter().find(|w| text.contains(*w)) {
+        Some(w) => Err(format!(
+            "the share move is for regular trading, measured from the previous close, so part of it may predate the report: state it with its session and do not place it after the report (found {w:?})"
+        )),
+        None => Ok(()),
+    }
 }
 
 /// Up to `max` decimals, trailing zeros dropped: 47.20 -> "47.2".
@@ -601,6 +655,7 @@ fn attempt(
     let d = parse(&v, lang, want).map_err(Problem::Malformed)?;
     check_title(&d.title, lang, f).map_err(Problem::Malformed)?;
     check_causes(&d, f).map_err(Problem::Malformed)?;
+    check_share_timing(&d, f).map_err(Problem::Malformed)?;
     let md = render_markdown(&d, f);
     // The whole page, code-rendered parts included, is checked. Names are
     // not figures: "3M" must not read as three million.
@@ -1023,6 +1078,35 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn a_long_name_still_has_a_hard_ceiling() {
+        let mut f = facts();
+        f.company = "American International Group".into();
+        f.ticker = "AIG".into();
+        // 75 columns with the name as its ticker, 100 as shown: within both.
+        let t = "American International Group swings to a $1.85-a-share loss as revenue reaches $102.5 billion, up 8%";
+        assert_eq!((title_width(t, &f), display_width(t)), (75, 100));
+        assert_eq!(check_title(t, Lang::En, &f), Ok(()));
+        // One copy of a long name can add at most its length; a second
+        // passes the masked cap but not the ceiling.
+        let t = "American International Group swings to a loss of $1.85 a share; American International Group revenue reaches $102.5 billion";
+        assert_eq!((title_width(t, &f), display_width(t)), (73, 123));
+        let e = check_title(t, Lang::En, &f).unwrap_err();
+        assert!(
+            e.contains("123 columns") && e.contains("120 or fewer"),
+            "{e}"
+        );
+        let zh = format!("{}季度营收增至1025亿美元，毛利率47.2%", f.company);
+        assert_eq!(check_title(&zh, Lang::Zh, &f), Ok(()));
+        let zh = format!(
+            "{n}与{n}季度营收增至1025亿美元，GAAP每股收益1.85美元，毛利率47.2%，同比增长8%",
+            n = f.company
+        );
+        assert_eq!((title_width(&zh, &f), display_width(&zh)), (77, 127));
+        let e = check_title(&zh, Lang::Zh, &f).unwrap_err();
+        assert!(e.contains("with the company's full name"), "{e}");
+    }
+
+    #[test]
     fn long_company_names_count_as_their_ticker() {
         let mut f = facts();
         f.company = "American International Group".into();
@@ -1195,14 +1279,67 @@ pub(crate) mod tests {
     fn prompts_bound_the_share_move() {
         assert!(
             PROMPT_EN.contains("`share_move`")
-                && PROMPT_EN.contains("never that the results caused it")
-                && PROMPT_EN.contains("never where the shares may go next")
+                && PROMPT_EN.contains("Never say the results caused a move")
+                && PROMPT_EN.contains("never say where the shares may go next")
+                && PROMPT_EN.contains("never say it came after or followed the report")
         );
         assert!(
             PROMPT_ZH.contains("`share_move`")
                 && PROMPT_ZH.contains("不得说业绩导致了股价变动")
                 && PROMPT_ZH.contains("不得预测股价走势")
+                && PROMPT_ZH.contains("不得说它发生在财报公布之后")
         );
+    }
+
+    #[tokio::test]
+    async fn a_regular_session_move_is_never_after_the_report() {
+        use crate::earnings::facts::ShareMove;
+        let mut f = facts();
+        f.share_move = Field::Value(ShareMove {
+            session: ShareSession::Regular,
+            change_pct: 3.1,
+            last: 105.0,
+            ref_close: 101.84,
+            as_of: "2026-10-30T16:36:00Z".parse().unwrap(),
+        });
+        for (lang, bad, good) in [
+            (
+                Lang::En,
+                "Shares rose 3.1% in regular trading after the report.",
+                "Shares are up 3.1% in regular trading.",
+            ),
+            (
+                Lang::En,
+                "Following the report, shares are up 3.1% in regular trading.",
+                "Shares are up 3.1% in regular trading.",
+            ),
+            (
+                Lang::Zh,
+                "财报公布后，股价盘中上涨3.1%。",
+                "股价盘中上涨3.1%。",
+            ),
+            (
+                Lang::Zh,
+                "公布财报后股价盘中上涨3.1%。",
+                "股价盘中上涨3.1%。",
+            ),
+        ] {
+            let mut r = reply(lang, "Quiet.");
+            r["summary"] = bad.into();
+            let mut ok = reply(lang, "Quiet.");
+            ok["summary"] = good.into();
+            let l = llm(vec![r, ok]);
+            let (d, _) = write(&l, &f, lang).await.unwrap();
+            assert_eq!(d.summary, good);
+            let p = l.prompts.borrow()[1].clone();
+            assert!(p.contains("do not place it after the report"), "{bad}: {p}");
+        }
+        // Premarket and after hours, "after the report" is true and allowed
+        // (`the_share_line_passes_the_number_check`); without a move, the
+        // guard is off.
+        let mut r = reply(Lang::En, "Quiet.");
+        r["summary"] = "Revenue was $102.5 billion after the report's 8% rise.".into();
+        assert!(write(&llm(vec![r]), &facts(), Lang::En).await.is_ok());
     }
 
     #[tokio::test]
