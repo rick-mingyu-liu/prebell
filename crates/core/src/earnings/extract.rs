@@ -1433,14 +1433,30 @@ fn period_from_headline(text: &str, v: &Value) -> Option<FiscalPeriod> {
     })
 }
 
+/// The quote names an item a release gives for a swing in profit: an
+/// impairment, a charge, a gain or loss on a deal, a tax or legal item.
+/// "Net loss was $2.4 billion" alone names none.
+fn names_item(quote: &str) -> bool {
+    static R: OnceLock<Regex> = OnceLock::new();
+    R.get_or_init(|| {
+        Regex::new(r"(?i)\b(?:impair\w*|write-?downs?|write-?offs?|written\s+(?:down|off)|charges?|restructuring|severance|litigation|lawsuits?|legal|settlements?|tax(?:es)?|one-?time|non-?recurring|non-?cash|gains?|loss(?:es)?\s+on|extinguishment|remeasurement|mark-to-market|valuation\s+allowance|divestitures?|(?:transaction|merger|acquisition|integration)(?:-related)?\s+(?:costs?|expenses?))\b")
+            .expect("valid built-in regex")
+    })
+    .is_match(quote)
+}
+
 /// Notes whose quote is in the exhibit and whose summary uses only the
-/// quote's numbers and no markup.
-fn verify_notes(text: &str, v: Option<&Value>) -> Vec<Note> {
-    v.and_then(Value::as_array)
+/// quote's numbers and no markup. With `causes`, a note marked as the cause
+/// of a swing keeps the mark only when its quote names an item, and such
+/// notes come first so the cap never drops them; otherwise no note is one.
+fn verify_notes(text: &str, v: Option<&Value>, causes: bool) -> Vec<Note> {
+    let mut notes: Vec<Note> = v
+        .and_then(Value::as_array)
         .into_iter()
         .flatten()
         .filter_map(|it| serde_json::from_value::<Note>(it.clone()).ok())
         .map(|n| Note {
+            cause: causes && n.cause && names_item(&n.quote),
             quote: collapse(&n.quote),
             summary_en: collapse(&n.summary_en),
         })
@@ -1455,8 +1471,11 @@ fn verify_notes(text: &str, v: Option<&Value>) -> Vec<Note> {
             };
             verify_reason(text, &r)
         })
-        .take(MAX_NOTES)
-        .collect()
+        .collect();
+    // Stable: the model's order otherwise.
+    notes.sort_by_key(|n| !n.cause);
+    notes.truncate(MAX_NOTES);
+    notes
 }
 
 fn user_prompt(text: &str, company: &str, ticker: &str) -> String {
@@ -1583,8 +1602,8 @@ pub fn from_reply(text: &str, v: &Value) -> Extracted {
     Extracted {
         fiscal_period,
         metrics,
-        guidance: Field::Value(verify_notes(text, v.get("guidance"))),
-        highlights: Field::Value(verify_notes(text, v.get("highlights"))),
+        guidance: Field::Value(verify_notes(text, v.get("guidance"), false)),
+        highlights: Field::Value(verify_notes(text, v.get("highlights"), true)),
     }
 }
 
@@ -3805,6 +3824,81 @@ mod tests {
             from_reply(&late, &v).fiscal_period,
             Field::Missing { .. }
         ));
+    }
+
+    /// A synthetic release in the shape of CHTR's third quarter of 2026 (a
+    /// year-earlier profit, a loss now), for a fictional company: the
+    /// wording is made up, not any company's.
+    pub(crate) const SWING: &str = "Acme Cable Reports Third Quarter 2026 Results\n\
+        Net loss attributable to Acme shareholders totaled $2.4 billion in the third quarter of 2026, compared to net income of $1.1 billion in the third quarter of 2025.\n\
+        The third quarter net loss was primarily due to a $4.6 billion non-cash impairment of franchise rights recorded in connection with the Metro Transactions.\n\
+        Acme closed the Metro Transactions on August 1, 2026 and launched a new operating model.\n\
+        Diluted $(20.50) $8.34";
+
+    #[test]
+    fn a_swing_keeps_the_release_s_cause_first() {
+        let cause = "The third quarter net loss was primarily due to a $4.6 billion non-cash impairment of franchise rights recorded in connection with the Metro Transactions.";
+        let closed = "Acme closed the Metro Transactions on August 1, 2026 and launched a new operating model.";
+        let note = |quote: &str, summary: &str, cause: bool| json!({"quote": quote, "summary_en": summary, "cause": cause});
+        let v = json!({
+            "highlights": [
+                note(closed, "Acme closed the Metro Transactions and launched a new operating model.", false),
+                note(cause, "The loss was mainly due to a $4.6 billion non-cash impairment of franchise rights.", true),
+            ],
+            "guidance": [note(closed, "Acme closed the Metro Transactions.", true)],
+        });
+        let x = from_reply(SWING, &v);
+        let (Field::Value(h), Field::Value(g)) = (&x.highlights, &x.guidance) else {
+            panic!("{x:?}");
+        };
+        // The cause comes first, quoted from the release; the rest keep their order.
+        assert_eq!(h.len(), 2);
+        assert!(h[0].cause && h[0].quote == cause, "{h:?}");
+        assert!(!h[1].cause);
+        // Guidance is never a cause.
+        assert!(!g[0].cause);
+    }
+
+    #[test]
+    fn a_cause_must_be_quoted_from_the_release_and_name_an_item() {
+        let v = json!({"highlights": [
+            // Invented: not in the release.
+            {"quote": "The net loss was due to a $4.6 billion goodwill write-down.", "summary_en": "A $4.6 billion goodwill write-down caused the loss.", "cause": true},
+            // In the release, but it names no item: kept as an ordinary highlight.
+            {"quote": "Acme closed the Metro Transactions on August 1, 2026 and launched a new operating model.", "summary_en": "Acme closed the Metro Transactions.", "cause": true},
+            // The summary claims an amount its quote does not give.
+            {"quote": "The third quarter net loss was primarily due to a $4.6 billion non-cash impairment of franchise rights", "summary_en": "A $7 billion impairment caused the loss.", "cause": true},
+        ]});
+        let Field::Value(h) = from_reply(SWING, &v).highlights else {
+            panic!()
+        };
+        assert_eq!(h.len(), 1, "{h:?}");
+        assert!(!h[0].cause);
+        assert!(h[0].quote.starts_with("Acme closed"));
+        for (q, item) in [
+            ("primarily due to a $4.6 billion non-cash impairment", true),
+            ("includes a $310 million restructuring charge", true),
+            ("reflecting a gain on the sale of its towers business", true),
+            ("a discrete tax benefit of $0.40 per share", true),
+            (
+                "Net loss attributable to Acme shareholders totaled $2.4 billion",
+                false,
+            ),
+            ("launched a new operating model", false),
+        ] {
+            assert_eq!(names_item(q), item, "{q}");
+        }
+    }
+
+    #[test]
+    fn notes_without_a_cause_field_still_parse() {
+        let v = json!({"highlights": [{"quote": "Acme closed the Metro Transactions on August 1, 2026", "summary_en": "Acme closed the Metro Transactions."}]});
+        let Field::Value(h) = from_reply(SWING, &v).highlights else {
+            panic!()
+        };
+        assert!(!h[0].cause);
+        // Stored without the field, as before it existed.
+        assert!(!serde_json::to_string(&h[0]).unwrap().contains("cause"));
     }
 
     struct FailLlm;

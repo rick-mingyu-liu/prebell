@@ -287,6 +287,51 @@ impl<H: Http> Yahoo<H> {
         })
         .await
     }
+
+    /// One symbol's v7 quote with the premarket, regular-session and
+    /// after-hours fields as Yahoo gives them, through the same session (the
+    /// cookie, the crumb and one quote request; a 401 refreshes once). Which
+    /// session counts, and whether it is current, is the caller's call.
+    pub async fn session_quote(&self, symbol: &str) -> Result<SessionQuote, ProviderError> {
+        let ts = |s: Option<i64>| s.and_then(|s| DateTime::from_timestamp(s, 0));
+        let r = self
+            .v7_quotes(&[symbol.to_string()], &|v| {
+                Ok(SessionQuote {
+                    pre_price: v.pre_market_price,
+                    pre_change_pct: v.pre_market_change_percent,
+                    pre_time: ts(v.pre_market_time),
+                    regular_price: v.regular_market_price,
+                    regular_change_pct: v.regular_market_change_percent,
+                    regular_prev_close: v.regular_market_previous_close,
+                    regular_time: ts(v.regular_market_time),
+                    post_price: v.post_market_price,
+                    post_change_pct: v.post_market_change_percent,
+                    post_time: ts(v.post_market_time),
+                })
+            })
+            .await;
+        r.into_iter()
+            .next()
+            .map_or(Err(ProviderError::Empty), |(_, q)| q)
+    }
+}
+
+/// A v7 quote's fields for each session. Percents are in percent units
+/// (1.15 means +1.15%).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct SessionQuote {
+    pub pre_price: Option<f64>,
+    pub pre_change_pct: Option<f64>,
+    pub pre_time: Option<DateTime<Utc>>,
+    /// Before the open, still the prior session's close.
+    pub regular_price: Option<f64>,
+    pub regular_change_pct: Option<f64>,
+    pub regular_prev_close: Option<f64>,
+    pub regular_time: Option<DateTime<Utc>>,
+    pub post_price: Option<f64>,
+    /// Against the regular session's close.
+    pub post_change_pct: Option<f64>,
+    pub post_time: Option<DateTime<Utc>>,
 }
 
 /// The `name=value` pairs of a `Set-Cookie` value, as a `Cookie` header.
@@ -357,6 +402,10 @@ struct V7Quote {
     /// Epoch seconds of the last regular-session trade.
     regular_market_time: Option<i64>,
     market_state: Option<String>,
+    post_market_price: Option<f64>,
+    post_market_change_percent: Option<f64>,
+    /// Epoch seconds of the last after-hours trade.
+    post_market_time: Option<i64>,
     /// Epoch seconds of the next (or latest) earnings report.
     earnings_timestamp: Option<i64>,
     earnings_timestamp_start: Option<i64>,
@@ -1574,6 +1623,46 @@ mod tests {
         assert_eq!(xom.end, Some("2026-10-31T12:00:00Z".parse().unwrap()));
         // No earnings fields: nothing known.
         assert_eq!(get("S0"), Err(ProviderError::Empty));
+    }
+
+    /// A hand-made v7 body with every session's fields (CHTR, Tue 2026-11-10
+    /// after the close; the prices are invented).
+    const SESSION: &str = include_str!("../tests/fixtures/yahoo_quote_session.json");
+
+    #[tokio::test]
+    async fn session_quote_reads_every_session_in_three_requests() {
+        let y = yahoo_v7(|r, _| {
+            assert_eq!(query(&r.url).0, ["CHTR"]);
+            resp(200, SESSION)
+        });
+        let q = y.session_quote("CHTR").await.unwrap();
+        let t = |s: &str| Some(s.parse::<DateTime<Utc>>().unwrap());
+        assert_eq!(
+            q,
+            SessionQuote {
+                pre_price: Some(325.72),
+                pre_change_pct: Some(-4.2),
+                pre_time: t("2026-11-10T13:12:00Z"),
+                regular_price: Some(330.12),
+                regular_change_pct: Some(-2.905882),
+                regular_prev_close: Some(340.0),
+                regular_time: t("2026-11-10T21:00:00Z"),
+                post_price: Some(310.31),
+                post_change_pct: Some(-6.000848),
+                post_time: t("2026-11-10T21:22:00Z"),
+            }
+        );
+        // fc.yahoo.com, getcrumb, one quote.
+        assert_eq!(y.http.seen.borrow().len(), 3);
+    }
+
+    #[tokio::test]
+    async fn session_quote_errors() {
+        let y = yahoo_v7(|_, _| resp(429, HTML));
+        assert_eq!(y.session_quote("CHTR").await, Err(ProviderError::Http(429)));
+        // The symbol is not in the answer.
+        let y = yahoo_v7(|_, _| resp(200, &batch_for(&syms(&["AAPL"]))));
+        assert_eq!(y.session_quote("CHTR").await, Err(ProviderError::Empty));
     }
 
     #[tokio::test]
