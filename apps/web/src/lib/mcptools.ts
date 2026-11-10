@@ -117,7 +117,8 @@ export const TOOLS = [
       "data aggregator and the company has not confirmed it; confirmed = the company or an SEC filing confirmed it; " +
       "reported = the results are out (filing_url is the SEC 8-K when known). Slot: before_open, after_close or " +
       "unknown. writes_check tells whether PreBell writes an earnings check for the company; check_url is the " +
-      "published check. Dates are US Eastern. Default range: the current week, Monday to Friday; at most 21 days.",
+      "published check. Dates are US Eastern, from 400 days before today to 800 days after. Default range: the " +
+      "current week, Monday to Friday; at most 21 days.",
     inputSchema: {
       type: "object",
       properties: {
