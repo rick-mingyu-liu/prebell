@@ -10,7 +10,7 @@ use regex::Regex;
 use serde_json::Value;
 
 use crate::cover::fmt_signed_pct;
-use crate::events::figures::figures_text;
+use crate::events::figures::{figures_text, FigureKey, ReleaseFigure};
 use crate::events::watch::{WatchItem, WatchKind};
 use crate::facts::{numbers_in_facts, Direction, Field, Mover, NewsReason, PremarketFacts, Theme};
 use crate::numbers::{check, Lang};
@@ -753,20 +753,27 @@ pub async fn write(
     // "What to watch" states no figure, never a consensus or a result: only
     // the trading year and its neighbours, and a released report's figures
     // and the numbers of their release sentences (the prior month's change).
-    let figures = watch_figures(&f.watch_list);
+    let figures: Vec<ReleaseFigure> = match &f.watch_list {
+        Field::Value(items) => items.iter().flat_map(|i| i.figures.clone()).collect(),
+        Field::Missing { .. } => vec![],
+    };
+    let quoted: Vec<f64> = figures
+        .iter()
+        .flat_map(|g| crate::facts::quote_numbers(&g.quote))
+        .collect();
     let mut watch_allowed = trading_years(f).to_vec();
-    watch_allowed.extend(&figures);
-    if let Field::Value(items) = &f.watch_list {
-        for g in items.iter().flat_map(|i| &i.figures) {
-            watch_allowed.extend(crate::facts::quote_numbers(&g.quote));
-        }
-    }
+    watch_allowed.extend(figures.iter().map(|g| g.value));
+    watch_allowed.extend(&quoted);
+    // The whole-text check takes them too; the guard then keeps them out of
+    // every section but "What to watch".
+    let base = allowed.clone();
+    allowed.extend(&quoted);
     let guard = |d: &Draft| {
         if figures.is_empty() {
-            Ok(())
-        } else {
-            reject_forecast_talk(d, lang, &figures)
+            return Ok(());
         }
+        reject_forecast_talk(d, lang, &figures)?;
+        quoted_only_in_watch(d, lang, &base, &names)
     };
     write_with_guard(
         llm,
@@ -789,22 +796,36 @@ pub async fn write(
     .await
 }
 
-/// The values of the watch list's release figures.
-pub(crate) fn watch_figures(w: &Field<Vec<WatchItem>>) -> Vec<f64> {
-    match w {
-        Field::Value(items) => items
-            .iter()
-            .flat_map(|i| i.figures.iter().map(|f| f.value))
-            .collect(),
-        Field::Missing { .. } => vec![],
+/// Rejects a number of a release sentence that is not a figure (the prior
+/// month's change) outside "What to watch": the title, the summary and the
+/// other sections state the release's own figures only.
+fn quoted_only_in_watch(d: &Draft, lang: Lang, base: &[f64], names: &[&str]) -> Result<(), String> {
+    let watch = all_headings(lang)[WATCH];
+    let texts = [("title", d.title.as_str()), ("summary", d.summary.as_str())]
+        .into_iter()
+        .chain(
+            d.sections
+                .iter()
+                .filter(|(h, _)| h != watch)
+                .map(|(h, m)| (h.as_str(), m.as_str())),
+        );
+    for (what, text) in texts {
+        if let Err(bad) = check(&blank_names(text, names), lang, base) {
+            return Err(format!(
+                "{what} cites {bad:?} from a release sentence: outside \"{watch}\" state only the release's own figures"
+            ));
+        }
     }
+    Ok(())
 }
 
 /// Words that put a sentence about the released CPI or jobs report
 /// (lowercase).
-const REPORT_WORDS: [&str; 18] = [
+const REPORT_WORDS: [&str; 20] = [
     "cpi",
     "consumer price",
+    "core prices",
+    "all items",
     "inflation",
     "payrolls",
     "nonfarm",
@@ -839,6 +860,54 @@ const FORECAST_STEMS: [&str; 8] = [
 const TEMPERATURE: [&str; 7] = [
     "hot", "hotter", "hottest", "cool", "cooler", "cooled", "cooling",
 ];
+/// Words of a consensus number ("Economists had expected a 0.5% rise"):
+/// with a percent or a payroll count, a sentence is refused on a figures
+/// day whatever it names.
+const CONSENSUS_WORDS: [&str; 7] = [
+    "economist",
+    "economists",
+    "consensus",
+    "polled",
+    "surveyed",
+    "forecaster",
+    "forecasters",
+];
+const CONSENSUS_ZH: [&str; 6] = [
+    "经济学家",
+    "共识",
+    "预估",
+    "市场预期",
+    "此前预期",
+    "分析师预期",
+];
+/// Words of a market move: a sentence with one of them states a futures,
+/// index or share move, so a figure's number alone does not make it about
+/// the report ("S&P 500 futures rose 0.4%").
+const MARKET_WORDS: [&str; 17] = [
+    "futures", "shares", "stock", "stocks", "s&p", "nasdaq", "dow", "russell", "treasury", "yield",
+    "yields", "dollar", "oil", "bitcoin", "jumps", "slides", "rallies",
+];
+const MARKET_ZH: [&str; 10] = [
+    "期货",
+    "指数",
+    "股价",
+    "股票",
+    "个股",
+    "标普",
+    "纳指",
+    "道指",
+    "收益率",
+    "美元",
+];
+/// Capitals that are not tickers.
+const NOT_TICKERS: [&str; 14] = [
+    "CPI", "PPI", "PCE", "GDP", "BLS", "US", "USA", "ET", "AM", "PM", "FOMC", "FED", "YOY", "MOM",
+];
+/// Abbreviations whose period does not end a sentence.
+const ABBREVIATIONS: [&str; 9] = [
+    "U.S.", "U.K.", "Inc.", "Corp.", "Co.", "vs.", "a.m.", "p.m.", "No.",
+];
+
 const FORECAST_ZH: [&str; 12] = [
     "预期",
     "预估",
@@ -855,7 +924,9 @@ const FORECAST_ZH: [&str; 12] = [
 ];
 
 /// `text` cut into sentences: after `.`, `!` or `?` followed by a space,
-/// a CJK character or the end, and at `。！？；` and line breaks.
+/// a CJK character or the end, and at `。！？；` and line breaks. Not after
+/// an abbreviation ("U.S.", "Inc.", "a.m.") or before a lower-case letter
+/// or a digit.
 fn sentences(text: &str) -> Vec<&str> {
     let mut out = Vec::new();
     let mut from = 0;
@@ -864,7 +935,17 @@ fn sentences(text: &str) -> Vec<&str> {
         let next = it.peek().map(|(_, n)| *n);
         let ends = match c {
             '。' | '！' | '？' | '；' | '\n' => true,
-            '.' | '!' | '?' => next.is_none_or(|n| n.is_whitespace() || !n.is_ascii()),
+            '.' | '!' | '?' => {
+                let end = i + c.len_utf8();
+                let word = text[..end]
+                    .rsplit(|w: char| w.is_whitespace() || w == '(')
+                    .next()
+                    .unwrap_or("");
+                let after = text[end..].trim_start().chars().next();
+                next.is_none_or(|n| n.is_whitespace() || !n.is_ascii())
+                    && !(c == '.' && ABBREVIATIONS.contains(&word))
+                    && !after.is_some_and(|a| a.is_lowercase() || a.is_ascii_digit())
+            }
             _ => false,
         };
         if ends {
@@ -878,19 +959,55 @@ fn sentences(text: &str) -> Vec<&str> {
     out
 }
 
+/// The sentence's ASCII words.
+fn words(text: &str) -> impl Iterator<Item = &str> {
+    text.split(|c: char| !(c.is_ascii_alphanumeric() || c == '&'))
+        .filter(|w| !w.is_empty())
+}
+
+/// Whether `sentence` states a market move: a futures, index, share or
+/// yield word, or a ticker (2-5 capitals, or `$` and letters).
+fn market_move(sentence: &str, lower: &str) -> bool {
+    words(lower).any(|w| MARKET_WORDS.contains(&w))
+        || MARKET_ZH.iter().any(|w| lower.contains(w))
+        || sentence.contains('$')
+        || words(sentence).any(|w| {
+            (2..=5).contains(&w.len())
+                && w.bytes().all(|b| b.is_ascii_uppercase())
+                && !NOT_TICKERS.contains(&w)
+        })
+}
+
+/// The percents and counts of thousands in `sentence`.
+fn figure_like(sentence: &str) -> Vec<crate::numbers::Num> {
+    crate::numbers::extract(sentence, Lang::En)
+        .into_iter()
+        .filter(|n| n.is_percent || n.value.abs() >= 1000.0)
+        .collect()
+}
+
 /// Whether `sentence` is about the released report: it names the report,
-/// or states one of its `figures` (a percent, or a count of thousands).
-fn about_the_report(sentence: &str, lower: &str, figures: &[f64]) -> bool {
+/// or, not stating a market move, it states one of its `figures` (the
+/// unemployment rate counts only by name, as releases always name it).
+fn about_the_report(sentence: &str, lower: &str, figures: &[ReleaseFigure]) -> bool {
     REPORT_WORDS.iter().any(|w| lower.contains(w))
-        || crate::numbers::extract(sentence, Lang::En)
-            .iter()
-            .filter(|n| n.is_percent || n.value.abs() >= 1000.0)
-            .any(|n| {
+        || (!market_move(sentence, lower)
+            && figure_like(sentence).iter().any(|n| {
                 let half = 0.5 * 10f64.powi(-i32::from(n.decimals)) * n.multiplier;
                 figures
                     .iter()
-                    .any(|f| (n.value.abs() - f.abs()).abs() < half)
-            })
+                    .filter(|f| f.key != FigureKey::UnemploymentRate)
+                    .any(|f| (n.value.abs() - f.value.abs()).abs() < half)
+            }))
+}
+
+/// A consensus word in a sentence that states a percent or a count: the
+/// shape of "Economists had expected a 0.5% rise".
+fn consensus_number(sentence: &str, lower: &str) -> Option<String> {
+    let word = words(lower)
+        .find(|w| CONSENSUS_WORDS.contains(w))
+        .or_else(|| CONSENSUS_ZH.iter().copied().find(|w| lower.contains(w)))?;
+    (!figure_like(sentence).is_empty()).then(|| word.to_string())
 }
 
 /// The first forecast or temperature word in `lower`, if any.
@@ -913,10 +1030,11 @@ fn forecast_word(lower: &str) -> Option<String> {
 
 /// Rejects a draft whose sentences about a released report set its figures
 /// against forecasts or call them hot or cool (the "never consensus" rule),
-/// in the title, the summary, the macro section and "What to watch". Other
-/// sentences ("revenue below estimates", "Cisco is expected to report") are
-/// not checked. Plain string tests: no regex to compile on the Worker.
-fn reject_forecast_talk(d: &Draft, lang: Lang, figures: &[f64]) -> Result<(), String> {
+/// or that state a consensus number, in the title, the summary, the macro
+/// section and "What to watch". Other sentences ("revenue below
+/// estimates", "Cisco is expected to report") are not checked. Plain string
+/// tests: no regex to compile on the Worker.
+fn reject_forecast_talk(d: &Draft, lang: Lang, figures: &[ReleaseFigure]) -> Result<(), String> {
     let heads = all_headings(lang);
     let mut texts = vec![("title", d.title.as_str()), ("summary", d.summary.as_str())];
     for (h, m) in &d.sections {
@@ -927,10 +1045,12 @@ fn reject_forecast_talk(d: &Draft, lang: Lang, figures: &[f64]) -> Result<(), St
     for (what, text) in texts {
         for sentence in sentences(text) {
             let lower = sentence.to_lowercase();
-            if !about_the_report(sentence, &lower, figures) {
-                continue;
-            }
-            if let Some(w) = forecast_word(&lower) {
+            let hit = consensus_number(sentence, &lower).or_else(|| {
+                about_the_report(sentence, &lower, figures)
+                    .then(|| forecast_word(&lower))
+                    .flatten()
+            });
+            if let Some(w) = hit {
                 return Err(format!(
                     "{what} compares a released figure with forecasts or calls it hot or cool ({w:?} in {:?}): state the figure only",
                     sentence.trim()
@@ -1711,7 +1831,7 @@ pub(crate) mod tests {
             let line = render_watch(std::slice::from_ref(&item), lang);
             assert_eq!(line, want);
             // Every figure on the page traces to the facts.
-            let allowed = watch_figures(&Field::Value(vec![item]));
+            let allowed: Vec<f64> = item.figures.iter().map(|f| f.value).collect();
             assert_eq!(
                 check(&without_link_targets(&line), lang, &allowed),
                 Ok(()),
@@ -1818,7 +1938,14 @@ pub(crate) mod tests {
                 ],
             }
         };
-        let cpi = [0.4, 0.3];
+        let cpi = [
+            figure(FigureKey::CpiMonth, 0.4),
+            figure(FigureKey::CoreMonth, 0.3),
+        ];
+        let jobs = [
+            figure(FigureKey::Payrolls, 119_000.0),
+            figure(FigureKey::UnemploymentRate, 4.4),
+        ];
         // Forecast wording about other things, on a CPI day: the review's cases.
         for (lang, summary, macro_text, watch) in [
             (
@@ -1845,13 +1972,56 @@ pub(crate) mod tests {
                 "中国10月出口好于预期。",
                 "10月CPI环比上涨0.4%。思科预计盘后公布财报。",
             ),
+            // The same number as a figure, in a market move.
+            (
+                Lang::En,
+                "S&P 500 futures rose 0.4% as traders expect a soft landing.",
+                "AAPL rose 0.4%, ahead of estimates.",
+                "Quiet.",
+            ),
         ] {
             let d = draft(lang, summary, macro_text, watch);
             assert_eq!(reject_forecast_talk(&d, lang, &cpi), Ok(()), "{summary}");
         }
+        // On a jobs day the rate's number alone is not the report.
+        let d = draft(
+            Lang::En,
+            "Datadog jumps 4.4% after topping estimates.",
+            "Yields rose 4.4% as traders expect cuts.",
+            "Quiet.",
+        );
+        assert_eq!(reject_forecast_talk(&d, Lang::En, &jobs), Ok(()));
         // About the report, by name or by figure.
         for (lang, text, figures) in [
             (Lang::En, "CPI came in hotter than expected.", &cpi[..]),
+            (Lang::En, "CPI rose 0.4%, more than expected.", &cpi),
+            (
+                Lang::En,
+                "Economists had expected U.S. CPI to rise 0.3%.",
+                &cpi,
+            ),
+            // Two sentences: the consensus one names neither report nor figure.
+            (
+                Lang::En,
+                "October CPI rose 0.4%. Economists had expected a 0.5% rise.",
+                &cpi,
+            ),
+            (
+                Lang::En,
+                "Payrolls rose by 119,000. Forecasters polled had looked for 150,000.",
+                &jobs,
+            ),
+            (
+                Lang::Zh,
+                "10月CPI环比上涨0.4%。经济学家此前预期上涨0.5%。",
+                &cpi,
+            ),
+            (Lang::Zh, "10月CPI环比上涨0.4%。市场预期为上涨0.5%。", &cpi),
+            (
+                Lang::En,
+                "The unemployment rate was 4.4%, above forecasts.",
+                &jobs,
+            ),
             (
                 Lang::En,
                 "Consumer prices rose 0.4%, above forecasts.",
@@ -1863,14 +2033,10 @@ pub(crate) mod tests {
             (
                 Lang::En,
                 "Payrolls rose by 119,000, above estimates.",
-                &[119_000.0, 4.4],
+                &jobs,
             ),
             (Lang::Zh, "高于预期的CPI压制期货。", &cpi),
-            (
-                Lang::Zh,
-                "非农就业增加11.9万人，好于预期。",
-                &[119_000.0, 4.4],
-            ),
+            (Lang::Zh, "非农就业增加11.9万人，好于预期。", &jobs),
             (Lang::Zh, "通胀降温。", &cpi),
         ] {
             for d in [
@@ -1879,18 +2045,35 @@ pub(crate) mod tests {
                 draft(lang, "S", "", text),
             ] {
                 let err = reject_forecast_talk(&d, lang, figures).unwrap_err();
-                assert!(err.contains("compares a released figure"), "{err}");
+                assert!(err.contains("compares a released figure"), "{text}: {err}");
             }
         }
+    }
+
+    #[test]
+    fn sentences_do_not_break_after_abbreviations() {
         assert_eq!(
-            sentences("CPI rose 0.4% in the U.S. today. Cisco reports later!下一句。最后"),
+            sentences("CPI rose 0.4% in the U.S. Cisco reports later!下一句。最后"),
             [
-                "CPI rose 0.4% in the U.S.",
-                " today.",
-                " Cisco reports later!",
+                "CPI rose 0.4% in the U.S. Cisco reports later!",
                 "下一句。",
                 "最后"
             ]
+        );
+        // No break after an abbreviation, or before lower case or a digit.
+        for one in [
+            "Apple Inc. Shares rose.",
+            "Data at 8:30 a.m. ET showed it.",
+            "Core vs. headline: 0.3% and 0.4%.",
+            "Rates. which rose.",
+            "It was No. 1 again.",
+            "Prices rose 0.4% vs. 0.3% in Sept. 2026 data.",
+        ] {
+            assert_eq!(sentences(one), [one], "{one}");
+        }
+        assert_eq!(
+            sentences("It rose. Then it fell."),
+            ["It rose.", " Then it fell."]
         );
     }
 
@@ -1901,10 +2084,24 @@ pub(crate) mod tests {
         let mut v = reply_with(&headings(Lang::En, false, false, true), "Quiet.").unwrap();
         v["sections"][2]["markdown"] =
             json!("October CPI rose 0.4% on the month after 0.6% in September; core rose 0.3%.");
-        let l = llm(vec![Ok(v)]);
+        let l = llm(vec![Ok(v.clone())]);
         let (d, _) = write(&l, &f, Lang::En).await.unwrap();
         assert_eq!(l.prompts.borrow().len(), 1);
         assert!(d.sections[2].1.contains("0.6%"));
+        // Not in the title or the summary: they state the release's own figures.
+        assert!(!crate::facts::numbers_in_facts(&f).contains(&0.6));
+        for key in ["title", "summary"] {
+            let mut bad = v.clone();
+            bad[key] = json!("October CPI rose 0.6%");
+            let l = llm(vec![Ok(bad), Ok(v.clone())]);
+            let (d, _) = write(&l, &f, Lang::En).await.unwrap();
+            let retry = l.prompts.borrow()[1].1.clone();
+            assert!(
+                retry.contains(&format!("{key} cites [\"0.6%\"] from a release sentence")),
+                "{retry}"
+            );
+            assert!(!d.title.contains("0.6") && !d.summary.contains("0.6"));
+        }
     }
 
     #[tokio::test]
