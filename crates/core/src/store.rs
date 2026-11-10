@@ -64,6 +64,9 @@ pub struct ReportRow {
     pub ticker: String,
     /// ET `YYYY-MM-DD`.
     pub report_date: String,
+    /// bmo | amc | unknown: the slot the calendar expected (an aggregator's
+    /// or the company's), kept on the reported row.
+    pub time_slot: String,
     /// RFC 3339 acceptance times of the ticker's earnings filings around
     /// `report_date` (from the day before to the day after, in UTC dates);
     /// the reader keeps those on its ET date. Empty for a report without a

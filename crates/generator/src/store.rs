@@ -555,6 +555,7 @@ impl Store for D1Store {
             .map(|r| ReportRow {
                 ticker: r.ticker,
                 report_date: r.report_date,
+                time_slot: r.time_slot,
                 accepted_at: r
                     .accepted_at
                     .map(|a| a.split(' ').map(str::to_string).collect())
@@ -574,7 +575,7 @@ impl Store for D1Store {
 /// separated) the ticker's filings accepted from the UTC day before the
 /// report date to the UTC day after it, which covers the ET date; the reader
 /// keeps those on the ET date.
-pub(crate) const REPORTED_BETWEEN: &str = "SELECT c.ticker, c.report_date, c.proof_url, x.slug AS post_slug, \
+pub(crate) const REPORTED_BETWEEN: &str = "SELECT c.ticker, c.report_date, c.time_slot, c.proof_url, x.slug AS post_slug, \
      (SELECT GROUP_CONCAT(f2.accepted_at, ' ') FROM earnings_filings f2 WHERE f2.ticker = c.ticker \
        AND f2.accepted_at >= date(c.report_date, '-1 day') AND f2.accepted_at < date(c.report_date, '+2 day')) AS accepted_at \
      FROM earnings_calendar c \
@@ -590,6 +591,7 @@ pub(crate) const REPORTED_BETWEEN: &str = "SELECT c.ticker, c.report_date, c.pro
 struct ReportRec {
     ticker: String,
     report_date: String,
+    time_slot: String,
     proof_url: Option<String>,
     post_slug: Option<String>,
     accepted_at: Option<String>,

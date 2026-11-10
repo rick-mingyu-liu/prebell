@@ -49,8 +49,8 @@ pub async fn read_reports(
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum Landed {
     BeforeOpen,
-    /// During today's regular session (the recap only).
-    DuringSession,
+    /// Earlier today, at a time not proven (the recap only).
+    Today,
     /// After the close of this trading day (the previous one).
     AfterClose(NaiveDate),
 }
@@ -81,14 +81,18 @@ fn filed_at(r: &ReportRow, day: NaiveDate) -> Option<NaiveTime> {
 }
 
 /// When `r` came out, if that is proven to precede the move `session` covers
-/// on `date`. The measured filing time decides, never the calendar's
-/// expected slot (an aggregator's guess):
+/// on `date`. The 8-K is furnished at or after the results release, so its
+/// acceptance time bounds the release from above only: it proves "before"
+/// a time, never "after" one.
 /// - today: the premarket brief is built before the open, so a report the
-///   calendar already marks out today came before it, timed or not; the
-///   recap needs the filing time: before 09:30 ET is before the open,
-///   during the session is during it, after the close explains nothing;
-/// - the previous trading day: filed at or after its close;
-/// - a day in between (a holiday): filed then, so after that close.
+///   calendar already marks out today came before it, timed or not. The
+///   recap needs the filing time: before 09:30 ET is before the open; during
+///   the session proves only that results came out today; after the close
+///   explains nothing;
+/// - the previous trading day, filed at or after its close, or a day in
+///   between (a holiday or weekend) with a filing that day: "after that
+///   close" also needs the calendar's slot not to be `bmo`, since a release
+///   before that day's open with a late 8-K was already traded on.
 ///
 /// A report without a filing time gets no results fallback outside the
 /// premarket's today: a reported row keeps no record of whether its slot was
@@ -105,14 +109,14 @@ fn landed(r: &ReportRow, date: NaiveDate, session: Session) -> Option<Landed> {
         if t < hm(9, 30) {
             Some(Landed::BeforeOpen)
         } else if t < close_of(date) {
-            Some(Landed::DuringSession)
+            Some(Landed::Today)
         } else {
             None
         }
-    } else if day == prev {
-        (at? >= close_of(prev)).then_some(Landed::AfterClose(prev))
-    } else if day > prev && day < date {
-        at.map(|_| Landed::AfterClose(prev))
+    } else if day >= prev && day < date {
+        let t = at?;
+        let after = day > prev || t >= close_of(prev);
+        (after && r.time_slot != "bmo").then_some(Landed::AfterClose(prev))
     } else {
         None
     }
@@ -130,17 +134,17 @@ fn weekday_zh(d: Weekday) -> &'static str {
     }
 }
 
-/// "Reported results before the open" / "... during the session" /
-/// "... after Monday's close", and the ZH.
+/// "Reported results before the open" / "... today" / "... after Monday's
+/// close", and the ZH.
 fn results(r: &ReportRow, landed: Landed) -> Fallback {
     let (text_en, text_zh) = match landed {
         Landed::BeforeOpen => (
             "Reported results before the open".to_string(),
             "已于盘前公布财报".to_string(),
         ),
-        Landed::DuringSession => (
-            "Reported results during the session".to_string(),
-            "已于盘中公布财报".to_string(),
+        Landed::Today => (
+            "Reported results today".to_string(),
+            "已于今日公布财报".to_string(),
         ),
         Landed::AfterClose(d) => (
             format!("Reported results after {}'s close", d.format("%A")),
@@ -319,11 +323,16 @@ mod tests {
     const TUE_0700: &str = "2026-11-10T12:00:00Z";
     const TUE_1200: &str = "2026-11-10T17:00:00Z";
     const TUE_1610: &str = "2026-11-10T21:10:00Z";
-    /// A reported row with these filing acceptance times.
+    /// A reported row with these filing acceptance times, expected after
+    /// the close.
     fn row(ticker: &str, date: &str, accepted: &[&str]) -> ReportRow {
+        slotted(ticker, date, "amc", accepted)
+    }
+    fn slotted(ticker: &str, date: &str, slot: &str, accepted: &[&str]) -> ReportRow {
         ReportRow {
             ticker: ticker.into(),
             report_date: date.into(),
+            time_slot: slot.into(),
             accepted_at: accepted.iter().map(|a| a.to_string()).collect(),
             proof_url: Some(
                 "https://www.sec.gov/Archives/edgar/data/1633978/000163397826000041/0001633978-26-000041-index.htm"
@@ -535,9 +544,14 @@ mod tests {
             text(&today(&[TUE_0700])),
             Some("Reported results before the open")
         );
-        let f = today(&[TUE_1200]);
-        assert_eq!(text(&f), Some("Reported results during the session"));
-        assert_eq!(f.unwrap().text_zh, "已于盘中公布财报");
+        // Filed during the session proves only that results are out today:
+        // a 06:45 ET release with its 8-K accepted at 10:20 ET was out
+        // before the open.
+        for a in [TUE_1200, "2026-11-10T15:20:00Z"] {
+            let f = today(&[a]);
+            assert_eq!(text(&f), Some("Reported results today"), "{a}");
+            assert_eq!(f.unwrap().text_zh, "已于今日公布财报");
+        }
         // After today's close, or untimed: not shown to precede the move.
         assert_eq!(today(&[TUE_1610]), None);
         assert_eq!(today(&[]), None);
@@ -556,6 +570,53 @@ mod tests {
         let rows = [row("LITE", "2026-11-27", &["2026-11-27T18:30:00Z"])];
         fill(ms.iter_mut(), &[], &rows, d("2026-11-27"), r);
         assert_eq!(ms[0].fallback, None);
+    }
+
+    #[test]
+    fn after_the_close_needs_a_late_filing_and_a_slot_that_is_not_bmo() {
+        let p = Session::Premarket;
+        // A Monday 07:00 ET release with its 8-K accepted at 16:30 ET: the
+        // filing is after the close, but the slot says before the open, so
+        // Monday's session already traded on it.
+        let monday_1630 = "2026-11-09T21:30:00Z";
+        let r = [slotted("LITE", "2026-11-09", "bmo", &[monday_1630])];
+        assert_eq!(one(mover("LITE", -5.0), &[], &r, p), None);
+        for slot in ["amc", "unknown"] {
+            let r = [slotted("LITE", "2026-11-09", slot, &[monday_1630])];
+            let f = one(mover("LITE", -5.0), &[], &r, p);
+            assert_eq!(
+                text(&f),
+                Some("Reported results after Monday's close"),
+                "{slot}"
+            );
+        }
+        // A weekend filing before Monday's brief: after Friday's close unless
+        // the slot was bmo.
+        let saturday = "2026-11-07T15:00:00Z";
+        for (slot, want) in [
+            ("amc", Some("Reported results after Friday's close")),
+            ("unknown", Some("Reported results after Friday's close")),
+            ("bmo", None),
+        ] {
+            let mut ms = [mover("LITE", -5.0)];
+            let r = [slotted("LITE", "2026-11-07", slot, &[saturday])];
+            fill(ms.iter_mut(), &[], &r, d("2026-11-09"), p);
+            assert_eq!(text(&ms[0].fallback), want, "{slot}");
+        }
+        // Early-close Friday 2026-11-27 (13:00 ET), Monday's brief: filed at
+        // 13:30 ET is after that close, at 12:30 ET it is not.
+        for (accepted, want) in [
+            (
+                "2026-11-27T18:30:00Z",
+                Some("Reported results after Friday's close"),
+            ),
+            ("2026-11-27T17:30:00Z", None),
+        ] {
+            let mut ms = [mover("LITE", -5.0)];
+            let r = [row("LITE", "2026-11-27", &[accepted])];
+            fill(ms.iter_mut(), &[], &r, d("2026-11-30"), p);
+            assert_eq!(text(&ms[0].fallback), want, "{accepted}");
+        }
     }
 
     #[test]
