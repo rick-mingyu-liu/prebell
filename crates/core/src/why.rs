@@ -49,8 +49,8 @@ pub async fn read_reports(
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum Landed {
     BeforeOpen,
-    /// Earlier today, at a time not proven (the recap only).
-    Today,
+    /// Before today's close, at a time not proven (the recap only).
+    BeforeTodaysClose,
     /// After the close of this trading day (the previous one).
     AfterClose(NaiveDate),
 }
@@ -87,12 +87,15 @@ fn filed_at(r: &ReportRow, day: NaiveDate) -> Option<NaiveTime> {
 /// - today: the premarket brief is built before the open, so a report the
 ///   calendar already marks out today came before it, timed or not. The
 ///   recap needs the filing time: before 09:30 ET is before the open; during
-///   the session proves only that results came out today; after the close
-///   explains nothing;
-/// - the previous trading day, filed at or after its close, or a day in
-///   between (a holiday or weekend) with a filing that day: "after that
-///   close" also needs the calendar's slot not to be `bmo`, since a release
-///   before that day's open with a late 8-K was already traded on.
+///   the session proves only that results came out before today's close (a
+///   release after Monday's close may be filed Tuesday morning); after the
+///   close explains nothing;
+/// - the previous trading day, filed at or after its close, with the
+///   calendar's slot `amc`: after that close. A late 8-K proves no release
+///   time, and a release before that day's close was already traded on, so
+///   a `bmo` or `unknown` slot gets nothing;
+/// - a day in between (a holiday or weekend) with a filing that day: after
+///   the previous close, unless the slot is `bmo`.
 ///
 /// A report without a filing time gets no results fallback outside the
 /// premarket's today: a reported row keeps no record of whether its slot was
@@ -109,14 +112,15 @@ fn landed(r: &ReportRow, date: NaiveDate, session: Session) -> Option<Landed> {
         if t < hm(9, 30) {
             Some(Landed::BeforeOpen)
         } else if t < close_of(date) {
-            Some(Landed::Today)
+            Some(Landed::BeforeTodaysClose)
         } else {
             None
         }
-    } else if day >= prev && day < date {
-        let t = at?;
-        let after = day > prev || t >= close_of(prev);
-        (after && r.time_slot != "bmo").then_some(Landed::AfterClose(prev))
+    } else if day == prev {
+        (at? >= close_of(prev) && r.time_slot == "amc").then_some(Landed::AfterClose(prev))
+    } else if day > prev && day < date {
+        at?;
+        (r.time_slot != "bmo").then_some(Landed::AfterClose(prev))
     } else {
         None
     }
@@ -134,17 +138,17 @@ fn weekday_zh(d: Weekday) -> &'static str {
     }
 }
 
-/// "Reported results before the open" / "... today" / "... after Monday's
-/// close", and the ZH.
+/// "Reported results before the open" / "... before today's close" /
+/// "... after Monday's close", and the ZH.
 fn results(r: &ReportRow, landed: Landed) -> Fallback {
     let (text_en, text_zh) = match landed {
         Landed::BeforeOpen => (
             "Reported results before the open".to_string(),
             "已于盘前公布财报".to_string(),
         ),
-        Landed::Today => (
-            "Reported results today".to_string(),
-            "已于今日公布财报".to_string(),
+        Landed::BeforeTodaysClose => (
+            "Reported results before today's close".to_string(),
+            "已于今日收盘前公布财报".to_string(),
         ),
         Landed::AfterClose(d) => (
             format!("Reported results after {}'s close", d.format("%A")),
@@ -544,13 +548,24 @@ mod tests {
             text(&today(&[TUE_0700])),
             Some("Reported results before the open")
         );
-        // Filed during the session proves only that results are out today:
-        // a 06:45 ET release with its 8-K accepted at 10:20 ET was out
-        // before the open.
-        for a in [TUE_1200, "2026-11-10T15:20:00Z"] {
-            let f = today(&[a]);
-            assert_eq!(text(&f), Some("Reported results today"), "{a}");
-            assert_eq!(f.unwrap().text_zh, "已于今日公布财报");
+        // Filed during the session proves only that results were out before
+        // today's close: a 06:45 ET release with its 8-K accepted at 10:20
+        // ET was out before the open, and a release at 16:05 ET Monday with
+        // its 8-K at 10:00 ET Tuesday (the row then dated Tuesday, slot
+        // unknown) was out the day before.
+        for (slot, a) in [
+            ("amc", TUE_1200),
+            ("amc", "2026-11-10T15:20:00Z"),
+            ("unknown", "2026-11-10T15:00:00Z"),
+        ] {
+            let rows = [slotted("LITE", "2026-11-10", slot, &[a])];
+            let f = one(mover("LITE", -5.0), &[], &rows, r);
+            assert_eq!(
+                text(&f),
+                Some("Reported results before today's close"),
+                "{a}"
+            );
+            assert_eq!(f.unwrap().text_zh, "已于今日收盘前公布财报");
         }
         // After today's close, or untimed: not shown to precede the move.
         assert_eq!(today(&[TUE_1610]), None);
@@ -573,23 +588,20 @@ mod tests {
     }
 
     #[test]
-    fn after_the_close_needs_a_late_filing_and_a_slot_that_is_not_bmo() {
+    fn after_the_close_needs_a_late_filing_and_the_amc_slot() {
         let p = Session::Premarket;
         // A Monday 07:00 ET release with its 8-K accepted at 16:30 ET: the
-        // filing is after the close, but the slot says before the open, so
-        // Monday's session already traded on it.
+        // filing is after the close, but only an `amc` slot says the release
+        // was; with `bmo` or `unknown` Monday's session may already have
+        // traded on it.
         let monday_1630 = "2026-11-09T21:30:00Z";
-        let r = [slotted("LITE", "2026-11-09", "bmo", &[monday_1630])];
-        assert_eq!(one(mover("LITE", -5.0), &[], &r, p), None);
-        for slot in ["amc", "unknown"] {
+        for slot in ["bmo", "unknown"] {
             let r = [slotted("LITE", "2026-11-09", slot, &[monday_1630])];
-            let f = one(mover("LITE", -5.0), &[], &r, p);
-            assert_eq!(
-                text(&f),
-                Some("Reported results after Monday's close"),
-                "{slot}"
-            );
+            assert_eq!(one(mover("LITE", -5.0), &[], &r, p), None, "{slot}");
         }
+        let r = [slotted("LITE", "2026-11-09", "amc", &[monday_1630])];
+        let f = one(mover("LITE", -5.0), &[], &r, p);
+        assert_eq!(text(&f), Some("Reported results after Monday's close"));
         // A weekend filing before Monday's brief: after Friday's close unless
         // the slot was bmo.
         let saturday = "2026-11-07T15:00:00Z";
