@@ -856,6 +856,7 @@ mod tests {
         let row = |date: &str, accepted: &str| ReportRow {
             ticker: "NVDA".into(),
             report_date: date.into(),
+            time_slot: "amc".into(),
             accepted_at: vec![accepted.into()],
             proof_url: None,
             post_slug: Some("nvda-q3-fy2027-earnings".into()),

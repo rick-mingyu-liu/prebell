@@ -678,6 +678,7 @@ mod tests {
         let reports = [ReportRow {
             ticker: "GEV".into(),
             report_date: "2026-10-28".into(),
+            time_slot: "amc".into(),
             // 16:05 ET.
             accepted_at: vec!["2026-10-28T20:05:00Z".into()],
             proof_url: None,
