@@ -11,7 +11,7 @@ For each figure, copy:
 Figures (use the current reporting period — the quarter the release reports, not the prior year or a year-to-date total — and null when the document does not state it):
 - `revenue`: total revenue / total net sales / total net revenue as reported under GAAP (never a segment or product line, and never "managed", "adjusted" or fully-taxable-equivalent revenue).
 - `net_income`: GAAP net income (or net loss) attributable to the company.
-- `eps_gaap_diluted`: GAAP diluted earnings (or loss) per share (never a dividend per share).
+- `eps_gaap_diluted`: GAAP diluted earnings (or loss) per share (never a dividend per share). If the document states no diluted figure, the net earnings (or loss) per share it states, unless labelled basic; if it states one per share class, the class of the ticker named in the user message (for BRK.B, "Net earnings per average equivalent Class B Share").
 - `eps_non_gaap_diluted`: non-GAAP (adjusted) diluted earnings per share, only if the document labels it non-GAAP or adjusted.
 - `gross_margin_pct`: gross margin as a percentage, only if the document states the percentage.
 - `operating_margin_pct`: GAAP operating margin as a percentage, only if the document states the percentage (never "adjusted" or non-GAAP operating margin).

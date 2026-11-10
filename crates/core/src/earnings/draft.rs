@@ -11,10 +11,12 @@ use chrono::Datelike;
 use regex::Regex;
 use serde_json::Value;
 
-use crate::earnings::facts::{numbers_in_facts, EarningsFacts, Metric, ShareSession, Unit};
+use crate::earnings::facts::{
+    allowed as allowed_numbers, EarningsAllowed, EarningsFacts, Metric, ShareSession, Unit,
+};
 use crate::earnings::share::share_line;
 use crate::facts::Field;
-use crate::numbers::{check, extract as extract_numbers, Lang};
+use crate::numbers::{extract as extract_numbers, Lang};
 use crate::premarket::draft::{
     fmt_num, is_setext_underline, match_sections, one_line, reject_markup, sections_line,
     without_link_targets, Draft,
@@ -649,7 +651,7 @@ fn attempt(
     f: &EarningsFacts,
     lang: Lang,
     want: &[&str],
-    allowed: &[f64],
+    allowed: &EarningsAllowed,
 ) -> Result<(Draft, String), Problem> {
     let v = v.map_err(Problem::Llm)?;
     let d = parse(&v, lang, want).map_err(Problem::Malformed)?;
@@ -659,10 +661,12 @@ fn attempt(
     let md = render_markdown(&d, f);
     // The whole page, code-rendered parts included, is checked. Names are
     // not figures: "3M" must not read as three million.
-    check(&mask_names(&without_link_targets(&md), f), lang, allowed).map_err(|bad| {
-        let mut seen = HashSet::new();
-        Problem::Numbers(bad.into_iter().filter(|n| seen.insert(n.clone())).collect())
-    })?;
+    allowed
+        .check(&mask_names(&without_link_targets(&md), f), lang)
+        .map_err(|bad| {
+            let mut seen = HashSet::new();
+            Problem::Numbers(bad.into_iter().filter(|n| seen.insert(n.clone())).collect())
+        })?;
     Ok((d, md))
 }
 
@@ -699,7 +703,7 @@ pub async fn write(
 ) -> Result<(Draft, String), Vec<String>> {
     let facts_json =
         serde_json::to_string_pretty(f).map_err(|e| vec![format!("draft: facts json: {e}")])?;
-    let allowed = numbers_in_facts(f);
+    let allowed = allowed_numbers(f);
     let want = wanted(f, lang);
     let base = format!("{facts_json}\n\n{}", sections_line(lang, &want));
     let mut user = base.clone();
@@ -727,6 +731,7 @@ pub(crate) mod tests {
     use super::*;
     use crate::earnings::facts::tests::facts;
     use crate::earnings::facts::{FiscalPeriod, Note};
+    use crate::numbers::check;
     use async_trait::async_trait;
     use serde_json::json;
     use std::cell::RefCell;
@@ -821,6 +826,7 @@ pub(crate) mod tests {
             amount: "$27.5 billion".into(),
             scale: 1.0,
             quote: "Net income was $27.5 billion for the quarter.".into(),
+            table_scale: None,
         });
         f.guidance = Field::Value(vec![]);
         f.highlights = Field::Missing {
@@ -1077,6 +1083,83 @@ pub(crate) mod tests {
         assert_eq!(check_title(hpe, Lang::Zh, &f), Ok(()));
     }
 
+    /// Facts as the extraction gives them for Berkshire Hathaway's third
+    /// quarter of 2026 (`extract::tests::BRK`): no revenue line, net
+    /// earnings from a table row in millions, and Class B EPS.
+    fn berkshire_facts() -> EarningsFacts {
+        use crate::earnings::facts::{Figure, Metrics, NOT_STATED};
+        let mut f = facts();
+        f.company = "Berkshire Hathaway".into();
+        f.ticker = "BRK.B".into();
+        let mut metrics = Metrics::all_missing(NOT_STATED);
+        metrics.net_income = Field::Value(Figure {
+            value: 22_112e6,
+            unit: Unit::Usd,
+            amount: "$22,112".into(),
+            scale: 1e6,
+            quote: "Net earnings attributable to Berkshire shareholders $22,112 $30,796 $57,885 $47,769".into(),
+            table_scale: None,
+        });
+        metrics.eps_gaap = crate::earnings::facts::tests::fig(
+            10.33,
+            Unit::UsdPerShare,
+            "$10.33",
+            "Net earnings per average equivalent Class B Share $10.33 $14.28 $26.92 $22.14",
+        );
+        f.metrics = metrics;
+        f.fiscal_period = Field::Value(FiscalPeriod {
+            quarter: Some(3),
+            fiscal_year: 2026,
+            quote:
+                "Berkshire's operating results for the third quarter and first nine months of 2026"
+                    .into(),
+        });
+        f.guidance = Field::Value(vec![]);
+        f.highlights = Field::Value(vec![]);
+        f.trend = Field::Missing { reason: "x".into() };
+        f
+    }
+
+    #[tokio::test]
+    async fn a_berkshire_style_check_publishes_with_a_takeaway_title() {
+        let f = berkshire_facts();
+        assert!(crate::earnings::facts::missing_required(&f).is_empty());
+        for (lang, title, summary, body) in [
+            (
+                Lang::En,
+                "Berkshire Hathaway's net earnings fall to $22.1 billion, or $10.33 per Class B share",
+                "Net earnings were $22.1 billion, down from $30.8 billion a year earlier.",
+                "Net earnings per Class B share were $10.33, against $14.28 a year earlier.",
+            ),
+            (
+                Lang::Zh,
+                "伯克希尔第三季度净利润降至221亿美元，B类股每股收益10.33美元",
+                "净利润221.1亿美元，上年同期为308亿美元。",
+                "B类股每股收益10.33美元，上年同期为14.28美元。",
+            ),
+        ] {
+            let mut r = reply(lang, body);
+            r["title"] = title.into();
+            r["summary"] = summary.into();
+            let l = llm(vec![r]);
+            let (d, md) = write(&l, &f, lang).await.unwrap();
+            assert_eq!(d.title, title);
+            assert_eq!(d.sections.len(), 1, "Results only: {md}");
+            assert!(!md.contains("| Revenue") && !md.contains("| 营收"), "{md}");
+        }
+        // Its press-release forms are still rejected.
+        for (lang, t) in [
+            (Lang::En, "Berkshire Hathaway third-quarter 2026 results"),
+            (
+                Lang::En,
+                "Berkshire Hathaway reports third quarter 2026 earnings",
+            ),
+            (Lang::Zh, "伯克希尔公布2026年第三季度业绩"),
+        ] {
+            assert!(check_title(t, lang, &f).is_err(), "{t}");
+        }
+    }
+
     #[test]
     fn a_long_name_still_has_a_hard_ceiling() {
         let mut f = facts();
@@ -1198,12 +1281,16 @@ pub(crate) mod tests {
             quote: "Acme closed the Metro Transactions on August 1, 2026 and launched a new operating model.".into(),
             summary_en: "Acme closed the Metro Transactions and launched a new operating model.".into(),
             cause: false,
+            scale: 1.0,
+            current: None,
         }];
         if cause {
             notes.insert(0, Note {
                 quote: "The third quarter net loss was primarily due to a $4.6 billion non-cash impairment of franchise rights recorded in connection with the Metro Transactions.".into(),
                 summary_en: "The loss was mainly due to a $4.6 billion non-cash impairment of franchise rights.".into(),
                 cause: true,
+                scale: 1.0,
+                current: None,
             });
         }
         f.highlights = Field::Value(notes);
@@ -1392,6 +1479,8 @@ pub(crate) mod tests {
                 quote: q.into(),
                 summary_en: "x".into(),
                 cause: false,
+                scale: 1.0,
+                current: None,
             }]);
         }
         let d = Draft {
@@ -1519,6 +1608,7 @@ pub(crate) mod tests {
             amount: "$25 million".into(),
             scale: 1.0,
             quote: "Net loss was $25 million in the quarter.".into(),
+            table_scale: None,
         });
         // The revenue quote is now a table row, so "up 8 percent" is gone.
         let mut r = reply(Lang::Zh, "营收1024.7亿美元，净亏损2500万美元。");
@@ -1556,7 +1646,7 @@ pub(crate) mod tests {
     #[test]
     fn every_rendered_number_is_in_the_facts() {
         let f = facts();
-        let allowed = numbers_in_facts(&f);
+        let allowed = crate::earnings::facts::numbers_in_facts(&f);
         for lang in [Lang::En, Lang::Zh] {
             let d = parse(&reply(lang, "Quiet."), lang, &wanted(&f, lang)).unwrap();
             let md = render_markdown(&d, &f);

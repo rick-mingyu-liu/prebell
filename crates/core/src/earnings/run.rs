@@ -274,7 +274,7 @@ pub async fn poll_job(
         EarningsStep::Foreign,
         out.foreign.reads,
     ));
-    if !crate::earnings::calendar::refreshed_today(es, now).await? {
+    if crate::earnings::calendar::refresh_due(es, now).await? {
         out.follow_ups.push(EarningsStep::Calendar);
     }
     if !crate::events::check::checked_today(es, now).await?
@@ -1444,6 +1444,27 @@ mod tests {
             .await
             .unwrap();
         assert!(o.follow_ups.is_empty(), "{o:?}");
+    }
+
+    #[tokio::test]
+    async fn polls_queue_a_failed_calendar_refresh_again_after_two_hours() {
+        let (base, es) = stores();
+        // The 07:01 ET attempt failed on a 429.
+        es.kv_set(
+            "calendar_refreshed_on",
+            "2026-11-10 1 2026-11-10T12:01:00Z",
+            "x",
+        )
+        .await
+        .unwrap();
+        let fl = FakeFilings::default();
+        let calendar = |o: &PollOutcome| o.follow_ups.contains(&EarningsStep::Calendar);
+        let t = utc("2026-11-10T13:56:00Z");
+        let o = poll_job(t, Some(t), &es, base.as_ref(), &fl).await.unwrap();
+        assert!(!calendar(&o), "{o:?}");
+        let t = utc("2026-11-10T14:01:00Z");
+        let o = poll_job(t, Some(t), &es, base.as_ref(), &fl).await.unwrap();
+        assert!(calendar(&o), "{o:?}");
     }
 
     #[tokio::test]
