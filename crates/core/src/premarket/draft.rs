@@ -872,14 +872,11 @@ const CONSENSUS_WORDS: [&str; 7] = [
     "forecaster",
     "forecasters",
 ];
-const CONSENSUS_ZH: [&str; 6] = [
-    "经济学家",
-    "共识",
-    "预估",
-    "市场预期",
-    "此前预期",
-    "分析师预期",
-];
+const CONSENSUS_ZH: [&str; 4] = ["经济学家", "共识", "此前预期", "分析师预期"];
+/// Also a mover's "业绩超市场预期" (as "topped estimates" in EN): a
+/// consensus word only in a sentence that names the report or states no
+/// market move.
+const MARKET_EXPECTED: &str = "市场预期";
 /// Words of a market move: a sentence with one of them states a futures,
 /// index or share move, so a figure's number alone does not make it about
 /// the report ("S&P 500 futures rose 0.4%").
@@ -887,7 +884,13 @@ const MARKET_WORDS: [&str; 17] = [
     "futures", "shares", "stock", "stocks", "s&p", "nasdaq", "dow", "russell", "treasury", "yield",
     "yields", "dollar", "oil", "bitcoin", "jumps", "slides", "rallies",
 ];
-const MARKET_ZH: [&str; 10] = [
+const MARKET_ZH: [&str; 16] = [
+    "盘前",
+    "盘后",
+    "盘中",
+    "大涨",
+    "大跌",
+    "美股",
     "期货",
     "指数",
     "股价",
@@ -906,6 +909,42 @@ const NOT_TICKERS: [&str; 14] = [
 /// Abbreviations whose period does not end a sentence.
 const ABBREVIATIONS: [&str; 9] = [
     "U.S.", "U.K.", "Inc.", "Corp.", "Co.", "vs.", "a.m.", "p.m.", "No.",
+];
+/// Of those, the ones a sentence often ends with ("… in the U.S."): their
+/// period ends it before a capitalised word, unless the word is one that
+/// follows them inside a sentence ("U.S. CPI", "8:30 a.m. ET").
+const END_ABBREVIATIONS: [&str; 4] = ["U.S.", "U.K.", "a.m.", "p.m."];
+const ABBREVIATION_FOLLOWERS: [&str; 30] = [
+    "cpi",
+    "consumer",
+    "payrolls",
+    "jobs",
+    "jobless",
+    "inflation",
+    "economy",
+    "economic",
+    "stocks",
+    "stock",
+    "shares",
+    "treasury",
+    "treasuries",
+    "dollar",
+    "futures",
+    "markets",
+    "market",
+    "government",
+    "federal",
+    "fed",
+    "labor",
+    "retail",
+    "gdp",
+    "bureau",
+    "department",
+    "et",
+    "est",
+    "edt",
+    "employment",
+    "unemployment",
 ];
 
 const FORECAST_ZH: [&str; 12] = [
@@ -941,9 +980,17 @@ fn sentences(text: &str) -> Vec<&str> {
                     .rsplit(|w: char| w.is_whitespace() || w == '(')
                     .next()
                     .unwrap_or("");
-                let after = text[end..].trim_start().chars().next();
+                let rest = text[end..].trim_start();
+                let after = rest.chars().next();
+                let next_word = words(rest).next().unwrap_or("").to_ascii_lowercase();
+                // "… in the U.S. Cisco reports" ends; "U.S. CPI" does not.
+                let abbreviation = c == '.'
+                    && ABBREVIATIONS.contains(&word)
+                    && !(END_ABBREVIATIONS.contains(&word)
+                        && after.is_some_and(char::is_uppercase)
+                        && !ABBREVIATION_FOLLOWERS.contains(&next_word.as_str()));
                 next.is_none_or(|n| n.is_whitespace() || !n.is_ascii())
-                    && !(c == '.' && ABBREVIATIONS.contains(&word))
+                    && !abbreviation
                     && !after.is_some_and(|a| a.is_lowercase() || a.is_ascii_digit())
             }
             _ => false,
@@ -978,11 +1025,19 @@ fn market_move(sentence: &str, lower: &str) -> bool {
         })
 }
 
-/// The percents and counts of thousands in `sentence`.
+/// The percents and counts of thousands in `sentence`, not bare years
+/// ("two cuts in 2027").
 fn figure_like(sentence: &str) -> Vec<crate::numbers::Num> {
     crate::numbers::extract(sentence, Lang::En)
         .into_iter()
-        .filter(|n| n.is_percent || n.value.abs() >= 1000.0)
+        .filter(|n| {
+            let year = !n.is_percent
+                && n.decimals == 0
+                && n.multiplier == 1.0
+                && !n.raw.contains('$')
+                && (1900.0..=2099.0).contains(&n.value);
+            n.is_percent || (n.value.abs() >= 1000.0 && !year)
+        })
         .collect()
 }
 
@@ -1006,7 +1061,13 @@ fn about_the_report(sentence: &str, lower: &str, figures: &[ReleaseFigure]) -> b
 fn consensus_number(sentence: &str, lower: &str) -> Option<String> {
     let word = words(lower)
         .find(|w| CONSENSUS_WORDS.contains(w))
-        .or_else(|| CONSENSUS_ZH.iter().copied().find(|w| lower.contains(w)))?;
+        .or_else(|| CONSENSUS_ZH.iter().copied().find(|w| lower.contains(w)))
+        .or_else(|| {
+            (lower.contains(MARKET_EXPECTED)
+                && (REPORT_WORDS.iter().any(|w| lower.contains(w))
+                    || !market_move(sentence, lower)))
+            .then_some(MARKET_EXPECTED)
+        })?;
     (!figure_like(sentence).is_empty()).then(|| word.to_string())
 }
 
@@ -2017,6 +2078,7 @@ pub(crate) mod tests {
                 &cpi,
             ),
             (Lang::Zh, "10月CPI环比上涨0.4%。市场预期为上涨0.5%。", &cpi),
+            (Lang::Zh, "10月CPI环比上涨0.4%，高于市场预期的0.3%。", &cpi),
             (
                 Lang::En,
                 "The unemployment rate was 4.4%, above forecasts.",
@@ -2051,11 +2113,42 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn the_consensus_rule_skips_years_and_a_movers_market_expectations() {
+        let draft = |lang: Lang, summary: &str, macro_text: &str, watch: &str| Draft {
+            lang,
+            title: "T".into(),
+            summary: summary.into(),
+            sections: vec![
+                (all_headings(lang)[1].into(), macro_text.into()),
+                (all_headings(lang)[WATCH].into(), watch.into()),
+            ],
+        };
+        let cpi = [figure(FigureKey::CpiMonth, 0.4)];
+        // A year is not a figure; a mover beating 市场预期 is not the report;
+        // company guidance (预估) is not a consensus.
+        let d = draft(
+            Lang::En,
+            "Economists now see two Fed cuts in 2027.",
+            "CPI rose 0.4% in the U.S. Cisco is expected to report later.",
+            "Quiet.",
+        );
+        assert_eq!(reject_forecast_talk(&d, Lang::En, &cpi), Ok(()));
+        let d = draft(
+            Lang::Zh,
+            "Datadog盘前大涨12%，业绩超市场预期。",
+            "英伟达预估第四季度营收增长5%。",
+            "平静。",
+        );
+        assert_eq!(reject_forecast_talk(&d, Lang::Zh, &cpi), Ok(()));
+    }
+
+    #[test]
     fn sentences_do_not_break_after_abbreviations() {
         assert_eq!(
             sentences("CPI rose 0.4% in the U.S. Cisco reports later!下一句。最后"),
             [
-                "CPI rose 0.4% in the U.S. Cisco reports later!",
+                "CPI rose 0.4% in the U.S.",
+                " Cisco reports later!",
                 "下一句。",
                 "最后"
             ]
@@ -2068,6 +2161,9 @@ pub(crate) mod tests {
             "Rates. which rose.",
             "It was No. 1 again.",
             "Prices rose 0.4% vs. 0.3% in Sept. 2026 data.",
+            "Economists had expected U.S. CPI to rise 0.3%.",
+            "Stocks in the U.S. Treasury market slipped.",
+            "Data at 8:30 a.m. EST showed it.",
         ] {
             assert_eq!(sentences(one), [one], "{one}");
         }
