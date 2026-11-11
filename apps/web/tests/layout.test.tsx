@@ -57,7 +57,25 @@ describe("paper shell", () => {
     expect(en).toContain('<a href="/en/about">About</a><a href="/en/legal">Privacy &amp; Terms</a>');
     const zh = renderToStaticMarkup(<FooterLinks locale="zh" />);
     expect(zh).toContain('<a href="/zh/about">关于</a><a href="/zh/legal">隐私与条款</a>');
-    expect(en.indexOf("/en/legal")).toBeLessThan(en.indexOf("中文"));
+  });
+
+  it("keeps the language switch out of the footer: it lives in the masthead nav only", () => {
+    const en = renderToStaticMarkup(<FooterLinks locale="en" />);
+    const zh = renderToStaticMarkup(<FooterLinks locale="zh" />);
+    expect(en).not.toContain("中文");
+    expect(zh).not.toContain("English");
+    expect(renderToStaticMarkup(<Masthead locale="en" dateline="d" />)).toContain("中文");
+    expect(renderToStaticMarkup(<Masthead locale="zh" dateline="d" />)).toContain("English");
+  });
+
+  it("ends the footer with the copyright line: the year, the site's name and its address", () => {
+    const en = renderToStaticMarkup(<FooterLinks locale="en" year={2026} />);
+    expect(en).toContain('<p class="footer-copy">© 2026 PreBell · prebell.site</p>');
+    expect(en.indexOf("footer-links")).toBeLessThan(en.indexOf("footer-copy"));
+    const zh = renderToStaticMarkup(<FooterLinks locale="zh" year={2027} />);
+    expect(zh).toContain('<p class="footer-copy">© 2027 盘前铃 PreBell · prebell.site</p>');
+    // With no year passed it is the current one.
+    expect(renderToStaticMarkup(<FooterLinks locale="en" />)).toContain(`© ${new Date().getUTCFullYear()} PreBell`);
   });
 
   it("puts the Chinese name first on the Chinese edition", () => {

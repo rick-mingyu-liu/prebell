@@ -250,11 +250,12 @@ html:lang(zh-Hans) .partners-strip .partners-label { font-variant-caps: normal; 
 .partners-strip a { font-weight: 600; text-decoration: none; }
 .partners-strip a:hover, .partners-strip a:focus-visible { text-decoration: underline; }
 
-/* Footer: About, For AI agents, Privacy & Terms and the language link, centred; on a narrow phone the row wraps between links. */
+/* Footer: About, For AI agents and Privacy & Terms, centred, with the copyright line under them; on a narrow phone the row wraps between links. */
 .site-footer { border-top: 3px double var(--rule-strong); margin-top: 2rem; padding: 1rem 0 2rem; text-align: center; }
 .site-footer .wrap > * { margin: 0.25rem 0; }
 .footer-links { display: flex; flex-wrap: wrap; justify-content: center; gap: 0.25rem 1rem; font-size: 13px; }
 .footer-links a { color: var(--muted); white-space: nowrap; }
+.footer-copy { font-size: 12px; color: var(--muted); }
 
 /* Shared bits: the quiet "more" link, the About column, the pending-translation notice. */
 .more { font-weight: 600; font-size: 14px; text-decoration: none; }
