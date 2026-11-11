@@ -195,3 +195,4 @@ they are never asked twice. Things decided *not* to do go in `declined.md`.
   - **The sitemap's IPO lastmod** is used only when it is a well-formed UTC time.
   - **The items read skips `expected_date` rows**, which the page never shows.
   - The figure "$2 trillion" above a quote that says "about $2 trillion" is left as is, for the owner (review item 8).
+  - **Valuations are printed as stored** (2026-11-11, after review), with only float noise rounded away, in the unit the raw value falls in, and they move up a unit only when the printed number itself reaches it ("$1 trillion", never "$1,000 billion"). This withdraws the three-significant-digit rounding above: it printed figures the quote did not say ("$1 trillion" for $999.6 billion, "$1.38 trillion" for $1.375 trillion). The change from the IPO price is computed from the close and the IPO price as printed (cents). `fmtValuation` in `apps/web/src/lib/ipo.ts`.
