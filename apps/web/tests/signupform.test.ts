@@ -26,6 +26,11 @@ describe("SignupForm result", () => {
     expect(messageFor("loading", en)).toBeNull();
   });
 
+  it("describes what the digest holds: earnings checks and the week ahead, no briefs", () => {
+    expect(en.copy).toBe("One email a week: three earnings checks and the week ahead. No spam, unsubscribe anytime.");
+    expect(en.copy).not.toMatch(/brief/i);
+  });
+
   it("is English only: the Chinese catalogue has no signup strings", () => {
     expect("signup" in zh).toBe(false);
   });

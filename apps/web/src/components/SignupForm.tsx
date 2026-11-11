@@ -35,7 +35,7 @@ export function messageFor(status: Status, m: SignupMessages): string | null {
  * Weekly-digest signup: email field, Subscribe button and an inline result. Posts JSON to
  * /api/subscribe; the honeypot `website` field stays out of sight (not display:none, which bots skip).
  * English only: the digest is one English email, so only English pages show the form
- * (`signupEnabled`). `source` keeps the field ids unique per page. Only the signup strings are pulled
+ * (`signupEnabled`). `source` names the page (the route checks it) and keeps the field ids unique. Only the signup strings are pulled
  * in, not the whole message catalogue.
  */
 export default function SignupForm({ source }: { source: "post" | "home" | "about" }) {
@@ -52,7 +52,7 @@ export default function SignupForm({ source }: { source: "post" | "home" | "abou
       const res = await fetch("/api/subscribe", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ email, website: String(data.get("website") ?? "") }),
+        body: JSON.stringify({ email, source, website: String(data.get("website") ?? "") }),
       });
       setStatus(await statusOf(res));
     } catch {

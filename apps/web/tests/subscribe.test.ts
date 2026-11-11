@@ -73,7 +73,7 @@ describe("POST /api/subscribe", () => {
         body: typeof body === "string" ? body : JSON.stringify(body),
       }),
     );
-  const good = { email: "a@b.co", website: "" };
+  const good = { email: "a@b.co", source: "home", website: "" };
 
   beforeEach(() => {
     ctx.env = { BUTTONDOWN_API_KEY: "SECRETKEY" };
@@ -88,6 +88,9 @@ describe("POST /api/subscribe", () => {
     expect((await post({ ...good, email: "nope" })).status).toBe(400);
     expect((await post({ ...good, website: "http://spam" })).status).toBe(400);
     expect((await post({ website: "" })).status).toBe(400);
+    // `source` is still checked against the pages the form is on, as before.
+    expect((await post({ ...good, source: "elsewhere" })).status).toBe(400);
+    expect((await post({ email: "a@b.co" })).status).toBe(400);
     expect((await post(null)).status).toBe(400);
     expect(f).not.toHaveBeenCalled();
   });
@@ -104,7 +107,7 @@ describe("POST /api/subscribe", () => {
   it("returns 200 for ok and already, sending Buttondown only the address", async () => {
     const f = vi.fn<typeof fetch>(() => reply(201));
     vi.stubGlobal("fetch", f);
-    // Fields an older form sent (source, lang) are ignored: nothing becomes a tag.
+    // `source` is checked, not sent, and an old form's `lang` is ignored: nothing becomes a tag.
     const res = await post({ ...good, email: " a@b.co ", source: "post", lang: "zh" });
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ ok: true });
