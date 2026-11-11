@@ -5,6 +5,8 @@ interface CloudflareEnv {
   FACTS: import("./src/lib/earnings").R2Like & import("./src/lib/facts").R2Like & import("./src/lib/covers").CardBucket;
   ASSETS: { fetch(request: Request): Promise<Response> };
   SITE_URL?: string;
+  /** "true" serves the MCP server at /mcp; anything else answers 404 there. */
+  MCP_ENABLED?: string;
   CF_BEACON_TOKEN?: string;
   BUTTONDOWN_API_KEY?: string;
 }
