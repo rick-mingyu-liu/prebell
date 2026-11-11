@@ -251,6 +251,10 @@ fn world() -> World {
             .borrow_mut()
             .insert((t.into(), d.into()), cal(t, d, slot, status));
     }
+    // Friday's calendar refresh has finished.
+    es.kv
+        .borrow_mut()
+        .insert("calendar_refreshed_on".into(), "2026-11-06".into());
     World {
         base,
         es,
@@ -408,10 +412,10 @@ async fn picks_are_up_to_three_largest_first_and_the_section_goes_when_there_are
     let by = |t: &str| all.iter().find(|p| p.slug.starts_with(t)).unwrap().clone();
     for (n, want, opening) in [
         (0, vec![], "Hi, it's Rick from PreBell. Here are the dates to know for the week of Nov 9–13."),
-        (1, vec!["aig"], "Hi, it's Rick from PreBell. First, one earnings check from last week; then the dates to know for the week of Nov 9–13."),
-        (2, vec!["amd", "aig"], "Hi, it's Rick from PreBell. First, two earnings checks from last week; then the dates to know for the week of Nov 9–13."),
-        (3, vec!["amd", "uber", "aig"], "Hi, it's Rick from PreBell. First, three earnings checks from last week; then the dates to know for the week of Nov 9–13."),
-        (4, vec!["amd", "cop", "uber"], "Hi, it's Rick from PreBell. First, three earnings checks from last week; then the dates to know for the week of Nov 9–13."),
+        (1, vec!["aig"], "Hi, it's Rick from PreBell. First, one earnings check from the past week; then the dates to know for the week of Nov 9–13."),
+        (2, vec!["amd", "aig"], "Hi, it's Rick from PreBell. First, two earnings checks from the past week; then the dates to know for the week of Nov 9–13."),
+        (3, vec!["amd", "uber", "aig"], "Hi, it's Rick from PreBell. First, three earnings checks from the past week; then the dates to know for the week of Nov 9–13."),
+        (4, vec!["amd", "cop", "uber"], "Hi, it's Rick from PreBell. First, three earnings checks from the past week; then the dates to know for the week of Nov 9–13."),
     ] {
         let mut w = world();
         w.posts.rows = order[..n].iter().map(|t| by(t)).collect();
@@ -432,7 +436,7 @@ async fn picks_are_up_to_three_largest_first_and_the_section_goes_when_there_are
             );
             assert!(body.contains(&item), "{n}: missing {item:?} in\n{body}");
         }
-        let section = body.contains("## From last week's earnings checks");
+        let section = body.contains("## From the past week's earnings checks");
         assert_eq!(section, n > 0, "{n}: {body}");
         assert_eq!(body.contains("All earnings checks →"), n > 0, "{n}");
         // The week ahead is there whatever the picks.
@@ -442,9 +446,9 @@ async fn picks_are_up_to_three_largest_first_and_the_section_goes_when_there_are
 
 /// The whole email for the fixture week, as Buttondown receives it.
 const FIXTURE_EMAIL: &str = "\
-Hi, it's Rick from PreBell. First, three earnings checks from last week; then the dates to know for the week of Nov 9–13.
+Hi, it's Rick from PreBell. First, three earnings checks from the past week; then the dates to know for the week of Nov 9–13.
 
-## From last week's earnings checks
+## From the past week's earnings checks
 
 **[AMD's third quarter of fiscal 2026: revenue of $9.2 billion](https://prebell.site/en/p/amd-q3-fy2026-earnings)**
 
@@ -719,7 +723,7 @@ async fn an_answer_that_is_not_a_draft_is_never_scheduled_and_alerts() {
         assert_eq!(http.methods(), ["POST"], "{answer:?}");
         let alerts = w.base.alerts.borrow();
         assert_eq!(alerts.len(), 1, "{alerts:?}");
-        assert_eq!(alerts[0].0, "digest:2026-11-06");
+        assert_eq!(alerts[0].0, "digest-not-draft:2026-11-06");
         assert!(alerts[0].2.contains("not draft"), "{}", alerts[0].2);
         // Done: a retry would get the same email back.
         assert_eq!(w.es.kv.borrow()[KV_BUILT], "2026-11-09");
@@ -754,10 +758,14 @@ async fn without_a_sender_it_is_a_dry_run() {
 #[test]
 fn enabled_only_when_exactly_true() {
     assert!(enabled(Some("true")));
-    assert!(enabled(Some(" true ")));
+    // Exactly: surrounding spaces or a newline leave it off.
     for off in [
         None,
         Some(""),
+        Some(" true"),
+        Some("true "),
+        Some(" true "),
+        Some("true\n"),
         Some("false"),
         Some("TRUE"),
         Some("yes"),
@@ -969,18 +977,25 @@ fn markdown_in_a_title_or_summary_is_escaped() {
 }
 
 #[tokio::test]
-async fn a_late_scheduled_run_keeps_the_draft() {
-    // Past Sunday 18:00 ET (never in practice: polls stop Friday 22:00 ET),
-    // a schedule would send at once; the draft stays a draft.
-    let w = world();
-    let http = fake();
-    w.es.kv_set(KV_BUILT, "2026-11-02", "x").await.unwrap();
-    let line = tick(&w, &http, "2026-11-08T23:30:00Z", Mode::Scheduled).await;
-    assert_eq!(
-        line,
-        "2026-11-09 (scheduled, send time passed: draft): draft em_01"
-    );
-    assert_eq!(http.methods(), ["POST"]);
+async fn a_message_on_any_other_day_or_hour_does_nothing() {
+    // Not Friday from 18:00 ET: a stray message saves nothing and does not
+    // mark the week, so the real Friday run still happens.
+    for at in [
+        "2026-11-08T23:30:00Z", // Sunday 18:30 ET
+        "2026-11-05T23:30:00Z", // Thursday 18:30 ET
+        "2026-11-06T22:55:00Z", // Friday 17:55 ET
+    ] {
+        let w = world();
+        let http = fake();
+        let line = tick(&w, &http, at, Mode::Scheduled).await;
+        assert_eq!(
+            line, "not due (Fridays from 18:00 ET only); skipped",
+            "{at}"
+        );
+        assert!(http.seen.borrow().is_empty(), "{at}");
+        assert!(w.es.kv.borrow().get(KV_BUILT).is_none(), "{at}");
+        assert_eq!(w.es.calls.get(), 0, "{at}: no store read");
+    }
 }
 
 #[tokio::test]
@@ -1002,8 +1017,254 @@ async fn the_job_stays_within_the_free_plan_budget() {
     .unwrap();
     // 1 create + 1 schedule.
     assert_eq!(http.count(), 2);
-    // kv read, calendar, loaded marker, kv write (EarningsStore), one
-    // events read, one posts read.
-    assert_eq!(w.es.calls.get(), 4);
+    // kv reads (built, calendar refreshed), calendar, loaded marker, kv
+    // write (EarningsStore), one events read, one posts read.
+    assert_eq!(w.es.calls.get(), 5);
     assert_eq!(w.ev.calls.get() + w.posts.calls.get(), 2);
+}
+
+#[tokio::test]
+async fn the_not_a_draft_alert_fires_even_after_a_failure_alerted_that_evening() {
+    // 18:30 ET: a 500, alerted under `digest`. 18:35 ET: Buttondown answers
+    // `about_to_send`; its alert has its own key, so it is not swallowed.
+    let w = world();
+    let mut http = fake();
+    http.post_status.borrow_mut().push_back(500);
+    let line = tick(&w, &http, FRI_EVENING, Mode::Draft).await;
+    assert_eq!(line, "2026-11-09 (draft): failed: http 500");
+    http.answer_status = Some(json!("about_to_send"));
+    let line = tick(&w, &http, "2026-11-06T23:35:00Z", Mode::Draft).await;
+    assert_eq!(
+        line,
+        "2026-11-09 (draft): email em_02 saved as about_to_send, not a draft"
+    );
+    let alerts = w.base.alerts.borrow();
+    let keys: Vec<&str> = alerts.iter().map(|a| a.0.as_str()).collect();
+    assert_eq!(keys, ["digest:2026-11-06", "digest-not-draft:2026-11-06"]);
+    assert!(
+        alerts[1].2.contains("about_to_send, not draft"),
+        "{}",
+        alerts[1].2
+    );
+    assert_eq!(alerts[1].1, "error");
+}
+
+/// 21:45, 21:50, 21:55 ET on Fri 2026-11-06 (EST), and 22:03 ET.
+const CLOSING_AT: &str = "2026-11-07T02:45:00Z";
+const BEFORE_LAST: &str = "2026-11-07T02:50:00Z";
+const LAST_AT: &str = "2026-11-07T02:55:00Z";
+const AFTER_22: &str = "2026-11-07T03:03:00Z";
+
+#[test]
+fn the_window_closes_at_21_45_and_the_last_try_is_from_21_55_et() {
+    assert!(!closing(utc("2026-11-07T02:40:00Z")));
+    assert!(closing(utc(CLOSING_AT)) && !last_try(utc(CLOSING_AT)));
+    assert!(!last_try(utc(BEFORE_LAST)));
+    assert!(last_try(utc(LAST_AT)) && last_try(utc(AFTER_22)));
+    // EDT: 21:55 ET is 01:55Z.
+    assert!(last_try(utc("2026-10-31T01:55:00Z")) && !last_try(utc("2026-10-31T01:50:00Z")));
+    // Not on a Thursday evening.
+    assert!(!closing(utc("2026-11-06T02:50:00Z")));
+}
+
+#[tokio::test]
+async fn it_waits_for_the_calendar_refresh_then_builds_from_it_as_it_stands_with_a_warning() {
+    // The day's Yahoo read failed at 20:00 ET and its retry is still to
+    // come (or Friday's refresh never ran: Thursday's marker).
+    for marker in ["2026-11-06 1 2026-11-07T01:00:00Z", "2026-11-05"] {
+        let w = world();
+        w.es.kv
+            .borrow_mut()
+            .insert("calendar_refreshed_on".into(), marker.into());
+        let http = fake();
+        let line = tick(&w, &http, FRI_EVENING, Mode::Draft).await;
+        assert_eq!(
+            line,
+            "2026-11-09: waiting for today's calendar refresh to finish"
+        );
+        assert!(http.seen.borrow().is_empty());
+        assert!(w.base.alerts.borrow().is_empty());
+        // 21:45 ET: rather than skip the week, the draft is built from the
+        // calendar as it stands, and the log and an alert say so.
+        let line = tick(&w, &http, CLOSING_AT, Mode::Draft).await;
+        assert_eq!(
+            line, "2026-11-09 (draft, calendar refresh unfinished): draft em_01",
+            "{marker}"
+        );
+        assert_eq!(w.es.kv.borrow()[KV_BUILT], "2026-11-09");
+        let alerts = w.base.alerts.borrow();
+        assert_eq!(alerts.len(), 1, "{alerts:?}");
+        assert_eq!(alerts[0].0, "digest-stale:2026-11-06");
+        assert_eq!(alerts[0].1, "warn");
+        assert!(
+            alerts[0].2.contains("calendar refresh had not finished")
+                && alerts[0].2.contains("check them before sending"),
+            "{}",
+            alerts[0].2
+        );
+    }
+}
+
+#[tokio::test]
+async fn the_last_try_alerts_once_that_the_week_is_missed() {
+    // A failure before the last try alerts as usual; from 21:55 ET it says
+    // the week is missed, once.
+    let w = world();
+    let http = fake();
+    http.post_status.borrow_mut().extend([500, 500, 503, 503]);
+    tick(&w, &http, BEFORE_LAST, Mode::Draft).await;
+    tick(&w, &http, LAST_AT, Mode::Draft).await;
+    let line = tick(&w, &http, AFTER_22, Mode::Draft).await;
+    assert_eq!(line, "2026-11-09 (draft): failed: http 503");
+    let alerts = w.base.alerts.borrow();
+    let keys: Vec<&str> = alerts.iter().map(|a| a.0.as_str()).collect();
+    assert_eq!(keys, ["digest:2026-11-06", "digest-missed:2026-11-06"]);
+    assert_eq!(
+        alerts[1].2,
+        "digest: no draft for the week of 2026-11-09: the last try before 22:00 ET failed (http 500); nothing retries until next Friday"
+    );
+    assert!(w.es.kv.borrow().get(KV_BUILT).is_none());
+}
+
+#[tokio::test]
+async fn a_dry_run_says_at_the_last_try_that_no_draft_was_saved() {
+    let w = world();
+    let run = |at: &'static str| {
+        digest_tick(
+            utc(at),
+            &w.es,
+            &w.ev,
+            &w.posts,
+            w.base.as_ref(),
+            None,
+            Mode::Draft,
+        )
+    };
+    run(FRI_EVENING).await.unwrap();
+    run(BEFORE_LAST).await.unwrap();
+    assert!(
+        w.base.alerts.borrow().is_empty(),
+        "no nag before the last try"
+    );
+    run(LAST_AT).await.unwrap();
+    run(AFTER_22).await.unwrap();
+    let alerts = w.base.alerts.borrow();
+    assert_eq!(alerts.len(), 1, "{alerts:?}");
+    assert_eq!(alerts[0].0, "digest-missed:2026-11-06");
+    assert!(alerts[0].2.contains("dry run"), "{}", alerts[0].2);
+    assert!(w.es.kv.borrow().get(KV_BUILT).is_none());
+}
+
+#[tokio::test]
+async fn a_saved_week_never_alerts_at_the_last_try() {
+    let w = world();
+    let http = fake();
+    tick(&w, &http, FRI_EVENING, Mode::Draft).await;
+    for at in [LAST_AT, AFTER_22] {
+        let line = tick(&w, &http, at, Mode::Draft).await;
+        assert_eq!(line, "2026-11-09: already built");
+    }
+    assert!(w.base.alerts.borrow().is_empty());
+    assert_eq!(http.methods(), ["POST"]);
+}
+
+#[tokio::test]
+async fn a_store_error_is_left_for_the_next_poll_not_called_a_config_error() {
+    for (at, key) in [
+        (FRI_EVENING, "digest:2026-11-06"),
+        (LAST_AT, "digest-missed:2026-11-06"),
+    ] {
+        let w = world();
+        *w.es.fail_kv.borrow_mut() = Some(KV_BUILT.into());
+        let http = fake();
+        let line = tick(&w, &http, at, Mode::Draft).await;
+        assert!(
+            line.starts_with("2026-11-09: store error, left for the next poll: "),
+            "{line}"
+        );
+        assert!(http.seen.borrow().is_empty());
+        let alerts = w.base.alerts.borrow();
+        assert_eq!(alerts.len(), 1, "{alerts:?}");
+        assert_eq!(alerts[0].0, key);
+        assert!(alerts[0].2.contains("store error") && !alerts[0].2.contains("config"));
+    }
+}
+
+#[tokio::test]
+async fn text_that_markdown_or_buttondown_templates_would_read_is_escaped() {
+    let w = world();
+    let mut wk = week(&w, FRI_EVENING).await;
+    wk.picks = [
+        "- led",
+        "+ led",
+        "* led",
+        "1. led",
+        "12) led",
+        "# led",
+        "plain {{ x }}",
+    ]
+    .iter()
+    .enumerate()
+    .map(|(i, sum)| {
+        check(
+            &format!("s{i}"),
+            "2026-11-03",
+            "X",
+            "Up {{ subscriber.email }} {% if x %}",
+            sum,
+        )
+    })
+    .collect();
+    // An event moved from a date that does not parse.
+    wk.days[1].events[0].status = "moved".into();
+    wk.days[1].events[0].moved_from = Some("TBD_[x]".into());
+    let body = render::body(&wk);
+    for want in [
+        "\n\n\\- led\n\n",
+        "\n\n\\+ led\n\n",
+        "\n\n\\* led\n\n",
+        "\n\n1\\. led\n\n",
+        "\n\n12\\) led\n\n",
+        "\n\n\\# led\n\n",
+        "\n\nplain &#123;&#123; x }}\n\n",
+        "**[Up &#123;&#123; subscriber.email }} &#123;% if x %}](https://prebell.site/en/p/s0)**",
+        "(moved from TBD\\_\\[x\\])",
+    ] {
+        assert!(body.contains(want), "missing {want:?} in\n{body}");
+    }
+    assert!(!body.contains("{{") && !body.contains("{%"), "{body}");
+}
+
+#[test]
+fn picks_drop_empty_titles_take_a_ticker_once_and_put_unknown_caps_last() {
+    let p = |slug: &str, date: &str, ticker: Option<&str>, title: &str| PostLink {
+        slug: slug.into(),
+        trading_date: date.into(),
+        ticker: ticker.map(String::from),
+        title: title.into(),
+        summary: String::new(),
+    };
+    let slugs = |v: Vec<PostLink>| v.into_iter().map(|p| p.slug).collect::<Vec<_>>();
+    // AMD twice (the newer kept), an empty title, AIG ($42B), and three with
+    // no known cap: not in the snapshot, a 0 in it (BF.B) and no ticker.
+    let posts = vec![
+        p("amd-old", "2026-11-02", Some("AMD"), "AMD first release"),
+        p("zzzb", "2026-11-03", Some("ZZZB"), "Unknown B"),
+        p("blank", "2026-11-03", Some("COP"), "  "),
+        p("none", "2026-11-03", None, "No filing row"),
+        p("bfb", "2026-11-04", Some("BF.B"), "Brown-Forman"),
+        p("aig", "2026-11-04", Some("AIG"), "AIG"),
+        p("amd-new", "2026-11-05", Some("AMD"), "AMD amended release"),
+    ];
+    assert_eq!(slugs(pick(posts.clone())), ["amd-new", "aig", "bfb"]);
+    // Without the known caps: unknowns by ticker, the one with no ticker
+    // last, whatever the input order.
+    let unknown: Vec<PostLink> = posts
+        .into_iter()
+        .filter(|p| matches!(p.slug.as_str(), "zzzb" | "none" | "bfb"))
+        .collect();
+    let mut reversed = unknown.clone();
+    reversed.reverse();
+    assert_eq!(slugs(pick(unknown)), ["bfb", "zzzb", "none"]);
+    assert_eq!(slugs(pick(reversed)), ["bfb", "zzzb", "none"]);
 }

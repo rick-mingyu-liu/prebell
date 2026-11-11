@@ -658,13 +658,17 @@ impl CardStore for D1Store {
 
 /// The digest's posts: those whose English page is published, with that
 /// page's title and one-line summary, by type and trading-date range.
+/// `CROSS JOIN` keeps `posts` first, so the week is read through
+/// `idx_posts_trading_date` (D1 runs no ANALYZE, and without it SQLite would
+/// start from every published English translation);
+/// `apps/web/tests/digestquery.test.ts` checks the plan.
 pub(crate) const DIGEST_POSTS: &str = "SELECT p.slug, p.trading_date, f.ticker, \
      en.title AS title, en.summary AS summary \
      FROM posts p \
-     JOIN post_translations en ON en.post_id = p.id AND en.lang = 'en' \
+     CROSS JOIN post_translations en ON en.post_id = p.id AND en.lang = 'en' \
      LEFT JOIN earnings_filings f ON f.run_key = p.run_key \
      WHERE p.content_type = ?1 AND p.trading_date BETWEEN ?2 AND ?3 AND p.published_at IS NOT NULL \
-     AND en.status = 'published' AND en.title IS NOT NULL \
+     AND en.status = 'published' AND en.title IS NOT NULL AND en.title <> '' \
      ORDER BY p.trading_date, p.published_at, p.id";
 
 #[derive(Deserialize)]

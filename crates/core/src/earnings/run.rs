@@ -285,8 +285,13 @@ pub async fn poll_job(
         out.follow_ups.push(EarningsStep::Events);
     }
     // Friday evening, once the day's calendar refresh ran: next week's dates
-    // are as complete as they get before the week starts.
-    if refreshed && crate::digest::due(now) && !crate::digest::built(es, now).await? {
+    // are as complete as they get before the week starts. From 21:45 ET
+    // whatever the refresh's state, so a retry still pending never skips
+    // the week (the digest says so in its alert).
+    if (refreshed || crate::digest::closing(now))
+        && crate::digest::due(now)
+        && !crate::digest::built(es, now).await?
+    {
         out.follow_ups.push(EarningsStep::Digest);
     }
     Ok(out)
@@ -1526,6 +1531,24 @@ mod tests {
         .unwrap();
         let o = poll_job(t, Some(t), &es, base.as_ref(), &fl).await.unwrap();
         assert!(!digest(&o), "{o:?}");
+        // A retry that falls due after the last poll (21:55 ET): from
+        // 21:45 ET the digest is queued anyway, rather than never.
+        es.kv_set(
+            "calendar_refreshed_on",
+            "2026-11-13 1 2026-11-14T00:58:00Z",
+            "x",
+        )
+        .await
+        .unwrap();
+        for (at, queued) in [
+            ("2026-11-14T02:40:00Z", false), // 21:40 ET
+            ("2026-11-14T02:45:00Z", true),  // 21:45 ET
+            ("2026-11-14T02:55:00Z", true),  // 21:55 ET
+        ] {
+            let t = utc(at);
+            let o = poll_job(t, Some(t), &es, base.as_ref(), &fl).await.unwrap();
+            assert_eq!(digest(&o), queued, "{at}: {o:?}");
+        }
         es.kv_set("calendar_refreshed_on", "2026-11-13", "x")
             .await
             .unwrap();

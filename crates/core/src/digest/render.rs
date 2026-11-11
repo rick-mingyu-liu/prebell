@@ -14,13 +14,32 @@ use crate::numbers::Lang;
 pub const SITE: &str = "https://prebell.site";
 
 /// Text safe inside a Markdown link label or list item.
+/// Every `{` becomes `&#123;`, so no `{{` or `{%` reaches Buttondown's
+/// template tags (the entity renders as `{`).
 fn escape(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {
+        if c == '{' {
+            out.push_str("&#123;");
+            continue;
+        }
         if matches!(c, '\\' | '[' | ']' | '*' | '_' | '`' | '<' | '>') {
             out.push('\\');
         }
         out.push(c);
+    }
+    out
+}
+
+/// `escape`, for text that starts a paragraph: a leading `-`, `+` or `#`,
+/// or `1.` / `1)`, would make it a list or a heading.
+fn escape_block(s: &str) -> String {
+    let mut out = escape(s);
+    let digits = out.bytes().take_while(u8::is_ascii_digit).count();
+    if out.starts_with(['-', '+', '#']) {
+        out.insert(0, '\\');
+    } else if digits > 0 && out[digits..].starts_with(['.', ')']) {
+        out.insert(digits, '\\');
     }
     out
 }
@@ -76,7 +95,7 @@ fn event_line(e: &Event) -> Option<String> {
             let from = from
                 .parse::<NaiveDate>()
                 .map(month_day)
-                .unwrap_or_else(|_| from.clone());
+                .unwrap_or_else(|_| escape(from));
             line.push_str(&copy::MOVED_FROM.replace("{date}", &from));
         }
         _ => {}
@@ -163,7 +182,7 @@ pub fn body(w: &Week) -> String {
                 link(&p.title, &format!("{SITE}/en/p/{}", p.slug))
             ));
             if !p.summary.trim().is_empty() {
-                out.push(escape(p.summary.trim()));
+                out.push(escape_block(p.summary.trim()));
             }
         }
         out.push(link(

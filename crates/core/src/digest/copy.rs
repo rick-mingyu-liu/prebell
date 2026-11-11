@@ -15,7 +15,7 @@ pub const SUBJECT: &str = "Week ahead: {range}";
 /// The first line, when last week has earnings checks to pick from.
 /// `{picks}`: one of `PICK_COUNTS`.
 pub const OPENING: &str =
-    "Hi, it's Rick from PreBell. First, {picks} from last week; then the dates to know for the week of {range}.";
+    "Hi, it's Rick from PreBell. First, {picks} from the past week; then the dates to know for the week of {range}.";
 /// `{picks}` for one, two and three picks (`super::PICKS`).
 pub const PICK_COUNTS: [&str; super::PICKS] = [
     "one earnings check",
@@ -26,8 +26,9 @@ pub const PICK_COUNTS: [&str; super::PICKS] = [
 pub const OPENING_NONE: &str =
     "Hi, it's Rick from PreBell. Here are the dates to know for the week of {range}.";
 
-/// The picks' heading.
-pub const PICKS_HEADING: &str = "From last week's earnings checks";
+/// The picks' heading. "The past week" stays true whether the draft is
+/// sent on Friday evening or on Sunday.
+pub const PICKS_HEADING: &str = "From the past week's earnings checks";
 /// Under the picks (site: `home.allEarnings`).
 pub const ALL_CHECKS: &str = "All earnings checks →";
 

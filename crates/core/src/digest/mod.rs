@@ -42,6 +42,14 @@ pub const FROM_HOUR: u32 = 18;
 pub const SEND_HOUR: u32 = 18;
 /// Last week's earnings checks picked at most, largest companies first.
 pub const PICKS: usize = 3;
+/// Fridays from this ET time, the poll queues the digest even when the
+/// day's calendar refresh has not finished (a failed read's retry still
+/// pending), and the digest is built from the calendar as it stands, with an
+/// alert: otherwise the week would be skipped (polls stop at 22:00 ET).
+pub const CLOSING: (u32, u32) = (21, 45);
+/// From this ET time on Friday a run is the week's last try (the last poll
+/// is 21:55 ET): one that saves no draft alerts that the week is missed.
+pub const LAST_TRY: (u32, u32) = (21, 55);
 
 const CAPS: &str = include_str!("../../data/marketcap-snapshot.tsv");
 
@@ -66,10 +74,10 @@ pub fn parse_mode(raw: Option<&str>) -> Result<Mode, String> {
     }
 }
 
-/// `DIGEST_ENABLED`: on only when it is exactly `true`; unset or anything
-/// else is off.
+/// `DIGEST_ENABLED`: on only when it is exactly `true` (no surrounding
+/// spaces or newline); unset or anything else is off.
 pub fn enabled(raw: Option<&str>) -> bool {
-    raw.map(str::trim) == Some("true")
+    raw == Some("true")
 }
 
 /// What a `digest` message does.
@@ -112,6 +120,23 @@ fn ymd(d: NaiveDate) -> String {
 pub fn due(now: DateTime<Utc>) -> bool {
     let local = et(now);
     local.weekday() == Weekday::Fri && local.hour() >= FROM_HOUR
+}
+
+/// Friday at or after `at` (ET hour, minute).
+fn friday_from(now: DateTime<Utc>, at: (u32, u32)) -> bool {
+    let local = et(now);
+    local.weekday() == Weekday::Fri && (local.hour(), local.minute()) >= at
+}
+
+/// Whether the Friday window is closing (`CLOSING`): the poll queues the
+/// digest whatever the calendar refresh's state.
+pub fn closing(now: DateTime<Utc>) -> bool {
+    friday_from(now, CLOSING)
+}
+
+/// Whether a run at `now` is the week's last try (`LAST_TRY`).
+pub fn last_try(now: DateTime<Utc>) -> bool {
+    friday_from(now, LAST_TRY)
 }
 
 /// The Monday after `now`'s ET date: the week the digest is about.
@@ -240,6 +265,38 @@ fn market_cap(ticker: &str) -> u64 {
     .unwrap_or(0)
 }
 
+/// Up to `PICKS` of `posts` (oldest first, as `DigestStore` returns them):
+/// a post with an empty title is dropped, a ticker is picked once (its
+/// newest check), and the rest are ordered largest company first; a company
+/// with no market cap in the snapshot (absent, or 0) comes after every one
+/// that has one, a post with no ticker after those, and ties go by ticker,
+/// then slug.
+pub fn pick(posts: Vec<PostLink>) -> Vec<PostLink> {
+    let mut seen = std::collections::HashSet::new();
+    let mut picks: Vec<PostLink> = posts
+        .into_iter()
+        .rev()
+        .filter(|p| !p.title.trim().is_empty())
+        .filter(|p| p.ticker.as_ref().is_none_or(|t| seen.insert(t.clone())))
+        .collect();
+    picks.sort_by(|a, b| {
+        let key = |p: &PostLink| {
+            let cap = p.ticker.as_deref().map(market_cap).filter(|c| *c > 0);
+            let t = p.ticker.clone();
+            (
+                cap.is_none(),
+                std::cmp::Reverse(cap),
+                t.is_none(),
+                t,
+                p.slug.clone(),
+            )
+        };
+        key(a).cmp(&key(b))
+    });
+    picks.truncate(PICKS);
+    picks
+}
+
 fn event(r: &EventRow) -> Event {
     Event {
         series: r.series.clone(),
@@ -335,16 +392,15 @@ pub async fn gather(
     }
 
     let last_monday = monday - Duration::days(7);
-    let mut picks = posts
-        .published_posts(
-            crate::earnings::draft::CONTENT_TYPE,
-            &ymd(last_monday),
-            &ymd(last_monday + Duration::days(6)),
-        )
-        .await?;
-    // Stable: equal caps keep their publishing order.
-    picks.sort_by_key(|p| std::cmp::Reverse(p.ticker.as_deref().map_or(0, market_cap)));
-    picks.truncate(PICKS);
+    let picks = pick(
+        posts
+            .published_posts(
+                crate::earnings::draft::CONTENT_TYPE,
+                &ymd(last_monday),
+                &ymd(last_monday + Duration::days(6)),
+            )
+            .await?,
+    );
 
     Ok(Week {
         monday,
@@ -395,13 +451,71 @@ pub fn email(week: &Week, send_at: Option<DateTime<Utc>>) -> Email {
     }
 }
 
-/// One `digest` queue message. Unless next week's email is saved, it
-/// gathers the week and renders the email. Without a `sender` that is all
-/// (a dry run: nothing is sent or marked). With one, the email is sent (for
-/// `send_at`, Sunday 18:00 ET, in `Scheduled` mode) and marked done in kv at
-/// once; a failure leaves it for the next poll and alerts once per ET day.
-/// `Err` is a store error.
+/// One `digest` queue message, Fridays from 18:00 ET only (`due`; a stray
+/// message on another day does nothing). Unless next week's email is saved,
+/// it waits for the day's calendar refresh to finish, or from `CLOSING`
+/// goes ahead without it (with a `digest-stale` warning once the draft is
+/// saved), gathers the week and renders the email. Without a `sender` that
+/// is all (a dry run: nothing is sent or marked). With one, the email is
+/// sent (for `send_at`, Sunday 18:00 ET, in `Scheduled` mode) and marked
+/// done in kv at once; a failure leaves it for the next poll and alerts once
+/// per ET day (`digest`). A run from `LAST_TRY` that saves no draft alerts
+/// `digest-missed`; an answer that is not a draft alerts `digest-not-draft`
+/// whatever was alerted before. A store error is alerted (best effort) and
+/// left for the next poll; it never surfaces as a config error.
 pub async fn digest_tick(
+    now: DateTime<Utc>,
+    es: &dyn EarningsStore,
+    events: &dyn EventStore,
+    posts: &dyn DigestStore,
+    store: &dyn Store,
+    sender: Option<&dyn Sender>,
+    mode: Mode,
+) -> Result<String, String> {
+    if !due(now) {
+        return Ok("not due (Fridays from 18:00 ET only); skipped".into());
+    }
+    let week = ymd(week_ahead(now));
+    match run(now, es, events, posts, store, sender, mode).await {
+        Ok(line) => Ok(line),
+        Err(e) => {
+            let (key, msg) = if last_try(now) {
+                (
+                    "digest-missed",
+                    format!("digest: no draft for the week of {week}: the last try before 22:00 ET hit a store error ({e}); nothing retries until next Friday"),
+                )
+            } else {
+                (
+                    "digest",
+                    format!("digest: store error ({e}); the next poll retries until 22:00 ET"),
+                )
+            };
+            // The store may be what failed: the alert is best effort.
+            let note = match alert_once_today(now, key, "error", &msg, store).await {
+                Ok(_) => "",
+                Err(_) => "; alert failed too",
+            };
+            Ok(format!(
+                "{week}: store error, left for the next poll: {e}{note}"
+            ))
+        }
+    }
+}
+
+/// The once-a-week alert that no draft will be saved for `week`.
+async fn missed(
+    now: DateTime<Utc>,
+    week: &str,
+    why: &str,
+    store: &dyn Store,
+) -> Result<bool, String> {
+    let msg = format!(
+        "digest: no draft for the week of {week}: {why}; nothing retries until next Friday"
+    );
+    alert_once_today(now, "digest-missed", "error", &msg, store).await
+}
+
+async fn run(
     now: DateTime<Utc>,
     es: &dyn EarningsStore,
     events: &dyn EventStore,
@@ -415,23 +529,43 @@ pub async fn digest_tick(
     if es.kv_get(KV_BUILT).await?.as_deref() == Some(week.as_str()) {
         return Ok(format!("{week}: already built"));
     }
-
+    // Next week's dates are as complete as they get once today's refresh
+    // finished. Near 22:00 ET a refresh still waiting for its retry would
+    // skip the week, so the digest goes ahead and says so.
+    let stale = !crate::earnings::calendar::refreshed_today(es, now).await?;
+    if stale && !closing(now) {
+        return Ok(format!(
+            "{week}: waiting for today's calendar refresh to finish"
+        ));
+    }
     let data = gather(now, monday, es, events, posts).await?;
     // Past Sunday 18:00 ET (a late run), a schedule would send at once.
     let send = match mode {
         Mode::Scheduled => send_at(monday).filter(|t| *t > now),
         Mode::Draft => None,
     };
-    let how = match (mode, send) {
+    let mut how = match (mode, send) {
         (Mode::Draft, _) => "draft".to_string(),
         (Mode::Scheduled, Some(t)) => {
             format!("scheduled {}", t.to_rfc3339_opts(SecondsFormat::Secs, true))
         }
         (Mode::Scheduled, None) => "scheduled, send time passed: draft".to_string(),
     };
+    if stale {
+        how.push_str(", calendar refresh unfinished");
+    }
     let e = email(&data, send);
 
     let Some(sender) = sender else {
+        if last_try(now) {
+            missed(
+                now,
+                &week,
+                "the digest is on but ran as a dry run, with no Buttondown key",
+                store,
+            )
+            .await?;
+        }
         return Ok(format!(
             "{week} ({how}): dry run, no sender: {:?} ({} picks, {} bytes)",
             e.subject,
@@ -443,19 +577,32 @@ pub async fn digest_tick(
     let (note, alert) = match sender.send(&e).await {
         Ok(Sent::Done(note)) => (note, None),
         Ok(Sent::NeedsOwner { note, alert }) => (note, Some(alert)),
-        // Left for the next poll.
         Err(err) => {
-            let msg =
-                format!("digest: the email failed ({err}); the next poll retries until 22:00 ET");
-            alert_once_today(now, "digest", "error", &msg, store).await?;
+            if last_try(now) {
+                let why = format!("the last try before 22:00 ET failed ({err})");
+                missed(now, &week, &why, store).await?;
+            } else {
+                let msg = format!(
+                    "digest: the email failed ({err}); the next poll retries until 22:00 ET"
+                );
+                alert_once_today(now, "digest", "error", &msg, store).await?;
+            }
             return Ok(format!("{week} ({how}): failed: {err}"));
         }
     };
+    // Its own key: the one warning that an email may be going out must not
+    // be swallowed by an earlier failure's alert that evening.
     if let Some(msg) = alert {
-        alert_once_today(now, "digest", "error", &msg, store).await?;
+        alert_once_today(now, "digest-not-draft", "error", &msg, store).await?;
     }
     let at = now.to_rfc3339_opts(SecondsFormat::Secs, true);
     es.kv_set(KV_BUILT, &week, &at).await?;
+    if stale {
+        let msg = format!(
+            "digest: the draft for the week of {week} was built from the calendar as it stood: today's calendar refresh had not finished by 21:45 ET (a failed read was waiting for its retry), so some dates may be out of date; check them before sending"
+        );
+        alert_once_today(now, "digest-stale", "warn", &msg, store).await?;
+    }
     Ok(format!("{week} ({how}): {note}"))
 }
 
