@@ -1,6 +1,7 @@
-/** The sitemap's entries, from one D1 read. */
+/** The sitemap's entries, from two D1 reads (posts, tracked IPOs) on a cache miss. */
 
 import type { MetadataRoute } from "next";
+import { listIpoSlugs } from "./ipo";
 import { JOIN_FILING, type D1Like } from "./posts";
 
 type Entry = MetadataRoute.Sitemap[number];
@@ -32,20 +33,24 @@ const newest = (a: string | undefined, b: string) => (a && a > b ? a : b);
  * are published; a pending Chinese page is noindex and left out), and the ticker pages that have an
  * earnings check with published English text (calendar-only tickers are noindex). A post's lastmod is
  * its update time, else its first publish. The For AI agents page is listed only while the MCP server is on
- * (`mcp`), as the page answers 404 otherwise.
+ * (`mcp`), as the page answers 404 otherwise. Each tracked IPO's page follows, in both languages, with its row's
+ * update time (none before migration 0009 is applied).
  */
 export async function sitemapEntries(db: D1Like, origin: URL, mcp = false): Promise<MetadataRoute.Sitemap> {
-  const { results } = await db
-    .prepare(
-      `SELECT p.slug, p.published_at, p.revised_at, en.status AS en, zh.status AS zh, f.ticker
-       FROM posts p
-       LEFT JOIN post_translations en ON en.post_id = p.id AND en.lang = 'en'
-       LEFT JOIN post_translations zh ON zh.post_id = p.id AND zh.lang = 'zh'
-       ${JOIN_FILING}
-       WHERE p.published_at IS NOT NULL AND (en.status = 'published' OR zh.status = 'published')
-       ORDER BY p.trading_date DESC, p.published_at DESC, p.id DESC`,
-    )
-    .all<Row>();
+  const [{ results }, ipos] = await Promise.all([
+    db
+      .prepare(
+        `SELECT p.slug, p.published_at, p.revised_at, en.status AS en, zh.status AS zh, f.ticker
+         FROM posts p
+         LEFT JOIN post_translations en ON en.post_id = p.id AND en.lang = 'en'
+         LEFT JOIN post_translations zh ON zh.post_id = p.id AND zh.lang = 'zh'
+         ${JOIN_FILING}
+         WHERE p.published_at IS NOT NULL AND (en.status = 'published' OR zh.status = 'published')
+         ORDER BY p.trading_date DESC, p.published_at DESC, p.id DESC`,
+      )
+      .all<Row>(),
+    listIpoSlugs(db),
+  ]);
 
   let latest: string | undefined;
   const tickers = new Map<string, string>();
@@ -71,6 +76,7 @@ export async function sitemapEntries(db: D1Like, origin: URL, mcp = false): Prom
     ...paired(origin, "/legal"),
     ...posts,
     ...[...tickers].flatMap(([ticker, modified]) => paired(origin, `/t/${encodeURIComponent(ticker)}`, modified)),
+    ...ipos.flatMap((i) => paired(origin, `/ipo/${i.slug}`, i.updatedAt ?? undefined)),
   ];
 }
 

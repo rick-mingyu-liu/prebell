@@ -2,11 +2,13 @@ import type { Metadata } from "next";
 import Link from "next/link";
 import { getTranslations, setRequestLocale } from "next-intl/server";
 import CalendarWeek from "@/components/CalendarWeek";
+import IpoWatchList from "@/components/IpoWatchList";
 import ShareButton from "@/components/ShareButton";
 import type { Locale } from "@/i18n/routing";
 import { getDb } from "@/lib/db";
 import { addDays, INDEXED_WEEKS, isDate, listCalendarWeek, todayEt, weekStart } from "@/lib/earnings";
 import { listEvents } from "@/lib/events";
+import { iposByDate, listIposBetween, listIpoWatch } from "@/lib/ipo";
 import { pairedAlternates, shareMetadata } from "@/lib/seo";
 import { formatDate } from "@/lib/time";
 
@@ -43,12 +45,15 @@ export default async function EarningsCalendar({ params, searchParams }: PagePro
   const start = monday((await searchParams).week);
   const t = await getTranslations("earnings");
   const te = await getTranslations("events");
+  const ti = await getTranslations("ipo");
   const db = getDb();
-  const [days, events] = await Promise.all([
+  const today = todayEt();
+  const [days, events, weekIpos, watch] = await Promise.all([
     listCalendarWeek(db, start, locale),
     listEvents(db, start, addDays(start, 4), locale),
+    listIposBetween(db, start, addDays(start, 4), locale),
+    listIpoWatch(db, today, locale),
   ]);
-  const today = todayEt();
   const href = (d: string) => `/${locale}/earnings?week=${d}`;
   // Companies, not rows: a ticker with two dates in one week counts once.
   const companies = new Set(days.flatMap((d) => d.entries.map((e) => e.ticker))).size;
@@ -94,13 +99,20 @@ export default async function EarningsCalendar({ params, searchParams }: PagePro
           />
         </div>
       </header>
-      <CalendarWeek days={days} locale={locale} events={events} today={today} />
+      <IpoWatchList ipos={watch} locale={locale} />
+      <CalendarWeek days={days} locale={locale} events={events} ipos={iposByDate(weekIpos)} today={today} />
       <p className="legend">
         {t("timesEt")}
         {locale === "zh" ? "。" : ". "}
         {te("legend")}
         {locale === "zh" ? "" : " "}
         {t("legend")}
+        {(watch.length > 0 || weekIpos.length > 0) && (
+          <>
+            {locale === "zh" ? "" : " "}
+            {ti("legend")}
+          </>
+        )}
       </p>
       <nav className="pager">
         <Link href={href(addDays(start, -7))}>← {t("prevWeek")}</Link>
