@@ -72,8 +72,9 @@ describe("About page", () => {
     expect(out).not.toContain('class="disclaimer"');
   });
 
-  it("renders in Chinese", async () => {
+  it("renders in Chinese, without the signup even with the key set", async () => {
     const out = await render("zh");
+    expect(out).not.toContain('class="signup"');
     expect(out).toContain("<h2>关于作者</h2>");
     expect(out).toContain("来自 PreBell 团队。");
     expect(out).toContain("试用 TermPocket →");

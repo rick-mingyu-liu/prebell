@@ -78,3 +78,11 @@ CF_ACCOUNT_ID = "ed6569531d89c3e00705807340c7b75f"
 # Earnings calendar seeding: "yahoo" (Yahoo v7 quote earnings dates, the default)
 # or "off" (only company announcements and EDGAR filings).
 EARNINGS_CALENDAR_SEED = "yahoo"
+# Weekly digest (docs/runbook.md "Weekly digest"): off. DIGEST_ENABLED is not set
+# here: unset or anything but "true" means no digest message is queued. "true"
+# queues one on Friday evenings: with the BUTTONDOWN_API_KEY secret it saves next
+# week's English email as a Buttondown draft for every subscriber; without the
+# secret it is a dry run that gathers and renders and sends nothing.
+# DIGEST_MODE: "draft" (the default; the owner sends it) or "scheduled" (Sunday
+# 18:00 ET).
+DIGEST_MODE = "draft"

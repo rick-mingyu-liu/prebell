@@ -6,6 +6,7 @@ use std::cell::Cell;
 
 use async_trait::async_trait;
 use prebell_core::cover::card::{CardStore, CoverPost};
+use prebell_core::digest::{DigestStore, PostLink};
 use prebell_core::facts::NewsReason;
 use prebell_core::store::{PostRow, ReportRow, RunRow, Store, TranslationRow};
 use serde::de::DeserializeOwned;
@@ -652,6 +653,54 @@ impl CardStore for D1Store {
 
     async fn put_text(&self, key: &str, text: &str) -> Result<(), String> {
         Store::put_bytes(self, key, text.as_bytes(), "text/plain").await
+    }
+}
+
+/// The digest's posts: those whose English page is published, with that
+/// page's title and one-line summary, by type and trading-date range.
+/// `CROSS JOIN` keeps `posts` first, so the week is read through
+/// `idx_posts_trading_date` (D1 runs no ANALYZE, and without it SQLite would
+/// start from every published English translation);
+/// `apps/web/tests/digestquery.test.ts` checks the plan.
+pub(crate) const DIGEST_POSTS: &str = "SELECT p.slug, p.trading_date, f.ticker, \
+     en.title AS title, en.summary AS summary \
+     FROM posts p \
+     CROSS JOIN post_translations en ON en.post_id = p.id AND en.lang = 'en' \
+     LEFT JOIN earnings_filings f ON f.run_key = p.run_key \
+     WHERE p.content_type = ?1 AND p.trading_date BETWEEN ?2 AND ?3 AND p.published_at IS NOT NULL \
+     AND en.status = 'published' AND en.title IS NOT NULL AND en.title <> '' \
+     ORDER BY p.trading_date, p.published_at, p.id";
+
+#[derive(Deserialize)]
+struct DigestPostRec {
+    slug: String,
+    trading_date: String,
+    ticker: Option<String>,
+    title: String,
+    summary: Option<String>,
+}
+
+#[async_trait(?Send)]
+impl DigestStore for D1Store {
+    async fn published_posts(
+        &self,
+        content_type: &str,
+        from: &str,
+        to: &str,
+    ) -> Result<Vec<PostLink>, String> {
+        let rows: Vec<DigestPostRec> = self
+            .all(DIGEST_POSTS, &[s(content_type), s(from), s(to)])
+            .await?;
+        Ok(rows
+            .into_iter()
+            .map(|r| PostLink {
+                slug: r.slug,
+                trading_date: r.trading_date,
+                ticker: r.ticker,
+                title: r.title,
+                summary: r.summary.unwrap_or_default(),
+            })
+            .collect())
     }
 }
 

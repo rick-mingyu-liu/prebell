@@ -692,6 +692,12 @@ pub async fn refresh_due(es: &dyn EarningsStore, now: DateTime<Utc>) -> Result<b
     Ok(next_attempt(es.kv_get(KV_REFRESHED).await?.as_deref(), now).is_some())
 }
 
+/// Whether the day's calendar refresh is over at `now`: it ran, and no retry
+/// of a failed aggregator read is still to come.
+pub async fn refreshed_today(es: &dyn EarningsStore, now: DateTime<Utc>) -> Result<bool, String> {
+    Ok(es.kv_get(KV_REFRESHED).await?.as_deref() == Some(ymd(et(now).date_naive()).as_str()))
+}
+
 /// Reads the aggregator and reconciles its dates (rules 1-7), drops the
 /// guessed dates of companies no longer on the watchlist, then rule 8. The
 /// calendar is read in one ranged query and written in one batch: at about

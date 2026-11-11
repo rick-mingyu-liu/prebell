@@ -13,18 +13,26 @@ describe("signupEnabled", () => {
   it("is on only when the Buttondown key is a non-empty string", () => {
     ctx.throws = false;
     ctx.env = { BUTTONDOWN_API_KEY: "KEY" };
-    expect(signupEnabled()).toBe(true);
+    expect(signupEnabled("en")).toBe(true);
     expect(buttondownKey()).toBe("KEY");
     for (const bad of [undefined, "", 42, null]) {
       ctx.env = { BUTTONDOWN_API_KEY: bad };
-      expect(signupEnabled(), String(bad)).toBe(false);
+      expect(signupEnabled("en"), String(bad)).toBe(false);
       expect(buttondownKey()).toBeNull();
     }
   });
 
+  it("is off on Chinese pages, key or not: the digest is one English email", () => {
+    ctx.throws = false;
+    ctx.env = { BUTTONDOWN_API_KEY: "KEY" };
+    expect(signupEnabled("zh")).toBe(false);
+    ctx.env = {};
+    expect(signupEnabled("zh")).toBe(false);
+  });
+
   it("is off without a Cloudflare context", () => {
     ctx.throws = true;
-    expect(signupEnabled()).toBe(false);
+    expect(signupEnabled("en")).toBe(false);
     expect(buttondownKey()).toBeNull();
   });
 });

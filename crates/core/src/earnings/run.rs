@@ -213,8 +213,9 @@ pub async fn poll_tick(
 /// alerts once per ET day when SEC refuses (403/429), and lists the
 /// follow-up messages: one build per new filing (or, with none, see
 /// `retry_builds`: for retries and Chinese drafts), the calendar refresh
-/// until it ran today, and the macro events check until it ran today or
-/// while an event's release may have just come out.
+/// until it ran today, the macro events check until it ran today or
+/// while an event's release may have just come out, and on Friday evenings
+/// the weekly digest until it is built.
 pub async fn poll_job(
     now: DateTime<Utc>,
     fired: Option<DateTime<Utc>>,
@@ -274,6 +275,7 @@ pub async fn poll_job(
         EarningsStep::Foreign,
         out.foreign.reads,
     ));
+    let refreshed = crate::earnings::calendar::refreshed_today(es, now).await?;
     if crate::earnings::calendar::refresh_due(es, now).await? {
         out.follow_ups.push(EarningsStep::Calendar);
     }
@@ -281,6 +283,16 @@ pub async fn poll_job(
         || crate::events::release_due(now, crate::events::check::RELEASE_WINDOW_MINUTES)
     {
         out.follow_ups.push(EarningsStep::Events);
+    }
+    // Friday evening, once the day's calendar refresh ran: next week's dates
+    // are as complete as they get before the week starts. From 21:45 ET
+    // whatever the refresh's state, so a retry still pending never skips
+    // the week (the digest says so in its alert).
+    if (refreshed || crate::digest::closing(now))
+        && crate::digest::due(now)
+        && !crate::digest::built(es, now).await?
+    {
+        out.follow_ups.push(EarningsStep::Digest);
     }
     Ok(out)
 }
@@ -1490,6 +1502,84 @@ mod tests {
         let t = utc("2026-11-10T13:35:00Z");
         let o = poll_job(t, Some(t), &es, base.as_ref(), &fl).await.unwrap();
         assert!(o.follow_ups.contains(&EarningsStep::Events), "{o:?}");
+    }
+
+    #[tokio::test]
+    async fn friday_evening_polls_queue_the_digest_until_it_is_built() {
+        let (base, es) = stores();
+        es.kv.borrow_mut().clear();
+        es.kv_set("events_checked_on", "2026-11-13", "x")
+            .await
+            .unwrap();
+        let fl = FakeFilings::default();
+        let digest = |o: &PollOutcome| o.follow_ups.contains(&EarningsStep::Digest);
+        // Fri 18:00 ET (EST), calendar not refreshed today: the refresh first.
+        let t = utc("2026-11-13T23:00:00Z");
+        let o = poll_job(t, Some(t), &es, base.as_ref(), &fl).await.unwrap();
+        assert!(
+            o.follow_ups.contains(&EarningsStep::Calendar) && !digest(&o),
+            "{o:?}"
+        );
+        // The day's first read failed and its retry is still to come: the
+        // digest waits for it.
+        es.kv_set(
+            "calendar_refreshed_on",
+            "2026-11-13 1 2026-11-13T22:00:00Z",
+            "x",
+        )
+        .await
+        .unwrap();
+        let o = poll_job(t, Some(t), &es, base.as_ref(), &fl).await.unwrap();
+        assert!(!digest(&o), "{o:?}");
+        // A retry that falls due after the last poll (21:55 ET): from
+        // 21:45 ET the digest is queued anyway, rather than never.
+        es.kv_set(
+            "calendar_refreshed_on",
+            "2026-11-13 1 2026-11-14T00:58:00Z",
+            "x",
+        )
+        .await
+        .unwrap();
+        for (at, queued) in [
+            ("2026-11-14T02:40:00Z", false), // 21:40 ET
+            ("2026-11-14T02:45:00Z", true),  // 21:45 ET
+            ("2026-11-14T02:55:00Z", true),  // 21:55 ET
+        ] {
+            let t = utc(at);
+            let o = poll_job(t, Some(t), &es, base.as_ref(), &fl).await.unwrap();
+            assert_eq!(digest(&o), queued, "{at}: {o:?}");
+        }
+        es.kv_set("calendar_refreshed_on", "2026-11-13", "x")
+            .await
+            .unwrap();
+        let o = poll_job(t, Some(t), &es, base.as_ref(), &fl).await.unwrap();
+        assert!(digest(&o), "{o:?}");
+        // The Worker's gate: off by default (DIGEST_ENABLED unset), on
+        // only with "true".
+        let mut off = o.clone();
+        crate::digest::gate(&mut off.follow_ups, None);
+        assert!(!digest(&off), "{off:?}");
+        let mut on = o.clone();
+        crate::digest::gate(&mut on.follow_ups, Some("true"));
+        assert!(digest(&on), "{on:?}");
+        // 17:55 ET Friday and Thursday evening: not yet.
+        for early in ["2026-11-13T22:55:00Z", "2026-11-13T00:00:00Z"] {
+            let t = utc(early);
+            let o = poll_job(t, Some(t), &es, base.as_ref(), &fl).await.unwrap();
+            assert!(!digest(&o), "{early}: {o:?}");
+        }
+        // Still queued at 21:00 ET until saved; saved for Nov 16 stops.
+        let t = utc("2026-11-14T02:00:00Z"); // Fri 21:00 ET
+        es.kv_set("digest_built_for", "2026-11-09", "x")
+            .await
+            .unwrap();
+        let o = poll_job(t, Some(t), &es, base.as_ref(), &fl).await.unwrap();
+        assert!(digest(&o), "{o:?}");
+        es.kv_set("digest_built_for", "2026-11-16", "x")
+            .await
+            .unwrap();
+        let o = poll_job(t, Some(t), &es, base.as_ref(), &fl).await.unwrap();
+        assert!(!digest(&o), "{o:?}");
     }
 
     #[tokio::test]
