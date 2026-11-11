@@ -384,6 +384,7 @@
       "note": "每个数字均为所列媒体在当日报道的数据。"
     },
     "reportedBy": "{outlet} {date}报道",
+    "reportedByLead": "{outlet} {date}报道：",
     "moves": {
       "heading": "公司近期动态"
     },

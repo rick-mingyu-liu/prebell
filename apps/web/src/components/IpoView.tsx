@@ -273,7 +273,11 @@ function Offering({ ipo, locale, t }: { ipo: IpoPage; locale: Locale; t: T }) {
   );
 }
 
-/** As-reported items, newest first: the lead (a figure or the statement), who reported it and when, the quote and the link. */
+/**
+ * As-reported items, newest first: the lead (a figure or a move's statement), who reported it and when, the quote
+ * and the link. With no lead (v1 stores no statements), the attribution introduces the quote in the ink of a view's
+ * line ("Sample Times reported on Nov 4, 2026:"), so the quote reads as the item.
+ */
 function Items({ items, head, locale, t }: { items: IpoItem[]; head: (i: IpoItem) => ReactNode; locale: Locale; t: T }) {
   return (
     <ul className="ipo-items">
@@ -282,7 +286,11 @@ function Items({ items, head, locale, t }: { items: IpoItem[]; head: (i: IpoItem
         return (
           <li key={i.url ?? `${i.outlet}:${i.publishedOn}:${i.quote}`} className="ipo-item">
             {lead && <p className="ipo-lead">{lead}</p>}
-            <p className="ipo-by">{t("ipo.reportedBy", { outlet: i.outlet, date: formatDate(i.publishedOn, locale) })}</p>
+            {lead ? (
+              <p className="ipo-by">{t("ipo.reportedBy", { outlet: i.outlet, date: formatDate(i.publishedOn, locale) })}</p>
+            ) : (
+              <p className="ipo-by ipo-by-lead">{t("ipo.reportedByLead", { outlet: i.outlet, date: formatDate(i.publishedOn, locale) })}</p>
+            )}
             <blockquote className="ipo-quote">“{i.quote}”</blockquote>
             <ArticleLink url={i.url} t={t} />
           </li>

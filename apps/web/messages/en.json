@@ -397,6 +397,7 @@
       "note": "Each figure is as the named outlet reported it on that day."
     },
     "reportedBy": "Reported by {outlet} on {date}",
+    "reportedByLead": "{outlet} reported on {date}:",
     "moves": {
       "heading": "Recent moves"
     },

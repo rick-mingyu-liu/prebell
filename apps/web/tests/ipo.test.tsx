@@ -773,7 +773,7 @@ describe("review fixes: what the reader refuses to print", () => {
     const text = textOf(await page("anthropic"));
     expect(text).not.toContain("trillion trillion");
     expect(text).not.toContain("$1,000,000,000");
-    expect(text).toContain("Reported by Sample Times on Oct 12, 2026“Bankers have pitched a valuation of about $2 trillion");
+    expect(text).toContain("Sample Times reported on Oct 12, 2026:“Bankers have pitched a valuation of about $2 trillion");
     expect(text).toContain("$1.4 trillionReported by Example News");
   });
 
@@ -965,12 +965,17 @@ describe("contract revision: statements, first trading day, passed reported date
     // A move with no statement at all shows its attributed quote alone.
     env.db = db(`UPDATE ipo_items SET statement_en = NULL, statement_zh = NULL WHERE kind = 'company_move';`);
     for (const [locale, line] of [
-      ["en", "Recent movesReported by Sample Times on Nov 4, 2026“Anthropic on Tuesday released"],
-      ["zh", "公司近期动态Sample Times 2026年11月4日报道“Anthropic on Tuesday released"],
+      ["en", "Recent movesSample Times reported on Nov 4, 2026:“Anthropic on Tuesday released"],
+      ["zh", "公司近期动态Sample Times 2026年11月4日报道：“Anthropic on Tuesday released"],
     ] as const) {
       const out = await page("anthropic", locale);
       expect(textOf(out)).toContain(line);
       expect(out).not.toContain('<p class="ipo-lead"></p>');
+      // Heading, the attribution introducing the quote, the quote in quotation marks, the article link.
+      const moves = out.slice(out.indexOf('<h2 id="moves">'), out.indexOf('<h2 id="views">'));
+      expect(moves).toMatch(
+        /^<h2 id="moves">[^<]+<\/h2><ul class="ipo-items"><li class="ipo-item"><p class="ipo-by ipo-by-lead">[^<]+<\/p><blockquote class="ipo-quote">“[^<]+”<\/blockquote><p class="ipo-link"><a class="more" href="https:\/\/sampletimes\.example\/2026\/11\/04\/anthropic-office-apps" rel="nofollow noopener noreferrer">[^<]+ ↗<\/a><\/p><\/li><\/ul>$/,
+      );
     }
   });
 
