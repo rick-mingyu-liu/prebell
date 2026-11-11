@@ -980,6 +980,22 @@ mod tests {
                 quote: "The initial public offering price is $75.00 per share.".into(),
                 ..Default::default()
             });
+            st.facts.push(FactRow {
+                accession: "b4".into(),
+                kind: "shares_offered".into(),
+                slug: "anthropic".into(),
+                value_num: Some(825e6),
+                quote: "Class A Common Stock 825,000,000 Shares".into(),
+                ..Default::default()
+            });
+            st.facts.push(FactRow {
+                accession: "b4".into(),
+                kind: "prospectus_date".into(),
+                slug: "anthropic".into(),
+                value_text: Some("2026-10-28".into()),
+                quote: "Prospectus dated October 28, 2026".into(),
+                ..Default::default()
+            });
         }
         // Up 20% on the IPO price: it would top the gainers if it were one.
         let m = md(&[

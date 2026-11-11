@@ -66,23 +66,23 @@ fn patterns() -> &'static Patterns {
             r"(?:Prospectus dated|PROSPECTUS DATED|The date of this prospectus is)\s+{MONTH}\s+(\d{{1,2}}),\s+(\d{{4}})"
         )),
         total: re(&format!(
-            r"(?:Class [A-Z] )?(?:Common Stock|Ordinary Shares|Common Shares)\s+{SHARES_NUM}\s+Shares\b|\b{SHARES_NUM}\s+Shares\s+(?:of\s+)?(?:Class [A-Z]\s+)?(?:Common Stock|Ordinary Shares|Common Shares)|\b{SHARES_NUM}\s+American Depositary Shares\b"
+            r"(?:Class [A-Z] )?(?:Common Stock|Ordinary Shares|Common Shares)\s+{SHARES_NUM}\s+Shares\b|\b{SHARES_NUM}\s+(?:Shares|American Depositary Shares)\s+[A-Za-z0-9 ,.&'()-]{{0,60}}?(?:Common Stock|Ordinary Shares|Common Shares)\b|\b{SHARES_NUM}\s+American Depositary Shares\b"
         )),
         company: re(&format!(
-            r"\b(?:We are|is) (?:offering|selling) {SHARES_NUM} (?:shares|American Depositary Shares|ADSs)\b"
+            r"\bWe are (?:offering|selling) {SHARES_NUM} (?:shares|American Depositary Shares|ADSs)\b|\bis (?:offering|selling) {SHARES_NUM} (?:shares|American Depositary Shares|ADSs) of its\b"
         )),
         selling: re(&format!(
-            r"selling (?:stockholders|shareholders)\b(?u:[^.])*?\b(?:are )?(?:offering|selling) (?:an additional |a total of )?{SHARES_NUM} (?:shares|American Depositary Shares|ADSs)\b"
+            r"selling (?:stockholders|shareholders)\b(?u:[^.])*?\b(?:are )?(?:offering|selling) (?:an additional |a total of |an aggregate of )?{SHARES_NUM} (?:shares|American Depositary Shares|ADSs)\b"
         )),
         option: re(&format!(
-            r"option to purchase (?:up to )?(?:an additional |a maximum of )?{SHARES_NUM} (?:additional )?(?:shares|American Depositary Shares|ADSs)\b"
+            r"(?:option|right) to purchase (?:up to )?(?:an additional |a maximum of )?{SHARES_NUM} (?:additional )?(?:shares|American Depositary Shares|ADSs)\b"
         )),
         range: re(r"between \$\s?(\d{1,4}(?:\.\d{2})?) and \$\s?(\d{1,4}(?:\.\d{2})?)"),
         final_price: re(
-            r"(?i)\binitial public offering price(?: per (?:share|ADS))? (?:is|of) \$\s?(\d{1,4}(?:\.\d{2})?)",
+            r"(?i)\binitial public offering price(?: per (?:share|ADS))?(?: of (?:our|the|its) [A-Za-z ]{1,60}?)? (?:is|of) \$\s?(\d{1,4}(?:\.\d{2})?)",
         ),
         listing: re(&format!(
-            r"\b(?:list|listing|listed)\b(?u:[^.])*? on (?:the |The )?({EXCHANGES})(?:\s*\(the “[A-Za-z]+”\)|\s*\(“[A-Za-z]+”\))?,?\s+under the (?:ticker |trading )?symbol\s+(?:“|\x22)([A-Z]{{1,5}}(?:\.[A-Z])?)\.?(?:”|\x22)"
+            r"\b(?:list|listing|listed)\b(?u:[^.])*? on (?:the |The )?({EXCHANGES})(?: LLC)?(?:\s*\(the “[A-Za-z]+”\)|\s*\(“[A-Za-z]+”\))?,?\s+under the (?:ticker |trading )?symbol\s+(?:“|\x22)([A-Z]{{1,5}}(?:\.[A-Z])?)\.?(?:”|\x22)"
         )),
         trading: re(&format!(
             r"(?:expected to|will) (?:begin|commence) trading\b(?u:[^.])*? on {MONTH} (\d{{1,2}}), (\d{{4}})"
@@ -121,11 +121,30 @@ fn num(s: &str) -> Option<f64> {
     s.replace(',', "").parse().ok()
 }
 
+/// Filer software often writes curly quotes and dashes as `&#147;`-style
+/// Windows-1252 numbers, which decode to C1 control characters (U+0093):
+/// read them as the characters they stand for.
+fn cp1252_quotes(text: &str) -> String {
+    text.chars()
+        .map(|c| match c {
+            '\u{91}' => '‘',
+            '\u{92}' => '’',
+            '\u{93}' => '“',
+            '\u{94}' => '”',
+            '\u{96}' => '–',
+            '\u{97}' => '—',
+            c => c,
+        })
+        .collect()
+}
+
 /// Words that never end a sentence before their period.
-const ABBREV: [&str; 16] = [
-    "Inc", "Corp", "Co", "Ltd", "Jr", "Sr", "Mr", "Ms", "Mrs", "Dr", "St", "No", "Nos", "vs",
-    "approx", "Messrs",
+const ABBREV: [&str; 12] = [
+    "Jr", "Sr", "Mr", "Ms", "Mrs", "Dr", "St", "No", "Nos", "vs", "approx", "Messrs",
 ];
+/// Company suffixes: their period ends a sentence only before a capital
+/// ("..., Inc. We are offering" ends; "Reddit, Inc. is offering" does not).
+const SUFFIXES: [&str; 5] = ["Inc", "Corp", "Co", "Ltd", "Bros"];
 
 /// Whether the character at byte `i` ends a sentence: `!`, `?`, or a period
 /// that is not a decimal point, not after an abbreviation and not after a
@@ -146,6 +165,11 @@ fn ends_at(text: &str, i: usize) -> bool {
                 .rev()
                 .collect();
             let single_cap = word.len() == 1 && word.chars().all(|c| c.is_ascii_uppercase());
+            if SUFFIXES.contains(&word.as_str()) {
+                return text[i + 1..]
+                    .trim_start()
+                    .starts_with(|c: char| c.is_ascii_uppercase());
+            }
             !(single_cap || ABBREV.contains(&word.as_str()))
         }
         _ => false,
@@ -162,6 +186,9 @@ fn sentence(text: &str, from: usize) -> Option<String> {
         .rev()
         .find(|&(i, _)| ends_at(text, i))
         .map_or(0, |(i, c)| i + c.len_utf8());
+    // A table row ends with a figure and no period: "... 4,773,090,000 The
+    // underwriters may ..." starts its sentence at "The".
+    let start = table_end(&text[start..from]).map_or(start, |k| start + k);
     // The previous sentence's closing quotes belong to it.
     let rest = &text[start..];
     let start = start + rest.len()
@@ -183,6 +210,34 @@ fn sentence(text: &str, from: usize) -> Option<String> {
     // "...between $70.00 and $78.00 ." reads "... and $78.00".
     let s = s.strip_suffix(" .").unwrap_or(s);
     (s.chars().count() <= MAX_SENTENCE_CHARS).then(|| s.to_string())
+}
+
+/// Words that start a cover sentence.
+const STARTERS: [&str; 12] = [
+    "The ",
+    "We ",
+    "Our ",
+    "This ",
+    "To ",
+    "Each ",
+    "Prior ",
+    "In ",
+    "Upon ",
+    "Following ",
+    "All ",
+    "An ",
+];
+
+/// Where the last "<figure> <Starter>" boundary in `s` lets a sentence start.
+fn table_end(s: &str) -> Option<usize> {
+    s.char_indices()
+        .filter(|&(i, c)| {
+            c == ' '
+                && s[..i].ends_with(|d: char| d.is_ascii_digit())
+                && STARTERS.iter().any(|w| s[i + 1..].starts_with(w))
+        })
+        .map(|(i, _)| i + 1)
+        .last()
 }
 
 /// The sentence holding capture group 0, or the match itself when the
@@ -266,6 +321,7 @@ fn verified(doc: &str, f: &CoverFact) -> bool {
 /// registration statements; the final price and the pricing date only from
 /// a final prospectus (a preliminary prospectus is also "dated").
 pub fn extract(text: &str, form: &str) -> Vec<CoverFact> {
+    let text = &cp1252_quotes(text);
     let p = patterns();
     let is_final = super::is_final(form);
     let mut out: Vec<CoverFact> = Vec::new();
@@ -286,12 +342,22 @@ pub fn extract(text: &str, form: &str) -> Vec<CoverFact> {
         let v = (1..=3)
             .find_map(|i| c.get(i))
             .and_then(|m| num(m.as_str()))?;
-        Some(fact_num("shares_offered", v, c[0].trim().to_string()))
+        // "(Representing 95,500,000 Ordinary Shares" takes its ")".
+        let m = c.get(0).expect("group 0");
+        let mut q = m.as_str().trim().to_string();
+        if q.matches('(').count() > q.matches(')').count() && text[m.end()..].starts_with(')') {
+            q.push(')');
+        }
+        Some(fact_num("shares_offered", v, q))
     });
-    let company = p
-        .company
-        .captures(text)
-        .and_then(|c| Some(fact_num("shares_company", num(&c[1])?, quote_of(text, &c))));
+    let company = p.company.captures(text).and_then(|c| {
+        let n = (1..=2).find_map(|i| c.get(i))?;
+        Some(fact_num(
+            "shares_company",
+            num(n.as_str())?,
+            quote_of(text, &c),
+        ))
+    });
     let selling = p
         .selling
         .captures(text)
@@ -346,7 +412,9 @@ pub fn extract(text: &str, form: &str) -> Vec<CoverFact> {
         out.push(fact_text("exchange", c[1].to_string(), q.clone()));
         out.push(fact_text("symbol", c[2].to_string(), q));
     }
-    if let Some(c) = p.trading.captures(text) {
+    // A trading day only from a final prospectus: a preliminary one's plan
+    // may change.
+    if let Some(c) = p.trading.captures(text).filter(|_| is_final) {
         if let Some(d) = date_at(&c, 1) {
             out.push(fact_text("trading_date", d, quote_of(text, &c)));
         }
@@ -354,6 +422,23 @@ pub fn extract(text: &str, form: &str) -> Vec<CoverFact> {
     let doc = normalize(text);
     out.retain(|f| verified(&doc, f));
     out
+}
+
+/// The kinds a final prospectus must yield to become the facts source.
+pub const FINAL_KINDS: [&str; 2] = ["price_final", "shares_offered"];
+
+/// What a filing of `form` is missing of the kinds it must yield on its
+/// own: a final prospectus its price and shares. A registration
+/// statement's needs depend on the facts it would replace (`resolve`).
+pub fn missing_for(facts: &[CoverFact], form: &str) -> Vec<&'static str> {
+    if !super::is_final(form) {
+        return vec![];
+    }
+    FINAL_KINDS
+        .iter()
+        .copied()
+        .filter(|k| find(facts, k).is_none())
+        .collect()
 }
 
 /// The fact of `kind`, if read.
@@ -463,6 +548,127 @@ pub(crate) mod tests {
         assert!(find(&f, "price_low").is_none());
         // Read as a registration statement, the same words give no final price.
         assert!(find(&extract(&text, "S-1/A"), "price_final").is_none());
+    }
+
+    pub(crate) const REDDIT: &str = include_str!("../../tests/fixtures/edgar_ipo_424b4_reddit.htm");
+    pub(crate) const ARM: &str = include_str!("../../tests/fixtures/edgar_ipo_424b4_arm.htm");
+    pub(crate) const COREWEAVE: &str =
+        include_str!("../../tests/fixtures/edgar_ipo_424b4_coreweave.htm");
+
+    /// `(kind, number or text)` of each fact read, in order.
+    fn values(f: &[CoverFact]) -> Vec<(&'static str, String)> {
+        f.iter()
+            .map(|x| {
+                let v = x
+                    .num
+                    .map(|n| n.to_string())
+                    .or_else(|| x.text.clone())
+                    .unwrap_or_default();
+                (x.kind, v)
+            })
+            .collect()
+    }
+    fn kv(pairs: &[(&'static str, &str)]) -> Vec<(&'static str, String)> {
+        pairs.iter().map(|(k, v)| (*k, v.to_string())).collect()
+    }
+
+    #[test]
+    fn reddit_real_424b4() {
+        let text = cover_text(REDDIT);
+        let f = extract(&text, "424B4");
+        assert_eq!(
+            values(&f),
+            kv(&[
+                ("prospectus_date", "2024-03-20"),
+                ("shares_offered", "22000000"),
+                ("shares_company", "15276527"),
+                ("shares_selling", "6723473"),
+                ("option_shares", "3300000"),
+                ("price_final", "34"),
+                ("exchange", "New York Stock Exchange"),
+                ("symbol", "RDDT"),
+            ])
+        );
+        assert_eq!(
+            get(&f, "price_final").quote,
+            "The initial public offering price per share of our Class A common stock is $34.00."
+        );
+        assert_eq!(
+            get(&f, "shares_offered").quote,
+            "22,000,000 Shares Reddit, Inc. Class A Common Stock"
+        );
+        assert!(missing_for(&f, "424B4").is_empty());
+        for x in &f {
+            assert!(verify_quote(&cp1252_quotes(&text), &x.quote), "{x:?}");
+        }
+    }
+
+    #[test]
+    fn arm_real_424b4_in_ads() {
+        let text = cover_text(ARM);
+        let f = extract(&text, "424B4");
+        assert_eq!(
+            values(&f),
+            kv(&[
+                ("prospectus_date", "2023-09-13"),
+                ("shares_offered", "95500000"),
+                ("option_shares", "7000000"),
+                ("price_final", "51"),
+                ("exchange", "Nasdaq Global Select Market"),
+                ("symbol", "ARM"),
+            ])
+        );
+        assert_eq!(
+            get(&f, "price_final").quote,
+            "The initial public offering price per ADS is $51.00."
+        );
+        // The cover's C1 quote characters are read as curly quotes.
+        assert_eq!(
+            get(&f, "symbol").quote,
+            "Our ADSs have been approved for listing on the Nasdaq Global Select Market (“Nasdaq”) under the symbol “ARM”."
+        );
+        assert!(get(&f, "option_shares")
+            .quote
+            .starts_with("The underwriters may also exercise"));
+        assert!(missing_for(&f, "424B4").is_empty());
+    }
+
+    #[test]
+    fn coreweave_real_424b4() {
+        let text = cover_text(COREWEAVE);
+        let f = extract(&text, "424B4");
+        assert_eq!(
+            values(&f),
+            kv(&[
+                ("prospectus_date", "2025-03-27"),
+                ("shares_offered", "37500000"),
+                ("shares_company", "36590000"),
+                ("shares_selling", "910000"),
+                ("price_final", "40"),
+                ("exchange", "Nasdaq Stock Market"),
+                ("symbol", "CRWV"),
+            ])
+        );
+        assert_eq!(
+            get(&f, "shares_company").quote,
+            "We are offering 36,590,000 shares of our Class A common stock and the selling stockholders identified in this prospectus are offering 910,000 shares of our Class A common stock in this offering."
+        );
+        assert!(missing_for(&f, "424B4").is_empty());
+    }
+
+    #[test]
+    fn a_final_prospectus_without_its_price_or_shares_is_incomplete() {
+        let only_price = "The initial public offering price per share is $34.00.";
+        let f = extract(only_price, "424B4");
+        assert_eq!(missing_for(&f, "424B4"), ["shares_offered"]);
+        assert_eq!(missing_for(&[], "424B4"), ["price_final", "shares_offered"]);
+    }
+
+    #[test]
+    fn a_selling_stockholder_is_not_the_company() {
+        let t = "Class A Common Stock 1,000,000 Shares. The selling stockholder is offering 1,000,000 shares of Class A common stock.";
+        let f = extract(t, "S-1");
+        assert!(find(&f, "shares_company").is_none(), "{f:?}");
     }
 
     #[test]

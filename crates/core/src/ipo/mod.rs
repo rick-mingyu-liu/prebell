@@ -45,6 +45,15 @@ pub struct Tracked {
     pub cik: u64,
     pub name: String,
     pub name_zh: Option<String>,
+    /// Other names a news quote may use for the company (`ipo::news`).
+    pub aliases: Vec<String>,
+}
+
+impl Tracked {
+    /// The display name and the aliases.
+    pub fn names(&self) -> impl Iterator<Item = &str> {
+        std::iter::once(self.name.as_str()).chain(self.aliases.iter().map(String::as_str))
+    }
 }
 
 fn slug_ok(s: &str) -> bool {
@@ -83,6 +92,17 @@ pub fn parse_list(data: &str) -> Result<Vec<Tracked>, String> {
             cik,
             name: name.to_string(),
             name_zh: (!zh.is_empty() && *zh != "-").then(|| zh.to_string()),
+            aliases: c
+                .get(4)
+                .filter(|a| !a.is_empty() && **a != "-")
+                .map(|a| {
+                    a.split(',')
+                        .map(str::trim)
+                        .filter(|x| !x.is_empty())
+                        .map(String::from)
+                        .collect()
+                })
+                .unwrap_or_default(),
         });
     }
     if out.len() > MAX_TRACKED {
@@ -182,23 +202,17 @@ fn hm(h: u32, m: u32) -> NaiveTime {
     NaiveTime::from_hms_opt(h, m, 0).expect("valid built-in time")
 }
 
-/// The news sweep's slot at `now`: `YYYY-MM-DD:am` from 07:00 ET (with the
-/// premarket build) and `:pm` from 16:30 ET (after the close), on trading
-/// days only; `None` before 07:00 and on closed days.
+/// The news sweep's slot at `now`: one a trading day, `YYYY-MM-DD:pm`
+/// from 16:30 ET (after the close); `None` before then and on closed
+/// days. One sweep a day, not two, keeps the Tavily allowance for the
+/// briefs (lead's ruling 2026-11-11; `docs/decisions.md`).
 pub fn slot(now: DateTime<Utc>) -> Option<String> {
     let l = et(now);
     let day = l.date_naive();
-    if trading_day(day) == DayKind::Closed {
+    if trading_day(day) == DayKind::Closed || l.time() < hm(16, 30) {
         return None;
     }
-    let half = if l.time() >= hm(16, 30) {
-        "pm"
-    } else if l.time() >= hm(7, 0) {
-        "am"
-    } else {
-        return None;
-    };
-    Some(format!("{}:{half}", ymd(day)))
+    Some(format!("{}:pm", ymd(day)))
 }
 
 /// slug -> the last slot swept.
@@ -229,8 +243,9 @@ pub async fn check_due(es: &dyn EarningsStore, now: DateTime<Utc>) -> Result<boo
     })
 }
 
-/// The IPO messages an earnings poll at `now` queues: `ipo:check` once an
-/// hour, and one `ipo:sweep` while a tracked IPO is not swept in this slot.
+/// The IPO messages an earnings poll at `now` queues, on trading days only:
+/// `ipo:check` once an hour, and one `ipo:sweep` while a tracked IPO is not
+/// swept in this slot.
 /// Off (`raw` not exactly `true`) is nothing, without touching the store.
 pub async fn follow_ups(
     raw: Option<&str>,
@@ -246,7 +261,8 @@ pub async fn follow_ups_for(
     es: &dyn EarningsStore,
     now: DateTime<Utc>,
 ) -> Result<Vec<EarningsStep>, String> {
-    if !enabled(raw) || list.is_empty() || !crate::earnings::in_window(now) {
+    let trading = trading_day(et(now).date_naive()) != DayKind::Closed;
+    if !enabled(raw) || list.is_empty() || !crate::earnings::in_window(now) || !trading {
         return Ok(vec![]);
     }
     let mut out = Vec::new();
@@ -290,6 +306,7 @@ mod tests {
             ),
             ("anthropic", 2130357, "Anthropic", None)
         );
+        assert!(a.aliases.is_empty());
     }
 
     #[test]
@@ -306,8 +323,13 @@ mod tests {
         }
         let eleven: String = (1..=11).map(|i| format!("c{i}\t{i}\tC\t-\n")).collect();
         assert!(parse_list(&eleven).is_err());
-        let ok = parse_list("# x\n\nnorthwind\t9\tNorthwind\t北风\tnote\n").unwrap();
+        let ok =
+            parse_list("# x\n\nnw\t9\tNorthwind\t北风\tNWR, Northwind Robotics\tnote\n").unwrap();
         assert_eq!(ok[0].name_zh.as_deref(), Some("北风"));
+        assert_eq!(
+            ok[0].names().collect::<Vec<_>>(),
+            ["Northwind", "NWR", "Northwind Robotics"]
+        );
     }
 
     #[test]
@@ -358,17 +380,10 @@ mod tests {
     }
 
     #[test]
-    fn sweep_slots_morning_and_after_the_close_on_trading_days() {
-        // 06:59 ET (EST) nothing; 07:00 am; 16:29 am; 16:30 pm.
-        assert_eq!(slot(utc("2026-11-11T11:59:00Z")), None);
-        assert_eq!(
-            slot(utc("2026-11-11T12:00:00Z")).as_deref(),
-            Some("2026-11-11:am")
-        );
-        assert_eq!(
-            slot(utc("2026-11-11T21:29:00Z")).as_deref(),
-            Some("2026-11-11:am")
-        );
+    fn one_sweep_slot_after_the_close_on_trading_days() {
+        // Nothing in the morning or before 16:30 ET (EST); 16:30 pm.
+        assert_eq!(slot(utc("2026-11-11T12:00:00Z")), None);
+        assert_eq!(slot(utc("2026-11-11T21:29:00Z")), None);
         assert_eq!(
             slot(utc("2026-11-11T21:30:00Z")).as_deref(),
             Some("2026-11-11:pm")
@@ -379,7 +394,7 @@ mod tests {
             Some("2026-11-11:pm")
         );
         // Thanksgiving: closed, no sweep.
-        assert_eq!(slot(utc("2026-11-26T15:00:00Z")), None);
+        assert_eq!(slot(utc("2026-11-26T22:00:00Z")), None);
     }
 
     fn list() -> Vec<Tracked> {
@@ -403,47 +418,56 @@ mod tests {
     #[tokio::test]
     async fn on_queues_the_hourly_check_and_one_sweep_per_poll() {
         let es = MemEarningsStore::default();
-        let now = utc("2026-11-11T15:00:00Z");
         let on = Some("true");
+        // 10:00 ET: the check, no sweep before 16:30.
+        let morning = utc("2026-11-11T15:00:00Z");
         assert_eq!(
-            follow_ups_for(on, &list(), &es, now).await.unwrap(),
-            [EarningsStep::IpoCheck, EarningsStep::IpoSweep]
+            follow_ups_for(on, &list(), &es, morning).await.unwrap(),
+            [EarningsStep::IpoCheck]
         );
-        es.kv_set(KV_CHECKED, "2026-11-11T14:30:00Z", "x")
+        es.kv_set(KV_CHECKED, "2026-11-11T15:00:00Z", "x")
             .await
             .unwrap();
-        let mut sw = Sweeps::new();
-        sw.insert("anthropic".into(), "2026-11-11:am".into());
-        es.kv_set(KV_SWEEPS, &serde_json::to_string(&sw).unwrap(), "x")
-            .await
-            .unwrap();
-        // 30 minutes after the check; northwind is still due.
-        assert_eq!(
-            follow_ups_for(on, &list(), &es, now).await.unwrap(),
-            [EarningsStep::IpoSweep]
-        );
-        sw.insert("northwind".into(), "2026-11-11:am".into());
-        es.kv_set(KV_SWEEPS, &serde_json::to_string(&sw).unwrap(), "x")
-            .await
-            .unwrap();
-        assert!(follow_ups_for(on, &list(), &es, now)
+        assert!(follow_ups_for(on, &list(), &es, morning)
             .await
             .unwrap()
             .is_empty());
-        // An hour after the check, and the pm slot.
+        // 16:30 ET: an hour later, the check again and the day's sweep.
+        let close = utc("2026-11-11T21:30:00Z");
         assert_eq!(
-            follow_ups_for(on, &list(), &es, utc("2026-11-11T21:30:00Z"))
-                .await
-                .unwrap(),
+            follow_ups_for(on, &list(), &es, close).await.unwrap(),
             [EarningsStep::IpoCheck, EarningsStep::IpoSweep]
         );
-        // Outside the poll window: nothing.
-        assert!(
-            follow_ups_for(on, &list(), &es, utc("2026-11-11T09:00:00Z"))
+        es.kv_set(KV_CHECKED, "2026-11-11T21:30:00Z", "x")
+            .await
+            .unwrap();
+        let mut sw = Sweeps::new();
+        sw.insert("anthropic".into(), "2026-11-11:pm".into());
+        es.kv_set(KV_SWEEPS, &serde_json::to_string(&sw).unwrap(), "x")
+            .await
+            .unwrap();
+        // Northwind is still due.
+        assert_eq!(
+            follow_ups_for(on, &list(), &es, close).await.unwrap(),
+            [EarningsStep::IpoSweep]
+        );
+        sw.insert("northwind".into(), "2026-11-11:pm".into());
+        es.kv_set(KV_SWEEPS, &serde_json::to_string(&sw).unwrap(), "x")
+            .await
+            .unwrap();
+        assert!(follow_ups_for(on, &list(), &es, close)
+            .await
+            .unwrap()
+            .is_empty());
+        // Outside the poll window, and on a market holiday: nothing.
+        for t in ["2026-11-11T09:00:00Z", "2026-11-26T15:00:00Z"] {
+            let fresh = MemEarningsStore::default();
+            assert!(follow_ups_for(on, &list(), &fresh, utc(t))
                 .await
                 .unwrap()
-                .is_empty()
-        );
+                .is_empty());
+            assert_eq!(fresh.calls.get(), 0, "{t}");
+        }
     }
 
     #[test]

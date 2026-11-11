@@ -7,7 +7,7 @@
 
 use chrono::{DateTime, Duration, NaiveDate, Utc};
 
-use super::resolve::{changed_rows, yahoo_url};
+use super::resolve::{changed_rows, current_of, first_session, yahoo_url};
 use super::store::{IpoState, IpoStore, IpoWrite, TradingRow};
 use super::{is_final, iso, ymd, Tracked};
 use crate::facts::{round2, Quote};
@@ -23,9 +23,13 @@ pub fn room(universe_len: usize) -> usize {
     (QUOTE_BATCH - universe_len % QUOTE_BATCH) % QUOTE_BATCH
 }
 
-/// `(slug, Yahoo symbol)` to read for `session`: priced or listed, with a
-/// symbol from a cover, within `TRADING_DAYS` of the first session; at
-/// most `room`.
+/// `(slug, Yahoo symbol)` to read for `session`: a symbol from the cover
+/// and a price range or more (`range_set`, `priced`, `listed`), so the
+/// first day is read even when the final prospectus is filed that day;
+/// before listing only once a pricing signal is on file (an `EFFECT`
+/// notice or a final prospectus filed on or before `session`), so another
+/// security that shares the symbol is never read as the IPO; within
+/// `TRADING_DAYS` of the first session; at most `room`.
 pub fn symbols(
     st: &IpoState,
     list: &[Tracked],
@@ -35,15 +39,20 @@ pub fn symbols(
     list.iter()
         .filter_map(|t| {
             let r = st.row(&t.slug)?;
-            if !matches!(r.status.as_str(), "priced" | "listed") {
+            if !matches!(r.status.as_str(), "range_set" | "priced" | "listed") {
                 return None;
             }
-            let first = st
-                .trading_of(&t.slug)
-                .iter()
-                .filter_map(|x| x.session_date.parse::<NaiveDate>().ok())
-                .min();
+            let first = first_session(st, &t.slug);
             if first.is_some_and(|f| session - f > Duration::days(TRADING_DAYS)) {
+                return None;
+            }
+            let signal = st.filings_of(&t.slug).iter().any(|f| {
+                (f.form == "EFFECT" || is_final(&f.form))
+                    && f.filing_date
+                        .parse::<NaiveDate>()
+                        .is_ok_and(|d| d <= session)
+            });
+            if first.is_none() && !signal {
                 return None;
             }
             Some((t.slug.clone(), yahoo_symbol(r.symbol.as_deref()?)))
@@ -52,20 +61,14 @@ pub fn symbols(
         .collect()
 }
 
-/// The final price of `slug`'s newest final prospectus, if read.
+/// The final price of the facts source when it is a final prospectus (the
+/// IPO's own, frozen at listing; never a follow-on's).
 pub fn ipo_price(st: &IpoState, slug: &str) -> Option<f64> {
-    let mut finals: Vec<_> = st
-        .filings_of(slug)
-        .into_iter()
-        .filter(|f| is_final(&f.form))
-        .collect();
-    finals.sort_by(|a, b| (&b.filing_date, &b.accession).cmp(&(&a.filing_date, &a.accession)));
-    finals.iter().find_map(|f| {
-        st.facts
-            .iter()
-            .find(|x| x.accession == f.accession && x.kind == "price_final")
-            .and_then(|x| x.value_num)
-    })
+    let c = current_of(st, slug).filter(|c| is_final(&c.form))?;
+    st.facts
+        .iter()
+        .find(|x| x.accession == c.accession && x.kind == "price_final")
+        .and_then(|x| x.value_num)
 }
 
 /// The rows for the closes read: one per symbol that has a close for
@@ -168,6 +171,22 @@ mod tests {
                 },
                 FactRow {
                     accession: "b4".into(),
+                    kind: "shares_offered".into(),
+                    slug: "nw".into(),
+                    value_num: Some(2e7),
+                    quote: "20,000,000 Shares Class A Common Stock".into(),
+                    ..Default::default()
+                },
+                FactRow {
+                    accession: "b4".into(),
+                    kind: "prospectus_date".into(),
+                    slug: "nw".into(),
+                    value_text: Some("2026-11-04".into()),
+                    quote: "Prospectus dated November 4, 2026".into(),
+                    ..Default::default()
+                },
+                FactRow {
+                    accession: "b4".into(),
                     kind: "symbol".into(),
                     slug: "nw".into(),
                     value_text: Some("NWRB".into()),
@@ -212,6 +231,25 @@ mod tests {
         });
         assert_eq!(symbols(&st, &list(), d("2026-12-05"), 32).len(), 1);
         assert!(symbols(&st, &list(), d("2026-12-06"), 32).is_empty());
+    }
+
+    #[test]
+    fn a_range_set_ipo_is_read_once_a_pricing_signal_is_on_file() {
+        let mut st = state();
+        st.filings.push(FilingRow {
+            accession: "e".into(),
+            slug: "hb".into(),
+            form: "EFFECT".into(),
+            filing_date: "2026-11-05".into(),
+            ..Default::default()
+        });
+        let syms: Vec<String> = symbols(&st, &list(), d("2026-11-05"), 32)
+            .into_iter()
+            .map(|(_, s)| s)
+            .collect();
+        assert_eq!(syms, ["NWRB", "HRBO"]);
+        // The day before the notice: not yet.
+        assert_eq!(symbols(&st, &list(), d("2026-11-04"), 32).len(), 0);
     }
 
     #[tokio::test]

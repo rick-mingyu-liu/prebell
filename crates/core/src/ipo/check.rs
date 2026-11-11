@@ -14,7 +14,7 @@ use chrono::{DateTime, Utc};
 use serde::Deserialize;
 
 use super::cover::{extract, COVER_PREFIX_BYTES};
-use super::resolve::changed_rows;
+use super::resolve::{changed_rows, current, missing_to_replace};
 use super::store::{FactRow, FilingRow, IpoState, IpoStore, IpoWrite};
 use super::{is_final, is_kept, is_registration, iso, Tracked, KV_CHECKED, MAX_TRACKED};
 use crate::earnings::cik10;
@@ -157,6 +157,40 @@ fn to_read(st: &IpoState, list: &[Tracked]) -> (Vec<FilingRow>, Vec<FilingRow>) 
     (read, superseded)
 }
 
+/// The alert text when `f`'s cover (its facts `rows`) cannot become the
+/// facts source: it names the filing and what was missing. `None` when it
+/// can.
+fn shortfall(st: &IpoState, f: &FilingRow, rows: &[FactRow]) -> Option<String> {
+    let mut with = st.clone();
+    with.facts.retain(|x| x.accession != f.accession);
+    with.facts.extend(rows.iter().cloned());
+    let all = with.filings_of(&f.slug);
+    let cur = current(
+        &with,
+        &all.iter()
+            .copied()
+            .filter(|x| x.accession != f.accession)
+            .collect::<Vec<_>>(),
+    );
+    let missing = missing_to_replace(&with, f, cur);
+    (!missing.is_empty()).then(|| {
+        format!(
+            "IPO watch: the {} filed {} for {} ({}) was read but lacks {}; the page keeps the earlier facts and status",
+            f.form,
+            f.filing_date,
+            f.slug,
+            f.accession,
+            missing.join(", ")
+        )
+    })
+}
+
+/// Records the hour's check as done (also for a missing table or a
+/// config error, so polls do not queue it again every 5 minutes).
+pub async fn mark_checked(es: &dyn EarningsStore, now: DateTime<Utc>) -> Result<(), String> {
+    es.kv_set(KV_CHECKED, &iso(now), &iso(now)).await
+}
+
 /// One `ipo:check` message.
 pub async fn check_tick(
     now: DateTime<Utc>,
@@ -170,9 +204,14 @@ pub async fn check_tick(
     let mut st = ipo.ipo_state().await?;
     // Marked after the read (a D1 failure retries) and before EDGAR (a
     // failing EDGAR is not asked again every poll).
-    es.kv_set(KV_CHECKED, &iso(now), &iso(now)).await?;
+    mark_checked(es, now).await?;
     let mut w = IpoWrite::default();
     for t in list.iter().take(MAX_TRACKED) {
+        // Listed is terminal for filings: the check stops, and the timeline
+        // stops growing at the first session.
+        if st.row(&t.slug).is_some_and(|r| r.status == "listed") {
+            continue;
+        }
         let subs = match src.submissions(t.cik).await {
             Ok(s) => s,
             Err(e) => {
@@ -230,18 +269,6 @@ pub async fn check_tick(
             now_reads.push(f);
         }
     }
-    // The attempts are written before the reads, so a read killed for CPU
-    // still counts toward `MAX_READ_ATTEMPTS` instead of retrying forever.
-    if !now_reads.is_empty() {
-        let mut pre = w.clone();
-        for f in &now_reads {
-            match pre.filings.iter_mut().find(|x| x.accession == f.accession) {
-                Some(x) => *x = f.clone(),
-                None => pre.filings.push(f.clone()),
-            }
-        }
-        ipo.ipo_write(&pre).await?;
-    }
     for mut f in now_reads {
         if out.throttled {
             // Not tried: SEC refused an earlier request.
@@ -249,6 +276,15 @@ pub async fn check_tick(
             changed.push(f);
             continue;
         }
+        // This read's attempt is written first, so a read killed for CPU
+        // still counts toward `MAX_READ_ATTEMPTS` (and only this one does);
+        // the next hourly check retries it.
+        let mut pre = w.clone();
+        match pre.filings.iter_mut().find(|x| x.accession == f.accession) {
+            Some(x) => *x = f.clone(),
+            None => pre.filings.push(f.clone()),
+        }
+        ipo.ipo_write(&pre).await?;
         let url = f.doc_url.clone().unwrap_or_default();
         match src.cover_text(&url).await {
             Ok(text) => {
@@ -256,23 +292,28 @@ pub async fn check_tick(
                 let kinds: Vec<&str> = got.iter().map(|x| x.kind).collect();
                 out.covers
                     .push(format!("{}:{}", f.accession, kinds.join(",")));
-                if got.is_empty() {
-                    let msg = format!(
-                        "IPO watch: no cover facts read from the {} filed {} for {} ({}); the page keeps the earlier facts",
-                        f.form, f.filing_date, f.slug, f.accession
-                    );
-                    alert_once_today(now, &format!("ipo-cover:{}", f.slug), "warn", &msg, store)
-                        .await?;
-                }
-                facts.extend(got.into_iter().map(|x| FactRow {
-                    accession: f.accession.clone(),
-                    kind: x.kind.into(),
-                    slug: f.slug.clone(),
-                    value_num: x.num,
-                    value_text: x.text,
-                    quote: x.quote,
-                }));
+                let rows: Vec<FactRow> = got
+                    .into_iter()
+                    .map(|x| FactRow {
+                        accession: f.accession.clone(),
+                        kind: x.kind.into(),
+                        slug: f.slug.clone(),
+                        value_num: x.num,
+                        value_text: x.text,
+                        quote: x.quote,
+                    })
+                    .collect();
                 f.read_state = "read".into();
+                if let Some(msg) = shortfall(&st, &f, &rows) {
+                    let key = if rows.is_empty() {
+                        format!("ipo-cover-empty:{}", f.slug)
+                    } else {
+                        format!("ipo-cover-partial:{}", f.slug)
+                    };
+                    out.errors.push(msg.clone());
+                    alert_once_today(now, &key, "warn", &msg, store).await?;
+                }
+                facts.extend(rows);
             }
             Err(e) => {
                 if matches!(e, ProviderError::Http(403 | 429)) {
@@ -286,8 +327,14 @@ pub async fn check_tick(
                         "IPO watch: gave up reading the cover of the {} filed {} for {} after {} tries: {e}",
                         f.form, f.filing_date, f.slug, f.attempts
                     );
-                    alert_once_today(now, &format!("ipo-cover:{}", f.slug), "error", &msg, store)
-                        .await?;
+                    alert_once_today(
+                        now,
+                        &format!("ipo-cover-failed:{}", f.slug),
+                        "error",
+                        &msg,
+                        store,
+                    )
+                    .await?;
                 } else {
                     f.read_state = "pending".into();
                 }
@@ -334,7 +381,7 @@ mod tests {
     use super::*;
     use crate::earnings::store::MemEarningsStore;
     use crate::edgar::tests::{FakeHttp, RecTimer};
-    use crate::ipo::cover::tests::{B4, S1A};
+    use crate::ipo::cover::tests::{B4, REDDIT, S1A};
     use crate::ipo::parse_list;
     use crate::ipo::store::MemIpoStore;
     use crate::store::MemStore;
@@ -516,6 +563,135 @@ mod tests {
         assert_eq!(r.date_source_name.as_deref(), Some("424B4"));
     }
 
+    /// Anthropic's submissions with a 424B4 (`b4.htm`) filed 2026-11-13 on top.
+    fn subs_with_424b4() -> String {
+        SUBS.replacen(
+            r#""accessionNumber":["#,
+            r#""accessionNumber":["0001628280-26-074000","#,
+            1,
+        )
+        .replacen(r#""form":["#, r#""form":["424B4","#, 1)
+        .replacen(r#""filingDate":["#, r#""filingDate":["2026-11-13","#, 1)
+        .replacen(
+            r#""primaryDocument":["#,
+            r#""primaryDocument":["b4.htm","#,
+            1,
+        )
+    }
+
+    #[tokio::test]
+    async fn a_real_424b4_cover_prices_it_after_the_range() {
+        let ipo = MemIpoStore::default();
+        let (es, store) = (MemEarningsStore::default(), MemStore::default());
+        let e = edgar(&[(&submissions_url(2130357), 200, SUBS), (S1A_URL, 200, S1A)]);
+        check_tick(utc(NOW), &anthropic(), &ipo, &es, &store, &e)
+            .await
+            .unwrap();
+        assert_eq!(
+            ipo.state.borrow().row("anthropic").unwrap().status,
+            "range_set"
+        );
+        // Reddit's real 424B4 cover stands in for Anthropic's.
+        let subs = subs_with_424b4();
+        let b4_url = doc_url(2130357, "0001628280-26-074000", "b4.htm");
+        let e = edgar(&[
+            (&submissions_url(2130357), 200, &subs),
+            (&b4_url, 200, REDDIT),
+        ]);
+        let out = check_tick(
+            utc("2026-11-13T15:00:00Z"),
+            &anthropic(),
+            &ipo,
+            &es,
+            &store,
+            &e,
+        )
+        .await
+        .unwrap();
+        assert!(out.errors.is_empty(), "{out:?}");
+        let st = ipo.state.borrow();
+        let r = st.row("anthropic").unwrap();
+        assert_eq!(
+            (r.status.as_str(), r.facts_accession.as_deref()),
+            ("priced", Some("0001628280-26-074000"))
+        );
+        // "Prospectus dated March 20, 2024": the next trading day, expected.
+        assert_eq!(
+            (r.first_trade_date.as_deref(), r.date_status.as_deref()),
+            (Some("2024-03-21"), Some("expected"))
+        );
+        assert!(store.alerts.borrow().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_424b4_missing_its_price_changes_nothing_and_alerts() {
+        let ipo = MemIpoStore::default();
+        let (es, store) = (MemEarningsStore::default(), MemStore::default());
+        let e = edgar(&[(&submissions_url(2130357), 200, SUBS), (S1A_URL, 200, S1A)]);
+        check_tick(utc(NOW), &anthropic(), &ipo, &es, &store, &e)
+            .await
+            .unwrap();
+        let no_price = REDDIT.replace("is $34.00", "is set out below");
+        let b4_url = doc_url(2130357, "0001628280-26-074000", "b4.htm");
+        let subs = subs_with_424b4();
+        let e = edgar(&[
+            (&submissions_url(2130357), 200, &subs),
+            (&b4_url, 200, &no_price),
+        ]);
+        let out = check_tick(
+            utc("2026-11-13T15:00:00Z"),
+            &anthropic(),
+            &ipo,
+            &es,
+            &store,
+            &e,
+        )
+        .await
+        .unwrap();
+        let st = ipo.state.borrow();
+        let r = st.row("anthropic").unwrap();
+        // Still the S-1/A's facts and status; the 424B4 is in the timeline, read.
+        assert_eq!(
+            (r.status.as_str(), r.facts_accession.as_deref()),
+            ("range_set", Some("0001628280-26-072484"))
+        );
+        let f = st
+            .filings
+            .iter()
+            .find(|f| f.accession == "0001628280-26-074000")
+            .unwrap();
+        assert_eq!(f.read_state, "read");
+        let alerts = store.alerts.borrow();
+        assert_eq!(alerts.len(), 1, "{alerts:?}");
+        assert_eq!(alerts[0].0, "ipo-cover-partial:anthropic:2026-11-13");
+        assert!(
+            alerts[0].2.contains("424B4 filed 2026-11-13") && alerts[0].2.contains("price_final"),
+            "{}",
+            alerts[0].2
+        );
+        assert_eq!(out.errors.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_listed_ipo_is_not_checked_again() {
+        let ipo = MemIpoStore::default();
+        ipo.state
+            .borrow_mut()
+            .watch
+            .push(crate::ipo::store::WatchRow {
+                slug: "anthropic".into(),
+                status: "listed".into(),
+                ..Default::default()
+            });
+        let (es, store) = (MemEarningsStore::default(), MemStore::default());
+        let e = edgar(&[(&submissions_url(2130357), 200, SUBS)]);
+        let out = check_tick(utc(NOW), &anthropic(), &ipo, &es, &store, &e)
+            .await
+            .unwrap();
+        assert_eq!(out.companies, 0);
+        assert!(sent(&e).is_empty());
+    }
+
     #[tokio::test]
     async fn a_failing_cover_retries_then_gives_up_with_an_alert() {
         let ipo = MemIpoStore::default();
@@ -554,7 +730,7 @@ mod tests {
         }
         let alerts = store.alerts.borrow();
         assert_eq!(alerts.len(), 1, "{alerts:?}");
-        assert_eq!(alerts[0].0, "ipo-cover:anthropic:2026-11-11");
+        assert_eq!(alerts[0].0, "ipo-cover-failed:anthropic:2026-11-11");
         assert_eq!(alerts[0].1, "error");
         // A fourth run does not read it again.
         let e = edgar(&routes);
@@ -641,6 +817,7 @@ mod tests {
                 cik: i,
                 name: format!("C{i}"),
                 name_zh: None,
+                aliases: vec![],
             })
             .collect();
         let mut routes: Vec<(String, u16, String)> = Vec::new();

@@ -348,7 +348,15 @@ impl JobRunner for Runner<'_> {
                         false,
                     ));
                 }
-                let edgar = self.edgar()?;
+                // A config error marks the hour first, so polls do not
+                // queue the check again every 5 minutes.
+                let edgar = match self.edgar() {
+                    Ok(e) => e,
+                    Err(e) => {
+                        ipo::check::mark_checked(store, t).await?;
+                        return Err(e);
+                    }
+                };
                 match ipo::check::check_tick(t, ipo::tracked(), store, store, store, &edgar).await {
                     Ok(o) => {
                         for e in &o.errors {
@@ -358,9 +366,7 @@ impl JobRunner for Runner<'_> {
                     }
                     // Before migration 0009: no alert, marked for the hour.
                     Err(e) if ipo::missing_table(&e) => {
-                        use prebell_core::earnings::store::EarningsStore;
-                        let iso = t.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
-                        store.kv_set(ipo::KV_CHECKED, &iso, &iso).await?;
+                        ipo::check::mark_checked(store, t).await?;
                         Ok((
                             "ipo: tables missing (apply migration 0009); skipped".into(),
                             false,
@@ -378,7 +384,15 @@ impl JobRunner for Runner<'_> {
                 }
                 let news_key = secret_or_empty(env, "TAVILY_API_KEY");
                 let ns = Tavily::new(self.http.clone(), news_key.clone());
-                let llm = self.llm(&[&news_key])?;
+                // A config error takes the slot first, so polls do not
+                // queue the sweep again every 5 minutes.
+                let llm = match self.llm(&[&news_key]) {
+                    Ok(l) => l,
+                    Err(e) => {
+                        ipo::news::claim(store, ipo::tracked(), t).await?;
+                        return Err(e);
+                    }
+                };
                 match ipo::news::sweep_tick(
                     t,
                     ipo::tracked(),

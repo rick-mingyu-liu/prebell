@@ -81,7 +81,9 @@ fn published(r: &Value, url: &str) -> Option<DateTime<Utc>> {
 }
 
 impl<H: Http> Tavily<H> {
-    async fn post(&self, body: &Value) -> Result<Vec<SearchHit>, ProviderError> {
+    /// `raw_only`: drop a result without `raw_content` instead of falling
+    /// back to Tavily's `content` snippet.
+    async fn post(&self, body: &Value, raw_only: bool) -> Result<Vec<SearchHit>, ProviderError> {
         let auth = format!("Bearer {}", self.api_key);
         let resp = self
             .http
@@ -112,6 +114,9 @@ impl<H: Http> Tavily<H> {
                     return None;
                 }
                 let raw = s(r, "raw_content");
+                if raw_only && raw.trim().is_empty() {
+                    return None;
+                }
                 let content = if raw.trim().is_empty() {
                     s(r, "content")
                 } else {
@@ -137,7 +142,7 @@ impl<H: Http> NewsSearch for Tavily<H> {
     /// No date filter: the earnings calendar looks for announcements made
     /// weeks before the report.
     async fn search(&self, query: &str, max: usize) -> Result<Vec<SearchHit>, ProviderError> {
-        self.post(&body(query, max)).await
+        self.post(&body(query, max), false).await
     }
 
     /// `start_date` (YYYY-MM-DD) filters on the publish or last-updated
@@ -153,7 +158,22 @@ impl<H: Http> NewsSearch for Tavily<H> {
         let mut b = body(query, max);
         let day = et(since).date_naive() - Days::new(1);
         b["start_date"] = json!(day.format("%Y-%m-%d").to_string());
-        self.post(&b).await
+        self.post(&b, false).await
+    }
+
+    /// `search_since` keeping only results with the full article text
+    /// (`raw_content`), never the snippet: IPO items are checked against
+    /// the article itself.
+    async fn search_full(
+        &self,
+        query: &str,
+        max: usize,
+        since: DateTime<Utc>,
+    ) -> Result<Vec<SearchHit>, ProviderError> {
+        let mut b = body(query, max);
+        let day = et(since).date_naive() - Days::new(1);
+        b["start_date"] = json!(day.format("%Y-%m-%d").to_string());
+        self.post(&b, true).await
     }
 }
 
@@ -336,6 +356,17 @@ mod tests {
                 "2026-10-29T04:00:00+00:00"
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn search_full_drops_results_without_the_article_text() {
+        // The fixture's second result has only a snippet.
+        let hits = tavily(200, FIX)
+            .search_full("q", 5, "2026-10-29T01:20:00Z".parse().unwrap())
+            .await
+            .unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].content, "Full article text A with more detail.");
     }
 
     #[tokio::test]

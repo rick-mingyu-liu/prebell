@@ -380,6 +380,9 @@ mod tests {
                 .map(str::trim)
                 .filter(|l| !l.is_empty() && !l.starts_with("--") && !l.starts_with("PRIMARY KEY"))
                 .filter_map(|l| l.split_whitespace().next())
+                // Column names are lowercase; CHECK lines and their
+                // continuations ("OR ...") are not columns.
+                .filter(|w| w.starts_with(|c: char| c.is_ascii_lowercase()))
                 .collect();
             let mine: Vec<&str> = cols.split(',').map(str::trim).collect();
             assert_eq!(mine, declared, "{table}");
