@@ -9,6 +9,7 @@
  */
 
 import { isDate } from "./earnings";
+import { round2 } from "./format";
 import type { D1Like, Lang } from "./posts";
 
 export const IPO_STATUSES = ["filed", "range_set", "priced", "listed", "withdrawn"] as const;
@@ -21,9 +22,9 @@ export interface IpoDate {
   date: string;
   status: DateStatus;
   source: DateSource;
-  /** An outlet, a filing label (`424B4`) or `Yahoo Finance`; null when unreadable. */
-  sourceName: string | null;
-  /** https only. */
+  /** An outlet or a filing label (`424B4`); for a trading source, `Yahoo Finance` when unreadable. */
+  sourceName: string;
+  /** Checked by source: any https article for news, www.sec.gov for a filing, finance.yahoo.com for trading. */
   sourceUrl: string | null;
   /** The article's or filing's own sentence; null for a trading source. */
   quote: string | null;
@@ -97,8 +98,8 @@ export interface IpoFact {
 }
 
 export interface IpoFacts {
-  /** The filing the facts were read from, when it is on the timeline. */
-  filing: IpoFiling | null;
+  /** The filing the facts were read from. */
+  filing: IpoFiling;
   facts: Partial<Record<FactKind, IpoFact>>;
 }
 
@@ -114,7 +115,7 @@ export interface IpoItem {
   quote: string;
   /** The statement in the page's language, else English; null for a view or when there is none. */
   statement: string | null;
-  /** A view's speaker as the article names them. */
+  /** A view's speaker as the article names them (a view without one is not shown). */
   speaker: string | null;
   /** A valuation in dollars. */
   valueUsd: number | null;
@@ -126,7 +127,7 @@ export interface IpoSession {
   close: number;
   volume: number | null;
   ipoPrice: number | null;
-  /** The generator's (close − IPO price) / IPO price × 100; shown only beside both inputs. */
+  /** (close − IPO price) / IPO price × 100, two decimals, computed here from the two numbers shown beside it. */
   changePct: number | null;
   /** The Yahoo Finance quote page, or null. */
   sourceUrl: string | null;
@@ -143,8 +144,11 @@ export interface IpoPage extends IpoSummary {
   moves: IpoItem[];
   /** The newest three, newest first. */
   views: IpoItem[];
-  /** The first session and the latest; `latest` is null when it is the first. */
-  trading: { first: IpoSession; latest: IpoSession | null } | null;
+  /**
+   * The earliest session and the latest by date, each null when its row is unusable (never replaced by the other);
+   * `latest` is also null when there is one session. Null when neither can be shown.
+   */
+  trading: { first: IpoSession | null; latest: IpoSession | null } | null;
   updatedAt: string | null;
 }
 
@@ -182,17 +186,19 @@ export function httpsUrl(v: unknown): string | null {
   }
 }
 
-/** Filing links: EDGAR pages on www.sec.gov only. */
-const secUrl = (v: unknown): string | null => {
+/** An https URL on exactly `host` (no user info, no port), as written, else null. */
+function onHost(v: unknown, host: string): string | null {
   const u = httpsUrl(v);
-  return u && u.startsWith("https://www.sec.gov/") ? u : null;
-};
+  if (!u || !u.startsWith(`https://${host}/`)) return null;
+  const parsed = new URL(u);
+  return parsed.hostname === host && !parsed.username && !parsed.password && !parsed.port ? u : null;
+}
+
+/** Filing links: EDGAR pages on www.sec.gov only. */
+export const secUrl = (v: unknown): string | null => onHost(v, "www.sec.gov");
 
 /** The trading source: Yahoo Finance quote pages only. */
-const yahooUrl = (v: unknown): string | null => {
-  const u = httpsUrl(v);
-  return u && u.startsWith("https://finance.yahoo.com/") ? u : null;
-};
+export const yahooUrl = (v: unknown): string | null => onHost(v, "finance.yahoo.com");
 
 const dateOf = (v: unknown): string | null => (typeof v === "string" && isDate(v) ? v : null);
 
@@ -213,17 +219,33 @@ interface WatchRow {
   updated_at?: unknown;
 }
 
-function dateLine(r: WatchRow): IpoDate | null {
+/** The contract's status and source pairs: a news date is only ever reported, never expected or confirmed. */
+const DATE_PAIRS: Record<DateStatus, DateSource[]> = {
+  reported: ["news"],
+  expected: ["filing"],
+  confirmed: ["filing", "trading"],
+};
+
+/**
+ * The date line, or null ("date not set") for a withdrawn IPO, a malformed date, a status and source the contract
+ * does not pair, or a news or filing date with no named source (an unattributed date is not shown). A link that
+ * fails its source's check is dropped; the date stays.
+ */
+function dateLine(r: WatchRow, status: IpoStatus): IpoDate | null {
   const date = dateOf(r.first_trade_date);
-  const status = r.date_status as DateStatus;
+  const dateStatus = r.date_status as DateStatus;
   const source = r.date_source as DateSource;
-  if (!date || !DATE_STATUSES.includes(status) || !DATE_SOURCES.includes(source)) return null;
+  if (status === "withdrawn" || !date || !DATE_STATUSES.includes(dateStatus) || !DATE_SOURCES.includes(source)) return null;
+  if (!DATE_PAIRS[dateStatus].includes(source)) return null;
+  const sourceName = source === "trading" ? "Yahoo Finance" : text(r.date_source_name);
+  if (!sourceName) return null;
+  const url = r.date_source_url;
   return {
     date,
-    status,
+    status: dateStatus,
     source,
-    sourceName: text(r.date_source_name),
-    sourceUrl: httpsUrl(r.date_source_url),
+    sourceName,
+    sourceUrl: source === "news" ? httpsUrl(url) : source === "filing" ? secUrl(url) : yahooUrl(url),
     quote: source === "trading" ? null : text(r.date_quote),
     asOf: dateOf(r.date_as_of),
   };
@@ -234,7 +256,7 @@ function summary(r: WatchRow, lang: Lang): IpoSummary | null {
   const name = (lang === "zh" ? text(r.name_zh) : null) ?? text(r.name);
   const status = r.status as IpoStatus;
   if (!slug || !name || !IPO_STATUSES.includes(status)) return null;
-  return { slug, name, symbol: text(r.symbol), status, date: dateLine(r) };
+  return { slug, name, symbol: text(r.symbol), status, date: dateLine(r, status) };
 }
 
 const SUMMARY_COLUMNS = `slug, name, name_zh, symbol, status, first_trade_date, date_status, date_source,
@@ -336,8 +358,9 @@ function factsOf(rows: FactRow[]): IpoFacts | null {
     delete facts.price_low;
     delete facts.price_high;
   }
-  if (Object.keys(facts).length === 0) return null;
+  // Every fact is shown with the filing it came from; without that filing row, none is shown.
   const filing = rows.length > 0 ? filingOf(rows[0]) : null;
+  if (!filing || Object.keys(facts).length === 0) return null;
   return { filing, facts };
 }
 
@@ -360,6 +383,8 @@ function itemOf(r: ItemRow, lang: Lang): IpoItem | null {
   const quote = text(r.quote);
   if (!ITEM_KINDS.includes(kind) || !outlet || !publishedOn || !quote) return null;
   const view = kind === "view";
+  // The contract's form is "{speaker}, quoted by {outlet}": a view with no speaker would read as the outlet's own.
+  if (view && !text(r.speaker)) return null;
   return {
     kind,
     url: httpsUrl(r.url),
@@ -378,7 +403,6 @@ interface TradingRow {
   close: unknown;
   volume: unknown;
   ipo_price: unknown;
-  change_pct: unknown;
   source_url: unknown;
 }
 
@@ -387,7 +411,6 @@ function sessionOf(r: TradingRow): IpoSession | null {
   const close = positive(r.close);
   if (!sessionDate || close === null) return null;
   const ipoPrice = positive(r.ipo_price);
-  const change = typeof r.change_pct === "number" && Number.isFinite(r.change_pct) ? r.change_pct : null;
   const volume = typeof r.volume === "number" && Number.isInteger(r.volume) && r.volume >= 0 ? r.volume : null;
   return {
     sessionDate,
@@ -395,8 +418,8 @@ function sessionOf(r: TradingRow): IpoSession | null {
     close,
     volume,
     ipoPrice,
-    // The change shows only with both of its inputs.
-    changePct: ipoPrice === null ? null : change,
+    // Computed from the two numbers printed beside it, never read from the stored change_pct.
+    changePct: ipoPrice === null ? null : round2(((close - ipoPrice) / ipoPrice) * 100),
     sourceUrl: yahooUrl(r.source_url),
   };
 }
@@ -435,13 +458,14 @@ export async function loadIpo(db: D1Like, slug: string, lang: Lang): Promise<Ipo
     db
       .prepare(
         `SELECT kind, url, outlet, published_on, quote, statement_en, statement_zh, speaker, value_usd
-         FROM ipo_items WHERE slug = ? ORDER BY kind DESC, published_on DESC, found_at DESC LIMIT 40`,
+         FROM ipo_items WHERE slug = ? AND kind IN ('view', 'valuation', 'company_move')
+         ORDER BY kind DESC, published_on DESC, found_at DESC LIMIT 40`,
       )
       .bind(slug)
       .all<ItemRow>(),
     db
       .prepare(
-        `SELECT session_date, open, close, volume, ipo_price, change_pct, source_url FROM ipo_trading
+        `SELECT session_date, open, close, volume, ipo_price, source_url FROM ipo_trading
          WHERE slug = ? AND session_date IN (
            (SELECT MIN(session_date) FROM ipo_trading WHERE slug = ?),
            (SELECT MAX(session_date) FROM ipo_trading WHERE slug = ?))
@@ -456,9 +480,11 @@ export async function loadIpo(db: D1Like, slug: string, lang: Lang): Promise<Ipo
   const list = items.results.flatMap((r) => itemOf(r, lang) ?? []);
   // Newest first within a kind, as the query orders them.
   const of = (kind: ItemKind) => list.filter((i) => i.kind === kind);
-  const runs = sessions.results.flatMap((r) => sessionOf(r) ?? []);
-  const first = runs[0] ?? null;
-  const last = runs.at(-1) ?? null;
+  // The query returns the earliest and the latest rows by date, in that order. Each is read in its own place, so
+  // an unusable earliest row hides the first day and never moves the latest session into it.
+  const rows = sessions.results;
+  const first = rows.length > 0 ? sessionOf(rows[0]) : null;
+  const latest = rows.length > 1 ? sessionOf(rows[rows.length - 1]) : null;
 
   return {
     ...base,
@@ -468,9 +494,15 @@ export async function loadIpo(db: D1Like, slug: string, lang: Lang): Promise<Ipo
     valuations: of("valuation"),
     moves: of("company_move"),
     views: of("view").slice(0, VIEWS_SHOWN),
-    trading: first ? { first, latest: last && last.sessionDate !== first.sessionDate ? last : null } : null,
+    trading: first || latest ? { first, latest } : null,
     updatedAt: text(row.updated_at),
   };
+}
+
+/** A UTC RFC 3339 time as the generator writes it (`2026-11-11T15:00:00Z`), else null. */
+function utcTime(v: unknown): string | null {
+  if (typeof v !== "string" || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,9})?Z$/.test(v)) return null;
+  return isDate(v.slice(0, 10)) && !Number.isNaN(Date.parse(v)) ? v : null;
 }
 
 /** Every tracked IPO's slug and last update, for the sitemap: at most 200 rows. Empty before migration 0009. */
@@ -480,34 +512,42 @@ export async function listIpoSlugs(db: D1Like): Promise<{ slug: string; updatedA
       .prepare("SELECT slug, updated_at FROM ipo_watch ORDER BY slug LIMIT 200")
       .all<{ slug: unknown; updated_at: unknown }>();
     return results.flatMap((r) =>
-      typeof r.slug === "string" && isIpoSlug(r.slug) ? [{ slug: r.slug, updatedAt: text(r.updated_at) }] : [],
+      typeof r.slug === "string" && isIpoSlug(r.slug) ? [{ slug: r.slug, updatedAt: utcTime(r.updated_at) }] : [],
     );
   } catch {
     return [];
   }
 }
 
-const MONEY = new Intl.NumberFormat("en-US", { maximumFractionDigits: 3 });
 const PRICE = new Intl.NumberFormat("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 const COUNT = new Intl.NumberFormat("en-US", { maximumFractionDigits: 0 });
+const SCALED = new Intl.NumberFormat("en-US", { maximumFractionDigits: 2, useGrouping: false });
 
 /** A share count with separators: "825,000,000". */
 export const fmtShares = (n: number): string => COUNT.format(n);
 /** A per-share price: "70.00". */
 export const fmtSharePrice = (n: number): string => PRICE.format(n);
 
+/** Valuations outside this range are not printed as a figure (the attributed quote still shows). */
+export const VALUATION_MIN = 1e6;
+export const VALUATION_MAX = 1e14;
+
 /**
- * A stored valuation as words, the stored number only rescaled for reading: "$1.4 trillion", "$965 billion";
- * "1.4万亿美元", "9650亿美元".
+ * A stored valuation in words, or null when it is not a plausible one (non-finite, under $1 million or over $100
+ * trillion). The number is first rounded to three significant digits, and the unit is chosen from the rounded
+ * value, so both languages show the same magnitude and nothing reads "$1,000 billion": "$1.4 trillion",
+ * "$965 billion", "$1.23 trillion"; "1.4万亿美元", "9650亿美元", "1.23万亿美元".
  */
-export function fmtValuation(usd: number, lang: Lang): string {
+export function fmtValuation(usd: number, lang: Lang): string | null {
+  if (!Number.isFinite(usd) || usd < VALUATION_MIN || usd > VALUATION_MAX) return null;
+  const v = Number(usd.toPrecision(3));
+  const scaled = (unit: number) => SCALED.format(v / unit);
   if (lang === "zh") {
-    if (usd >= 1e12) return `${MONEY.format(usd / 1e12).replace(/,/g, "")}万亿美元`;
-    if (usd >= 1e8) return `${MONEY.format(usd / 1e8).replace(/,/g, "")}亿美元`;
-    return `${MONEY.format(usd / 1e4).replace(/,/g, "")}万美元`;
+    if (v >= 1e12) return `${scaled(1e12)}万亿美元`;
+    if (v >= 1e8) return `${scaled(1e8)}亿美元`;
+    return `${scaled(1e4)}万美元`;
   }
-  if (usd >= 1e12) return `$${MONEY.format(usd / 1e12)} trillion`;
-  if (usd >= 1e9) return `$${MONEY.format(usd / 1e9)} billion`;
-  if (usd >= 1e6) return `$${MONEY.format(usd / 1e6)} million`;
-  return `$${COUNT.format(usd)}`;
+  if (v >= 1e12) return `$${scaled(1e12)} trillion`;
+  if (v >= 1e9) return `$${scaled(1e9)} billion`;
+  return `$${scaled(1e6)} million`;
 }

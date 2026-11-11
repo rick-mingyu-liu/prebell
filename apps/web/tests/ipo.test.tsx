@@ -11,6 +11,8 @@ import {
   listIposBetween,
   listIpoWatch,
   loadIpo,
+  secUrl,
+  yahooUrl,
 } from "../src/lib/ipo";
 import type { D1Like } from "../src/lib/posts";
 import { sitemapEntries } from "../src/lib/sitemap";
@@ -364,7 +366,7 @@ describe("IPO page", () => {
     expect(text).toContain(`What others sayJane Doe, an analyst at Example Securities, quoted by Sample Times on Nov 9, 2026:“${VIEW_QUOTE}”`);
     expect(out).toContain(`<blockquote class="ipo-quote">“${VIEW_QUOTE}”</blockquote>`);
     const zh = textOf(await page("anthropic", "zh"));
-    expect(zh).toContain(`各方观点Sample Times于2026年11月9日引述Jane Doe, an analyst at Example Securities：“${VIEW_QUOTE}”`);
+    expect(zh).toContain(`各方观点Sample Times 2026年11月9日引述 Jane Doe, an analyst at Example Securities：“${VIEW_QUOTE}”`);
     // Without views the section is left out.
     env.db = memoryD1(`${SEED}\nDELETE FROM ipo_items WHERE kind = 'view';`);
     expect(await page("anthropic")).not.toContain("What others say");
@@ -386,12 +388,12 @@ describe("IPO page", () => {
     const text = textOf(out);
     expect(out).toContain('<p class="kicker">IPO 追踪</p><h1>Anthropic IPO</h1>');
     expect(out).toContain('<span class="ipo-status">已定发行价区间</span>');
-    expect(text).toContain("未确认 预计2026年11月16日开始交易，据Example News2026年11月10日报道。 原文 ↗");
+    expect(text).toContain("未确认 预计2026年11月16日开始交易，据 Example News 2026年11月10日报道。 原文 ↗");
     expect(text).toContain("出自2026年11月10日提交的S-1/A · SEC 文件 ↗");
     expect(out).toContain('<dt>发行股数</dt><dd><span class="ipo-value">825,000,000股</span>');
     expect(out).toContain('<dt>发行价区间</dt><dd><span class="ipo-value">每股70.00至78.00美元</span>');
     expect(text).toContain("2026年11月10日 注册声明修订（S-1/A）文件 ↗");
-    expect(text).toContain("1.4万亿美元Example News于2026年11月10日报道");
+    expect(text).toContain("1.4万亿美元Example News 2026年11月10日报道");
     expect(text).toContain("面向企业客户推出了 AI 文字处理和演示文稿软件。");
     expect(text).toContain("“Anthropic on Tuesday released AI versions of word-processing and presentation software for business customers.”");
     expect(text).toContain("本页根据美国证监会文件和公开新闻报道自动生成，仅供参考，不构成投资建议。");
@@ -421,7 +423,7 @@ describe("IPO page", () => {
     env.db = memoryD1(`${SEED}\n${PRICED}`);
     for (const [locale, status, line, price] of [
       ["en", "Priced", "Unconfirmed Expected to start trading Thu, Nov 5, 2026: the trading day after pricing (424B4 filed Nov 5, 2026). SEC filing ↗", "$24.00 per share"],
-      ["zh", "已定价", "未确认 预计2026年11月5日开始交易：定价后的下一个交易日（2026年11月5日提交的424B4）。 SEC 文件 ↗", "每股24.00美元"],
+      ["zh", "已定价", "未确认 预计2026年11月5日开始交易：定价后的下一个交易日（2026年11月5日提交的 424B4）。 SEC 文件 ↗", "每股24.00美元"],
     ] as const) {
       const out = await page("northwind-robotics", locale);
       const text = textOf(out);
@@ -448,7 +450,7 @@ describe("IPO page", () => {
     expect(after).not.toContain("Open");
     const zh = textOf(await page("northwind-robotics", "zh"));
     expect(zh).toContain("北风机器人 IPO");
-    expect(zh).toContain("首日 · 11月5日 周四收盘价$31.20成交量48,210,000股较发行价涨跌+30.00%（收盘价31.20美元，发行价24.00美元）");
+    expect(zh).toContain("首日 · 11月5日 周四收盘价31.20美元成交量48,210,000股较发行价涨跌+30.00%（收盘价31.20美元，发行价24.00美元）");
     expect(zh).toContain("来源：Yahoo Finance ↗");
   });
 
@@ -554,5 +556,232 @@ describe("IPO sitemap entries", () => {
   it("has no IPO entries when none is tracked", async () => {
     const entries = await sitemapEntries(memoryD1(""), new URL("https://prebell.site"));
     expect(entries.some((e) => e.url.includes("/ipo/"))).toBe(false);
+  });
+});
+
+describe("review fixes: what the reader refuses to print", () => {
+  const watch = (set: string, slug = "anthropic") => memoryD1(`${SEED}\nUPDATE ipo_watch SET ${set} WHERE slug = '${slug}';`);
+
+  it("links filings only on www.sec.gov and the trading source only on finance.yahoo.com, against host tricks", () => {
+    expect(secUrl(ANTHROPIC_FILING)).toBe(ANTHROPIC_FILING);
+    expect(yahooUrl("https://finance.yahoo.com/quote/NWRB")).toBe("https://finance.yahoo.com/quote/NWRB");
+    for (const [check, host] of [
+      [secUrl, "www.sec.gov"],
+      [yahooUrl, "finance.yahoo.com"],
+    ] as const) {
+      for (const bad of [
+        `https://${host}.evil.example/x`,
+        `https://evil.example/?u=https://${host}/x`,
+        `https://evil.example/https://${host}/x`,
+        `https://${host}@evil.example/x`,
+        `https://${host}:443@evil.example/x`,
+        `https://user:pass@${host}/x`,
+        `https://${host}:8443/x`,
+        `http://${host}/x`,
+        `https://${host}`,
+        `https://${host.toUpperCase()}/x`,
+        `https://x${host}/x`,
+        "javascript:alert(1)",
+      ])
+        expect(check(bad), bad).toBeNull();
+    }
+  });
+
+  it("checks the date line's link by its source, and drops only the link when it fails", async () => {
+    const cases: [string, string, string | null][] = [
+      // news: any https article
+      ["date_source_url = 'https://www.sec.gov/x'", "anthropic", "https://www.sec.gov/x"],
+      ["date_source_url = 'javascript:alert(1)'", "anthropic", null],
+      ["date_source_url = 'http://news.example/a'", "anthropic", null],
+      // filing (the priced fixture): www.sec.gov only
+      [`status = 'priced', date_status = 'expected', date_source = 'filing', date_source_name = '424B4', date_source_url = 'https://evil.example/x-index.htm'`, "northwind-robotics", null],
+      [`status = 'priced', date_status = 'expected', date_source = 'filing', date_source_name = '424B4', date_source_url = '${ANTHROPIC_FILING}'`, "northwind-robotics", ANTHROPIC_FILING],
+      // trading: finance.yahoo.com only
+      ["date_source_url = 'https://evil.example/quote/NWRB'", "northwind-robotics", null],
+      ["date_source_url = 'https://finance.yahoo.com.evil.example/quote/NWRB'", "northwind-robotics", null],
+      ["date_source_url = 'https://finance.yahoo.com/quote/NWRB'", "northwind-robotics", "https://finance.yahoo.com/quote/NWRB"],
+    ];
+    for (const [set, slug, url] of cases) {
+      const ipo = (await loadIpo(watch(set, slug), slug, "en"))!;
+      expect(ipo.date, set).not.toBeNull();
+      expect(ipo.date!.sourceUrl, set).toBe(url);
+    }
+    env.db = watch("date_source_url = 'https://evil.example/quote/NWRB'", "northwind-robotics");
+    const out = await page("northwind-robotics");
+    expect(out).not.toContain("evil.example");
+    expect(textOf(out)).toContain("Confirmed First trading day Thu, Nov 5, 2026: its first regular session, per Yahoo Finance.");
+  });
+
+  it("shows a date only for the contract's status and source pairs, and only with a named source", async () => {
+    for (const [status, source, ok] of [
+      ["reported", "news", true],
+      ["expected", "filing", true],
+      ["confirmed", "filing", true],
+      ["confirmed", "trading", true],
+      ["confirmed", "news", false],
+      ["expected", "news", false],
+      ["reported", "filing", false],
+      ["reported", "trading", false],
+      ["expected", "trading", false],
+    ] as const) {
+      const db = watch(`date_status = '${status}', date_source = '${source}'`);
+      const ipo = (await loadIpo(db, "anthropic", "en"))!;
+      expect(ipo.date !== null, `${status}+${source}`).toBe(ok);
+      const week = await listIposBetween(db, "2026-11-16", "2026-11-20", "en");
+      expect(week.length, `${status}+${source} on the calendar`).toBe(ok ? 1 : 0);
+    }
+    // A news date that names no outlet is not shown.
+    expect((await loadIpo(watch("date_source_name = NULL"), "anthropic", "en"))!.date).toBeNull();
+    // On the page and the calendar, a refused pair reads "date not set" and draws no card.
+    env.db = watch("date_status = 'confirmed', date_source = 'news'");
+    expect(await page("anthropic")).toContain('<p class="ipo-date">First trading day: date not set.</p>');
+    const cal = await calendar("2026-11-16");
+    expect(cal).not.toContain('class="cal-ipo"');
+    expect(textOf(cal)).toContain("AnthropicANTPrice range setDate not set");
+  });
+
+  it("a withdrawn IPO shows no date even when one is stored", async () => {
+    env.db = memoryD1(`${SEED}\n${WITHDRAWN}\nUPDATE ipo_watch SET first_trade_date = '2026-11-20', date_status = 'reported', date_source = 'news',
+      date_source_name = 'Example News', date_as_of = '2026-11-09' WHERE slug = 'harbor-bio';`);
+    expect((await loadIpo(env.db as D1Like, "harbor-bio", "en"))!.date).toBeNull();
+    const out = await page("harbor-bio");
+    expect(out).not.toContain("ipo-date");
+    expect(out).not.toContain("Expected to start trading");
+  });
+
+  it("never shows a later session as the first day: a malformed earliest row hides the first day", async () => {
+    env.db = memoryD1(`${SEED}\nUPDATE ipo_trading SET close = 0 WHERE session_date = '2026-11-05';`);
+    const ipo = (await loadIpo(env.db as D1Like, "northwind-robotics", "en"))!;
+    expect(ipo.trading!.first).toBeNull();
+    expect(ipo.trading!.latest!.sessionDate).toBe("2026-11-10");
+    const text = textOf(await page("northwind-robotics"));
+    expect(text).not.toContain("First day");
+    expect(text).toContain("Latest · Tue, Nov 10Close$28.45");
+    // A malformed latest row hides only the latest.
+    const bad = memoryD1(`${SEED}\nUPDATE ipo_trading SET close = -3 WHERE session_date = '2026-11-10';`);
+    const t2 = (await loadIpo(bad, "northwind-robotics", "en"))!.trading!;
+    expect([t2.first?.sessionDate, t2.latest]).toEqual(["2026-11-05", null]);
+    // Both malformed: no section.
+    const none = memoryD1(`${SEED}\nUPDATE ipo_trading SET close = 0;`);
+    expect((await loadIpo(none, "northwind-robotics", "en"))!.trading).toBeNull();
+  });
+
+  it("shows no cover facts without the filing they came from", async () => {
+    env.db = memoryD1(`${SEED}\nDELETE FROM ipo_filings WHERE accession = '0001628280-26-072484';`);
+    expect((await loadIpo(env.db as D1Like, "anthropic", "en"))!.facts).toBeNull();
+    const out = await page("anthropic");
+    expect(out).toContain("The offering&#x27;s terms are not available yet.");
+    expect(out).not.toContain("825,000,000");
+    // A filing row with a malformed date is no source either.
+    const bad = memoryD1(`${SEED}\nUPDATE ipo_filings SET filing_date = 'soon' WHERE accession = '0001628280-26-072484';`);
+    expect((await loadIpo(bad, "anthropic", "en"))!.facts).toBeNull();
+  });
+
+  it("computes the change from the close and IPO price shown beside it, never the stored one", async () => {
+    const at = async (close: number, ipo: number | null, stored: number | null = 99) => {
+      const db = memoryD1(`${SEED}\nUPDATE ipo_trading SET close = ${close}, ipo_price = ${ipo ?? "NULL"}, change_pct = ${stored ?? "NULL"} WHERE session_date = '2026-11-05';`);
+      return (await loadIpo(db, "northwind-robotics", "en"))!.trading!.first!.changePct;
+    };
+    expect(await at(31.2, 24)).toBe(30);
+    expect(await at(28.45, 24)).toBe(18.54);
+    expect(await at(20, 24)).toBe(-16.67);
+    expect(await at(24, 24)).toBe(0);
+    expect(await at(30.0003, 24)).toBe(25);
+    expect(await at(31.2, 24, null)).toBe(30);
+    expect(await at(31.2, null)).toBeNull();
+    expect(await at(31.2, 0)).toBeNull();
+    expect(await at(31.2, -24)).toBeNull();
+    env.db = memoryD1(`${SEED}\nUPDATE ipo_trading SET close = 20, change_pct = 30 WHERE session_date = '2026-11-05';`);
+    const out = await page("northwind-robotics");
+    expect(out).toContain('<span class="num down">−16.67%</span>');
+    expect(textOf(out)).toContain("(close $20.00 vs. IPO price $24.00)");
+    expect(out).not.toContain("+30.00%");
+  });
+
+  it("drops a view with no speaker, and any item with no outlet", async () => {
+    env.db = memoryD1(`${SEED}\nUPDATE ipo_items SET speaker = '  ' WHERE kind = 'view';\nUPDATE ipo_items SET outlet = ' ' WHERE kind = 'company_move';`);
+    const ipo = (await loadIpo(env.db as D1Like, "anthropic", "en"))!;
+    expect(ipo.views).toEqual([]);
+    expect(ipo.moves).toEqual([]);
+    const out = await page("anthropic");
+    expect(out).not.toContain("What others say");
+    expect(out).not.toContain("Recent moves");
+  });
+
+  it("writes valuations to three significant digits, the same magnitude in both languages, and hides implausible ones", () => {
+    const table: [number, string | null, string | null][] = [
+      [1.4e12, "$1.4 trillion", "1.4万亿美元"],
+      [2e12, "$2 trillion", "2万亿美元"],
+      [965e9, "$965 billion", "9650亿美元"],
+      [999_999_999_999, "$1 trillion", "1万亿美元"],
+      [999.9996e9, "$1 trillion", "1万亿美元"],
+      [999.6e9, "$1 trillion", "1万亿美元"],
+      [1.2345e12, "$1.23 trillion", "1.23万亿美元"],
+      [61.5e9, "$61.5 billion", "615亿美元"],
+      [1.5e9, "$1.5 billion", "15亿美元"],
+      [999_999_999, "$1 billion", "10亿美元"],
+      [250e6, "$250 million", "2.5亿美元"],
+      [99_950_000, "$100 million", "1亿美元"],
+      [5e6, "$5 million", "500万美元"],
+      [1e6, "$1 million", "100万美元"],
+      [1e14, "$100 trillion", "100万亿美元"],
+      [999_999, null, null],
+      [0, null, null],
+      [-1.4e12, null, null],
+      [1.01e14, null, null],
+      [1e21, null, null],
+      [Number.NaN, null, null],
+      [Number.POSITIVE_INFINITY, null, null],
+    ];
+    for (const [usd, en, zh] of table) {
+      expect(fmtValuation(usd, "en"), String(usd)).toBe(en);
+      expect(fmtValuation(usd, "zh"), String(usd)).toBe(zh);
+      expect(String(fmtValuation(usd, "en"))).not.toMatch(/1,000|\d{4}/);
+      expect(String(fmtValuation(usd, "zh"))).not.toMatch(/10000/);
+    }
+  });
+
+  it("an implausible valuation shows no figure, only its attributed quote", async () => {
+    env.db = memoryD1(`${SEED}\nUPDATE ipo_items SET value_usd = 1e21 WHERE kind = 'valuation' AND url LIKE '%sampletimes%';`);
+    const text = textOf(await page("anthropic"));
+    expect(text).not.toContain("trillion trillion");
+    expect(text).not.toContain("$1,000,000,000");
+    expect(text).toContain("Reported by Sample Times on Oct 12, 2026“Bankers have pitched a valuation of about $2 trillion");
+    expect(text).toContain("$1.4 trillionReported by Example News");
+  });
+
+  it("says shares and price are not available only when no share or price row is shown", async () => {
+    env.db = memoryD1(`${SEED}\nDELETE FROM ipo_facts WHERE slug = 'anthropic' AND kind NOT IN ('shares_company', 'exchange');`);
+    const out = await page("anthropic");
+    expect(out).toContain("<dt>Sold by the company</dt>");
+    expect(out).not.toContain("Shares and price are not available yet.");
+    // Harbor Bio has only the exchange and symbol rows: the line stays.
+    expect(await page("harbor-bio")).toContain("Shares and price are not available yet.");
+  });
+
+  it("uses the site's Chinese money style (X美元) for every amount on a Chinese page", async () => {
+    // Quotes stay as the filing or article wrote them; PreBell's own figures are what is checked here.
+    const html = await page("northwind-robotics", "zh");
+    const out = textOf(html);
+    expect(out).toContain("收盘价31.20美元");
+    expect(out).toContain("每股24.00美元");
+    expect(out).toContain("（收盘价31.20美元，发行价24.00美元）");
+    const own = html.replace(/<blockquote[^>]*>[\s\S]*?<\/blockquote>/g, "");
+    expect(textOf(own)).not.toMatch(/\$\d/);
+    const anthropic = (await page("anthropic", "zh")).replace(/<blockquote[^>]*>[\s\S]*?<\/blockquote>/g, "");
+    expect(textOf(anthropic)).not.toMatch(/\$\d/);
+  });
+
+  it("gives the sitemap only a well-formed UTC lastmod", async () => {
+    const db = memoryD1(`${SEED}\nUPDATE ipo_watch SET updated_at = 'yesterday' WHERE slug = 'harbor-bio';
+      UPDATE ipo_watch SET updated_at = '2026-13-01T00:00:00Z' WHERE slug = 'northwind-robotics';`);
+    const slugs = await listIpoSlugs(db);
+    expect(slugs).toEqual([
+      { slug: "anthropic", updatedAt: "2026-11-11T15:00:00Z" },
+      { slug: "harbor-bio", updatedAt: null },
+      { slug: "northwind-robotics", updatedAt: null },
+    ]);
+    const entries = await sitemapEntries(db, new URL("https://prebell.site"));
+    expect(entries.find((e) => e.url === "https://prebell.site/en/ipo/harbor-bio")!.lastModified).toBeUndefined();
   });
 });

@@ -49,7 +49,8 @@ export default function IpoView({ ipo, locale }: { ipo: IpoPage; locale: Locale 
           {t("ipo.withdrawn", { hasDay: rw ? "yes" : "no", day: rw ? day(rw.filingDate) : "" })}
         </p>
       )}
-      <DateLine date={ipo.date} locale={locale} t={t} />
+      {/* A withdrawn IPO has no expected date. */}
+      {ipo.status !== "withdrawn" && <DateLine date={ipo.date} locale={locale} t={t} />}
 
       <h2 id="offering">{t("ipo.offering.heading")}</h2>
       <Offering ipo={ipo} locale={locale} t={t} />
@@ -83,7 +84,11 @@ export default function IpoView({ ipo, locale }: { ipo: IpoPage; locale: Locale 
           <p className="ipo-note">{t("ipo.valuation.note")}</p>
           <Items
             items={ipo.valuations}
-            head={(i) => (i.valueUsd !== null ? <strong className="ipo-figure">{fmtValuation(i.valueUsd, locale)}</strong> : i.statement)}
+            head={(i) => {
+              // A missing or implausible figure is not printed; the attributed quote below still is.
+              const figure = i.valueUsd === null ? null : fmtValuation(i.valueUsd, locale);
+              return figure && <strong className="ipo-figure">{figure}</strong>;
+            }}
             locale={locale}
             t={t}
           />
@@ -104,12 +109,7 @@ export default function IpoView({ ipo, locale }: { ipo: IpoPage; locale: Locale 
             {ipo.views.map((v) => (
               <li key={v.url ?? `${v.outlet}:${v.publishedOn}:${v.quote}`} className="ipo-item ipo-view">
                 <p className="ipo-by">
-                  {t("ipo.views.by", {
-                    hasSpeaker: v.speaker ? "yes" : "no",
-                    speaker: v.speaker ?? "",
-                    outlet: v.outlet,
-                    date: day(v.publishedOn),
-                  })}
+                  {t("ipo.views.by", { speaker: v.speaker ?? "", outlet: v.outlet, date: day(v.publishedOn) })}
                 </p>
                 <blockquote className="ipo-quote">“{v.quote}”</blockquote>
                 <ArticleLink url={v.url} t={t} />
@@ -122,9 +122,9 @@ export default function IpoView({ ipo, locale }: { ipo: IpoPage; locale: Locale 
       {ipo.trading && (
         <>
           <h2 id="trading">{t("ipo.trading.heading")}</h2>
-          <Session label={t("ipo.trading.first")} s={ipo.trading.first} locale={locale} t={t} />
+          {ipo.trading.first && <Session label={t("ipo.trading.first")} s={ipo.trading.first} locale={locale} t={t} />}
           {ipo.trading.latest && <Session label={t("ipo.trading.latest")} s={ipo.trading.latest} locale={locale} t={t} />}
-          <TradingSource url={(ipo.trading.latest ?? ipo.trading.first).sourceUrl} t={t} />
+          <TradingSource url={(ipo.trading.latest ?? ipo.trading.first)?.sourceUrl ?? null} t={t} />
         </>
       )}
 
@@ -152,14 +152,15 @@ function DateLine({ date, locale, t }: { date: IpoDate | null; locale: Locale; t
     hasDay: date.asOf ? "yes" : "no",
     day: date.asOf ? formatDate(date.asOf, locale) : "",
   };
-  const sentence =
+  const key =
     date.status === "reported"
-      ? t("ipo.date.reported", { ...vars, source: date.sourceName ?? t("ipo.date.someReport") })
+      ? "reported"
       : date.status === "expected"
-        ? t("ipo.date.expected", { ...vars, source: date.sourceName ?? t("ipo.date.someFiling") })
+        ? "expected"
         : date.source === "trading"
-          ? t("ipo.date.confirmedTrading", { ...vars, source: date.sourceName ?? "Yahoo Finance" })
-          : t("ipo.date.confirmedFiling", { ...vars, source: date.sourceName ?? t("ipo.date.someFiling") });
+          ? "confirmedTrading"
+          : "confirmedFiling";
+  const sentence = t(`ipo.date.${key}`, { ...vars, source: date.sourceName });
   const confirmed = date.status === "confirmed";
   return (
     <div className="ipo-date">
@@ -206,6 +207,8 @@ type OfferingLabel =
   | "priceFinal"
   | "prospectusDate";
 
+const SHARE_PRICE_ROWS = new Set(["shares_offered", "shares_company", "shares_selling", "option_shares", "price_range", "price_final"]);
+
 const SHARE_ROWS: [FactKind, OfferingLabel][] = [
   ["shares_offered", "sharesOffered"],
   ["shares_company", "sharesCompany"],
@@ -231,23 +234,22 @@ function Offering({ ipo, locale, t }: { ipo: IpoPage; locale: Locale; t: T }) {
   }
   add("price_final", facts.price_final, "priceFinal", (f) => t("ipo.offering.price", { price: fmtSharePrice(f.num!) }));
   add("prospectus_date", facts.prospectus_date, "prospectusDate", (f) => formatDate(f.text!, locale));
-  const terms = facts.shares_offered || facts.price_final || facts.price_low;
+  // Said only when no share or price row is shown, so it never contradicts a row above it.
+  const terms = rows.some((r) => SHARE_PRICE_ROWS.has(r.key));
 
   return (
     <>
-      {filing && (
-        <p className="ipo-src">
-          {t("ipo.offering.from", { form: filing.form, date: formatDate(filing.filingDate, locale) })}
-          {filing.indexUrl && (
-            <>
-              {" · "}
-              <a href={filing.indexUrl} rel="noopener noreferrer">
-                {t("ipo.secFiling")} ↗
-              </a>
-            </>
-          )}
-        </p>
-      )}
+      <p className="ipo-src">
+        {t("ipo.offering.from", { form: filing.form, date: formatDate(filing.filingDate, locale) })}
+        {filing.indexUrl && (
+          <>
+            {" · "}
+            <a href={filing.indexUrl} rel="noopener noreferrer">
+              {t("ipo.secFiling")} ↗
+            </a>
+          </>
+        )}
+      </p>
       {rows.length > 0 && (
         <dl className="ipo-facts">
           {rows.map((r) => (
@@ -323,12 +325,12 @@ function Session({ label, s, locale, t }: { label: string; s: IpoSession; locale
         {s.open !== null && (
           <div className="ipo-fact">
             <dt>{t("ipo.trading.open")}</dt>
-            <dd className="num">${fmtPrice(s.open)}</dd>
+            <dd className="num">{t("ipo.trading.money", { n: fmtPrice(s.open) })}</dd>
           </div>
         )}
         <div className="ipo-fact">
           <dt>{t("ipo.trading.close")}</dt>
-          <dd className="num">${fmtPrice(s.close)}</dd>
+          <dd className="num">{t("ipo.trading.money", { n: fmtPrice(s.close) })}</dd>
         </div>
         {s.volume !== null && (
           <div className="ipo-fact">

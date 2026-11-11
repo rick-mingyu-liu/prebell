@@ -182,3 +182,16 @@ they are never asked twice. Things decided *not* to do go in `declined.md`.
   - **Valuations** are written in words from the stored number ("$1.4 trillion", "1.4万亿美元"), each with "Reported by {outlet} on {date}", the quote and the link; never a change between two. News quotes show in full (they are a sentence); `expected_date` items are not listed separately (the date line uses the newest).
   - **Links**: only `https://` (the lead's rule, stricter than the contract's "http or https"); filing links only on `https://www.sec.gov/`, the trading source only on `https://finance.yahoo.com/`. A rejected link hides only the link; the item stays, attributed.
   - **Sitemap**: every row of `ipo_watch`, withdrawn included (its page still renders), in both languages with the row's `updated_at`; the sitemap is now two D1 reads on a cache miss.
+- **IPO watch, site review fixes** (2026-11-11; builder's calls on the site review, each one the owner can change in `apps/web/src/lib/ipo.ts` or `IpoView.tsx` unless named). These amend "IPO watch, site rulings" above:
+  - **Date links are checked by their source**: an article link (any https) for a news date, www.sec.gov for a filing date and finance.yahoo.com for a trading date. A link that fails is dropped and the date stays.
+  - **Date status and source must be a pair the contract allows** (reported with news; expected with filing; confirmed with filing or trading). Any other pair counts as no date, and so does a news or filing date with no named source. The page then says "date not set" and the calendar draws no card. A withdrawn IPO shows no date line at all.
+  - **First day and latest are fixed by date before rows are read.** An unusable earliest session hides "First day" and never moves the latest session into its place.
+  - **Cover facts show only with their filing.** Without the filing row, the page says "The offering's terms are not available yet."
+  - **The change from the IPO price is computed on the page** from the close and the IPO price printed beside it (two decimals). The stored `change_pct` is not read.
+  - **Views need a speaker**: a view with none is dropped. Items with no outlet were already dropped.
+  - **Valuations in words** are rounded to three significant digits before the unit is chosen, so both languages give the same magnitude: "$1 trillion" / "1万亿美元", never "$1,000 billion". A value under $1 million or over $100 trillion shows no figure, only the attributed quote. A valuation with no stored number now also shows only its attributed quote; before, it showed the statement.
+  - **Chinese wording**: a space separates a Latin outlet or filing name from the Chinese text around it ("据 Example News 2026年11月10日报道", "Example News 2026年11月10日报道", "Sample Times 2026年11月9日引述 Jane Doe…：", "（2026年11月5日提交的 424B4）"). Amounts on Chinese pages use the site's "X美元" style throughout (the close is "31.20美元", not "$31.20").
+  - **"Shares and price are not available yet."** shows only when no share or price row does.
+  - **The sitemap's IPO lastmod** is used only when it is a well-formed UTC time.
+  - **The items read skips `expected_date` rows**, which the page never shows.
+  - The figure "$2 trillion" above a quote that says "about $2 trillion" is left as is, for the owner (review item 8).

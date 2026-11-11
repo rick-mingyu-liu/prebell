@@ -362,9 +362,7 @@
       "expected": "Expected to start trading {date}: the trading day after pricing ({source}{hasDay, select, yes { filed {day}} other {}}).",
       "confirmedFiling": "First trading day {date}, as stated in the {source}{hasDay, select, yes { filed {day}} other {}}.",
       "confirmedTrading": "First trading day {date}: its first regular session, per {source}.",
-      "notSet": "First trading day: date not set.",
-      "someReport": "a news report",
-      "someFiling": "a filing"
+      "notSet": "First trading day: date not set."
     },
     "article": "Article",
     "sourceWords": "The source's words",
@@ -404,7 +402,7 @@
     },
     "views": {
       "heading": "What others say",
-      "by": "{hasSpeaker, select, yes {{speaker}, quoted by {outlet} on {date}:} other {{outlet}, {date}:}}"
+      "by": "{speaker}, quoted by {outlet} on {date}:"
     },
     "trading": {
       "heading": "After listing",
@@ -417,6 +415,7 @@
       "change": "Change from IPO price",
       "changeInputs": "close ${close} vs. IPO price ${ipo}",
       "volumeValue": "{n} shares",
+      "money": "${n}",
       "source": "Source: {source}"
     },
     "disclaimer": "This page is generated automatically from SEC filings and public news reports for information only. It is not investment advice.",

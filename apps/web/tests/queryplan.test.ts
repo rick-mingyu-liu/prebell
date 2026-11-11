@@ -109,7 +109,7 @@ describe.each([false, true])("IPO query plans (ANALYZE: %s)", (analyze) => {
     expect(plan("ipo_facts")).toMatch(/SEARCH f USING INDEX sqlite_autoindex_ipo_facts_1 \(accession=\?\)/);
     expect(plan("ipo_facts")).toMatch(/SEARCH g USING INDEX sqlite_autoindex_ipo_filings_1 \(accession=\?\)/);
     expect(plan("ipo_filings")).toMatch(/SEARCH ipo_filings USING INDEX idx_ipo_filings_slug \(slug=\?\)/);
-    expect(plan("ipo_items")).toMatch(/SEARCH ipo_items USING INDEX (idx_ipo_items_slug|sqlite_autoindex_ipo_items_1) \(slug=\?\)/);
+    expect(plan("ipo_items")).toMatch(/SEARCH ipo_items USING INDEX idx_ipo_items_slug \(slug=\? AND kind=\?\)/);
     expect(plan("ipo_trading")).toMatch(/SEARCH ipo_trading USING (COVERING )?INDEX sqlite_autoindex_ipo_trading_1 \(slug=\?/);
     for (const p of plans) expect(p.plan, p.sql).not.toMatch(/SCAN (ipo_\w+|f|g)\b/);
   });

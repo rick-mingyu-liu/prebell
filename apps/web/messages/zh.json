@@ -345,13 +345,11 @@
       "withdrawn": "已撤回"
     },
     "date": {
-      "reported": "预计{date}开始交易，据{source}{hasDay, select, yes {{day}} other {}}报道。",
-      "expected": "预计{date}开始交易：定价后的下一个交易日（{hasDay, select, yes {{day}提交的} other {}}{source}）。",
-      "confirmedFiling": "首个交易日为{date}，见{hasDay, select, yes {{day}提交的} other {}}{source}。",
-      "confirmedTrading": "首个交易日为{date}：据{source}，当日为其首个常规交易日。",
-      "notSet": "首个交易日：日期未定。",
-      "someReport": "新闻报道",
-      "someFiling": "申报文件"
+      "reported": "预计{date}开始交易，据 {source} {hasDay, select, yes {{day}} other {}}报道。",
+      "expected": "预计{date}开始交易：定价后的下一个交易日（{hasDay, select, yes {{day}提交的 } other {}}{source}）。",
+      "confirmedFiling": "首个交易日为{date}，见{hasDay, select, yes {{day}提交的 } other {}}{source}。",
+      "confirmedTrading": "首个交易日为{date}：据 {source}，当日为其首个常规交易日。",
+      "notSet": "首个交易日：日期未定。"
     },
     "article": "原文",
     "sourceWords": "来源原文",
@@ -385,13 +383,13 @@
       "heading": "媒体报道的估值",
       "note": "每个数字均为所列媒体在当日报道的数据。"
     },
-    "reportedBy": "{outlet}于{date}报道",
+    "reportedBy": "{outlet} {date}报道",
     "moves": {
       "heading": "公司近期动态"
     },
     "views": {
       "heading": "各方观点",
-      "by": "{hasSpeaker, select, yes {{outlet}于{date}引述{speaker}：} other {{outlet}，{date}：}}"
+      "by": "{outlet} {date}引述 {speaker}："
     },
     "trading": {
       "heading": "上市后表现",
@@ -404,6 +402,7 @@
       "change": "较发行价涨跌",
       "changeInputs": "收盘价{close}美元，发行价{ipo}美元",
       "volumeValue": "{n}股",
+      "money": "{n}美元",
       "source": "来源：{source}"
     },
     "disclaimer": "本页根据美国证监会文件和公开新闻报道自动生成，仅供参考，不构成投资建议。",
