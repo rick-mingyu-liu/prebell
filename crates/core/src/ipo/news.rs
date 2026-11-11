@@ -13,15 +13,14 @@
 //! - the quote names the company (its name or an alias from the list); a
 //!   view may instead name it in the same paragraph, within
 //!   `VIEW_COMPANY_WINDOW` characters of the quote;
-//! - a valuation's figure is the money the quote ties to valuation wording
-//!   ("valued at $X", "valuation of $X", "$X valuation", "worth $X",
-//!   "market value of $X"), at least $1 billion, not a bound ("up to",
-//!   "more than", ...), and in the same clause as the company's name with no
-//!   other company between (`tied_to_company`);
-//! - an expected date is written in the quote next to trading or listing
-//!   words in the same clause, with no pricing word or other date between,
-//!   no negation or change word in that clause ("no longer", "postponed",
-//!   "had been", ...), and the company's name in it with no other company;
+//! - a valuation or an expected date must match an allowed shape first
+//!   (`valuation_templates`, `date_templates`), with the company's names
+//!   replaced by `@CO`: the company itself is what is valued, or the
+//!   subject of a present or future trading verb. Word lists stay as a
+//!   second line: no comparison, no other party ("invested in", "stake",
+//!   "supplier", ...), no bound before a figure ("up to"), no negation or
+//!   change word in a date's sentence, nothing conditional after the date
+//!   ("but", "before", "if", ...);
 //! - a view is a direct quotation (inside quotation marks in the article)
 //!   of a speaker the article names near it; the speaker's affiliation is
 //!   kept only when the article writes it next to the name.
@@ -104,13 +103,12 @@ pub enum Reject {
     QuoteNotInArticle,
     NotAnOutlet,
     CompanyNotNamed,
-    /// The company is named, but not tied to the figure or date (another
-    /// company in between, a comparison, another clause).
-    NotAboutCompany,
     Markup,
     NoValue,
-    ValueNotTheValuation,
-    NotTradingDate,
+    /// No valuation template gives this figure as the company's own.
+    NotTheCompanysValuation,
+    /// No date template gives this day as the company's first trading day.
+    NotTheCompanysTradingDate,
     DateNotInQuote,
     NoSpeaker,
     SpeakerNotInArticle,
@@ -150,16 +148,21 @@ pub const OUTLETS: &[(&str, &str)] = &[
     ("caixinglobal.com", "Caixin Global"),
 ];
 
-/// Path segments of press releases, sponsored and partner content on the
-/// allowlisted sites (apnews.com/press-release/, bloomberg.com/press-releases/,
-/// marketwatch.com/press-release/, ...).
-const EXCLUDED_PATHS: [&str; 6] = [
-    "/press-release",
-    "/sponsored",
-    "/sponsor/",
-    "/partner",
-    "/paid-post",
-    "/brandvoice",
+/// Whole path segments of press releases, sponsored and partner content on
+/// the allowlisted sites (apnews.com/press-release/, bloomberg.com/press-releases/,
+/// marketwatch.com/press-release/, ...). A segment that only contains one
+/// ("/partnerships-anthropic/") is fine.
+const EXCLUDED_SEGMENTS: [&str; 10] = [
+    "press-release",
+    "press-releases",
+    "sponsored",
+    "sponsor",
+    "partner",
+    "partners",
+    "partner-content",
+    "paid-post",
+    "paidpost",
+    "brandvoice",
 ];
 
 /// The outlet of an https article URL on an allowlisted host.
@@ -172,7 +175,8 @@ pub fn outlet_for(url: &str) -> Option<&'static str> {
     let h = h.to_ascii_lowercase();
     let h = h.strip_prefix("www.").unwrap_or(&h);
     let p = path.to_ascii_lowercase();
-    if EXCLUDED_PATHS.iter().any(|x| p.contains(x)) {
+    let p = p.split(['?', '#']).next().unwrap_or("");
+    if p.split('/').any(|seg| EXCLUDED_SEGMENTS.contains(&seg)) {
         return None;
     }
     OUTLETS
@@ -185,46 +189,54 @@ fn re(p: &str) -> Regex {
     Regex::new(p).expect("valid built-in regex")
 }
 
-/// A boundary of a clause at byte `i` of `text`: ";", ":", ",", or a
-/// sentence's period (followed by a space and a capital, not after a single
-/// capital such as the "S" of "U.S.").
-fn clause_break(text: &str, i: usize) -> bool {
-    let b = text.as_bytes();
-    let next_space = b.get(i + 1).is_none_or(|c| *c == b' ');
-    match b[i] {
-        b';' | b':' | b',' => next_space,
-        b'.' => {
-            let next_cap = b.get(i + 2).is_some_and(|c| c.is_ascii_uppercase());
-            let single = i >= 2 && b[i - 1].is_ascii_uppercase() && !b[i - 2].is_ascii_alphabetic();
-            b.get(i + 1).is_none() || (next_space && next_cap && !single)
-        }
-        _ => false,
+/// The marker the company's names are replaced with before the templates
+/// run, so a template reads `@CO` wherever the quote names the company.
+const CO: &str = "@CO";
+
+/// `text` with each of the company's names (case-insensitive, whole words,
+/// longest first) replaced by `CO`.
+pub fn mark_company(text: &str, t: &Tracked) -> String {
+    let mut names: Vec<&str> = t.names().filter(|n| !n.is_empty()).collect();
+    names.sort_by_key(|n| std::cmp::Reverse(n.len()));
+    let mut out = text.to_string();
+    for n in names {
+        let r = re(&format!(r"(?i)\b{}\b", regex::escape(n)));
+        out = r.replace_all(&out, CO).into_owned();
     }
+    out
 }
 
-/// The clause around `[s, e)` of `text`: from after the last break before
-/// `s` to the first break at or after `e`.
-pub fn clause(text: &str, s: usize, e: usize) -> (usize, usize) {
-    let start = (0..s)
-        .rev()
-        .find(|&i| clause_break(text, i))
-        .map_or(0, |i| i + 1);
-    let end = (e..text.len())
-        .find(|&i| clause_break(text, i))
-        .unwrap_or(text.len());
-    (start, end)
+/// The sentences of a normalized, marked quote: split after ".", "?",
+/// "!" or ";" followed by a space and a capital (so "Nov. 16" and "$1.4"
+/// never split), with a dateline ("SAN FRANCISCO, Nov 10 (Reuters) -")
+/// removed from the front.
+pub fn sentences(text: &str) -> Vec<String> {
+    static DATELINE: OnceLock<Regex> = OnceLock::new();
+    let dateline =
+        DATELINE.get_or_init(|| re(r"^[A-Z][A-Z .,'-]+(?:,[^()]{0,30})?\([^)]*\)\s*[-–—]\s*"));
+    let b = text.as_bytes();
+    let mut out = Vec::new();
+    let mut from = 0;
+    for i in 0..b.len() {
+        let end = matches!(b[i], b'.' | b'?' | b'!' | b';')
+            && b.get(i + 1) == Some(&b' ')
+            && b.get(i + 2)
+                .is_some_and(|c| c.is_ascii_uppercase() || *c == b'@');
+        if end {
+            out.push(text[from..=i].trim().to_string());
+            from = i + 1;
+        }
+    }
+    out.push(text[from..].trim().to_string());
+    out.into_iter()
+        .map(|s| dateline.replace(&s, "").trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect()
 }
 
-/// Comparison words that make a clause about two companies.
-fn contrast_re() -> &'static Regex {
-    static R: OnceLock<Regex> = OnceLock::new();
-    R.get_or_init(|| {
-        re(r"(?i)\b(?:unlike|compared (?:with|to)|versus|vs|while|whereas|rival|rivals)\b")
-    })
-}
-
-/// Capitalized words that may sit between the company and its figure or
-/// date without naming another company.
+/// Capitalized words that may sit in a template's free gaps without naming
+/// another company. Any other word with an uppercase letter (OpenAI, xAI,
+/// eBay) counts as a name.
 const ALLOWED_CAPS: &[&str] = &[
     "January",
     "February",
@@ -255,8 +267,6 @@ const ALLOWED_CAPS: &[&str] = &[
     "Wednesday",
     "Thursday",
     "Friday",
-    "Saturday",
-    "Sunday",
     "IPO",
     "IPOs",
     "Nasdaq",
@@ -279,107 +289,105 @@ const ALLOWED_CAPS: &[&str] = &[
     "Inc",
     "PBC",
     "SEC",
-    "Wall",
-    "Street",
 ];
 
-/// Whether the company named in `t` is the subject of the figure or date
-/// at `[s, e)` of the normalized quote `text`: one of its names is in the
-/// same clause, the clause has no comparison word, and no other
-/// capitalized name (beyond `ALLOWED_CAPS`) sits between the name and the
-/// span or inside it. When in doubt, no.
-pub fn tied_to_company(text: &str, s: usize, e: usize, t: &Tracked) -> bool {
-    let (cs, ce) = clause(text, s, e);
-    let c = &text[cs..ce];
-    if contrast_re().is_match(c) {
-        return false;
-    }
-    let lower = c.to_ascii_lowercase();
-    let mut names: Vec<(usize, usize)> = Vec::new();
-    for n in t.names() {
-        let n = n.to_ascii_lowercase();
-        for (i, _) in lower.match_indices(&n) {
-            let before = c[..i].chars().next_back();
-            let after = c[i + n.len()..].chars().next();
-            if !before.is_some_and(char::is_alphanumeric)
-                && !after.is_some_and(char::is_alphanumeric)
-            {
-                names.push((cs + i, cs + i + n.len()));
-            }
-        }
-    }
-    let dist = |&(a, b): &(usize, usize)| if b <= s { s - b } else { a.saturating_sub(e) };
-    let Some(&(a, b)) = names.iter().min_by_key(|x| dist(x)) else {
-        return false;
-    };
-    let (lo, hi) = (a.min(s), b.max(e));
-    let mut seg = text[lo..hi].to_string();
-    for n in t.names() {
-        seg = seg.replace(n, " ");
-    }
-    seg.split(|c: char| c.is_whitespace() || matches!(c, ',' | '(' | ')' | '"' | ';'))
+/// `gap` names no one: every word with an uppercase letter is in
+/// `ALLOWED_CAPS`.
+fn no_other_name(gap: &str) -> bool {
+    gap.split(|c: char| c.is_whitespace() || matches!(c, ',' | '(' | ')' | '"' | ';' | '$'))
         .map(|w| w.trim_end_matches("'s").trim_end_matches(['.', '\'']))
-        .filter(|w| w.starts_with(|c: char| c.is_uppercase()))
+        .filter(|w| w.chars().any(|c| c.is_uppercase()))
         .all(|w| ALLOWED_CAPS.contains(&w))
 }
 
-/// A figure that is a bound, not the figure: "up to $X", "more than $X".
-/// Plain hedges ("about", "roughly", "around", "approximately") are fine.
-fn bounded_re() -> &'static Regex {
+/// Comparison words: a sentence about two companies is never used.
+fn contrast_re() -> &'static Regex {
+    static R: OnceLock<Regex> = OnceLock::new();
+    R.get_or_init(|| re(r"(?i)\b(?:unlike|compared (?:with|to)|versus|vs|whereas|rival|rivals)\b"))
+}
+
+/// Words that put another party into a valuation sentence: someone the
+/// company invested in, a supplier, a customer, its stake.
+fn other_party_re() -> &'static Regex {
     static R: OnceLock<Regex> = OnceLock::new();
     R.get_or_init(|| {
-        re(r"(?i)\b(?:up to|as much as|as high as|as low as|at least|at most|more than|less than|fewer than|over|under|nearly|almost|close to|north of|south of|upwards of|in excess of|above|below|exceeding|topping|beyond)\s*$")
+        re(r"(?i)\b(?:invest(?:ed|s|ing)? in|stake|stakes|portfolio|supplier|suppliers|customer|customers|partner|partners|backer|backers|investor|investors|startup|start-up|startups|subsidiary|unit|affiliate)\b")
     })
 }
 
-/// The amounts a quote ties to valuation wording, in dollars, each with
-/// the span (in `normalize(quote)`) of its wording and money. A bounded
-/// figure ("valued at up to $X") is none.
-pub fn valuation_spans(quote: &str) -> Vec<(f64, (usize, usize))> {
+/// A short description right after the company's name (", the maker of
+/// the Claude chatbot,", ", which was valued at $965 billion in May,").
+const ASIDE: &str = r"(?:,\s+(?:the|a|an|which|who|whose|backed|founded|based|known|led|valued|maker|creator|developer)\b[^,;]{1,100},)?";
+const MONEY: &str = r"(\$\s?\d[\d,]*(?:\.\d+)?(?:\s?(?:trillion|billion|million|tn|bn|T|B)\b)?)";
+/// A plain hedge may precede the figure; a bound ("up to") may not.
+const HEDGE: &str = r"(?:(?:about|around|roughly|approximately|some)\s+)?";
+
+/// The valuation shapes accepted, with `@CO` for the company: what is
+/// valued is the company itself. Each has one money capture; `gap` groups
+/// must name no other company.
+pub fn valuation_templates() -> &'static [Regex] {
     static R: OnceLock<Vec<Regex>> = OnceLock::new();
-    let rs = R.get_or_init(|| {
-        let money = r"(\$\s?\d[\d,]*(?:\.\d+)?(?:\s?(?:trillion|billion|million|tn|bn|T|B)\b)?)";
-        let qual = r"(?:(?:about|around|roughly|approximately|some)\s+)?";
+    R.get_or_init(|| {
+        let co = CO;
         [
-            format!(
-                r"(?i)\bvalu(?:e|ed|es|ing|ation)\b(?:\s+\S+){{0,4}}?\s+(?:at|of)\s+{qual}{money}"
-            ),
-            format!(r"(?i){money}\s+valuation\b"),
-            format!(r"(?i)\bworth\s+{qual}{money}"),
-            format!(r"(?i)\bmarket (?:value|capitali[sz]ation) of\s+{qual}{money}"),
+            // Anthropic (, the maker of Claude,) is/was/would be valued at $X
+            format!(r"(?i)^{co}{ASIDE}\s+(?:is|was|would\s+be|could\s+be|has\s+been)\s+(?:now\s+)?valued\s+at\s+{HEDGE}{MONEY}"),
+            // Anthropic, (which was) valued at $X, ...
+            format!(r"(?i)^{co},\s+(?:which\s+(?:is|was|has\s+been)\s+(?:now\s+)?)?valued\s+at\s+{HEDGE}{MONEY}"),
+            // ... values / valued / valuing / would value Anthropic at $X
+            format!(r"(?i)\bvalu(?:e|es|ed|ing)\s+{co}\s+at\s+{HEDGE}{MONEY}"),
+            // Anthropic's valuation / market value / market capitalization (of|at|to|is) $X
+            format!(r"(?i){co}'s\s+(?:latest\s+|last\s+|current\s+|private\s+)?(?:valuation|market\s+value|market\s+capitali[sz]ation)\s+(?:of\s+|at\s+|to\s+|is\s+|was\s+|would\s+be\s+|could\s+be\s+|stood\s+at\s+|reached\s+|rose\s+to\s+|fell\s+to\s+)?{HEDGE}{MONEY}"),
+            // Anthropic's last (funding) round valued it at $X
+            format!(r"(?i)^{co}'s\s+(?:last|latest|most\s+recent|previous)\s+(?:funding\s+|private\s+)?round\s+valued\s+it\s+at\s+{HEDGE}{MONEY}"),
+            // a/the valuation of $X for Anthropic
+            format!(r"(?i)\b(?:a|the)\s+valuation\s+of\s+{HEDGE}{MONEY}\s+for\s+{co}\b"),
+            // a/the $X valuation for Anthropic
+            format!(r"(?i)\b(?:a|the)\s+{HEDGE}{MONEY}\s+valuation\s+for\s+{co}\b"),
+            // Anthropic (...) raised/sold/priced/is seeking ... at a valuation of $X
+            format!(r"(?i)^{co}{ASIDE}\s+(?P<gap>(?:\S+\s+){{0,4}}?)(?:raised|raises|raising|raise|sold|sells|selling|sell|priced|prices|pricing|is\s+seeking|seeks|seeking|is\s+targeting|targets|targeting|is\s+offering|offers|offering)\b(?P<gap2>[^;]{{0,80}}?)\s+at\s+a\s+valuation\s+of\s+{HEDGE}{MONEY}"),
+            // give(s)/giving Anthropic a valuation/market value of $X
+            format!(r"(?i)\bgiv(?:e|es|ing)\s+{co}\s+an?\s+(?:valuation|market\s+value)\s+of\s+{HEDGE}{MONEY}"),
+            // Anthropic (, which ...,) is seeking/targeting a valuation of $X
+            format!(r"(?i)^{co}{ASIDE}\s+(?:is\s+|was\s+)?(?:seeking|targeting|aiming\s+for|eyeing|seeks|targets|eyes)\s+an?\s+valuation\s+of\s+{HEDGE}{MONEY}"),
+            // Anthropic is/was/would be worth $X
+            format!(r"(?i)^{co}{ASIDE}\s+(?:is|was|would\s+be|could\s+be)\s+(?:now\s+)?worth\s+{HEDGE}{MONEY}"),
         ]
         .iter()
         .map(|p| re(p))
         .collect()
-    });
-    let text = normalize(quote);
+    })
+}
+
+/// The valuations `quote` gives for the company `t`, by template
+/// (`valuation_templates`), in dollars. A sentence with a comparison word
+/// or another party (`other_party_re`) gives none.
+pub fn valuation_figures(quote: &str, t: &Tracked) -> Vec<f64> {
+    let marked = mark_company(&normalize(quote), t);
     let mut out = Vec::new();
-    for r in rs {
-        for c in r.captures_iter(&text) {
-            let (Some(all), Some(m)) = (c.get(0), c.get(1)) else {
-                continue;
-            };
-            let from = text[..m.start()]
-                .char_indices()
-                .rev()
-                .nth(24)
-                .map_or(0, |(i, _)| i);
-            if bounded_re().is_match(&text[from..m.start()]) {
-                continue;
+    for s in sentences(&marked) {
+        if contrast_re().is_match(&s) || other_party_re().is_match(&s) {
+            continue;
+        }
+        for r in valuation_templates() {
+            for c in r.captures_iter(&s) {
+                let gaps_ok = ["gap", "gap2"]
+                    .iter()
+                    .all(|g| c.name(g).is_none_or(|m| no_other_name(m.as_str())));
+                let money = (1..c.len())
+                    .rev()
+                    .find_map(|i| c.get(i).filter(|m| m.as_str().starts_with('$')));
+                if let (true, Some(m)) = (gaps_ok, money) {
+                    out.extend(
+                        numbers_in(m.as_str(), Lang::En)
+                            .into_iter()
+                            .map(|n| n.value),
+                    );
+                }
             }
-            out.extend(
-                numbers_in(m.as_str(), Lang::En)
-                    .into_iter()
-                    .map(|n| (n.value, (all.start(), all.end()))),
-            );
         }
     }
     out
-}
-
-/// The amounts alone (`valuation_spans`).
-pub fn valuation_values(quote: &str) -> Vec<f64> {
-    valuation_spans(quote).into_iter().map(|(v, _)| v).collect()
 }
 
 const MONTHS: [(&str, &str); 12] = [
@@ -430,83 +438,78 @@ pub fn quote_names_date(quote: &str, d: NaiveDate) -> bool {
     !date_spans(&normalize(quote), d).is_empty()
 }
 
-fn trading_re() -> &'static Regex {
-    static R: OnceLock<Regex> = OnceLock::new();
-    R.get_or_init(|| {
-        re(r"(?i)\b(?:(?:begin|begins|start|starts|commence|commences)\s+trading|trading\s+(?:debut|begins|starts|will\s+begin|will\s+start)|debut(?:s|ed)?|first\s+day\s+of\s+trading|list(?:s|ed|ing)?|go(?:es)?\s+public)\b")
-    })
-}
-
-fn month_re() -> &'static Regex {
-    static R: OnceLock<Regex> = OnceLock::new();
-    R.get_or_init(|| re(r"\b(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\.?\s+\d"))
-}
-
-/// Negation and change words: a date in their clause is no longer (or not
-/// yet, or not) the trading day.
-pub const CHANGE_WORDS: &str = r"(?i)(?:n't\b|\b(?:not|no longer|never|postpon\w*|delay\w*|push(?:ed|es|ing)? back|cancel\w*|scrap\w*|shelv\w*|pull(?:s|ed|ing)?|halt\w*|suspend\w*|withdr\w*|abandon\w*|call(?:s|ed|ing)? off|originally|previously|had been|was to|were to|earlier planned|instead of|rather than|reschedul\w*|mov(?:e|es|ed|ing))\b)";
+/// Negation and change words, a second line behind the date templates: a
+/// sentence holding one gives no date.
+pub const CHANGE_WORDS: &str = r"(?i)(?:n't\b|\b(?:not|no longer|never|postpon\w*|delay\w*|push(?:ed|es|ing)? back|cancel\w*|scrap\w*|shelv\w*|pull(?:s|ed|ing)?|halt\w*|suspend\w*|withdr\w*|abandon\w*|call(?:s|ed|ing)? off|originally|previously|had been|was to|were to|earlier planned|instead of|rather than|reschedul\w*|mov(?:e|es|ed|ing)|on hold|in doubt|is off|put off|uncertain|unclear|slipped)\b)";
 
 fn change_re() -> &'static Regex {
     static R: OnceLock<Regex> = OnceLock::new();
     R.get_or_init(|| re(CHANGE_WORDS))
 }
 
-/// "from Nov. 16 to " at the end of a gap: the first date of a change.
-fn from_to_re() -> &'static Regex {
+/// Words after the date that make it conditional or past ("on Nov. 16 but
+/// market turmoil intervened", "before the sell-off", "if ...").
+fn tail_re() -> &'static Regex {
     static R: OnceLock<Regex> = OnceLock::new();
-    R.get_or_init(|| re(r"(?i)\bfrom\s+[A-Za-z]{3,9}\.?\s+\d{1,2}(?:,\s+\d{4})?\s+to\s*$"))
+    R.get_or_init(|| {
+        re(r"(?i)\b(?:but|before|until|unless|if|although|though|instead|rather|or|pending|subject to)\b")
+    })
 }
 
-/// Where the quote attaches `d` to trading or listing words (spans in
-/// `normalize(quote)` from the earlier of the two to the later): in the
-/// same clause (no ";"), within 80 characters, with no pricing word and no
-/// other date between them (except "from X to" before a "to Y" date), no
-/// pricing word in the 30 characters before the date, the date not the
-/// "X" of "from X to Y", and no negation or change word (`CHANGE_WORDS`)
-/// in the clause that holds them.
-pub fn trading_date_spans(quote: &str, d: NaiveDate) -> Vec<(usize, usize)> {
-    let text = normalize(quote);
-    let dates = date_spans(&text, d);
-    let mut out = Vec::new();
-    for t in trading_re().find_iter(&text) {
-        for &(ds, de) in &dates {
-            let from = text[..ds]
-                .char_indices()
-                .rev()
-                .nth(29)
-                .map_or(0, |(i, _)| i);
-            let before = text[from..ds].to_lowercase();
-            if before.contains("pric") || before.trim_end().ends_with("from") {
-                continue;
-            }
-            let gap = if t.end() <= ds {
-                let g = &text[t.end()..ds];
-                match from_to_re().find(g) {
-                    Some(m) => &g[..m.start()],
-                    None => g,
-                }
-            } else if de <= t.start() {
-                &text[de..t.start()]
-            } else {
-                continue;
-            };
-            let clean = gap.len() <= 80
-                && !gap.contains(';')
-                && !gap.to_lowercase().contains("pric")
-                && !month_re().is_match(gap);
-            let span = (t.start().min(ds), t.end().max(de));
-            let (cs, ce) = clause(&text, span.0, span.1);
-            if clean && !change_re().is_match(&text[cs..ce]) {
-                out.push(span);
-            }
-        }
-    }
-    out
+/// The date shapes accepted: a present or future statement with the
+/// company (or its shares or stock) as the subject of the trading verb.
+/// Each has a `date` and a `tail` (the rest of the sentence) group.
+pub fn date_templates() -> &'static [Regex] {
+    static R: OnceLock<Vec<Regex>> = OnceLock::new();
+    R.get_or_init(|| {
+        let co = CO;
+        let date = r"(?P<date>(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\.?\s+\d{1,2}(?:st|nd|rd|th)?(?:,\s+\d{4})?)";
+        let weekday = r"(?:(?:Monday|Tuesday|Wednesday|Thursday|Friday),?\s+)?";
+        let subj = format!(r"(?:shares\s+(?:of|in)\s+{co}|{co}(?:'s)?\s+(?:Class\s+A\s+)?(?:shares|stock|common\s+stock)|{co})");
+        let frame = r"(?:(?:is|are)\s+(?:now\s+)?(?:expected|set|scheduled|slated|due|planning|aiming|poised|preparing|on\s+track)\s+to|will|plans\s+to|plan\s+to|expects\s+to|expect\s+to|aims\s+to|intends\s+to)";
+        let verb = r"(?:(?:begin|start|commence)\s+trading|list|debut|go\s+public|trade|make\s+(?:its|their)\s+(?:(?:market|trading|stock\s+market|public\s+market|Nasdaq|NYSE)\s+)?debut)";
+        let fill = r"(?:\s+(?:its|their)\s+shares)?(?:\s+(?:on|in)\s+(?:the\s+)?(?:Nasdaq(?:\s+Global\s+Select\s+Market|\s+Stock\s+Market)?|New\s+York\s+Stock\s+Exchange|NYSE|public\s+markets?|stock\s+market))?\s+on\s+";
+        let tail = r"(?P<tail>[^;]*)$";
+        // "price its shares on Nov. 13 and" before the trading verb: the
+        // pricing day is never the captured date.
+        let priced_first = r"(?:price\s+(?:its\s+|their\s+)?(?:shares|IPO|offering|stock)\s+on\s+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\.?\s+\d{1,2}\s+and\s+)?";
+        [
+            // Anthropic (, the maker of Claude,) is expected to begin trading (on the Nasdaq) on Nov. 16
+            format!(r"(?i)^{subj}{ASIDE}\s+{frame}\s+{priced_first}{verb}{fill}{weekday}{date}{tail}"),
+            // Anthropic Chief Executive Dario Amodei said the company expects to list on Nov. 16
+            format!(r"(?i)^{co}(?:\s+(?-i:[A-Z])[\w.'-]*){{0,5}}\s+said\s+(?:that\s+)?(?:it|the\s+company|its\s+shares)\s+{frame}\s+{verb}{fill}{weekday}{date}{tail}"),
+            // Trading in Anthropic('s shares) is expected to begin / will begin on Nov. 16
+            format!(r"(?i)^trading\s+(?:in|of)\s+(?:shares\s+of\s+{co}|{co}(?:'s)?(?:\s+(?:shares|stock))?)\s+(?:is\s+(?:expected|set|scheduled|slated|due)\s+to|will)\s+(?:begin|start|commence)\s+on\s+{weekday}{date}{tail}"),
+            // On Nov. 16, Anthropic will begin trading
+            format!(r"(?i)^on\s+{weekday}{date},\s+{subj}{ASIDE}\s+{frame}\s+{verb}{tail}"),
+        ]
+        .iter()
+        .map(|p| re(p))
+        .collect()
+    })
 }
 
-/// `d` is the quote's trading date (`trading_date_spans`).
-pub fn is_trading_date(quote: &str, d: NaiveDate) -> bool {
-    !trading_date_spans(quote, d).is_empty()
+/// Whether `quote` gives `d` as the company's first trading day by a date
+/// template (`date_templates`), with nothing after it that makes it
+/// conditional or past (`tail_re`), and no negation or change word in the
+/// sentence (`CHANGE_WORDS`).
+pub fn is_trading_date(quote: &str, d: NaiveDate, t: &Tracked) -> bool {
+    let marked = mark_company(&normalize(quote), t);
+    sentences(&marked).iter().any(|s| {
+        !change_re().is_match(s)
+            && !contrast_re().is_match(s)
+            && date_templates().iter().any(|r| {
+                r.captures_iter(s).any(|c| {
+                    let tail_ok = c
+                        .name("tail")
+                        .is_none_or(|m| !tail_re().is_match(m.as_str()));
+                    let date_ok = c
+                        .name("date")
+                        .is_some_and(|m| !date_spans(m.as_str(), d).is_empty());
+                    tail_ok && date_ok
+                })
+            })
+    })
 }
 
 /// Decoded, whitespace collapsed, curly quotes kept.
@@ -667,23 +670,17 @@ pub fn check_item(
     if !names_company(&quote, t) {
         return Err(Reject::CompanyNotNamed);
     }
-    let text = normalize(&quote);
     match p.kind.as_str() {
         "valuation" => {
             let v = p
                 .value_usd
                 .filter(|v| v.is_finite() && *v >= MIN_VALUATION_USD)
                 .ok_or(Reject::NoValue)?;
-            let spans: Vec<(usize, usize)> = valuation_spans(&quote)
-                .into_iter()
-                .filter(|(n, _)| (n - v).abs() <= 1e-9 * v.abs())
-                .map(|(_, s)| s)
-                .collect();
-            if spans.is_empty() {
-                return Err(Reject::ValueNotTheValuation);
-            }
-            if !spans.iter().any(|&(s, e)| tied_to_company(&text, s, e, t)) {
-                return Err(Reject::NotAboutCompany);
+            if !valuation_figures(&quote, t)
+                .iter()
+                .any(|n| (n - v).abs() <= 1e-9 * v.abs())
+            {
+                return Err(Reject::NotTheCompanysValuation);
             }
             row.value_usd = Some(v);
         }
@@ -697,12 +694,8 @@ pub fn check_item(
             {
                 return Err(Reject::DateNotInQuote);
             }
-            let spans = trading_date_spans(&quote, d);
-            if spans.is_empty() {
-                return Err(Reject::NotTradingDate);
-            }
-            if !spans.iter().any(|&(s, e)| tied_to_company(&text, s, e, t)) {
-                return Err(Reject::NotAboutCompany);
+            if !is_trading_date(&quote, d, t) {
+                return Err(Reject::NotTheCompanysTradingDate);
             }
             row.value_date = Some(ymd(d));
         }
@@ -1054,33 +1047,51 @@ mod tests {
         }
     }
 
+    fn val(q: &str) -> Vec<f64> {
+        valuation_figures(q, &anthropic())
+    }
+    fn td(q: &str, day: &str) -> bool {
+        is_trading_date(q, d(day), &anthropic())
+    }
+
     #[test]
-    fn a_valuation_is_the_figure_tied_to_valuation_wording() {
-        // The raise size in the same quote is not the valuation, either way round.
+    fn valuation_templates_take_only_the_companys_own_figure() {
+        // The positive shapes.
+        for (q, v) in [
+            ("Anthropic was valued at $183 billion in its last funding round.", 1.83e11),
+            ("Anthropic, the maker of Claude, is valued at $965 billion.", 9.65e11),
+            ("The offering would value Anthropic at about $1.4 trillion.", 1.4e12),
+            ("The IPO would raise about $60 billion, valuing Anthropic at $1.4 trillion, the people said.", 1.4e12),
+            ("Anthropic's valuation of $965 billion makes it one of the most valuable private companies.", 9.65e11),
+            ("Anthropic's market value would be $1.4 trillion at the top of the range.", 1.4e12),
+            ("Anthropic's last funding round valued it at $965 billion.", 9.65e11),
+            ("Anthropic raised $13 billion at a valuation of $183 billion.", 1.83e11),
+            ("Anthropic is seeking a valuation of $1.4 trillion in its IPO.", 1.4e12),
+            ("Anthropic, valued at $965 billion in its last round, filed publicly in October.", 9.65e11),
+            ("Anthropic is worth about $1.4 trillion, according to the people.", 1.4e12),
+            ("The deal would give Anthropic a market value of $1.4 trillion.", 1.4e12),
+            ("Bankers discussed a valuation of $1.4 trillion for Anthropic.", 1.4e12),
+            ("Bankers discussed a $1.4 trillion valuation for Anthropic.", 1.4e12),
+        ] {
+            assert_eq!(val(q), [v], "{q}");
+        }
+        // The owner's shape: both figures are Anthropic's, each its own.
+        let mut owner = val("Anthropic, which was valued at $965 billion in May, is seeking a valuation of about $1.4 trillion.");
+        owner.sort_by(f64::total_cmp);
+        assert_eq!(owner, [9.65e11, 1.4e12]);
+        // The raise size is never the valuation.
+        assert!(
+            !val("The IPO would raise about $60 billion, valuing Anthropic at $1.4 trillion.")
+                .contains(&6e10)
+        );
         assert_eq!(
             ck(&Proposed {
                 value_usd: Some(6e10),
                 ..valuation()
             })
             .unwrap_err(),
-            Reject::ValueNotTheValuation
+            Reject::NotTheCompanysValuation
         );
-        let reversed = "valuing Anthropic at $1.4 trillion and raising about $60 billion";
-        assert_eq!(valuation_values(reversed), [1.4e12]);
-        assert_eq!(
-            valuation_values("a $965 billion valuation in May"),
-            [9.65e11]
-        );
-        assert_eq!(
-            valuation_values("Anthropic, worth roughly $2 trillion"),
-            [2e12]
-        );
-        assert_eq!(
-            valuation_values("Anthropic was valued at $965 billion in its last round"),
-            [9.65e11]
-        );
-        assert!(valuation_values("revenue of $5 billion and a valuation").is_empty());
-        // A bare range figure or a share price is no valuation.
         assert_eq!(
             ck(&Proposed {
                 value_usd: Some(78.0),
@@ -1089,135 +1100,93 @@ mod tests {
             .unwrap_err(),
             Reject::NoValue
         );
-        assert_eq!(
-            ck(&Proposed {
-                value_usd: None,
-                ..valuation()
-            })
-            .unwrap_err(),
-            Reject::NoValue
-        );
+    }
+
+    #[test]
+    fn another_party_is_never_valued_as_the_company() {
+        // The reviewer's N1b quotes, and the earlier ones.
+        for q in [
+            "Anthropic's chip supplier is valued at $4 trillion.",
+            "Anthropic said xAI is valued at $200 billion.",
+            "Anthropic invested in a startup valued at $2 billion.",
+            "Anthropic said its stake is worth $10 billion.",
+            "The deal values OpenAI at $500 billion, while Anthropic's last round valued it at $965 billion.",
+            "Anthropic investor SoftBank valued it at $2 trillion.",
+            "Anthropic, whose rival is valued at $500 billion, declined to comment.",
+            "Anthropic's biggest customer, valued at $50 billion, signed a deal.",
+            "Anthropic raised $13 billion from Amazon at a valuation of $183 billion.",
+            "Unlike OpenAI, Anthropic is valued at $965 billion.",
+        ] {
+            assert!(val(q).is_empty(), "{q}");
+        }
     }
 
     #[test]
     fn a_bound_is_not_the_valuation_but_a_hedge_is_fine() {
         for q in [
             "Anthropic could be valued at up to $1.6 trillion",
-            "a valuation of as much as $1.6 trillion for Anthropic",
+            "Anthropic is seeking a valuation of as much as $1.6 trillion",
             "Anthropic is worth more than $1.6 trillion",
             "Anthropic was valued at over $1.6 trillion",
             "Anthropic was valued at nearly $1.6 trillion",
             "Anthropic was valued at north of $1.6 trillion",
-            "Anthropic, valued at at least $1.6 trillion",
+            "Anthropic is seeking a valuation of up to $1.4 trillion",
         ] {
-            assert!(valuation_values(q).is_empty(), "{q}");
+            assert!(val(q).is_empty(), "{q}");
         }
         for q in [
             "Anthropic was valued at about $1.6 trillion",
             "Anthropic is worth roughly $1.6 trillion",
-            "a valuation of approximately $1.6 trillion for Anthropic",
+            "Anthropic is seeking a valuation of approximately $1.6 trillion",
             "Anthropic was valued at around $1.6 trillion",
         ] {
-            assert_eq!(valuation_values(q), [1.6e12], "{q}");
+            assert_eq!(val(q), [1.6e12], "{q}");
         }
     }
 
     #[test]
-    fn another_company_in_the_quote_is_never_taken_for_the_tracked_one() {
-        let t = anthropic();
-        // The reviewer's two quotes.
-        let openai_date = Proposed {
-            url: B_URL.into(),
-            quote: "OpenAI, which unlike Anthropic is expected to list on Nov. 20, declined to comment.".into(),
-            date: Some("2026-11-20".into()),
-            ..date_item()
-        };
-        assert_eq!(ck(&openai_date).unwrap_err(), Reject::NotAboutCompany);
-        let openai_value = Proposed {
-            url: B_URL.into(),
-            quote: "The deal values OpenAI at $500 billion, while Anthropic's last round valued it at $965 billion.".into(),
-            value_usd: Some(5e11),
-            ..valuation()
-        };
-        assert_eq!(ck(&openai_value).unwrap_err(), Reject::NotAboutCompany);
-        // A comparison in the clause: dropped even for Anthropic's own figure.
-        assert_eq!(
-            ck(&Proposed {
-                value_usd: Some(9.65e11),
-                ..openai_value
-            })
-            .unwrap_err(),
-            Reject::NotAboutCompany
-        );
-        // Another company's name between the company and the figure.
-        let text = normalize("Anthropic investor SoftBank valued it at $2 trillion");
-        let (_, (s, e)) = valuation_spans(&text)[0];
-        assert!(!tied_to_company(&text, s, e, &t));
-        // The clean forms.
-        for (q, v) in [
-            ("valuing Anthropic at $1.4 trillion", 1.4e12),
-            ("Anthropic's last round valued it at $965 billion", 9.65e11),
-            ("a $965 billion valuation for Anthropic", 9.65e11),
-            ("Anthropic, which is valued at $2 trillion", 0.0),
+    fn date_templates_take_a_present_or_future_trading_day_of_the_company() {
+        for q in [
+            "Anthropic is expected to begin trading on the Nasdaq on Nov. 16 after pricing its shares on Nov. 13, the people said.",
+            "Anthropic, the maker of the Claude chatbot, is expected to list its shares on Nov. 16.",
+            "Anthropic, backed by Amazon and Alphabet, is expected to list on Nov. 16.",
+            "Anthropic Chief Executive Dario Amodei said the company expects to list on Nov. 16.",
+            "Shares of Anthropic are expected to begin trading on Nov. 16.",
+            "Anthropic's shares will begin trading on the Nasdaq on Monday, Nov. 16.",
+            "Anthropic plans to list on the Nasdaq on Nov. 16.",
+            "Trading in Anthropic shares is expected to begin on Nov. 16.",
+            "Anthropic is set to make its market debut on Nov. 16.",
+            "Anthropic will debut on the Nasdaq on Nov. 16, the people said.",
+            "Anthropic expects to begin trading on Nov. 16.",
+            "Anthropic's stock is scheduled to start trading on the New York Stock Exchange on Nov. 16.",
+            "Anthropic is expected to price its shares on Nov. 13 and begin trading on Nov. 16.",
+            "On Nov. 16, Anthropic will begin trading",
+            "SAN FRANCISCO, Nov 10 (Reuters) - Anthropic is expected to list on Nov. 16, people familiar said.",
         ] {
-            let text = normalize(q);
-            let tied = valuation_spans(&text)
-                .iter()
-                .any(|&(n, (s, e))| n == v && tied_to_company(&text, s, e, &t));
-            // The last is two clauses: when in doubt, no.
-            assert_eq!(tied, v > 0.0, "{q}");
+            assert!(td(q, "2026-11-16"), "{q}");
         }
-        let text = normalize("Anthropic is expected to begin trading on the Nasdaq on Nov. 16");
-        let spans = trading_date_spans(&text, d("2026-11-16"));
-        assert!(spans.iter().any(|&(s, e)| tied_to_company(&text, s, e, &t)));
-        // SpaceX's date in an article that names Anthropic elsewhere.
-        let spacex = Proposed {
-            url: B_URL.into(),
-            quote: "SpaceX is expected to begin trading on Nov. 20, according to people familiar with the plans.".into(),
-            date: Some("2026-11-20".into()),
-            ..date_item()
-        };
-        assert_eq!(ck(&spacex).unwrap_err(), Reject::CompanyNotNamed);
-        // An alias from the list counts only in the quote.
-        let t2 = parse_list("anthropic\t2130357\tAnthropic\t-\tClaude maker\n").unwrap()[0].clone();
-        let raise = Proposed {
-            quote: "The IPO would raise about $60 billion".into(),
-            value_usd: Some(6e10),
-            ..valuation()
-        };
-        assert_eq!(
-            check_item(&raise, &hits(), &t2, utc(NOW)).unwrap_err(),
-            Reject::CompanyNotNamed
-        );
-    }
-
-    #[test]
-    fn an_expected_date_is_the_trading_date_not_the_pricing_date() {
+        // The pricing day in the same sentence is never the trading day.
+        assert!(!td(
+            "Anthropic is expected to begin trading on the Nasdaq on Nov. 16 after pricing its shares on Nov. 13.",
+            "2026-11-13"
+        ));
+        assert!(!td(
+            "Anthropic is expected to price its shares on Nov. 13 and begin trading on Nov. 16.",
+            "2026-11-13"
+        ));
+        assert!(!td(
+            "Anthropic will price on Nov. 13 and list later",
+            "2026-11-13"
+        ));
         assert_eq!(
             ck(&Proposed {
                 date: Some("2026-11-13".into()),
                 ..date_item()
             })
             .unwrap_err(),
-            Reject::NotTradingDate
+            Reject::NotTheCompanysTradingDate
         );
         assert!(ck(&date_item()).is_ok());
-        assert!(is_trading_date(
-            "Shares will debut on Monday, Nov. 16",
-            d("2026-11-16")
-        ));
-        assert!(is_trading_date(
-            "On Nov. 16, Anthropic will begin trading",
-            d("2026-11-16")
-        ));
-        assert!(!is_trading_date(
-            "It will price on Nov. 13 and list later",
-            d("2026-11-13")
-        ));
-        assert!(!is_trading_date(
-            "Trading begins; pricing is set for Nov. 13",
-            d("2026-11-13")
-        ));
         assert_eq!(
             ck(&Proposed {
                 date: Some("2026-11-17".into()),
@@ -1237,34 +1206,37 @@ mod tests {
     }
 
     #[test]
-    fn a_cancelled_postponed_or_moved_date_is_not_the_trading_date() {
-        // The reviewer's quotes.
+    fn a_past_conditional_cancelled_or_other_companys_date_is_refused() {
         for q in [
+            // R2b.
+            "Anthropic's Nov. 16 listing is off, sources said.",
+            "Anthropic's planned Nov. 16 debut is now in doubt.",
+            "Anthropic's Nov. 16 debut was put on hold.",
+            "Anthropic had hoped to list on Nov. 16.",
+            "Anthropic had planned to list on Nov. 16 but market turmoil intervened.",
+            "Anthropic was expected to debut on Nov. 16 before the market sell-off.",
+            // The earlier ones.
             "Anthropic is no longer expected to list on Nov. 16",
             "Anthropic postponed its debut, which had been planned for Nov. 16",
             "Anthropic will not begin trading on November 16 as planned",
             "Anthropic delayed its listing from Nov. 16 to Dec. 1",
-            "Anthropic is no longer expected to begin trading on Nov. 16, people familiar said.",
             "Anthropic won't list on Nov. 16",
             "Anthropic's debut, originally set for Nov. 16, was scrapped",
             "Anthropic will begin trading on Dec. 1 instead of Nov. 16",
+            "Anthropic will list on Nov. 16 if markets stay calm.",
+            "Anthropic could list on Nov. 16.",
+            // Another company's date.
+            "Anthropic said the startup it invested in is expected to list on Nov. 16.",
+            "Anthropic said its portfolio company expects to begin trading on Nov. 16.",
+            "OpenAI, which unlike Anthropic is expected to list on Nov. 16, declined to comment.",
+            "SpaceX is expected to begin trading on Nov. 16, Anthropic said.",
         ] {
-            assert!(!is_trading_date(q, d("2026-11-16")), "{q}");
+            assert!(!td(q, "2026-11-16"), "{q}");
         }
-        // In "from X to Y" only Y can be the day, and only in a clean clause.
-        assert!(!is_trading_date(
+        assert!(!td(
             "Anthropic delayed its listing from Nov. 16 to Dec. 1",
-            d("2026-12-01")
+            "2026-12-01"
         ));
-        assert!(!is_trading_date(
-            "Anthropic's listing date went from Nov. 16 to Dec. 1",
-            d("2026-11-16")
-        ));
-        assert!(is_trading_date(
-            "Anthropic's listing date went from Nov. 16 to Dec. 1",
-            d("2026-12-01")
-        ));
-        // End to end.
         let article = format!(
             "{ARTICLE_A} Anthropic is no longer expected to begin trading on Nov. 16, people familiar said."
         );
@@ -1277,8 +1249,51 @@ mod tests {
         };
         assert_eq!(
             check_item(&p, &h, &anthropic(), utc(NOW)),
-            Err(Reject::NotTradingDate)
+            Err(Reject::NotTheCompanysTradingDate)
         );
+    }
+
+    /// Recall on clean wire sentences: which true items the rules keep.
+    /// The dropped ones are listed, so a change in recall shows here.
+    #[test]
+    fn recall_on_clean_wire_sentences() {
+        let dates = [
+            "Anthropic is expected to begin trading on the Nasdaq on Nov. 16 after pricing its shares on Nov. 13, the people said.",
+            "Anthropic, the maker of the Claude chatbot, is expected to list its shares on Nov. 16.",
+            "Anthropic, backed by Amazon and Alphabet, is expected to list on Nov. 16.",
+            "Anthropic Chief Executive Dario Amodei said the company expects to list on Nov. 16.",
+            "Shares of Anthropic are expected to begin trading on Nov. 16.",
+            "Anthropic's shares will begin trading on the Nasdaq on Monday, Nov. 16.",
+            "Anthropic plans to list on the Nasdaq on Nov. 16.",
+            "Trading in Anthropic shares is expected to begin on Nov. 16.",
+            "Anthropic is set to make its market debut on Nov. 16.",
+            "Anthropic expects to begin trading on Nov. 16.",
+            // Dropped: the date is in another clause than the trading verb.
+            "Anthropic's IPO is expected to price on Nov. 13, with trading set to begin on Nov. 16.",
+            // Dropped: no name in the quote.
+            "The company is expected to begin trading on Nov. 16.",
+        ];
+        let kept_dates = dates.iter().filter(|q| td(q, "2026-11-16")).count();
+        assert_eq!(kept_dates, 10);
+        let values = [
+            ("Anthropic, which was valued at $965 billion in May, is seeking a valuation of about $1.4 trillion.", 1.4e12),
+            ("Anthropic was valued at $183 billion in its last funding round.", 1.83e11),
+            ("The offering would value Anthropic at about $1.4 trillion.", 1.4e12),
+            ("The IPO would raise about $60 billion, valuing Anthropic at $1.4 trillion, the people said.", 1.4e12),
+            ("Anthropic raised $13 billion at a valuation of $183 billion.", 1.83e11),
+            ("Anthropic is seeking a valuation of $1.4 trillion in its IPO.", 1.4e12),
+            ("Anthropic, valued at $965 billion in its last round, filed publicly in October.", 9.65e11),
+            ("Anthropic is worth about $1.4 trillion, according to the people.", 1.4e12),
+            ("Anthropic's last funding round valued it at $965 billion.", 9.65e11),
+            // Dropped: "investors" is one of the other-party words.
+            ("Investors valued Anthropic at $1.4 trillion.", 1.4e12),
+            // Dropped: a bound, by design.
+            ("Anthropic is seeking a valuation of up to $1.4 trillion.", 1.4e12),
+            // Dropped: another name in the gap ("from Amazon").
+            ("Anthropic raised $13 billion from Amazon and Google at a valuation of $183 billion.", 1.83e11),
+        ];
+        let kept_values = values.iter().filter(|(q, v)| val(q).contains(v)).count();
+        assert_eq!(kept_values, 9);
     }
 
     #[test]
@@ -1397,6 +1412,12 @@ mod tests {
             Some("The Wall Street Journal")
         );
         assert_eq!(outlet_for("https://asia.nikkei.com/x"), Some("Nikkei Asia"));
+        // Whole path segments only: a slug that contains "partner" is fine.
+        assert_eq!(
+            outlet_for("https://techcrunch.com/2026/11/10/partnerships-anthropic/"),
+            Some("TechCrunch")
+        );
+        assert_eq!(outlet_for("https://www.axios.com/partners/x"), None);
         for bad in [
             "https://markets.businessinsider.com/news/stocks/x",
             "https://sponsored.bloomberg.com/x",

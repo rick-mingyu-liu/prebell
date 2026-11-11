@@ -351,7 +351,7 @@ The next hourly check reads the company's EDGAR submissions, adds its filings to
 
 ### Outlets
 
-News items come only from these hosts (https, the host itself or with `www.`; no other subdomain), and the outlet name shown is the one here, never the model's. Paths with `/press-release`, `/sponsored`, `/sponsor/`, `/partner`, `/paid-post` or `/brandvoice` are refused. Adding an outlet is a code change (`OUTLETS` in `crates/core/src/ipo/news.rs`) and a line here:
+News items come only from these hosts (https, the host itself or with `www.`; no other subdomain), and the outlet name shown is the one here, never the model's. Paths with a whole segment `press-release(s)`, `sponsored`, `sponsor`, `partner(s)`, `partner-content`, `paid-post`, `paidpost` or `brandvoice` are refused. Adding an outlet is a code change (`OUTLETS` in `crates/core/src/ipo/news.rs`) and a line here:
 
 Reuters (reuters.com), Bloomberg (bloomberg.com), The Wall Street Journal (wsj.com), Financial Times (ft.com), CNBC (cnbc.com), The New York Times (nytimes.com), MarketWatch (marketwatch.com), Barron's (barrons.com), Axios (axios.com), Fortune (fortune.com), Business Insider (businessinsider.com), AP (apnews.com), The Information (theinformation.com), TechCrunch (techcrunch.com), The Verge (theverge.com), Semafor (semafor.com), Investor's Business Daily (investors.com), The Economist (economist.com), The Washington Post (washingtonpost.com), The Guardian (theguardian.com), BBC (bbc.com, bbc.co.uk), South China Morning Post (scmp.com), Nikkei Asia (asia.nikkei.com), Caixin Global (caixinglobal.com). Forbes (contributor posts) and Yahoo Finance (syndicated wires) were removed on 2026-11-11.
 
@@ -397,7 +397,8 @@ Local preview data: `cd crates/generator && pnpm exec wrangler d1 execute prebel
 - No opening price after listing (the recap's quote read has none); the page shows close, volume and the change against the IPO price.
 - A new listing's first-day close is stored only if Yahoo's v7 quote gives a previous close for it (the movers' close check needs one). Not verifiable before a listing. If day one has no close, later sessions are stored but none is called the first day, and the date line keeps the filing's expected date.
 - Cover patterns are checked on seven real covers (Anthropic's S-1/A, Birkenstock's F-1/A; Reddit's, Arm's, CoreWeave's, Instacart's and Circle's 424B4s). A cover worded differently may yield fewer facts; then the earlier facts stay and an `ipo-cover-partial` or `ipo-cover-empty` warning says so.
-- The company check is strict: a figure or date written in another clause than the company's name ("Anthropic, which ..., is valued at ...") is dropped, as is any comparison.
+- News checks accept by shape: a valuation or a date is kept only when its sentence matches one of the allowed shapes (the lists are in `docs/decisions.md`, 2026-11-11, "accept by template"), with the company itself valued or the company (or its shares) the subject of a present or future trading verb; word lists (comparisons, other parties, bounds, negations, conditional tails) are a second line. Measured recall on clean wire sentences: dates 10 of 12, valuations 9 of 12; what is dropped is listed in the test `recall_on_clean_wire_sentences`.
+- Figma's 424B4 (no share count in its cover heading) never reads completely: such an IPO stays at its range and ends with `ipo-no-final`.
 - Items are deduplicated by URL, so an article updated in place keeps its first stored version; the sweeps' monthly counter can be off by one if two sweeps start at the same moment.
 
 ## Logos

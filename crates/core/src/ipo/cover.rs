@@ -46,6 +46,7 @@ fn re(p: &str) -> Regex {
 struct Patterns {
     cover_date: Regex,
     prospectus_date: Regex,
+    footer_date: Regex,
     total: Regex,
     company: Regex,
     selling: Regex,
@@ -63,8 +64,9 @@ fn patterns() -> &'static Patterns {
             r"(?i:Subject to Completion)[.,]?\s+(?:Preliminary Prospectus\s+)?[Dd]ated\s+{MONTH}\s+(\d{{1,2}}),\s+(\d{{4}})\.?"
         )),
         prospectus_date: re(&format!(
-            r"(?:(?:Prospectus dated|PROSPECTUS DATED|The date of this prospectus is)\s+{MONTH}\s+(\d{{1,2}}),\s+(\d{{4}})|\b{MONTH}\s+(\d{{1,2}}),\s+(\d{{4}})\s+Table of Contents\b)"
+            r"(?:Prospectus dated|PROSPECTUS DATED|The date of this prospectus is)\s+{MONTH}\s+(\d{{1,2}}),\s+(\d{{4}})"
         )),
+        footer_date: re(&format!(r"\b{MONTH}\s+(\d{{1,2}}),\s+(\d{{4}})\s+Table of Contents\b")),
         total: re(&format!(
             r"(?:Class [A-Z] )?(?:Common Stock|Ordinary Shares|Common Shares)\s+{SHARES_NUM}\s+Shares\b|\b{SHARES_NUM}\s+(?:Shares|American Depositary Shares)\s+[A-Za-z0-9 ,.&'()-]{{0,60}}?(?:Common Stock|Ordinary Shares|Common Shares)\b|\b{SHARES_NUM}\s+(?:American Depositary Shares|Ordinary Shares)\b|\b{SHARES_NUM}\s+shares\s+(?:Class [A-Z]\s+)?common stock\b"
         )),
@@ -254,7 +256,27 @@ fn table_end(s: &str) -> Option<usize> {
 /// sentence is too long.
 fn quote_of(text: &str, c: &Captures) -> String {
     let m = c.get(0).expect("group 0");
-    sentence(text, m.start()).unwrap_or_else(|| m.as_str().trim().to_string())
+    let s = sentence(text, m.start()).unwrap_or_else(|| m.as_str().trim().to_string());
+    // A cover heading glued to the sentence ("Class A Common Stock Reddit,
+    // Inc. is offering ..."): the sentence starts after it, when the match
+    // is still whole.
+    match heading_end(&s) {
+        Some(k) if s[k..].contains(m.as_str().trim()) => s[k..].to_string(),
+        _ => s,
+    }
+}
+
+/// Where a leading cover heading ("Class A Common Stock ", "Ordinary
+/// Shares ") ends, when a capitalized word follows it.
+fn heading_end(s: &str) -> Option<usize> {
+    static R: OnceLock<Regex> = OnceLock::new();
+    let r = R.get_or_init(|| {
+        re(r"^(?:Preliminary Prospectus\s+)?(?:Class [A-Z] )?(?:Common Stock|Ordinary Shares|Common Shares|American Depositary Shares)\s+")
+    });
+    let k = r.find(s)?.end();
+    s[k..]
+        .starts_with(|c: char| c.is_ascii_uppercase())
+        .then_some(k)
 }
 
 fn fact_num(kind: &'static str, v: f64, quote: String) -> CoverFact {
@@ -342,10 +364,15 @@ pub fn extract(text: &str, form: &str) -> Vec<CoverFact> {
         }
     }
     if is_final {
-        if let Some(c) = p.prospectus_date.captures(text) {
-            // "Prospectus dated <date>", or the bare date that closes some
-            // covers ("... Roberts & Ryan June 4, 2025 Table of Contents").
-            if let Some(d) = date_at(&c, 1).or_else(|| date_at(&c, 4)) {
+        // "Prospectus dated <date>" first; only without one, the bare date
+        // that closes some covers ("... Roberts & Ryan June 4, 2025 Table of
+        // Contents"), so an earlier footer date never wins.
+        let c = p
+            .prospectus_date
+            .captures(text)
+            .or_else(|| p.footer_date.captures(text));
+        if let Some(c) = c {
+            if let Some(d) = date_at(&c, 1) {
                 out.push(fact_text("prospectus_date", d, c[0].trim().to_string()));
             }
         }
@@ -370,10 +397,15 @@ pub fn extract(text: &str, form: &str) -> Vec<CoverFact> {
             quote_of(text, &c),
         ))
     });
-    let selling = p
-        .selling
-        .captures(text)
-        .and_then(|c| Some(fact_num("shares_selling", num(&c[1])?, quote_of(text, &c))));
+    // The selling stockholders' number usually sits in the company's
+    // sentence: the same quote then, not a longer one.
+    let selling = p.selling.captures(text).and_then(|c| {
+        let q = match &company {
+            Some(cf) if cf.quote.contains(c[0].trim()) => cf.quote.clone(),
+            _ => quote_of(text, &c),
+        };
+        Some(fact_num("shares_selling", num(&c[1])?, q))
+    });
     // The split must add up to the cover's total; otherwise a sentence was
     // misread and neither part is kept.
     let t = total.as_ref().and_then(|f| f.num);
@@ -678,6 +710,11 @@ pub(crate) mod tests {
             get(&f, "cover_date").quote,
             "Subject To Completion Dated October 4, 2023"
         );
+        // The selling shareholder's number takes the same sentence.
+        assert_eq!(
+            get(&f, "shares_selling").quote,
+            get(&f, "shares_company").quote
+        );
     }
 
     #[test]
@@ -705,6 +742,10 @@ pub(crate) mod tests {
             get(&f, "shares_offered").quote,
             "22,000,000 Shares Reddit, Inc. Class A Common Stock"
         );
+        // The heading glued before the split sentence is left out.
+        let split = "Reddit, Inc. is offering 15,276,527 shares of its Class A common stock and the selling stockholders identified in this prospectus are offering an aggregate of 6,723,473 shares of Class A common stock.";
+        assert_eq!(get(&f, "shares_company").quote, split);
+        assert_eq!(get(&f, "shares_selling").quote, split);
         assert!(missing_for(&f, "424B4").is_empty());
         for x in &f {
             assert!(verify_quote(&cp1252_quotes(&text), &x.quote), "{x:?}");
@@ -762,6 +803,22 @@ pub(crate) mod tests {
             "We are offering 36,590,000 shares of our Class A common stock and the selling stockholders identified in this prospectus are offering 910,000 shares of our Class A common stock in this offering."
         );
         assert!(missing_for(&f, "424B4").is_empty());
+    }
+
+    #[test]
+    fn an_explicit_pricing_date_wins_over_an_earlier_footer_date() {
+        let t = "Underwriter One Underwriter Two May 1, 2025 Table of Contents The initial public offering price is $10.00 per share. Prospectus dated June 4, 2025";
+        let f = extract(t, "424B4");
+        assert_eq!(
+            get(&f, "prospectus_date").text.as_deref(),
+            Some("2025-06-04")
+        );
+        // Without the explicit line, the footer date is read.
+        let f = extract(&t.replace("Prospectus dated June 4, 2025", ""), "424B4");
+        assert_eq!(
+            get(&f, "prospectus_date").text.as_deref(),
+            Some("2025-05-01")
+        );
     }
 
     #[test]
