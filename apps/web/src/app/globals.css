@@ -250,11 +250,11 @@ html:lang(zh-Hans) .partners-strip .partners-label { font-variant-caps: normal; 
 .partners-strip a { font-weight: 600; text-decoration: none; }
 .partners-strip a:hover, .partners-strip a:focus-visible { text-decoration: underline; }
 
-/* Footer: About, Privacy & Terms and the language link. */
+/* Footer: About, For AI agents, Privacy & Terms and the language link, centred; on a narrow phone the row wraps between links. */
 .site-footer { border-top: 3px double var(--rule-strong); margin-top: 2rem; padding: 1rem 0 2rem; text-align: center; }
 .site-footer .wrap > * { margin: 0.25rem 0; }
 .footer-links { display: flex; flex-wrap: wrap; justify-content: center; gap: 0.25rem 1rem; font-size: 13px; }
-.footer-links a { color: var(--muted); }
+.footer-links a { color: var(--muted); white-space: nowrap; }
 
 /* Shared bits: the quiet "more" link, the About column, the pending-translation notice. */
 .more { font-weight: 600; font-size: 14px; text-decoration: none; }
@@ -266,6 +266,11 @@ html:lang(zh-Hans) .partners-strip .partners-label { font-variant-caps: normal; 
 .prose > ul { margin: 0.25rem 0 1rem; padding-left: 1.25rem; font-size: 16.5px; line-height: 1.7; max-width: 75ch; }
 .prose > ul li + li { margin-top: 0.4rem; }
 .prose-legal > h2 { margin-top: 1.75rem; }
+/* For AI agents: the address and command as plain code blocks that wrap on a phone; one click selects the whole line. */
+.prose-mcp > h2 { margin-top: 1.75rem; }
+.prose-mcp code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 0.88em; }
+.prose-mcp > pre { margin: 0.25rem 0 1rem; padding: 0.6rem 0.8rem; border: 1px solid var(--rule); background: var(--card); font-size: 15px; line-height: 1.5; white-space: pre-wrap; overflow-wrap: anywhere; }
+.prose-mcp > pre code { user-select: all; }
 .prose > h2 + .author { margin-top: 0.5rem; border-top: 0; padding-top: 0.5rem; }
 .prose > .about-tp { margin: 0.5rem 0 1.5rem; color: var(--muted); font-size: 15px; }
 .prose > .about-tp .more { white-space: nowrap; }
