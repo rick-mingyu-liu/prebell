@@ -46,8 +46,8 @@ INSERT INTO ipo_facts (accession, kind, slug, value_num, value_text, quote) VALU
   ('0001628280-26-072484', 'option_shares', 'anthropic', 123750000, NULL, 'To the extent that the underwriters sell more than 825,000,000 shares of Class A common stock, the underwriters have the option to purchase up to an additional 123,750,000 shares of Class A common stock from Anthropic, PBC at the initial public offering price less the underwriting discount.');
 
 -- FIXTURE: made-up news items for Anthropic (two valuations on different dates, a date report,
--- a company move, a view). Only a company move carries a statement; the others render from
--- value_usd / value_date / speaker and the quote (contract, ipo_items).
+-- a company move, a view). No item carries a statement in v1 (statement_en and statement_zh are
+-- always NULL): every item renders from its quote, with value_usd / value_date / speaker (contract, ipo_items).
 INSERT INTO ipo_items (slug, kind, url, outlet, published_on, quote, statement_en, statement_zh, speaker, value_usd, value_date, found_at) VALUES
   ('anthropic', 'valuation', 'https://sampletimes.example/2026/10/12/anthropic-valuation', 'Sample Times', '2026-10-12',
    'Bankers have pitched a valuation of about $2 trillion for the listing, according to people familiar with the talks.',
@@ -60,8 +60,7 @@ INSERT INTO ipo_items (slug, kind, url, outlet, published_on, quote, statement_e
    NULL, NULL, NULL, NULL, '2026-11-16', '2026-11-11T15:00:00Z'),
   ('anthropic', 'company_move', 'https://sampletimes.example/2026/11/04/anthropic-office-apps', 'Sample Times', '2026-11-04',
    'Anthropic on Tuesday released AI versions of word-processing and presentation software for business customers.',
-   'Released AI word-processing and presentation software for business customers.',
-   '面向企业客户推出了 AI 文字处理和演示文稿软件。', NULL, NULL, NULL, '2026-11-11T15:00:00Z'),
+   NULL, NULL, NULL, NULL, NULL, '2026-11-11T15:00:00Z'),
   ('anthropic', 'view', 'https://sampletimes.example/2026/11/09/anthropic-ipo-analysts', 'Sample Times', '2026-11-09',
    'The office tools show how far they want to push into software that businesses already pay for',
    NULL, NULL, 'Jane Doe, an analyst at Example Securities', NULL, NULL, '2026-11-11T15:00:00Z');
@@ -95,8 +94,7 @@ INSERT INTO ipo_trading (slug, session_date, symbol, open, close, volume, ipo_pr
 INSERT INTO ipo_items (slug, kind, url, outlet, published_on, quote, statement_en, statement_zh, speaker, value_usd, value_date, found_at) VALUES
   ('northwind-robotics', 'company_move', 'https://news.example/2026/10/30/northwind-warehouse-deal', 'Example News', '2026-10-30',
    'Northwind Robotics signed a deal to supply picking robots to a national grocery chain, the company said.',
-   'Signed a deal to supply picking robots to a national grocery chain.',
-   '签署协议，向一家全国性连锁超市供应拣货机器人。', NULL, NULL, NULL, '2026-11-01T12:00:00Z');
+   NULL, NULL, NULL, NULL, NULL, '2026-11-01T12:00:00Z');
 
 -- FIXTURE: Harbor Bio, filed, no price range, no date.
 INSERT INTO ipo_watch (slug, cik, name, name_zh, status, exchange, symbol, facts_accession, first_trade_date,
