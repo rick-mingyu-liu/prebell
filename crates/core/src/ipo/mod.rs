@@ -198,6 +198,11 @@ pub fn next_trading_day(d: NaiveDate) -> NaiveDate {
     }
 }
 
+/// The `n`th trading day after `d`.
+pub fn trading_days_after(d: NaiveDate, n: usize) -> NaiveDate {
+    (0..n).fold(d, |x, _| next_trading_day(x))
+}
+
 fn hm(h: u32, m: u32) -> NaiveTime {
     NaiveTime::from_hms_opt(h, m, 0).expect("valid built-in time")
 }

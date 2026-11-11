@@ -60,26 +60,26 @@ fn patterns() -> &'static Patterns {
     static P: OnceLock<Patterns> = OnceLock::new();
     P.get_or_init(|| Patterns {
         cover_date: re(&format!(
-            r"Subject to Completion[.,]?\s+(?:Preliminary Prospectus\s+)?[Dd]ated\s+{MONTH}\s+(\d{{1,2}}),\s+(\d{{4}})\.?"
+            r"(?i:Subject to Completion)[.,]?\s+(?:Preliminary Prospectus\s+)?[Dd]ated\s+{MONTH}\s+(\d{{1,2}}),\s+(\d{{4}})\.?"
         )),
         prospectus_date: re(&format!(
-            r"(?:Prospectus dated|PROSPECTUS DATED|The date of this prospectus is)\s+{MONTH}\s+(\d{{1,2}}),\s+(\d{{4}})"
+            r"(?:(?:Prospectus dated|PROSPECTUS DATED|The date of this prospectus is)\s+{MONTH}\s+(\d{{1,2}}),\s+(\d{{4}})|\b{MONTH}\s+(\d{{1,2}}),\s+(\d{{4}})\s+Table of Contents\b)"
         )),
         total: re(&format!(
-            r"(?:Class [A-Z] )?(?:Common Stock|Ordinary Shares|Common Shares)\s+{SHARES_NUM}\s+Shares\b|\b{SHARES_NUM}\s+(?:Shares|American Depositary Shares)\s+[A-Za-z0-9 ,.&'()-]{{0,60}}?(?:Common Stock|Ordinary Shares|Common Shares)\b|\b{SHARES_NUM}\s+American Depositary Shares\b"
+            r"(?:Class [A-Z] )?(?:Common Stock|Ordinary Shares|Common Shares)\s+{SHARES_NUM}\s+Shares\b|\b{SHARES_NUM}\s+(?:Shares|American Depositary Shares)\s+[A-Za-z0-9 ,.&'()-]{{0,60}}?(?:Common Stock|Ordinary Shares|Common Shares)\b|\b{SHARES_NUM}\s+(?:American Depositary Shares|Ordinary Shares)\b|\b{SHARES_NUM}\s+shares\s+(?:Class [A-Z]\s+)?common stock\b"
         )),
         company: re(&format!(
-            r"\bWe are (?:offering|selling) {SHARES_NUM} (?:shares|American Depositary Shares|ADSs)\b|\bis (?:offering|selling) {SHARES_NUM} (?:shares|American Depositary Shares|ADSs) of its\b"
+            r"\bWe are (?:offering|selling) {SHARES_NUM} (?:shares|ordinary shares|American Depositary Shares|ADSs)\b|\bis (?:offering|selling) {SHARES_NUM} (?:shares|ordinary shares|American Depositary Shares|ADSs) of its\b"
         )),
         selling: re(&format!(
-            r"selling (?:stockholders|shareholders)\b(?u:[^.])*?\b(?:are )?(?:offering|selling) (?:an additional |a total of |an aggregate of )?{SHARES_NUM} (?:shares|American Depositary Shares|ADSs)\b"
+            r"selling (?:stockholders?|shareholders?)\b(?u:[^.])*?\b(?:are |is )?(?:offering|selling) (?:an additional |a total of |an aggregate of )?{SHARES_NUM} (?:shares|ordinary shares|American Depositary Shares|ADSs)\b"
         )),
         option: re(&format!(
-            r"(?:option|right) to purchase (?:up to )?(?:an additional |a maximum of )?{SHARES_NUM} (?:additional )?(?:shares|American Depositary Shares|ADSs)\b"
+            r"(?:(?:option|right)(?: for a period of \d+ days)? to purchase|underwriters may (?:also )?purchase) (?:up to )?(?:an additional |a maximum of )?{SHARES_NUM} (?:additional )?(?:shares|ordinary shares|American Depositary Shares|ADSs)\b"
         )),
         range: re(r"between \$\s?(\d{1,4}(?:\.\d{2})?) and \$\s?(\d{1,4}(?:\.\d{2})?)"),
         final_price: re(
-            r"(?i)\binitial public offering price(?: per (?:share|ADS))?(?: of (?:our|the|its) [A-Za-z ]{1,60}?)? (?:is|of) \$\s?(\d{1,4}(?:\.\d{2})?)",
+            r"(?i)\binitial public offering price(?: per (?:share|ADS))?(?: (?:of|for) (?:our|the|its) [A-Za-z ]{1,60}?)? (?:is|of) \$\s?(\d{1,4}(?:\.\d{2})?)",
         ),
         listing: re(&format!(
             r"\b(?:list|listing|listed)\b(?u:[^.])*? on (?:the |The )?({EXCHANGES})(?: LLC)?(?:\s*\(the “[A-Za-z]+”\)|\s*\(“[A-Za-z]+”\))?,?\s+under the (?:ticker |trading )?symbol\s+(?:“|\x22)([A-Z]{{1,5}}(?:\.[A-Z])?)\.?(?:”|\x22)"
@@ -189,6 +189,13 @@ fn sentence(text: &str, from: usize) -> Option<String> {
     // A table row ends with a figure and no period: "... 4,773,090,000 The
     // underwriters may ..." starts its sentence at "The".
     let start = table_end(&text[start..from]).map_or(start, |k| start + k);
+    // A capitalized "We" or "Our" starts a sentence even after a heading
+    // with no period ("... Birkenstock Holding plc We are offering ...").
+    let start = if PRONOUNS.iter().any(|w| text[from..].starts_with(w)) {
+        from
+    } else {
+        start
+    };
     // The previous sentence's closing quotes belong to it.
     let rest = &text[start..];
     let start = start + rest.len()
@@ -227,6 +234,9 @@ const STARTERS: [&str; 12] = [
     "All ",
     "An ",
 ];
+
+/// Pronouns that, capitalized, only ever start a sentence.
+const PRONOUNS: [&str; 2] = ["We ", "Our "];
 
 /// Where the last "<figure> <Starter>" boundary in `s` lets a sentence start.
 fn table_end(s: &str) -> Option<usize> {
@@ -333,13 +343,15 @@ pub fn extract(text: &str, form: &str) -> Vec<CoverFact> {
     }
     if is_final {
         if let Some(c) = p.prospectus_date.captures(text) {
-            if let Some(d) = date_at(&c, 1) {
+            // "Prospectus dated <date>", or the bare date that closes some
+            // covers ("... Roberts & Ryan June 4, 2025 Table of Contents").
+            if let Some(d) = date_at(&c, 1).or_else(|| date_at(&c, 4)) {
                 out.push(fact_text("prospectus_date", d, c[0].trim().to_string()));
             }
         }
     }
     let total = p.total.captures(text).and_then(|c| {
-        let v = (1..=3)
+        let v = (1..=4)
             .find_map(|i| c.get(i))
             .and_then(|m| num(m.as_str()))?;
         // "(Representing 95,500,000 Ordinary Shares" takes its ")".
@@ -400,8 +412,13 @@ pub fn extract(text: &str, form: &str) -> Vec<CoverFact> {
             }
         }
     } else if let Some(c) = p.final_price.captures_iter(text).find(|c| {
+        // Not an estimate, a range or another security's price ("The
+        // Series A Preferred Stock will have a conversion price equal to the
+        // initial public offering price of $30.00").
         let q = quote_of(text, c).to_ascii_lowercase();
-        !q.contains("estimated") && !q.contains("between")
+        !["estimated", "between", "conversion", "preferred"]
+            .iter()
+            .any(|w| q.contains(w))
     }) {
         if let Some(v) = num(&c[1]).filter(|v| *v > 0.0) {
             out.push(fact_num("price_final", v, quote_of(text, &c)));
@@ -422,6 +439,16 @@ pub fn extract(text: &str, form: &str) -> Vec<CoverFact> {
     let doc = normalize(text);
     out.retain(|f| verified(&doc, f));
     out
+}
+
+/// An amendment filed only to add exhibits ("is being filed solely for the
+/// purpose of filing exhibits"): it has no prospectus cover.
+pub fn exhibits_only(text: &str) -> bool {
+    static R: OnceLock<Regex> = OnceLock::new();
+    R.get_or_init(|| {
+        re(r"(?i)\bsolely (?:for the purpose of |to )(?:fil(?:e|ing)|includ(?:e|ing)|add(?:ing)?) (?:certain |an |the )?(?:exhibits?|Exhibit\s+\d)|\bfor the sole purpose of (?:filing|including) (?:certain |an |the )?exhibits?")
+    })
+    .is_match(text)
 }
 
 /// The kinds a final prospectus must yield to become the facts source.
@@ -570,6 +597,87 @@ pub(crate) mod tests {
     }
     fn kv(pairs: &[(&'static str, &str)]) -> Vec<(&'static str, String)> {
         pairs.iter().map(|(k, v)| (*k, v.to_string())).collect()
+    }
+
+    const INSTACART: &str = include_str!("../../tests/fixtures/edgar_ipo_424b4_instacart.htm");
+    const CIRCLE: &str = include_str!("../../tests/fixtures/edgar_ipo_424b4_circle.htm");
+    const BIRKENSTOCK: &str = include_str!("../../tests/fixtures/edgar_ipo_f1a_birkenstock.htm");
+
+    #[test]
+    fn instacart_real_424b4_takes_the_cover_sentence_not_the_preferred_one() {
+        let f = extract(&cover_text(INSTACART), "424B4");
+        assert_eq!(
+            values(&f),
+            kv(&[
+                ("prospectus_date", "2023-09-18"),
+                ("shares_offered", "22000000"),
+                ("shares_company", "14100000"),
+                ("shares_selling", "7900000"),
+                ("option_shares", "3300000"),
+                ("price_final", "30"),
+                ("exchange", "Nasdaq Global Select Market"),
+                ("symbol", "CART"),
+            ])
+        );
+        assert_eq!(
+            get(&f, "price_final").quote,
+            "The initial public offering price for our common stock is $30.00 per share."
+        );
+        assert!(missing_for(&f, "424B4").is_empty());
+    }
+
+    #[test]
+    fn circle_real_424b4_in_lowercase_with_its_pricing_date() {
+        let f = extract(&cover_text(CIRCLE), "424B4");
+        assert_eq!(
+            values(&f),
+            kv(&[
+                ("prospectus_date", "2025-06-04"),
+                ("shares_offered", "34000000"),
+                ("shares_company", "14800000"),
+                ("shares_selling", "19200000"),
+                ("option_shares", "5100000"),
+                ("price_final", "31"),
+                ("exchange", "New York Stock Exchange"),
+                ("symbol", "CRCL"),
+            ])
+        );
+        assert_eq!(
+            get(&f, "shares_offered").quote,
+            "34,000,000 shares Class A common stock"
+        );
+        assert_eq!(
+            get(&f, "prospectus_date").quote,
+            "June 4, 2025 Table of Contents"
+        );
+        assert!(missing_for(&f, "424B4").is_empty());
+    }
+
+    #[test]
+    fn birkenstock_real_f1a_in_ordinary_shares() {
+        let f = extract(&cover_text(BIRKENSTOCK), "F-1/A");
+        assert_eq!(
+            values(&f),
+            kv(&[
+                ("cover_date", "2023-10-04"),
+                ("shares_offered", "32258064"),
+                ("shares_company", "10752688"),
+                ("shares_selling", "21505376"),
+                ("option_shares", "4838709"),
+                ("price_low", "44"),
+                ("price_high", "49"),
+                ("exchange", "New York Stock Exchange"),
+                ("symbol", "BIRK"),
+            ])
+        );
+        assert_eq!(
+            get(&f, "shares_company").quote,
+            "We are offering 10,752,688 ordinary shares, no par value, of Birkenstock Holding plc (the “Company”) and the selling shareholder identified in this prospectus is offering an additional 21,505,376 ordinary shares of the Company."
+        );
+        assert_eq!(
+            get(&f, "cover_date").quote,
+            "Subject To Completion Dated October 4, 2023"
+        );
     }
 
     #[test]

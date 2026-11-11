@@ -30,7 +30,9 @@ use chrono::{DateTime, Duration, NaiveDate, Utc};
 
 use super::cover::FINAL_KINDS;
 use super::store::{FactRow, FilingRow, IpoState, ItemRow, TradingRow, WatchRow};
-use super::{is_draft, is_final, is_registration, iso, next_trading_day, ymd, Tracked};
+use super::{
+    is_draft, is_final, is_registration, iso, next_trading_day, trading_days_after, ymd, Tracked,
+};
 use crate::clock::et;
 use crate::premarket::yahoo_symbol;
 
@@ -87,15 +89,30 @@ pub fn first_session(st: &IpoState, slug: &str) -> Option<NaiveDate> {
         .min()
 }
 
-/// The filings that count: once listed, only those filed on or before the
-/// first session.
+/// A final prospectus filed this many trading days after the first session
+/// is still the IPO's own (Instacart's 424B4 came the day after its first
+/// trade).
+pub const FINAL_AFTER_LISTING_DAYS: usize = 5;
+
+/// Whether `f` is part of the IPO: anything before listing; once listed,
+/// filings on or before the first session, and a final prospectus within
+/// `FINAL_AFTER_LISTING_DAYS` trading days after it. Later filings (a
+/// follow-on, a resale withdrawal) never count.
+pub fn part_of_ipo(f: &FilingRow, first: Option<NaiveDate>) -> bool {
+    let Some(d) = first else {
+        return true;
+    };
+    f.filing_date.parse::<NaiveDate>().is_ok_and(|fd| {
+        fd <= d || (is_final(&f.form) && fd <= trading_days_after(d, FINAL_AFTER_LISTING_DAYS))
+    })
+}
+
+/// The filings that count (`part_of_ipo`).
 pub fn considered<'a>(filings: &[&'a FilingRow], first: Option<NaiveDate>) -> Vec<&'a FilingRow> {
     filings
         .iter()
         .copied()
-        .filter(|f| {
-            first.is_none_or(|d| f.filing_date.parse::<NaiveDate>().is_ok_and(|fd| fd <= d))
-        })
+        .filter(|f| part_of_ipo(f, first))
         .collect()
 }
 

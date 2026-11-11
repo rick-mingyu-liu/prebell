@@ -13,10 +13,16 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use serde::Deserialize;
 
-use super::cover::{extract, COVER_PREFIX_BYTES};
-use super::resolve::{changed_rows, current, missing_to_replace};
-use super::store::{FactRow, FilingRow, IpoState, IpoStore, IpoWrite};
-use super::{is_final, is_kept, is_registration, iso, Tracked, KV_CHECKED, MAX_TRACKED};
+use super::cover::{exhibits_only, extract, COVER_PREFIX_BYTES};
+use super::resolve::{
+    changed_rows, current, current_of, first_session, missing_to_replace, part_of_ipo,
+};
+use super::store::{FactRow, FilingRow, IpoState, IpoStore, IpoWrite, TradingRow};
+use super::trading::backfill;
+use super::{
+    is_final, is_kept, is_registration, iso, trading_days_after, Tracked, KV_CHECKED, MAX_TRACKED,
+};
+use crate::clock::et;
 use crate::earnings::cik10;
 use crate::earnings::store::EarningsStore;
 use crate::edgar::{filing_url, Edgar, Filings};
@@ -26,6 +32,9 @@ use crate::store::Store;
 
 /// Covers read per run at most.
 pub const MAX_COVER_READS: usize = 3;
+/// A listed IPO is checked for its final prospectus this many trading days
+/// after the first session at most.
+pub const FINAL_WAIT_DAYS: usize = 10;
 /// A cover that fails this many reads is given up (and alerted).
 pub const MAX_READ_ATTEMPTS: i64 = 3;
 
@@ -206,11 +215,28 @@ pub async fn check_tick(
     // failing EDGAR is not asked again every poll).
     mark_checked(es, now).await?;
     let mut w = IpoWrite::default();
+    let today = et(now).date_naive();
     for t in list.iter().take(MAX_TRACKED) {
-        // Listed is terminal for filings: the check stops, and the timeline
-        // stops growing at the first session.
-        if st.row(&t.slug).is_some_and(|r| r.status == "listed") {
-            continue;
+        // Once listed, the check runs only to find the IPO's own final
+        // prospectus (often filed after the first trade): until one is the
+        // facts source, or `FINAL_WAIT_DAYS` trading days after the first
+        // session, then one warning and no more checks.
+        let first = first_session(&st, &t.slug);
+        if let Some(d) = first {
+            if current_of(&st, &t.slug).is_some_and(|c| is_final(&c.form)) {
+                continue;
+            }
+            if today > trading_days_after(d, FINAL_WAIT_DAYS) {
+                let key = format!("ipo-no-final:{}", t.slug);
+                if !store.has_alert(&key).await? {
+                    let msg = format!(
+                        "IPO watch: {} listed on {d} but no complete final prospectus was read within {FINAL_WAIT_DAYS} trading days; the page shows no IPO price. Checks for it have stopped",
+                        t.slug
+                    );
+                    store.add_alert(&key, "warn", &msg).await?;
+                }
+                continue;
+            }
         }
         let subs = match src.submissions(t.cik).await {
             Ok(s) => s,
@@ -226,6 +252,15 @@ pub async fn check_tick(
         out.companies += 1;
         for s in subs.iter().filter(|s| is_kept(&s.form)) {
             if st.filings.iter().any(|f| f.accession == s.accession) {
+                continue;
+            }
+            let probe = FilingRow {
+                form: s.form.clone(),
+                filing_date: s.filing_date.clone(),
+                ..Default::default()
+            };
+            // After listing only the IPO's own final prospectus joins.
+            if !part_of_ipo(&probe, first) {
                 continue;
             }
             let f = FilingRow {
@@ -304,7 +339,10 @@ pub async fn check_tick(
                     })
                     .collect();
                 f.read_state = "read".into();
-                if let Some(msg) = shortfall(&st, &f, &rows) {
+                // An amendment filed only for exhibits has no cover: it is
+                // in the timeline, with no alert.
+                let shortfall = shortfall(&st, &f, &rows).filter(|_| !exhibits_only(&text));
+                if let Some(msg) = shortfall {
                     let key = if rows.is_empty() {
                         format!("ipo-cover-empty:{}", f.slug)
                     } else {
@@ -357,6 +395,17 @@ pub async fn check_tick(
     }
     w.facts = facts;
     st.apply(&w);
+    // A final prospectus read after listing gives the stored sessions their
+    // IPO price and change.
+    let backfilled: Vec<TradingRow> = list
+        .iter()
+        .flat_map(|t| backfill(&st, &t.slug, now))
+        .collect();
+    st.apply(&IpoWrite {
+        trading: backfilled.clone(),
+        ..Default::default()
+    });
+    w.trading.extend(backfilled);
     w.watch = changed_rows(now, list, &st);
     out.rows = w
         .watch
@@ -383,6 +432,7 @@ mod tests {
     use crate::edgar::tests::{FakeHttp, RecTimer};
     use crate::ipo::cover::tests::{B4, REDDIT, S1A};
     use crate::ipo::parse_list;
+    use crate::ipo::resolve::changed_rows;
     use crate::ipo::store::MemIpoStore;
     use crate::store::MemStore;
 
@@ -672,24 +722,179 @@ mod tests {
         assert_eq!(out.errors.len(), 1);
     }
 
-    #[tokio::test]
-    async fn a_listed_ipo_is_not_checked_again() {
+    const INSTACART: &str = include_str!("../../tests/fixtures/edgar_ipo_424b4_instacart.htm");
+
+    /// Instacart's real order: EFFECT and pricing on 2023-09-18, the first
+    /// trade on 9/19 (stored by the recap), the 424B4 filed on 9/20.
+    fn instacart_listed() -> (Vec<Tracked>, MemIpoStore) {
+        let list = parse_list("instacart\t1579091\tInstacart\t-\tMaplebear\n").unwrap();
         let ipo = MemIpoStore::default();
-        ipo.state
-            .borrow_mut()
-            .watch
-            .push(crate::ipo::store::WatchRow {
-                slug: "anthropic".into(),
-                status: "listed".into(),
+        {
+            let mut st = ipo.state.borrow_mut();
+            let f = |acc: &str, form: &str, date: &str, read: &str| FilingRow {
+                accession: acc.into(),
+                slug: "instacart".into(),
+                form: form.into(),
+                filing_date: date.into(),
+                index_url: format!("https://www.sec.gov/{acc}-index.htm"),
+                read_state: read.into(),
+                ..Default::default()
+            };
+            st.filings
+                .push(f("0001193125-23-235646", "S-1/A", "2023-09-15", "read"));
+            st.filings
+                .push(f("0001193125-23-235388", "8-A12B", "2023-09-14", "none"));
+            st.filings
+                .push(f("9999999995-23-002688", "EFFECT", "2023-09-18", "none"));
+            for (k, n, t) in [
+                ("shares_offered", Some(22e6), None),
+                ("price_low", Some(28.0), None),
+                ("price_high", Some(30.0), None),
+                ("symbol", None, Some("CART")),
+            ] {
+                st.facts.push(FactRow {
+                    accession: "0001193125-23-235646".into(),
+                    kind: k.into(),
+                    slug: "instacart".into(),
+                    value_num: n,
+                    value_text: t.map(String::from),
+                    quote: "q".into(),
+                });
+            }
+            st.trading.push(TradingRow {
+                slug: "instacart".into(),
+                session_date: "2023-09-19".into(),
+                symbol: "CART".into(),
+                close: 33.7,
+                source_url: "https://finance.yahoo.com/quote/CART".into(),
                 ..Default::default()
             });
+            st.watch = changed_rows(utc("2023-09-19T21:00:00Z"), &list, &st);
+            assert_eq!(st.watch[0].status, "listed");
+        }
+        (list, ipo)
+    }
+    fn instacart_subs() -> String {
+        r#"{"filings":{"recent":{"accessionNumber":["0001193125-23-237900","0001193125-23-235646","9999999995-23-002688","0001193125-23-235388"],"form":["424B4","S-1/A","EFFECT","8-A12B"],"filingDate":["2023-09-20","2023-09-15","2023-09-18","2023-09-14"],"primaryDocument":["d55348d424b4.htm","d55348ds1a.htm","xslEFFECTX01/primary_doc.xml","d317735d8a12b.htm"]}}}"#.into()
+    }
+
+    #[tokio::test]
+    async fn a_424b4_filed_after_the_first_trade_still_prices_the_ipo() {
+        let (list, ipo) = instacart_listed();
         let (es, store) = (MemEarningsStore::default(), MemStore::default());
-        let e = edgar(&[(&submissions_url(2130357), 200, SUBS)]);
-        let out = check_tick(utc(NOW), &anthropic(), &ipo, &es, &store, &e)
+        let b4 = doc_url(1579091, "0001193125-23-237900", "d55348d424b4.htm");
+        let e = edgar(&[
+            (&submissions_url(1579091), 200, &instacart_subs()),
+            (&b4, 200, INSTACART),
+        ]);
+        let out = check_tick(utc("2023-09-20T15:00:00Z"), &list, &ipo, &es, &store, &e)
             .await
             .unwrap();
-        assert_eq!(out.companies, 0);
+        assert!(out.errors.is_empty(), "{out:?}");
+        let st = ipo.state.borrow();
+        let r = st.row("instacart").unwrap();
+        assert_eq!(
+            (r.status.as_str(), r.facts_accession.as_deref()),
+            ("listed", Some("0001193125-23-237900"))
+        );
+        // "Prospectus dated September 18, 2023": 9/19, the stored first session.
+        assert_eq!(
+            (
+                r.first_trade_date.as_deref(),
+                r.date_status.as_deref(),
+                r.date_source.as_deref()
+            ),
+            (Some("2023-09-19"), Some("confirmed"), Some("trading"))
+        );
+        // The stored session gets its IPO price and change.
+        let t = &st.trading[0];
+        assert_eq!((t.ipo_price, t.change_pct), (Some(30.0), Some(12.33)));
+        drop(st);
+        // Done: a later check reads nothing for it.
+        let e = edgar(&[(&submissions_url(1579091), 200, &instacart_subs())]);
+        check_tick(utc("2023-09-21T15:00:00Z"), &list, &ipo, &es, &store, &e)
+            .await
+            .unwrap();
         assert!(sent(&e).is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_later_follow_on_never_joins_and_the_wait_ends_with_one_alert() {
+        let (list, ipo) = instacart_listed();
+        let (es, store) = (MemEarningsStore::default(), MemStore::default());
+        // A 424B4 six trading days after the first session is not the IPO's.
+        let late = instacart_subs().replace("2023-09-20", "2023-09-27");
+        let e = edgar(&[(&submissions_url(1579091), 200, &late)]);
+        let out = check_tick(utc("2023-09-27T15:00:00Z"), &list, &ipo, &es, &store, &e)
+            .await
+            .unwrap();
+        assert!(
+            out.new_filings.is_empty() && out.covers.is_empty(),
+            "{out:?}"
+        );
+        // Ten trading days after 9/19 is 10/3: from 10/4, one alert and no checks.
+        for day in ["2023-10-04T15:00:00Z", "2023-10-05T15:00:00Z"] {
+            let e = edgar(&[(&submissions_url(1579091), 200, &late)]);
+            check_tick(utc(day), &list, &ipo, &es, &store, &e)
+                .await
+                .unwrap();
+            assert!(sent(&e).is_empty());
+        }
+        let alerts = store.alerts.borrow();
+        assert_eq!(alerts.len(), 1, "{alerts:?}");
+        assert_eq!(alerts[0].0, "ipo-no-final:instacart");
+        let st = ipo.state.borrow();
+        assert_eq!(st.row("instacart").unwrap().status, "listed");
+    }
+
+    #[tokio::test]
+    async fn an_exhibits_only_amendment_is_timeline_only_with_no_alert() {
+        let ipo = MemIpoStore::default();
+        let (es, store) = (MemEarningsStore::default(), MemStore::default());
+        let e = edgar(&[(&submissions_url(2130357), 200, SUBS), (S1A_URL, 200, S1A)]);
+        check_tick(utc(NOW), &anthropic(), &ipo, &es, &store, &e)
+            .await
+            .unwrap();
+        let subs = SUBS
+            .replacen(
+                r#""accessionNumber":["#,
+                r#""accessionNumber":["0001628280-26-074100","#,
+                1,
+            )
+            .replacen(r#""form":["#, r#""form":["S-1/A","#, 1)
+            .replacen(r#""filingDate":["#, r#""filingDate":["2026-11-12","#, 1)
+            .replacen(
+                r#""primaryDocument":["#,
+                r#""primaryDocument":["ex.htm","#,
+                1,
+            );
+        let ex = doc_url(2130357, "0001628280-26-074100", "ex.htm");
+        let body = "<p>Explanatory Note</p><p>This Amendment No. 3 to the Registration Statement on Form S-1 is being filed solely for the purpose of filing exhibits to the Registration Statement.</p>";
+        let e = edgar(&[(&submissions_url(2130357), 200, &subs), (&ex, 200, body)]);
+        check_tick(
+            utc("2026-11-12T15:00:00Z"),
+            &anthropic(),
+            &ipo,
+            &es,
+            &store,
+            &e,
+        )
+        .await
+        .unwrap();
+        assert!(
+            store.alerts.borrow().is_empty(),
+            "{:?}",
+            store.alerts.borrow()
+        );
+        let st = ipo.state.borrow();
+        assert!(st
+            .filings
+            .iter()
+            .any(|f| f.accession == "0001628280-26-074100"));
+        assert_eq!(
+            st.row("anthropic").unwrap().facts_accession.as_deref(),
+            Some("0001628280-26-072484")
+        );
     }
 
     #[tokio::test]

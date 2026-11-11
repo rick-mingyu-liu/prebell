@@ -71,6 +71,24 @@ pub fn ipo_price(st: &IpoState, slug: &str) -> Option<f64> {
         .and_then(|x| x.value_num)
 }
 
+/// Stored sessions of `slug` whose IPO price or change differs from the
+/// facts source's final price (it was read after them), recomputed.
+pub fn backfill(st: &IpoState, slug: &str, now: DateTime<Utc>) -> Vec<TradingRow> {
+    let price = ipo_price(st, slug);
+    st.trading_of(slug)
+        .into_iter()
+        .filter(|t| t.ipo_price != price)
+        .map(|t| TradingRow {
+            ipo_price: price,
+            change_pct: price
+                .filter(|p| *p > 0.0)
+                .map(|p| round2((t.close - p) / p * 100.0)),
+            fetched_at: iso(now),
+            ..t.clone()
+        })
+        .collect()
+}
+
 /// The rows for the closes read: one per symbol that has a close for
 /// `session`.
 pub fn rows(
