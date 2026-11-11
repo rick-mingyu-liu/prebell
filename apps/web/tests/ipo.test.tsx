@@ -260,18 +260,18 @@ describe("calendar with IPOs", () => {
       '<li class="cal-card cal-card-text cal-unconfirmed"><a class="cal-card-link" title="Anthropic" href="/en/ipo/anthropic"><span class="cal-card-body"><span class="cal-card-sym" aria-hidden="true">ANT</span><span class="cal-card-name">Anthropic</span></span><span class="sr-only">Unconfirmed</span><span class="sr-only">IPO page</span></a></li>',
     );
     // Only on its own day.
-    expect(out.match(/cal-ipo/g)).toHaveLength(1);
+    expect(out.match(/class="cal-ipo"/g)).toHaveLength(1);
     // The watch list sits between the head and the board.
-    expect(out.indexOf('<section class="ipo-watch"')).toBeGreaterThan(out.indexOf("</header>"));
-    expect(out.indexOf('<section class="ipo-watch"')).toBeLessThan(out.indexOf('<div class="cal-week"'));
-    const list = out.slice(out.indexOf('<section class="ipo-watch"'), out.indexOf("</section>", out.indexOf('<section class="ipo-watch"')));
+    expect(out.indexOf('<section class="cal-ipo-watch"')).toBeGreaterThan(out.indexOf("</header>"));
+    expect(out.indexOf('<section class="cal-ipo-watch"')).toBeLessThan(out.indexOf('<div class="cal-week"'));
+    const list = out.slice(out.indexOf('<section class="cal-ipo-watch"'), out.indexOf("</section>", out.indexOf('<section class="cal-ipo-watch"')));
     expect(textOf(list)).toBe(
       "IPO watch" +
         "Northwind RoboticsNWRBListedNov 5, 2026" +
         "AnthropicANTPrice range setNov 16, 2026Unconfirmed" +
         "Harbor BioHRBOFiledDate not set",
     );
-    expect(list).toContain('<a class="ipo-watch-name" href="/en/ipo/anthropic">Anthropic</a>');
+    expect(list).toContain('<a class="cal-ipo-watch-name" href="/en/ipo/anthropic">Anthropic</a>');
     expect(out).toContain("each links to its IPO page.");
   });
 
@@ -285,9 +285,9 @@ describe("calendar with IPOs", () => {
   it("in Chinese: the Chinese name, labels and date not set", async () => {
     const out = await calendar("2026-11-02", "zh");
     expect(out).toContain('title="北风机器人" href="/zh/ipo/northwind-robotics"');
-    expect(out).toContain('<h2 class="cal-slot" id="ipo-watch">IPO 追踪</h2>');
-    expect(out).toContain('<span class="ipo-watch-status">已定发行价区间</span>');
-    expect(out).toContain('<span class="ipo-watch-date">日期未定</span>');
+    expect(out).toContain('<h2 class="cal-slot" id="cal-ipo-watch">IPO 追踪</h2>');
+    expect(out).toContain('<span class="cal-ipo-watch-status">已定发行价区间</span>');
+    expect(out).toContain('<span class="cal-ipo-watch-date">日期未定</span>');
     expect(out).toContain("<time dateTime=\"2026-11-16\">2026年11月16日</time><span class=\"ipo-flag\">未确认</span>");
   });
 
@@ -302,7 +302,7 @@ describe("calendar with IPOs", () => {
     env.db = memoryD1(`${SEED}\nUPDATE ipo_watch SET status = 'withdrawn' WHERE slug = 'anthropic';`);
     const out = await calendar("2026-11-16");
     expect(out).not.toContain("/en/ipo/anthropic");
-    expect(out).not.toContain("cal-ipo");
+    expect(out).not.toContain('class="cal-ipo"');
     expect(out).toContain("/en/ipo/harbor-bio");
   });
 });

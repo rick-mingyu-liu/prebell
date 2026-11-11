@@ -13,19 +13,19 @@ export default function IpoWatchList({ ipos, locale }: { ipos: IpoSummary[]; loc
   if (ipos.length === 0) return null;
   const t = translator(locale);
   return (
-    <section className="ipo-watch" aria-labelledby="ipo-watch">
-      <h2 className="cal-slot" id="ipo-watch">
+    <section className="cal-ipo-watch" aria-labelledby="cal-ipo-watch">
+      <h2 className="cal-slot" id="cal-ipo-watch">
         {t("ipo.watchTitle")}
       </h2>
-      <ul className="ipo-watch-list">
+      <ul className="cal-ipo-watch-list">
         {ipos.map((i) => (
-          <li key={i.slug} className="ipo-watch-row">
-            <Link className="ipo-watch-name" href={`/${locale}/ipo/${i.slug}`}>
+          <li key={i.slug} className="cal-ipo-watch-row">
+            <Link className="cal-ipo-watch-name" href={`/${locale}/ipo/${i.slug}`}>
               {i.name}
             </Link>
-            {i.symbol && <span className="ipo-watch-sym">{i.symbol}</span>}
-            <span className="ipo-watch-status">{t(`ipo.status.${i.status}`)}</span>
-            <span className="ipo-watch-date">
+            {i.symbol && <span className="cal-ipo-watch-sym">{i.symbol}</span>}
+            <span className="cal-ipo-watch-status">{t(`ipo.status.${i.status}`)}</span>
+            <span className="cal-ipo-watch-date">
               {i.date ? (
                 <>
                   <time dateTime={i.date.date}>{formatDate(i.date.date, locale)}</time>
