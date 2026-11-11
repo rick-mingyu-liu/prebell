@@ -13,13 +13,15 @@ use crate::cover::{
 };
 use crate::earnings::facts::EarningsFacts;
 use crate::facts::{push_reason, push_themes, Field, Mover, NewsReason, Quote, Theme, ThemeStat};
+use crate::ipo::store::IpoStore;
+use crate::ipo::trading as ipo_trading;
 use crate::numbers::Lang;
 use crate::premarket::draft::Draft;
 use crate::premarket::{
     articles_prompt, as_of, company_name, extract, fresh_news, macro_items, system_prompt,
     theme_reasons, universe, yahoo_symbol, Diag, MacroPrompt, EVENT_RULE,
 };
-use crate::providers::{LlmProvider, MarketData, NewsSearch};
+use crate::providers::{LlmProvider, MarketData, NewsSearch, ProviderError};
 use crate::run::{tick_content, Content, Hooks, TickOutcome};
 use crate::store::Store;
 use crate::themes::{detect_all, RECAP_RULES, THEME_MAX};
@@ -344,14 +346,33 @@ async fn after_hours(
     }
 }
 
-/// Universe closes passing the price/volume filters, `symbol` set to the universe ticker.
-async fn liquid_closes(md: &dyn MarketData, date: NaiveDate, d: &mut Diag) -> Vec<Quote> {
+/// Universe closes passing the price/volume filters, `symbol` set to the
+/// universe ticker; and the raw results for `extra` symbols (tracked IPOs)
+/// read in the same batches, never movers.
+async fn liquid_closes(
+    md: &dyn MarketData,
+    date: NaiveDate,
+    d: &mut Diag,
+    extra: &[String],
+) -> (Vec<Quote>, Vec<(String, Result<Quote, ProviderError>)>) {
     let tickers = universe();
-    let symbols: Vec<String> = tickers.iter().map(|t| yahoo_symbol(t)).collect();
+    let mut symbols: Vec<String> = tickers.iter().map(|t| yahoo_symbol(t)).collect();
+    let own: std::collections::HashSet<String> = symbols.iter().cloned().collect();
+    for e in extra {
+        if !symbols.contains(e) {
+            symbols.push(e.clone());
+        }
+    }
     let quotes = md.close_quotes(&symbols, date).await;
     d.market = md.diagnostics();
+    let extra_out: Vec<(String, Result<Quote, ProviderError>)> = quotes
+        .iter()
+        .filter(|(sym, _)| extra.contains(sym))
+        .cloned()
+        .collect();
     let liquid: Vec<Quote> = quotes
         .into_iter()
+        .filter(|(sym, _)| own.contains(sym))
         .inspect(|(_, r)| d.quote(r))
         .filter_map(|(sym, r)| {
             let mut q = r.ok()?;
@@ -362,7 +383,7 @@ async fn liquid_closes(md: &dyn MarketData, date: NaiveDate, d: &mut Diag) -> Ve
         .filter(|q| q.last >= MIN_PRICE && q.volume.is_some_and(|v| v >= MIN_VOLUME))
         .collect();
     d.liquid = liquid.len();
-    liquid
+    (liquid, extra_out)
 }
 
 pub async fn build_facts(
@@ -370,6 +391,23 @@ pub async fn build_facts(
     ns: &dyn NewsSearch,
     llm: &dyn LlmProvider,
     store: &dyn Store,
+    trading_date: NaiveDate,
+    now: DateTime<Utc>,
+    budget: &dyn Fn() -> usize,
+) -> RecapFacts {
+    build_facts_with_ipo(md, ns, llm, store, None, trading_date, now, budget).await
+}
+
+/// `build_facts`, also reading the closes of tracked IPOs (`ipo::trading`)
+/// in the movers' batches when `ipo` is given (`IPO_WATCH_ENABLED`). An IPO
+/// store error costs only those closes; it is a diagnostics line.
+#[allow(clippy::too_many_arguments)]
+pub async fn build_facts_with_ipo(
+    md: &dyn MarketData,
+    ns: &dyn NewsSearch,
+    llm: &dyn LlmProvider,
+    store: &dyn Store,
+    ipo: Option<&dyn IpoStore>,
     trading_date: NaiveDate,
     now: DateTime<Utc>,
     budget: &dyn Fn() -> usize,
@@ -425,7 +463,48 @@ pub async fn build_facts(
     // A store error costs only the "already reported" line.
     let (reported, reported_err) = reported(store, trading_date, early_close).await;
 
-    let quotes = liquid_closes(md, trading_date, &mut d).await;
+    let mut ipo_line: Option<String> = None;
+    let ipo_state = match ipo {
+        Some(s) => match s.ipo_state().await {
+            Ok(st) => Some((s, st)),
+            Err(e) => {
+                ipo_line = Some(format!("ipo_err={e}"));
+                None
+            }
+        },
+        None => None,
+    };
+    let picks: Vec<(String, String)> = ipo_state
+        .as_ref()
+        .map(|(_, st)| {
+            ipo_trading::symbols(
+                st,
+                crate::ipo::tracked(),
+                trading_date,
+                ipo_trading::room(universe().len()),
+            )
+        })
+        .unwrap_or_default();
+    let extra: Vec<String> = picks.iter().map(|(_, s)| s.clone()).collect();
+    let (quotes, ipo_quotes) = liquid_closes(md, trading_date, &mut d, &extra).await;
+    if let Some((s, st)) = ipo_state {
+        ipo_line = Some(
+            match ipo_trading::record(
+                s,
+                st,
+                crate::ipo::tracked(),
+                &picks,
+                &ipo_quotes,
+                trading_date,
+                now,
+            )
+            .await
+            {
+                Ok(line) => line,
+                Err(e) => format!("ipo_err={e}"),
+            },
+        );
+    }
     // Every liquid close, not only the eight movers, feeds the themes.
     let (mut themes, theme_candidates) = detect_all(&quotes, &RECAP_RULES);
     d.themes_found = themes.len();
@@ -497,6 +576,7 @@ pub async fn build_facts(
         reported.len()
     ));
     diagnostics.extend(why::diagnostics(counts, reports_err));
+    diagnostics.extend(ipo_line);
     RecapFacts {
         trading_date,
         as_of_utc: now,
@@ -520,6 +600,8 @@ pub struct Recap<'a> {
     pub llm: &'a dyn LlmProvider,
     /// Read for the earnings checks already published today.
     pub store: &'a dyn Store,
+    /// IPO watch's closes (`ipo::trading`), while it is on.
+    pub ipo: Option<&'a dyn IpoStore>,
 }
 
 #[async_trait(?Send)]
@@ -552,7 +634,10 @@ impl Content for Recap<'_> {
         now: DateTime<Utc>,
         budget: &dyn Fn() -> usize,
     ) -> RecapFacts {
-        build_facts(self.md, self.ns, self.llm, self.store, date, now, budget).await
+        build_facts_with_ipo(
+            self.md, self.ns, self.llm, self.store, self.ipo, date, now, budget,
+        )
+        .await
     }
     fn missing_required(&self, f: &RecapFacts) -> Vec<&'static str> {
         missing_required(f)
@@ -623,7 +708,26 @@ pub async fn tick_with_hooks(
     llm: &dyn LlmProvider,
     hooks: &Hooks<'_>,
 ) -> TickOutcome {
-    let recap = Recap { md, ns, llm, store };
+    tick_with_ipo(now, store, md, ns, llm, None, hooks).await
+}
+
+/// `tick_with_hooks`, also reading tracked IPOs' closes when `ipo` is given.
+pub async fn tick_with_ipo(
+    now: DateTime<Utc>,
+    store: &dyn Store,
+    md: &dyn MarketData,
+    ns: &dyn NewsSearch,
+    llm: &dyn LlmProvider,
+    ipo: Option<&dyn IpoStore>,
+    hooks: &Hooks<'_>,
+) -> TickOutcome {
+    let recap = Recap {
+        md,
+        ns,
+        llm,
+        store,
+        ipo,
+    };
     tick_content(now, store, &recap, hooks).await
 }
 
@@ -845,6 +949,78 @@ mod tests {
         assert_eq!(batches[0].len(), universe().len());
         assert!(!batches[0].iter().any(|s| s.starts_with('^')));
         assert_eq!(m.sessions.borrow().len(), 4 + universe().len());
+    }
+
+    #[tokio::test]
+    async fn a_priced_ipo_rides_the_movers_batch_and_is_never_a_mover() {
+        use crate::ipo::store::{FactRow, FilingRow, IpoStore, MemIpoStore, WatchRow};
+        let ipo = MemIpoStore::default();
+        {
+            let mut st = ipo.state.borrow_mut();
+            st.watch.push(WatchRow {
+                slug: "anthropic".into(),
+                status: "priced".into(),
+                symbol: Some("ANT".into()),
+                ..Default::default()
+            });
+            st.filings.push(FilingRow {
+                accession: "b4".into(),
+                slug: "anthropic".into(),
+                form: "424B4".into(),
+                filing_date: "2026-10-28".into(),
+                index_url: "https://www.sec.gov/b4-index.htm".into(),
+                read_state: "read".into(),
+                ..Default::default()
+            });
+            st.facts.push(FactRow {
+                accession: "b4".into(),
+                kind: "price_final".into(),
+                slug: "anthropic".into(),
+                value_num: Some(75.0),
+                quote: "The initial public offering price is $75.00 per share.".into(),
+                ..Default::default()
+            });
+        }
+        // Up 20% on the IPO price: it would top the gainers if it were one.
+        let m = md(&[
+            q("NVDA", 182.35, 3.08, Some(210_000_000)),
+            q("ANT", 90.0, 20.0, Some(400_000_000)),
+        ]);
+        let f = build_facts_with_ipo(
+            &m,
+            &ns(vec![]),
+            &llm(vec![]),
+            &MemStore::default(),
+            Some(&ipo as &dyn IpoStore),
+            date(),
+            now(),
+            &|| 0,
+        )
+        .await;
+        // One batched call with one more symbol: room in the last v7 batch,
+        // so no extra request.
+        let batches = m.batches.borrow();
+        assert_eq!(batches.len(), 1);
+        assert_eq!(batches[0].len(), universe().len() + 1);
+        assert_eq!(batches[0].last().map(String::as_str), Some("ANT"));
+        assert!(universe().len() % crate::yahoo::QUOTE_BATCH != 0);
+        assert_eq!(syms(&f.gainers), ["NVDA"]);
+        assert!(
+            f.diagnostics.iter().any(|l| l == "ipo symbols=1 closes=1"),
+            "{:?}",
+            f.diagnostics
+        );
+        let st = ipo.state.borrow();
+        let t = &st.trading[0];
+        assert_eq!(
+            (t.session_date.as_str(), t.close, t.ipo_price, t.change_pct),
+            ("2026-10-29", 90.0, Some(75.0), Some(20.0))
+        );
+        let r = st.row("anthropic").unwrap();
+        assert_eq!(
+            (r.status.as_str(), r.first_trade_date.as_deref()),
+            ("listed", Some("2026-10-29"))
+        );
     }
 
     #[tokio::test]
@@ -2461,6 +2637,7 @@ mod run_tests {
             ns: &FakeNs,
             llm: &llm,
             store: &store,
+            ipo: None,
         };
         let f = RecapFacts {
             trading_date: "2026-10-29".parse().unwrap(),

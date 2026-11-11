@@ -1,0 +1,7 @@
+# IPO watch: the big upcoming US listings PreBell tracks (docs/runbook.md, "IPO watch").
+# One line per company, tab-separated. Everything else (forms, cover facts, dates, news)
+# comes from EDGAR and the news sweep, never from this file. At most 10 rows.
+# slug: the page URL (/en/ipo/<slug>), lowercase a-z, 0-9 and "-".
+# cik: the SEC CIK (EDGAR company search). name: the display name. name_zh: "-" for none.
+# slug	cik	name	name_zh	notes
+anthropic	2130357	Anthropic	-	S-1 filed 2026-10-26; S-1/A with a price range 2026-11-10

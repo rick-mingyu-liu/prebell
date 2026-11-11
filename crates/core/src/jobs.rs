@@ -69,6 +69,10 @@ pub async fn run_job(
             Err(e) if step == EarningsStep::Digest => {
                 Err(config_error(now, "digest", &e, store).await)
             }
+            // IPO watch too: its own key, so the earnings alert stays free.
+            Err(e) if matches!(step, EarningsStep::IpoCheck | EarningsStep::IpoSweep) => {
+                Err(config_error(now, "ipo", &e, store).await)
+            }
             // One alert per day for every earnings step: they share the config.
             Err(e) => Err(config_error(now, "earnings", &e, store).await),
         },
@@ -215,6 +219,29 @@ mod tests {
         assert_eq!(*r.earnings_calls.borrow(), [EarningsStep::Digest]);
         assert!(s.has_alert("config:digest:2026-11-13").await.unwrap());
         assert!(!s.has_alert("config:earnings:2026-11-13").await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn an_ipo_error_alerts_under_its_own_key() {
+        let s = MemStore::default();
+        let r = FakeRunner {
+            content_err: Some("ipo_state: D1 down".into()),
+            content_calls: RefCell::new(vec![]),
+            earnings_calls: RefCell::new(vec![]),
+        };
+        let now = utc("2026-11-11T15:00:00Z");
+        for job in ["ipo:check", "ipo:sweep"] {
+            let line = run_job(now, job, &s, &r).await.unwrap_err();
+            assert!(line.contains("ipo: config error"), "{line}");
+        }
+        assert_eq!(
+            *r.earnings_calls.borrow(),
+            [EarningsStep::IpoCheck, EarningsStep::IpoSweep]
+        );
+        // One alert a day for both, apart from the earnings one.
+        assert_eq!(s.alerts.borrow().len(), 1);
+        assert!(s.has_alert("config:ipo:2026-11-11").await.unwrap());
+        assert!(!s.has_alert("config:earnings:2026-11-11").await.unwrap());
     }
 
     #[tokio::test]

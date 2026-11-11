@@ -55,6 +55,16 @@ pub enum EarningsStep {
     /// is done (`digest::digest_tick`); on this queue for its serial
     /// consumer, so two never save drafts at once.
     Digest,
+    /// `ipo:check`, queued by a poll at most hourly while
+    /// `IPO_WATCH_ENABLED` is on: the IPO watch's EDGAR filing check
+    /// (`ipo::check`), on this queue so EDGAR is never read by it and a
+    /// poll at once.
+    IpoCheck,
+    /// `ipo:sweep`, queued by a poll after 07:00 and 16:30 ET while a
+    /// tracked IPO is not yet swept in that half-day: one news search and
+    /// its checked items (`ipo::news`). It needs no EDGAR, so it goes to
+    /// the jobs queue and never holds up a poll.
+    IpoSweep,
 }
 
 impl EarningsStep {
@@ -67,6 +77,8 @@ impl EarningsStep {
             EarningsStep::Events => "events:check",
             EarningsStep::Foreign => "earnings:6k",
             EarningsStep::Digest => "digest",
+            EarningsStep::IpoCheck => "ipo:check",
+            EarningsStep::IpoSweep => "ipo:sweep",
         }
     }
 }
@@ -93,6 +105,8 @@ impl JobKind {
             "events:check" => Some(JobKind::Earnings(EarningsStep::Events)),
             "earnings:6k" => Some(JobKind::Earnings(EarningsStep::Foreign)),
             "digest" => Some(JobKind::Earnings(EarningsStep::Digest)),
+            "ipo:check" => Some(JobKind::Earnings(EarningsStep::IpoCheck)),
+            "ipo:sweep" => Some(JobKind::Earnings(EarningsStep::IpoSweep)),
             "cards" => Some(JobKind::Cards),
             _ => None,
         }
@@ -103,6 +117,7 @@ impl JobKind {
 pub fn queue_for(job: &str) -> &'static str {
     match JobKind::parse(job) {
         Some(JobKind::Earnings(EarningsStep::Build)) => EARNINGS_BUILD_QUEUE,
+        Some(JobKind::Earnings(EarningsStep::IpoSweep)) => JOBS_QUEUE,
         Some(JobKind::Earnings(_)) => EARNINGS_QUEUE,
         _ => JOBS_QUEUE,
     }
@@ -341,10 +356,13 @@ mod tests {
             EarningsStep::Events,
             EarningsStep::Foreign,
             EarningsStep::Digest,
+            EarningsStep::IpoCheck,
+            EarningsStep::IpoSweep,
         ] {
             assert_eq!(JobKind::parse(step.job()), Some(JobKind::Earnings(step)));
             let queue = match step {
                 EarningsStep::Build => EARNINGS_BUILD_QUEUE,
+                EarningsStep::IpoSweep => JOBS_QUEUE,
                 _ => EARNINGS_QUEUE,
             };
             assert_eq!(queue_for(step.job()), queue);

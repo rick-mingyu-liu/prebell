@@ -9,6 +9,7 @@ pub mod earnings;
 pub mod edgar;
 pub mod events;
 pub mod facts;
+pub mod ipo;
 pub mod jobs;
 pub mod llm;
 pub mod numbers;
