@@ -331,6 +331,7 @@ describe("off switch and GET", () => {
     const text = await page.text();
     expect(text).toContain("claude mcp add --transport http prebell https://prebell.site/mcp");
     expect(text).toMatch(/not investment advice/);
+    expect(text).toContain("How to connect, for people: https://prebell.site/en/mcp");
     const sse = handleMcpGet(new Request(URL_, { headers: { Accept: "text/event-stream" } }), { enabled: true, siteUrl: "https://prebell.site" });
     expect(sse.status).toBe(405);
     expect(sse.headers.get("allow")).toBe("POST");

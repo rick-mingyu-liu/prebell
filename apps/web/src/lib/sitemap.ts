@@ -31,9 +31,10 @@ const newest = (a: string | undefined, b: string) => (a && a > b ? a : b);
  * Every indexable page: the fixed pages, each published translation of a post (paired only when both
  * are published; a pending Chinese page is noindex and left out), and the ticker pages that have an
  * earnings check with published English text (calendar-only tickers are noindex). A post's lastmod is
- * its update time, else its first publish.
+ * its update time, else its first publish. The For AI agents page is listed only while the MCP server is on
+ * (`mcp`), as the page answers 404 otherwise.
  */
-export async function sitemapEntries(db: D1Like, origin: URL): Promise<MetadataRoute.Sitemap> {
+export async function sitemapEntries(db: D1Like, origin: URL, mcp = false): Promise<MetadataRoute.Sitemap> {
   const { results } = await db
     .prepare(
       `SELECT p.slug, p.published_at, p.revised_at, en.status AS en, zh.status AS zh, f.ticker
@@ -66,6 +67,7 @@ export async function sitemapEntries(db: D1Like, origin: URL): Promise<MetadataR
     ...paired(origin, "/archive", latest),
     ...paired(origin, "/earnings"),
     ...paired(origin, "/about"),
+    ...(mcp ? paired(origin, "/mcp") : []),
     ...paired(origin, "/legal"),
     ...posts,
     ...[...tickers].flatMap(([ticker, modified]) => paired(origin, `/t/${encodeURIComponent(ticker)}`, modified)),

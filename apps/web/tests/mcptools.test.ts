@@ -406,6 +406,42 @@ describe("latest_brief", () => {
     expect(out.snapshot_note).toMatch(/not available/);
   });
 
+  it("reads the 8:35 update's facts key (premarket/YYYY-MM-DD-update.json) the post points at after the update", async () => {
+    const key = "premarket/2026-10-29-update.json";
+    const sql = seed() + DROP_FRIDAY_BRIEF + `UPDATE posts SET facts_r2_key = '${key}' WHERE slug = 'premarket-2026-10-29';`;
+    const c = ctx({ sql, objs: { [key]: premarketFacts() } });
+    const out = await run("latest_brief", { kind: "premarket" }, c);
+    expect(out).toMatchObject({ found: true, kind: "premarket", trading_date: "2026-10-29", market_data_available: true, as_of: "2026-10-30T13:20:43.115Z" });
+    expect(out.indexes[0]).toMatchObject({ symbol: "ES=F" });
+    expect(out.gainers[0]).toMatchObject({ ticker: "MDLZ" });
+    expect(out.losers.length).toBeGreaterThan(0);
+    expect(out.watch[0]).toMatchObject({ kind: "event", title: "October CPI" });
+    expect(c.gets).toEqual([key]);
+    expect(c.errors).toEqual([]);
+  });
+
+  it("never reads a stored facts key of another shape, and reports its shape (not its contents) through onError", async () => {
+    const keys = [
+      "recap/2026-10-30-update.json",
+      "premarket/2026-10-30-update-2.json",
+      "premarket/2026-10-30-UPDATE.json",
+      "premarket/2026-10-30.json.bak",
+      "premarket/../earnings/AAPL/x.json",
+      "../premarket/2026-10-30.json",
+      "/premarket/2026-10-30.json",
+      "premarket/2026-10-30.json\n",
+      AAPL_KEY,
+    ];
+    for (const key of keys) {
+      const sql = seed() + `UPDATE posts SET facts_r2_key = '${key}' WHERE slug = 'premarket-2026-10-30';`;
+      const c = ctx({ sql, objs: { [key]: premarketFacts() } });
+      const out = await run("latest_brief", { kind: "premarket" }, c);
+      expect(out, key).toMatchObject({ trading_date: "2026-10-30", market_data_available: false, as_of: null });
+      expect(c.gets, key).toEqual([]);
+      expect(c.errors.map((e) => (e as Error).message), key).toEqual(["premarket facts key: unexpected shape"]);
+    }
+  });
+
   it("no brief at all is an empty result, not an error", async () => {
     const out = await run("latest_brief", {}, ctx({ sql: "" }));
     expect(out).toMatchObject({ found: false, as_of: null, source: "https://prebell.site/en" });
