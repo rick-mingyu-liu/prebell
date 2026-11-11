@@ -79,7 +79,7 @@
     "ask": ["Who reports earnings this week?", "What did PreBell's latest earnings check on Apple show?", "What did this morning's brief say?"],
     "limitsHeading": "Limits",
     "limits": [
-      "The brief is a snapshot written at set times, not a live feed: the premarket brief comes out from 8:00 AM Eastern on trading days and is usually updated after 8:35 with the 8:30 economic data, and the after-close recap from 4:45 PM Eastern (1:45 PM on early-close days). Before today's brief is out, your agent gets the most recent one, with a note saying when the next is due.",
+      "The brief is a snapshot written at set times, not a live feed: the premarket brief comes out from 8:00 AM Eastern on trading days and is usually rebuilt after 8:35 with fresh prices and any 8:30 economic releases, and the after-close recap from 4:45 PM Eastern (1:45 PM on early-close days). Before today's brief is out, your agent gets the most recent one, with a note saying when the next is due.",
       "There are no live quotes: every price comes from a published brief or earnings check and carries its own time."
     ]
   },

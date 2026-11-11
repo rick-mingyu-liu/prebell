@@ -83,7 +83,7 @@ describe("For AI agents page", () => {
     const out = await render("en");
     for (const fact of [
       "8:00 AM Eastern",
-      "usually updated after 8:35 with the 8:30 economic data",
+      "usually rebuilt after 8:35 with fresh prices and any 8:30 economic releases",
       "4:45 PM Eastern (1:45 PM on early-close days)",
       "no live quotes",
       "published brief or earnings check and carries its own time",
