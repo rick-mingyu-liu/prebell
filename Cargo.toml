@@ -1,3 +1,11 @@
 [workspace]
 resolver = "2"
 members = ["crates/core", "crates/generator"]
+
+# Debug builds: keep line numbers in our own crates' backtraces, drop full debug
+# info everywhere else. Cuts target/debug by more than half.
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false
