@@ -9,9 +9,12 @@ mod store;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use prebell_core::cover::card::{cards_tick, wants_card};
+use prebell_core::digest::buttondown::Buttondown;
+use prebell_core::digest::{digest_tick, gate, parse_mode, run_kind, RunKind, Sender};
 use prebell_core::earnings::calendar::{refresh_tick, yahoo_seeding, CalendarSource};
 use prebell_core::earnings::foreign::foreign_read;
-use prebell_core::earnings::run::{build_tick, poll_job};
+use prebell_core::earnings::run::{build_tick_with_shares, poll_job};
+use prebell_core::earnings::share::Shares;
 use prebell_core::edgar::{Edgar, BUILD_GAP_MS};
 use prebell_core::events::check::{check_tick, mark_checked, missing_table};
 use prebell_core::events::watch::StoreWatch;
@@ -239,13 +242,15 @@ impl JobRunner for Runner<'_> {
             }
             EarningsStep::Poll => {
                 let edgar = self.edgar()?;
-                let o = poll_job(t, self.fired, store, store, &edgar).await?;
+                let mut o = poll_job(t, self.fired, store, store, &edgar).await?;
                 if o.stale {
                     return Ok(("stale message, dropped".into(), false));
                 }
                 for e in &o.errors {
                     console_warn!("earnings poll: {e}");
                 }
+                // The digest only while DIGEST_ENABLED is exactly "true".
+                gate(&mut o.follow_ups, text(env, "DIGEST_ENABLED").as_deref());
                 for next in &o.follow_ups {
                     // Builds go to their own queue, the calendar to this one.
                     let sent = match env.queue(queue_for(next.job())) {
@@ -292,7 +297,23 @@ impl JobRunner for Runner<'_> {
                 let log = |m: &str| console_log!("{m}");
                 // Beside a poll on the other queue: slower, to stay under 10/s.
                 let edgar = edgar.paced(BUILD_GAP_MS);
-                let o = build_tick(t, store, store, &edgar, llm.as_ref(), &log).await?;
+                // The share move at build time: one Yahoo quote (cookie,
+                // crumb, quote), only while it fits the subrequest budget.
+                let yahoo = Yahoo::new(self.http.clone());
+                let shares = Shares {
+                    quotes: &yahoo,
+                    budget: &|| self.http.count(),
+                };
+                let o = build_tick_with_shares(
+                    t,
+                    store,
+                    store,
+                    &edgar,
+                    llm.as_ref(),
+                    Some(&shares),
+                    &log,
+                )
+                .await?;
                 let published = o.iter().any(|(_, outcome)| wants_card(outcome));
                 Ok((format!("{o:?}"), published))
             }
@@ -307,6 +328,30 @@ impl JobRunner for Runner<'_> {
                 let src: Option<&dyn CalendarSource> = if yahoo { Some(&cal) } else { None };
                 let o = refresh_tick(t, store, store, src, &ns, llm.as_ref()).await?;
                 Ok((format!("{o:?}"), false))
+            }
+            EarningsStep::Digest => {
+                // Read quietly: no key is the normal state until the owner
+                // sets it, and it means a dry run, not a failure.
+                let key = env.secret("BUTTONDOWN_API_KEY").ok().map(|v| v.to_string());
+                let kind = run_kind(text(env, "DIGEST_ENABLED").as_deref(), key.as_deref());
+                if kind == RunKind::Off {
+                    return Ok((
+                        "disabled (DIGEST_ENABLED is not true); skipped".into(),
+                        false,
+                    ));
+                }
+                let mode = parse_mode(text(env, "DIGEST_MODE").as_deref())?;
+                let log = |m: &str| console_log!("{m}");
+                let bd = key
+                    .as_deref()
+                    .filter(|_| kind == RunKind::Send)
+                    .map(|k| Buttondown::new(&self.http, k, &log));
+                let sender = bd.as_ref().map(|b| b as &dyn Sender);
+                let line = digest_tick(t, store, store, store, store, sender, mode).await?;
+                Ok(match kind {
+                    RunKind::Send => (line, false),
+                    _ => (format!("{line}; BUTTONDOWN_API_KEY is not set"), false),
+                })
             }
         }
     }

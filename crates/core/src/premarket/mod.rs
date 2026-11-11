@@ -377,6 +377,8 @@ pub(crate) async fn extract(
     Ok(kept)
 }
 
+/// The mover's verified reasons, or `None` when its news search or the
+/// extraction call failed (so no search completed).
 async fn mover_reasons(
     ns: &dyn NewsSearch,
     llm: &dyn LlmProvider,
@@ -385,7 +387,7 @@ async fn mover_reasons(
     change_pct: f64,
     now: DateTime<Utc>,
     d: &mut Diag,
-) -> Vec<NewsReason> {
+) -> Option<Vec<NewsReason>> {
     let Ok(hits) = fresh_news(
         ns,
         &format!("{name} ({ticker}) stock"),
@@ -396,7 +398,7 @@ async fn mover_reasons(
     .await
     else {
         d.search_err += 1;
-        return vec![];
+        return None;
     };
     let system = format!(
         "{} {EVENT_RULE}",
@@ -419,7 +421,7 @@ async fn mover_reasons(
         d,
     )
     .await
-    .unwrap_or_default()
+    .ok()
 }
 
 /// What the macro extraction asks for: the LLM's task and the prompt's
@@ -731,7 +733,9 @@ async fn to_mover(
     Mover {
         quote,
         name,
-        reasons,
+        search_failed: reasons.is_none(),
+        reasons: reasons.unwrap_or_default(),
+        fallback: None,
     }
 }
 

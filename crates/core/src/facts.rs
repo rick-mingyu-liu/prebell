@@ -84,6 +84,44 @@ pub struct Mover {
     pub quote: Quote,
     pub name: String,
     pub reasons: Vec<NewsReason>,
+    /// True when the mover's news search or reason extraction failed, so no
+    /// search completed and `reasons` being empty says nothing. Absent
+    /// (false) in facts stored before it existed.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub search_failed: bool,
+    /// What code can prove about a mover with no verified reason (`why`).
+    /// Absent when it has a reason or nothing is known, and in facts stored
+    /// before it existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fallback: Option<Fallback>,
+}
+
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum FallbackKind {
+    /// The earnings calendar marks the company's report as out, at a time
+    /// that precedes this session's move.
+    Results,
+    /// The mover is in the group of one of the facts' themes and moved the
+    /// same way. Co-movement, never a cause.
+    Theme,
+}
+
+/// The Why of a mover without a verified news reason, rendered by code
+/// (`why::fill`) from the calendar or the themes, never by the LLM.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct Fallback {
+    pub kind: FallbackKind,
+    /// "Reported results after Monday's close", "Fell with the networking
+    /// & optical group (median −4.63%); no company news found".
+    pub text_en: String,
+    pub text_zh: String,
+    /// This site's earnings check for the report: `/{lang}/p/{slug}`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub post_slug: Option<String>,
+    /// The SEC filing of the report, when there is no earnings check.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub filing_url: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -140,21 +178,42 @@ fn push_quote(out: &mut Vec<f64>, q: &Quote) {
 }
 
 /// Numbers a source quote allows, in base units. Without an explicit sign
-/// marker the quote carries no direction, so both signs are allowed.
+/// marker the quote carries no direction, so both signs are allowed. A
+/// range's first figure is allowed bare too ("2.32 to 2.36 million" allows
+/// 2.32 and 2.32 million).
 pub(crate) fn quote_numbers(quote: &str) -> Vec<f64> {
     let mut out = Vec::new();
     // `Num.value` is already scaled to base units.
     for n in numbers::extract(quote, Lang::En) {
-        out.push(n.value);
-        if !n.signed {
-            out.push(-n.value);
+        push_signed(&mut out, n.value, n.signed);
+        if n.from_range {
+            push_signed(&mut out, n.value / n.multiplier, n.signed);
         }
     }
     out
 }
 
-fn push_reason(out: &mut Vec<f64>, r: &NewsReason) {
+fn push_signed(out: &mut Vec<f64>, v: f64, signed: bool) {
+    out.push(v);
+    if !signed {
+        out.push(-v);
+    }
+}
+
+/// A reason's quote and its title, which is fetched with the article and
+/// never written by the model ("... Biggest Losses on Record, $2.9
+/// Trillion"). Only a title's figures count, not a list's small numbers
+/// ("3 Stocks to Buy Now, 7 to Avoid"): a percentage, a "$" amount, a size
+/// word or 11 and up.
+pub(crate) fn push_reason(out: &mut Vec<f64>, r: &NewsReason) {
     out.extend(quote_numbers(&r.quote));
+    for n in numbers::extract(&r.title, Lang::En) {
+        let figure =
+            n.is_percent || n.raw.contains('$') || n.multiplier != 1.0 || n.value.abs() >= 11.0;
+        if figure {
+            push_signed(out, n.value, n.signed);
+        }
+    }
 }
 
 /// Each theme's member moves and median, computed in code so the draft may
@@ -170,7 +229,10 @@ pub(crate) fn push_themes(out: &mut Vec<f64>, themes: &[Theme]) {
 }
 
 /// Every number a draft may cite: quote fields, numbers inside source quotes,
-/// and the trading year and its neighbours ("full-year 2026 guidance").
+/// a released report's figures on the watch list, and the trading year and
+/// its neighbours ("full-year 2026 guidance"). The other numbers of a
+/// figure's release sentence are allowed in "What to watch" only
+/// (`premarket::draft::write`).
 pub fn numbers_in_facts(f: &PremarketFacts) -> Vec<f64> {
     let year = f64::from(f.trading_date.year());
     let mut out = vec![year - 1.0, year, year + 1.0];
@@ -191,6 +253,9 @@ pub fn numbers_in_facts(f: &PremarketFacts) -> Vec<f64> {
         }
     }
     push_themes(&mut out, &f.themes);
+    if let Field::Value(items) = &f.watch_list {
+        out.extend(items.iter().flat_map(|i| i.figures.iter().map(|g| g.value)));
+    }
     out
 }
 
@@ -220,6 +285,8 @@ mod tests {
             quote: quote("ABC"),
             name: "ABC Inc".into(),
             reasons,
+            search_failed: false,
+            fallback: None,
         }
     }
     fn missing() -> Field<Quote> {
@@ -291,6 +358,43 @@ mod tests {
     }
 
     #[test]
+    fn mover_fallback_round_trips_and_is_absent_from_old_facts() {
+        let mut f = facts();
+        // No fallback: the stored JSON has no key, as before it existed.
+        let s = serde_json::to_string(&f).unwrap();
+        assert!(!s.contains("fallback"), "{s}");
+        f.losers = vec![Mover {
+            fallback: Some(Fallback {
+                kind: FallbackKind::Results,
+                text_en: "Reported results after Monday's close".into(),
+                text_zh: "已于周一盘后公布财报".into(),
+                post_slug: None,
+                filing_url: Some("https://www.sec.gov/Archives/edgar/data/1/x-index.htm".into()),
+            }),
+            ..mover(vec![])
+        }];
+        let s = serde_json::to_string(&f).unwrap();
+        assert!(
+            s.contains(r#""kind":"results""#) && !s.contains("post_slug"),
+            "{s}"
+        );
+        assert_eq!(serde_json::from_str::<PremarketFacts>(&s).unwrap(), f);
+        // A mover stored before the field existed reads as having none.
+        let old = r#"{"quote":{"symbol":"ABC","last":1.0,"prev_close":1.0,"change_pct":0.0,"volume":null},"name":"ABC Inc","reasons":[]}"#;
+        let old: Mover = serde_json::from_str(old).unwrap();
+        assert_eq!((old.fallback, old.search_failed), (None, false));
+        // `search_failed` is stored only when set.
+        assert!(!s.contains("search_failed"), "{s}");
+        let failed = Mover {
+            search_failed: true,
+            ..mover(vec![])
+        };
+        let j = serde_json::to_string(&failed).unwrap();
+        assert!(j.contains(r#""search_failed":true"#), "{j}");
+        assert_eq!(serde_json::from_str::<Mover>(&j).unwrap(), failed);
+    }
+
+    #[test]
     fn quote_text_numbers_are_collected_in_base_units() {
         let mut f = facts();
         f.gainers = vec![mover(vec![reason("rose 12% to $1.2 billion")])];
@@ -348,6 +452,55 @@ mod tests {
             more: 0,
             median_pct: -5.25,
             reasons: vec![reason("memory prices fell 7% in October")],
+        }
+    }
+
+    #[test]
+    fn a_reason_title_is_in_the_facts() {
+        // Recaps of 2026-11-05 and -06: the figures sit in the fetched
+        // headlines, not the quotes.
+        let mut n = Vec::new();
+        for title in [
+            "Stock Market Today: Nasdaq, S&P 500 Suffer Biggest Losses on Record, $2.9 Trillion — Live Updates",
+            "Tech stocks rebound after AI fears spark the worst rout in 19 months",
+        ] {
+            push_reason(
+                &mut n,
+                &NewsReason {
+                    url: "https://news.test/a".into(),
+                    title: title.into(),
+                    quote: "Stocks fell sharply in a broad-based selloff".into(),
+                    summary_en: String::new(),
+                },
+            );
+        }
+        for ok in [
+            "市值蒸发2.9万亿美元",
+            "a $2.9 trillion wipeout",
+            "19个月来最大跌幅",
+        ] {
+            assert_eq!(numbers::check(ok, Lang::Zh, &n), Ok(()), "{ok}");
+        }
+        for bad in [
+            "市值蒸发29万亿美元",
+            "a $2.8 trillion wipeout",
+            "18个月来最大跌幅",
+        ] {
+            assert!(numbers::check(bad, Lang::Zh, &n).is_err(), "{bad}");
+        }
+        // A list's small numbers are not figures.
+        let mut n = Vec::new();
+        push_reason(
+            &mut n,
+            &NewsReason {
+                url: "https://news.test/b".into(),
+                title: "3 Stocks to Buy Now, 7 to Avoid".into(),
+                quote: "Shares moved.".into(),
+                summary_en: String::new(),
+            },
+        );
+        for bad in ["NVDA fell 3%", "AMD rose 7%"] {
+            assert!(numbers::check(bad, Lang::En, &n).is_err(), "{bad}");
         }
     }
 

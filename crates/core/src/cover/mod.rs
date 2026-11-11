@@ -371,6 +371,8 @@ pub(crate) mod tests {
             quote: quote(sym, 50.0, pct),
             name: format!("{sym} Inc"),
             reasons: vec![],
+            search_failed: false,
+            fallback: None,
         }
     }
 

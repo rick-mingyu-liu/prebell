@@ -51,6 +51,10 @@ pub enum EarningsStep {
     /// filer (`earnings::foreign::foreign_read`), in its own invocation so
     /// its CPU never adds to the poll's.
     Foreign,
+    /// `digest`, queued by a Friday evening poll until next week's digest
+    /// is done (`digest::digest_tick`); on this queue for its serial
+    /// consumer, so two never save drafts at once.
+    Digest,
 }
 
 impl EarningsStep {
@@ -62,6 +66,7 @@ impl EarningsStep {
             EarningsStep::Calendar => "earnings:calendar",
             EarningsStep::Events => "events:check",
             EarningsStep::Foreign => "earnings:6k",
+            EarningsStep::Digest => "digest",
         }
     }
 }
@@ -87,6 +92,7 @@ impl JobKind {
             "earnings:calendar" => Some(JobKind::Earnings(EarningsStep::Calendar)),
             "events:check" => Some(JobKind::Earnings(EarningsStep::Events)),
             "earnings:6k" => Some(JobKind::Earnings(EarningsStep::Foreign)),
+            "digest" => Some(JobKind::Earnings(EarningsStep::Digest)),
             "cards" => Some(JobKind::Cards),
             _ => None,
         }
@@ -334,6 +340,7 @@ mod tests {
             EarningsStep::Calendar,
             EarningsStep::Events,
             EarningsStep::Foreign,
+            EarningsStep::Digest,
         ] {
             assert_eq!(JobKind::parse(step.job()), Some(JobKind::Earnings(step)));
             let queue = match step {

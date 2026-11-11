@@ -11,6 +11,7 @@
 //! Titles come from the glossary here, never from a row or an LLM.
 
 pub mod check;
+pub mod figures;
 pub mod parse;
 pub mod store;
 pub mod watch;

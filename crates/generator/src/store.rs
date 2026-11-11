@@ -6,8 +6,9 @@ use std::cell::Cell;
 
 use async_trait::async_trait;
 use prebell_core::cover::card::{CardStore, CoverPost};
+use prebell_core::digest::{DigestStore, PostLink};
 use prebell_core::facts::NewsReason;
-use prebell_core::store::{PostRow, RunRow, Store, TranslationRow};
+use prebell_core::store::{PostRow, ReportRow, RunRow, Store, TranslationRow};
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use worker::wasm_bindgen::JsValue;
@@ -547,6 +548,54 @@ impl Store for D1Store {
     async fn kv_set(&self, key: &str, value: &str, now: &str) -> Result<(), String> {
         self.kv_upsert(key, value, now).await
     }
+
+    async fn reported_between(&self, from: &str, to: &str) -> Result<Vec<ReportRow>, String> {
+        let rows: Vec<ReportRec> = self.all(REPORTED_BETWEEN, &[s(from), s(to)]).await?;
+        Ok(rows
+            .into_iter()
+            .map(|r| ReportRow {
+                ticker: r.ticker,
+                report_date: r.report_date,
+                time_slot: r.time_slot,
+                accepted_at: r
+                    .accepted_at
+                    .map(|a| a.split(' ').map(str::to_string).collect())
+                    .unwrap_or_default(),
+                proof_url: r.proof_url,
+                post_slug: r.post_slug,
+            })
+            .collect())
+    }
+}
+
+/// Reported calendar rows from `?1` to `?2` (ET dates) with the earnings
+/// check for each and the measured filing times, in one query. The check is
+/// an earnings post with a published EN translation, matched by ticker and ET
+/// date as the web's calendar matches them; CROSS JOIN pins the join order so
+/// SQLite starts from `idx_posts_trading_date`. `accepted_at` lists (space
+/// separated) the ticker's filings accepted from the UTC day before the
+/// report date to the UTC day after it, which covers the ET date; the reader
+/// keeps those on the ET date.
+pub(crate) const REPORTED_BETWEEN: &str = "SELECT c.ticker, c.report_date, c.time_slot, c.proof_url, x.slug AS post_slug, \
+     (SELECT GROUP_CONCAT(f2.accepted_at, ' ') FROM earnings_filings f2 WHERE f2.ticker = c.ticker \
+       AND f2.accepted_at >= date(c.report_date, '-1 day') AND f2.accepted_at < date(c.report_date, '+2 day')) AS accepted_at \
+     FROM earnings_calendar c \
+     LEFT JOIN (SELECT f.ticker, p.trading_date, MIN(p.slug) AS slug FROM posts p \
+       CROSS JOIN post_translations en ON en.post_id = p.id AND en.lang = 'en' AND en.status = 'published' \
+       CROSS JOIN earnings_filings f ON f.run_key = p.run_key \
+       WHERE p.trading_date BETWEEN ?1 AND ?2 AND p.published_at IS NOT NULL \
+       GROUP BY f.ticker, p.trading_date) x ON x.ticker = c.ticker AND x.trading_date = c.report_date \
+     WHERE c.report_date BETWEEN ?1 AND ?2 AND c.status = 'reported' \
+     ORDER BY c.report_date, c.ticker";
+
+#[derive(Deserialize)]
+struct ReportRec {
+    ticker: String,
+    report_date: String,
+    time_slot: String,
+    proof_url: Option<String>,
+    post_slug: Option<String>,
+    accepted_at: Option<String>,
 }
 
 /// Newest published posts with an SVG cover and a trading date on or after
@@ -604,6 +653,54 @@ impl CardStore for D1Store {
 
     async fn put_text(&self, key: &str, text: &str) -> Result<(), String> {
         Store::put_bytes(self, key, text.as_bytes(), "text/plain").await
+    }
+}
+
+/// The digest's posts: those whose English page is published, with that
+/// page's title and one-line summary, by type and trading-date range.
+/// `CROSS JOIN` keeps `posts` first, so the week is read through
+/// `idx_posts_trading_date` (D1 runs no ANALYZE, and without it SQLite would
+/// start from every published English translation);
+/// `apps/web/tests/digestquery.test.ts` checks the plan.
+pub(crate) const DIGEST_POSTS: &str = "SELECT p.slug, p.trading_date, f.ticker, \
+     en.title AS title, en.summary AS summary \
+     FROM posts p \
+     CROSS JOIN post_translations en ON en.post_id = p.id AND en.lang = 'en' \
+     LEFT JOIN earnings_filings f ON f.run_key = p.run_key \
+     WHERE p.content_type = ?1 AND p.trading_date BETWEEN ?2 AND ?3 AND p.published_at IS NOT NULL \
+     AND en.status = 'published' AND en.title IS NOT NULL AND en.title <> '' \
+     ORDER BY p.trading_date, p.published_at, p.id";
+
+#[derive(Deserialize)]
+struct DigestPostRec {
+    slug: String,
+    trading_date: String,
+    ticker: Option<String>,
+    title: String,
+    summary: Option<String>,
+}
+
+#[async_trait(?Send)]
+impl DigestStore for D1Store {
+    async fn published_posts(
+        &self,
+        content_type: &str,
+        from: &str,
+        to: &str,
+    ) -> Result<Vec<PostLink>, String> {
+        let rows: Vec<DigestPostRec> = self
+            .all(DIGEST_POSTS, &[s(content_type), s(from), s(to)])
+            .await?;
+        Ok(rows
+            .into_iter()
+            .map(|r| PostLink {
+                slug: r.slug,
+                trading_date: r.trading_date,
+                ticker: r.ticker,
+                title: r.title,
+                summary: r.summary.unwrap_or_default(),
+            })
+            .collect())
     }
 }
 

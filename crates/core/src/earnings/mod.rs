@@ -11,6 +11,7 @@ pub mod extract;
 pub mod facts;
 pub mod foreign;
 pub mod run;
+pub mod share;
 pub mod store;
 pub mod watchlist;
 pub mod xbrl;

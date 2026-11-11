@@ -12,7 +12,7 @@ use crate::cover::{
     brief_graphic, brief_lines, cover_movers, index_snapshot, CoverLines, IndexSnapshot, Session,
 };
 use crate::earnings::facts::EarningsFacts;
-use crate::facts::{push_themes, quote_numbers, Field, Mover, NewsReason, Quote, Theme, ThemeStat};
+use crate::facts::{push_reason, push_themes, Field, Mover, NewsReason, Quote, Theme, ThemeStat};
 use crate::numbers::Lang;
 use crate::premarket::draft::Draft;
 use crate::premarket::{
@@ -23,6 +23,7 @@ use crate::providers::{LlmProvider, MarketData, NewsSearch};
 use crate::run::{tick_content, Content, Hooks, TickOutcome};
 use crate::store::Store;
 use crate::themes::{detect_all, RECAP_RULES, THEME_MAX};
+use crate::why;
 
 /// `(label, Yahoo symbol)`: the indexes themselves, not ETF proxies, so the
 /// levels match what readers see quoted at the close.
@@ -138,13 +139,13 @@ pub fn numbers_in_facts(f: &RecapFacts) -> Vec<f64> {
     for m in f.gainers.iter().chain(&f.losers) {
         push_quote(&mut out, &m.quote);
         for r in &m.reasons {
-            out.extend(quote_numbers(&r.quote));
+            push_reason(&mut out, r);
         }
     }
     for items in [&f.macro_items, &f.after_hours] {
         if let Field::Value(items) = items {
             for r in items {
-                out.extend(quote_numbers(&r.quote));
+                push_reason(&mut out, r);
             }
         }
     }
@@ -169,6 +170,7 @@ async fn mover(
         .to_string();
     let ticker = &quote.symbol;
     let query = format!("{name} ({ticker}) stock");
+    // `None` when the search or the extraction call failed.
     let reasons = match fresh_news(ns, &query, HITS_PER_MOVER, now, d).await {
         Ok(hits) => {
             let system = format!(
@@ -193,17 +195,19 @@ async fn mover(
                 d,
             )
             .await
-            .unwrap_or_default()
+            .ok()
         }
         Err(_) => {
             d.search_err += 1;
-            vec![]
+            None
         }
     };
     Mover {
         quote,
         name,
-        reasons,
+        search_failed: reasons.is_none(),
+        reasons: reasons.unwrap_or_default(),
+        fallback: None,
     }
 }
 
@@ -477,11 +481,22 @@ pub async fn build_facts(
     )
     .await;
     let after_hours = after_hours(ns, llm, trading_date, now, &reported, &mut d).await;
+    // One read for the reported results that explain a mover without news.
+    let needed = gainers.iter().chain(&losers).any(|m| m.reasons.is_empty());
+    let (reports, reports_err) = why::read_reports(store, trading_date, needed).await;
+    let counts = why::fill(
+        gainers.iter_mut().chain(losers.iter_mut()),
+        &themes,
+        &reports,
+        trading_date,
+        Session::Recap,
+    );
     let mut diagnostics = d.lines_as("indexes");
     diagnostics.push(format!(
         "reported={} reported_err={reported_err}",
         reported.len()
     ));
+    diagnostics.extend(why::diagnostics(counts, reports_err));
     RecapFacts {
         trading_date,
         as_of_utc: now,
@@ -830,6 +845,82 @@ mod tests {
         assert_eq!(batches[0].len(), universe().len());
         assert!(!batches[0].iter().any(|s| s.starts_with('^')));
         assert_eq!(m.sessions.borrow().len(), 4 + universe().len());
+    }
+
+    #[tokio::test]
+    async fn a_mover_without_news_gets_its_reported_results_from_one_read() {
+        use crate::facts::FallbackKind;
+        use crate::store::ReportRow;
+        let m = md(&[q("NVDA", 182.35, 3.08, Some(210_000_000))]);
+        let s = MemStore::default();
+        let row = |date: &str, accepted: &str| ReportRow {
+            ticker: "NVDA".into(),
+            report_date: date.into(),
+            time_slot: "amc".into(),
+            accepted_at: vec![accepted.into()],
+            proof_url: None,
+            post_slug: Some("nvda-q3-fy2027-earnings".into()),
+        };
+        // A report after today's close does not explain today's session.
+        // Filed at 16:05 ET on Wednesday and at 16:10 ET today.
+        *s.reports.borrow_mut() = vec![
+            row("2026-10-28", "2026-10-28T20:05:00Z"),
+            row("2026-10-29", "2026-10-29T20:10:00Z"),
+        ];
+        let f = build_facts(&m, &ns(vec![]), &llm(vec![]), &s, date(), now(), &|| 0).await;
+        let fb = f.gainers[0].fallback.as_ref().unwrap();
+        assert_eq!(fb.kind, FallbackKind::Results);
+        assert_eq!(fb.text_en, "Reported results after Wednesday's close");
+        assert_eq!(fb.text_zh, "已于周三盘后公布财报");
+        assert_eq!(fb.post_slug.as_deref(), Some("nvda-q3-fy2027-earnings"));
+        assert_eq!(
+            f.diagnostics.last().unwrap(),
+            "why results=1 theme=0 reports_err=0"
+        );
+        // A store error costs only the fallback.
+        s.fail_reports.set(true);
+        let f = build_facts(&m, &ns(vec![]), &llm(vec![]), &s, date(), now(), &|| 0).await;
+        assert_eq!(f.gainers[0].fallback, None);
+        assert_eq!(
+            f.diagnostics.last().unwrap(),
+            "why results=0 theme=0 reports_err=1"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_no_news_tail_needs_a_completed_search() {
+        // Semiconductors rise together; none of the three has news.
+        let m = md(&[
+            q("NVDA", 182.35, 4.0, Some(210_000_000)),
+            q("AMD", 250.0, 4.5, Some(50_000_000)),
+            q("AVGO", 350.0, 5.0, Some(20_000_000)),
+        ]);
+        // NVDA's search completes empty; AMD's extraction call fails; AVGO's
+        // search fails.
+        let n = ns(vec![
+            ("Nvidia (NVDA) stock", Ok(vec![])),
+            (
+                "Advanced Micro Devices (AMD) stock",
+                Ok(vec![hit("https://news.test/amd", "AMD shares rose today.")]),
+            ),
+        ]);
+        let l = llm(vec![("Ticker: AMD", Err(ProviderError::Http(500)))]);
+        let f = build_facts(&m, &n, &l, &MemStore::default(), date(), now(), &|| 0).await;
+        assert_eq!(f.themes[0].group, "Semiconductors");
+        let why = |sym: &str| {
+            let m = f.gainers.iter().find(|m| m.quote.symbol == sym).unwrap();
+            (
+                m.search_failed,
+                m.fallback.as_ref().unwrap().text_en.as_str(),
+            )
+        };
+        let group = "Rose with the semiconductors group (median +4.50%)";
+        assert_eq!(
+            why("NVDA"),
+            (false, &*format!("{group}; no company news found"))
+        );
+        assert_eq!(why("AMD"), (true, group));
+        assert_eq!(why("AVGO"), (true, group));
     }
 
     #[tokio::test]
@@ -2384,6 +2475,8 @@ mod run_tests {
                 quote: q("FIS", 60.0, -23.67),
                 name: "Fidelity National".into(),
                 reasons: vec![],
+                search_failed: false,
+                fallback: None,
             }],
             macro_items: Field::Missing {
                 reason: "n/a".into(),

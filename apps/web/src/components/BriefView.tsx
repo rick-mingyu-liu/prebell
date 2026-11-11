@@ -115,7 +115,7 @@ export default function BriefView({ data, locale, signup }: BriefViewProps) {
       )}
 
       <AuthorBlock locale={locale} />
-      {signup && <SignupForm source="post" locale={locale} />}
+      {signup && <SignupForm source="post" />}
       {(adjacent.prev || adjacent.next) && (
         <nav className="adjacent" aria-label={t("brief.adjacent")}>
           {adjacent.prev && (

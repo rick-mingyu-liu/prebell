@@ -241,7 +241,7 @@ export default function HomeView({ data, locale, signup }: { data: HomeData; loc
           )}
         </aside>
       </div>
-      {signup && <SignupForm source="home" locale={locale} />}
+      {signup && <SignupForm source="home" />}
       <PartnersStrip locale={locale} />
     </>
   );

@@ -1,5 +1,6 @@
 import "server-only";
 import { getCloudflareContext } from "@opennextjs/cloudflare";
+import type { Locale } from "../i18n/routing";
 
 /**
  * Server-only. The Buttondown key from the Worker secrets, or null when it is unset, empty or there
@@ -14,7 +15,10 @@ export function buttondownKey(): string | null {
   }
 }
 
-/** Server-only. Whether pages show the weekly-digest form: only once the Buttondown key is set. */
-export function signupEnabled(): boolean {
-  return buttondownKey() !== null;
+/**
+ * Server-only. Whether a page shows the weekly-digest form: on English pages only (the digest is one
+ * English email), and only once the Buttondown key is set.
+ */
+export function signupEnabled(locale: Locale): boolean {
+  return locale === "en" && buttondownKey() !== null;
 }

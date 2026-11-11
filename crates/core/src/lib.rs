@@ -4,6 +4,7 @@ pub mod claude;
 pub mod clock;
 pub mod cover;
 pub mod deepseek;
+pub mod digest;
 pub mod earnings;
 pub mod edgar;
 pub mod events;
@@ -19,6 +20,7 @@ pub mod schedule;
 pub mod store;
 pub mod tavily;
 pub mod themes;
+pub mod why;
 pub mod yahoo;
 pub mod yahoo_calendar;
 

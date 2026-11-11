@@ -98,8 +98,9 @@ fn loss_before(quote: &str, at: usize) -> bool {
 pub fn label_keywords(m: Metric) -> &'static [&'static str] {
     match m {
         Metric::Revenue => &["revenue", "revenues", "net sales", "total revenues"],
-        // A loss is reported on the net income line.
-        Metric::NetIncome => &["net income", "net loss"],
+        // A loss is reported on the net income line; Berkshire's is "Net
+        // earnings attributable to Berkshire shareholders".
+        Metric::NetIncome => &["net income", "net loss", "net earnings"],
         Metric::EpsGaap | Metric::EpsNonGaap => &["diluted", "per share", "eps"],
         Metric::GrossMargin => &["gross margin"],
         Metric::OperatingMargin => &["operating margin"],
@@ -354,7 +355,9 @@ fn names_metric(
     }
     // A REIT's funds from operations is not earnings; reconciling items
     // are not net income ("Total adjustments to net income (344)",
-    // "Adjustments to reconcile net income to net cash ...").
+    // "Adjustments to reconcile net income to net cash ..."), nor is a
+    // part or a wider measure of it: pre-tax, continuing operations,
+    // comprehensive income.
     let other = match m {
         Metric::NetIncome => &[
             "adjustment",
@@ -363,6 +366,11 @@ fn names_metric(
             "reconciliation",
             "pro forma",
             "pro-forma",
+            "before income taxes",
+            "pre-tax",
+            "pretax",
+            "continuing operations",
+            "comprehensive",
         ][..],
         _ => &[
             "ffo",
@@ -393,9 +401,10 @@ fn names_metric(
     }
     let near_after: String = after.chars().take(30).collect();
     if m == Metric::NetIncome
-        && ["per share", "per diluted share", "per basic share"]
+        && (["per share", "per diluted share", "per basic share"]
             .iter()
             .any(|w| has_word(label, w) || has_word(&near_after, w))
+            || per_class_share(label).is_some())
     {
         return Err("a per share figure is not net income".into());
     }
@@ -413,7 +422,14 @@ fn names_metric(
     // $3.09" under an FFO group) is that measure.
     let group = group.filter(|_| per_share);
     let words = label_keywords(m);
-    let own = per_share_after || words.iter().any(|w| has_word(label, w));
+    // Berkshire's "Net earnings per average equivalent Class B Share": net
+    // earnings per share of a class, not basic ("Net income per common
+    // share — basic").
+    let per_class = per_share
+        && net_per_class_share(label).is_some()
+        && !has_word(label, "basic")
+        && !has_word(&near_after, "basic");
+    let own = per_share_after || per_class || words.iter().any(|w| has_word(label, w));
     let any = |s: &str, ws: &[&str]| ws.iter().any(|w| has_word(s, w));
     let basic = |s: &str| has_word(s, "basic") && !has_word(s, "diluted");
     let group_basis = group.is_some_and(|g| {
@@ -469,6 +485,31 @@ fn names_metric(
         "the quote's label does not name {} (needs one of {words:?})",
         words[0]
     ))
+}
+
+/// The words between "per" and "share" in a label naming a share of some
+/// kind ("per average equivalent Class B Share"), up to four.
+fn per_class_share(label: &str) -> Option<&str> {
+    static R: OnceLock<Regex> = OnceLock::new();
+    R.get_or_init(|| {
+        Regex::new(r"(?i)\bper\s+((?:[a-z]+\s+){1,4})shares?\b").expect("valid built-in regex")
+    })
+    .captures(label)
+    .and_then(|c| c.get(1))
+    .map(|m| m.as_str())
+}
+
+/// The same words when the label names net earnings, income or loss per
+/// that share ("Net earnings per average equivalent Class B Share").
+fn net_per_class_share(label: &str) -> Option<&str> {
+    static R: OnceLock<Regex> = OnceLock::new();
+    R.get_or_init(|| {
+        Regex::new(r"(?i)\bnet\s+(?:earnings|income|loss)\s+per\s+((?:[a-z]+\s+){1,4})shares?\b")
+            .expect("valid built-in regex")
+    })
+    .captures(label)
+    .and_then(|c| c.get(1))
+    .map(|m| m.as_str())
 }
 
 /// A table row's revenue label is the company's total revenue, not a
@@ -555,6 +596,8 @@ pub fn verify_figure(text: &str, metric: Metric, raw: &RawFigure) -> Result<Figu
         _ => {}
     }
     let scale = scale_of(&raw.scale).ok_or_else(|| format!("unknown scale {:?}", raw.scale))?;
+    // A per-share row's table scale, for its other cells (`Figure`).
+    let mut table_scale = None;
     let scale = match unit {
         Unit::Usd if n.multiplier == 1.0 => {
             // A bare table number: only a scale the document itself states,
@@ -626,6 +669,9 @@ pub fn verify_figure(text: &str, metric: Metric, raw: &RawFigure) -> Result<Figu
                 if in_row && !current_column(table.as_ref(), &quote, &cells, col) {
                     return Err(CURRENT_COLUMN.into());
                 }
+                if in_row {
+                    table_scale = table.as_ref().map(|t| t.scale);
+                }
                 // A lone per-share cell may be prose: only its group counts.
                 if let Some(e) = table
                     .as_ref()
@@ -664,6 +710,7 @@ pub fn verify_figure(text: &str, metric: Metric, raw: &RawFigure) -> Result<Figu
         amount,
         scale,
         quote,
+        table_scale,
     })
 }
 
@@ -1156,10 +1203,26 @@ fn period_words_only(s: &str) -> bool {
         "non",
         "unaudited",
     ];
+    // Berkshire's "Third Quarter First Nine Months"; a bare "Fourth
+    // Quarter" titles a block and is no label line.
+    const ORDINALS: &[&str] = &["first", "second", "third", "fourth"];
     static R: OnceLock<Regex> = OnceLock::new();
+    static LENGTH: OnceLock<Regex> = OnceLock::new();
+    static YEAR: OnceLock<Regex> = OnceLock::new();
     let r = R.get_or_init(|| Regex::new(r"[A-Za-z]+").expect("valid built-in regex"));
-    r.find_iter(&strip_parens(s))
-        .all(|w| WORDS.contains(&w.as_str().to_ascii_lowercase().as_str()))
+    let length = LENGTH.get_or_init(|| {
+        Regex::new(r"(?i)\b(?:months|weeks|quarters?|years?|q[1-4]|ytd|year-to-date)\b")
+            .expect("valid built-in regex")
+    });
+    let year = YEAR.get_or_init(|| Regex::new(r"\b(?:19|20)\d\d\b").expect("valid built-in regex"));
+    let s = strip_parens(s);
+    let mut ordinal = false;
+    let words = r.find_iter(&s).all(|w| {
+        let w = w.as_str().to_ascii_lowercase();
+        ordinal |= ORDINALS.contains(&w.as_str());
+        WORDS.contains(&w.as_str()) || ORDINALS.contains(&w.as_str())
+    });
+    words && (!ordinal || length.find_iter(&s).count() >= 2 || year.is_match(&s))
 }
 
 /// The years a column header line lists ("2025 Q4 2026 Q4 Change 2025
@@ -1403,14 +1466,26 @@ fn verify_period(text: &str, v: &Value) -> Result<FiscalPeriod, String> {
 /// The text has a revenue or sales label with a number soon after it, in
 /// the same sentence ("Total revenues 8,893", "Revenue for the third
 /// quarter was a record $8.9 billion"); boilerplate such as "projected
-/// revenues, costs and plans" does not count. Erring towards a match only
-/// keeps revenue required.
+/// revenues, costs and plans" does not count, nor does a gain, loss or
+/// proceeds on sales ("realized gains on sales of investments of $1.7
+/// billion", Berkshire's). Erring towards a match only keeps revenue
+/// required.
 fn states_revenue(text: &str) -> bool {
-    static R: OnceLock<Regex> = OnceLock::new();
-    R.get_or_init(|| {
-        Regex::new(r"(?i)\b(?:revenues?|sales)\b[^.\d]{0,60}\d").expect("valid built-in regex")
-    })
-    .is_match(text)
+    static WORD: OnceLock<Regex> = OnceLock::new();
+    static FIGURE: OnceLock<Regex> = OnceLock::new();
+    static ON_SALES: OnceLock<Regex> = OnceLock::new();
+    let word = WORD
+        .get_or_init(|| Regex::new(r"(?i)\b(?:revenues?|sales)\b").expect("valid built-in regex"));
+    let figure =
+        FIGURE.get_or_init(|| Regex::new(r"^[^.\d]{0,60}\d").expect("valid built-in regex"));
+    let on_sales = ON_SALES.get_or_init(|| {
+        Regex::new(r"(?i)\b(?:gains?|loss|losses|proceeds)(?:\s*\((?:gains?|loss|losses)\))?\s+(?:on|from)\s+(?:the\s+)?$")
+            .expect("valid built-in regex")
+    });
+    // Each word on its own: "Gains on sales of businesses and total
+    // revenues were $93.4 billion" states revenue.
+    word.find_iter(text)
+        .any(|m| !on_sales.is_match(&text[..m.start()]) && figure.is_match(&text[m.end()..]))
 }
 
 /// The claimed quarter re-anchored to a line in the exhibit's opening that
@@ -1433,16 +1508,59 @@ fn period_from_headline(text: &str, v: &Value) -> Option<FiscalPeriod> {
     })
 }
 
+/// The quote names an item a release gives for a swing in profit: an
+/// impairment, a charge, a gain or loss on a deal, a tax or legal item.
+/// "Net loss was $2.4 billion" alone names none. ASCII classes only
+/// (`(?-u)`): a Unicode pattern costs several times more to compile, and
+/// the Worker pays that once per isolate.
+fn names_item(quote: &str) -> bool {
+    static R: OnceLock<Regex> = OnceLock::new();
+    R.get_or_init(|| {
+        Regex::new(r"(?i-u)\b(?:impair[a-z]*|write-?downs?|write-?offs?|wr(?:itten|ote)\s+(?:down|off)|charges?|restructuring|severance|litigation|lawsuits?|legal|settle(?:d|ments?)|tax(?:es)?|one-?time|non-?recurring|non-?cash|gains?|loss(?:es)?\s+on|extinguishment|remeasurement|mark-to-market|valuation\s+allowance|divestitures?|(?:transaction|merger|acquisition|integration)(?:-related)?\s+(?:costs?|expenses?))\b")
+            .expect("valid built-in regex")
+    })
+    .is_match(quote)
+}
+
+/// The quote attributes a result to something, in the words 8-K releases
+/// use: "primarily due to", "driven by", "as a result of", "resulting
+/// from", "reflects", or a net income, net loss or EPS figure that
+/// "included" an item. "Results included a $50 million restructuring
+/// charge" or "a tax rate of 21%" names an item but attributes nothing.
+/// ("attributable to" is left out: "net income attributable to Acme
+/// shareholders" names whose income it is, not why.)
+fn attributes(quote: &str) -> bool {
+    static R: OnceLock<Regex> = OnceLock::new();
+    R.get_or_init(|| {
+        Regex::new(r"(?i-u)\b(?:due\s+to|driven\s+by|as\s+a\s+result\s+of|result(?:s|ed|ing)?\s+from|reflect(?:s|ed|ing)?|because\s+of|caused\s+by|attributed\s+to)\b|\b(?:net\s+(?:income|loss|earnings)|(?:loss|earnings)\s+per\s+(?:diluted\s+)?share|eps)\b[a-z0-9$,.%() -]{0,80}\binclud(?:e|es|ed|ing)\b")
+            .expect("valid built-in regex")
+    })
+    .is_match(quote)
+}
+
 /// Notes whose quote is in the exhibit and whose summary uses only the
-/// quote's numbers and no markup.
-fn verify_notes(text: &str, v: Option<&Value>) -> Vec<Note> {
-    v.and_then(Value::as_array)
+/// quote's numbers and no markup, each with its table's scale when it
+/// quotes a table row (`row_scale`). With `causes`, a note marked as the
+/// cause of a swing keeps the mark only when its quote names an item and
+/// attributes a result to it, and such notes come first so the cap never
+/// drops them; otherwise no note is one.
+fn verify_notes(text: &str, v: Option<&Value>, causes: bool) -> Vec<Note> {
+    let lines = Lines::new(text);
+    let mut notes: Vec<Note> = v
+        .and_then(Value::as_array)
         .into_iter()
         .flatten()
         .filter_map(|it| serde_json::from_value::<Note>(it.clone()).ok())
-        .map(|n| Note {
-            quote: collapse(&n.quote),
-            summary_en: collapse(&n.summary_en),
+        .map(|n| {
+            let quote = collapse(&n.quote);
+            let (scale, current) = row_scale(&lines, &quote).unwrap_or((1.0, None));
+            Note {
+                cause: causes && n.cause && names_item(&n.quote) && attributes(&n.quote),
+                scale,
+                current,
+                quote,
+                summary_en: collapse(&n.summary_en),
+            }
         })
         .filter(|n| !n.summary_en.is_empty())
         .filter(|n| reject_markup("summary_en", &n.summary_en).is_ok())
@@ -1455,8 +1573,95 @@ fn verify_notes(text: &str, v: Option<&Value>) -> Vec<Note> {
             };
             verify_reason(text, &r)
         })
-        .take(MAX_NOTES)
-        .collect()
+        .collect();
+    // Stable: the model's order otherwise.
+    notes.sort_by_key(|n| !n.cause);
+    notes.truncate(MAX_NOTES);
+    notes
+}
+
+/// Whether the period lengths on year line `j` and the line above it name
+/// the quarter first ("Three Months Ended September Year-To-Date
+/// September").
+fn quarter_first_above(lines: &Lines, j: usize) -> bool {
+    static R: OnceLock<Regex> = OnceLock::new();
+    let r = R.get_or_init(|| {
+        Regex::new(r"(?i)\b(?:(three\s+months|thirteen\s+weeks|quarters?|q[1-4])|six\s+months|nine\s+months|twelve\s+months|years?|ytd|year-to-date)\b")
+            .expect("valid built-in regex")
+    });
+    let above = j.checked_sub(1).map_or("", |a| lines.line(a, usize::MAX));
+    let labels = format!("{above} {}", lines.line(j, usize::MAX));
+    r.captures(&labels).is_some_and(|c| c.get(1).is_some())
+}
+
+/// Lines a scale heading may sit above a row it scales.
+const ROW_HEADING_LINES: usize = 60;
+
+/// The scale of the table `quote` is a whole row of, and the row's
+/// current-period cell, which its year header must give. A row is a whole
+/// line of the exhibit with at least two cells, no size word, and nothing
+/// but cells after its first one (footnote markers and "%" aside: "Acme
+/// opened 52 new stores and closed 3 ..." is prose). Its scale heading
+/// starts a line or is parenthesised ("All amounts are in millions,
+/// except ..." inside a sentence is not one) and sits at most
+/// `ROW_HEADING_LINES` lines above it.
+fn row_scale(lines: &Lines, quote: &str) -> Option<(f64, Option<f64>)> {
+    static MARKER: OnceLock<Regex> = OnceLock::new();
+    let marker = MARKER.get_or_init(|| Regex::new(r"\(\w{1,2}\)").expect("valid built-in regex"));
+    let t = Table::find(lines, quote)?;
+    let (i, top) = (lines.line_of(t.quote_at), lines.line_of(t.heading_at));
+    let whole_line = lines.starts[i] == t.quote_at && lines.line(i, usize::MAX) == quote;
+    let heading_starts =
+        lines.doc[t.heading_at..].starts_with('(') || lines.starts[top] == t.heading_at;
+    let sized = extract_numbers(quote, Lang::En)
+        .iter()
+        .any(|n| n.multiplier != 1.0);
+    let cells = row_cells(quote);
+    let first_end = cells.first()?.1;
+    let after = marker.replace_all(&quote[first_end..], "");
+    let row = whole_line
+        && heading_starts
+        && i - top <= ROW_HEADING_LINES
+        && !sized
+        && cells.len() >= 2
+        && !after.contains(|c: char| c.is_alphabetic());
+    if !row {
+        return None;
+    }
+    // The row's periods: the nearest line above it that ends in two or
+    // more years ("Net Income – As Reported 2026 2025 2026 2025"), one per
+    // cell. Without one, or one that does not settle which cell is the
+    // current quarter, the row is not scaled at all: EMR's "2026 Q4 ...
+    // Adjusted Segment EBITA" columns are measures a sentence could swap.
+    static YEARS: OnceLock<Regex> = OnceLock::new();
+    let years_re = YEARS.get_or_init(|| {
+        Regex::new(r"(?:\b(?:19|20)\d\d\b\s*){2,}$").expect("valid built-in regex")
+    });
+    let header = (top..i).rev().find_map(|j| {
+        let line = lines.line(j, t.quote_at);
+        years_re.find(line).map(|m| {
+            let years: Vec<u32> = m
+                .as_str()
+                .split_whitespace()
+                .filter_map(|y| y.parse().ok())
+                .collect();
+            (j, years)
+        })
+    });
+    let (j, years) = header?;
+    let latest = *years.iter().max()?;
+    let repeated = years.iter().filter(|&&y| y == latest).count() > 1;
+    if years.len() != cells.len() || repeated && !quarter_first_above(lines, j) {
+        return None;
+    }
+    let col = years.iter().position(|&y| y == latest)?;
+    let current = Some(
+        quote[cells[col].0..cells[col].1]
+            .replace(',', "")
+            .parse()
+            .ok()?,
+    );
+    Some((t.scale, current))
 }
 
 fn user_prompt(text: &str, company: &str, ticker: &str) -> String {
@@ -1583,8 +1788,8 @@ pub fn from_reply(text: &str, v: &Value) -> Extracted {
     Extracted {
         fiscal_period,
         metrics,
-        guidance: Field::Value(verify_notes(text, v.get("guidance"))),
-        highlights: Field::Value(verify_notes(text, v.get("highlights"))),
+        guidance: Field::Value(verify_notes(text, v.get("guidance"), false)),
+        highlights: Field::Value(verify_notes(text, v.get("highlights"), true)),
     }
 }
 
@@ -3231,6 +3436,90 @@ mod tests {
     }
 
     #[test]
+    fn a_note_quoting_a_table_row_keeps_its_scale() {
+        // SO's highlights table, as html_to_text renders it.
+        let text = "Southern Company\nFinancial Highlights\n(In Millions Except Earnings Per Share)\nThree Months Ended September Year-To-Date September\nNet Income – As Reported 2026 2025 2026 2025\nTraditional Electric Operating Companies $2,272 $1,920 $4,654 $3,994\nSouthern Power 52 3 30 141\nSouthern Company today reported third-quarter earnings of $2.0 billion, or $1.77 per share.";
+        let v = json!([
+            {"quote": "Traditional Electric Operating Companies $2,272 $1,920 $4,654 $3,994", "summary_en": "Traditional Electric Operating Companies net income was $2,272 versus $1,920.", "scale": 7},
+            {"quote": "Southern Power 52 3 30 141", "summary_en": "Southern Power net income was 52 versus 3."},
+            {"quote": "Southern Company today reported third-quarter earnings of $2.0 billion, or $1.77 per share.", "summary_en": "Earnings were $2.0 billion, or $1.77 per share."},
+            // Part of a row is not the row.
+            {"quote": "Traditional Electric Operating Companies $2,272 $1,920", "summary_en": "Net income was $2,272 versus $1,920."}
+        ]);
+        let notes = verify_notes(text, Some(&v), true);
+        let rows: Vec<(f64, Option<f64>)> = notes.iter().map(|n| (n.scale, n.current)).collect();
+        assert_eq!(
+            rows,
+            [
+                (1e6, Some(2272.0)),
+                (1e6, Some(52.0)),
+                (1.0, None),
+                (1.0, None)
+            ]
+        );
+        // Prose under a scale heading is no table row, and a heading inside
+        // a sentence is no scale heading.
+        let text = "Acme Corp\n(In millions, except per share amounts)\nTotal revenues $9,000 $8,000\nNet income $900 $800\nAcme opened 52 new stores and closed 3 underperforming locations in the quarter.\nThe board approved a dividend of 24 cents and a buyback of 150 shares per holder.\nAll amounts are in millions, except per share data, unless noted.\nHighlights\nCustomers 4,512 4,100";
+        let v = json!([
+            {"quote": "Acme opened 52 new stores and closed 3 underperforming locations in the quarter.", "summary_en": "Acme opened 52 stores and closed 3."},
+            {"quote": "The board approved a dividend of 24 cents and a buyback of 150 shares per holder.", "summary_en": "A dividend of 24 cents."},
+            {"quote": "Customers 4,512 4,100", "summary_en": "Customers were 4,512 versus 4,100."}
+        ]);
+        let notes = verify_notes(text, Some(&v), true);
+        assert_eq!(notes.len(), 3);
+        assert!(notes.iter().all(|n| n.scale == 1.0), "{notes:?}");
+        let text = "Acme Corp reports results\nAll amounts are in millions, except per share data, unless noted.\nHighlights\nCustomers 4,512 4,100";
+        let notes = verify_notes(
+            text,
+            Some(
+                &json!([{"quote": "Customers 4,512 4,100", "summary_en": "Customers were 4,512."}]),
+            ),
+            true,
+        );
+        assert_eq!(notes[0].scale, 1.0);
+        // A row with no year line above it, or one that does not settle the
+        // current quarter, is not scaled: EMR's segment EBITA columns are
+        // measures of one quarter, AMGN's are GAAP and non-GAAP per year.
+        let emr = "(dollars in millions)\nPage 19\n2026 Q4 Adjusted Segment EBITA EBIT EBIT Margin Amortization of Intangibles Restructuring and Related Costs Adjusted Segment EBITA Adjusted Segment EBITA Margin\nControl Systems & Software $297 23.8% $99 $16 $412 33.1%";
+        let amgn = "(In millions, except per-share data)\nThree months ended September 30, 2026 Three months ended September 30, 2025\nGAAP Non-GAAP GAAP Non-GAAP\nNet income $3,864 $3,520 $3,216 $3,055";
+        for (text, quote) in [
+            (
+                emr,
+                "Control Systems & Software $297 23.8% $99 $16 $412 33.1%",
+            ),
+            (amgn, "Net income $3,864 $3,520 $3,216 $3,055"),
+        ] {
+            let notes = verify_notes(
+                text,
+                Some(&json!([{"quote": quote, "summary_en": "A row."}])),
+                true,
+            );
+            assert_eq!((notes[0].scale, notes[0].current), (1.0, None), "{quote}");
+        }
+        // The same row is still no company figure.
+        let q = "Traditional Electric Operating Companies $2,272 $1,920 $4,654 $3,994";
+        for m in [Metric::Revenue, Metric::NetIncome] {
+            assert!(
+                verify_figure(text, m, &raw("$2,272", "millions", false, q)).is_err(),
+                "{m:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_per_share_row_records_its_table_scale() {
+        let amd = "(In millions, except per share amounts)\nThree Months Ended\nSeptember 26, 2026 June 27, 2026 September 27, 2025\nNon-GAAP net income / earnings per share $3,471 $2.09 $2,760 $1.66 $1,965 $1.20";
+        let q = "Non-GAAP net income / earnings per share $3,471 $2.09 $2,760 $1.66 $1,965 $1.20";
+        let f = verify_figure(amd, Metric::EpsNonGaap, &raw("$2.09", "units", false, q)).unwrap();
+        assert_eq!(f.table_scale, Some(1e6));
+        // Prose has no table scale.
+        let t = "(In millions)\nNon-GAAP EPS grew 35% YoY to $0.88.";
+        let q = "Non-GAAP EPS grew 35% YoY to $0.88.";
+        let f = verify_figure(t, Metric::EpsNonGaap, &raw("$0.88", "units", false, q)).unwrap();
+        assert_eq!(f.table_scale, None);
+    }
+
+    #[test]
     fn unverified_reasons_cite_the_quote() {
         let text = "(In millions)\nTotal revenues $9,000 $8,000";
         let v = json!({"metrics": {"revenue": {"amount": "8,000", "scale": "millions", "negative": false, "quote": "Total revenues $9,000 $8,000"}}});
@@ -3807,6 +4096,97 @@ mod tests {
         ));
     }
 
+    /// A synthetic release in the shape of CHTR's third quarter of 2026 (a
+    /// year-earlier profit, a loss now), for a fictional company: the
+    /// wording is made up, not any company's.
+    pub(crate) const SWING: &str = "Acme Cable Reports Third Quarter 2026 Results\n\
+        Net loss attributable to Acme shareholders totaled $2.4 billion in the third quarter of 2026, compared to net income of $1.1 billion in the third quarter of 2025.\n\
+        The third quarter net loss was primarily due to a $4.6 billion non-cash impairment of franchise rights recorded in connection with the Metro Transactions.\n\
+        Acme closed the Metro Transactions on August 1, 2026 and launched a new operating model.\n\
+        Diluted $(20.50) $8.34";
+
+    #[test]
+    fn a_swing_keeps_the_release_s_cause_first() {
+        let cause = "The third quarter net loss was primarily due to a $4.6 billion non-cash impairment of franchise rights recorded in connection with the Metro Transactions.";
+        let closed = "Acme closed the Metro Transactions on August 1, 2026 and launched a new operating model.";
+        let note = |quote: &str, summary: &str, cause: bool| json!({"quote": quote, "summary_en": summary, "cause": cause});
+        let v = json!({
+            "highlights": [
+                note(closed, "Acme closed the Metro Transactions and launched a new operating model.", false),
+                note(cause, "The loss was mainly due to a $4.6 billion non-cash impairment of franchise rights.", true),
+            ],
+            "guidance": [note(closed, "Acme closed the Metro Transactions.", true)],
+        });
+        let x = from_reply(SWING, &v);
+        let (Field::Value(h), Field::Value(g)) = (&x.highlights, &x.guidance) else {
+            panic!("{x:?}");
+        };
+        // The cause comes first, quoted from the release; the rest keep their order.
+        assert_eq!(h.len(), 2);
+        assert!(h[0].cause && h[0].quote == cause, "{h:?}");
+        assert!(!h[1].cause);
+        // Guidance is never a cause.
+        assert!(!g[0].cause);
+    }
+
+    #[test]
+    fn a_cause_must_be_quoted_from_the_release_and_name_an_item() {
+        let v = json!({"highlights": [
+            // Invented: not in the release.
+            {"quote": "The net loss was due to a $4.6 billion goodwill write-down.", "summary_en": "A $4.6 billion goodwill write-down caused the loss.", "cause": true},
+            // In the release, but it names no item: kept as an ordinary highlight.
+            {"quote": "Acme closed the Metro Transactions on August 1, 2026 and launched a new operating model.", "summary_en": "Acme closed the Metro Transactions.", "cause": true},
+            // The summary claims an amount its quote does not give.
+            {"quote": "The third quarter net loss was primarily due to a $4.6 billion non-cash impairment of franchise rights", "summary_en": "A $7 billion impairment caused the loss.", "cause": true},
+        ]});
+        let Field::Value(h) = from_reply(SWING, &v).highlights else {
+            panic!()
+        };
+        assert_eq!(h.len(), 1, "{h:?}");
+        assert!(!h[0].cause);
+        assert!(h[0].quote.starts_with("Acme closed"));
+        for (q, item) in [
+            ("primarily due to a $4.6 billion non-cash impairment", true),
+            ("includes a $310 million restructuring charge", true),
+            ("reflecting a gain on the sale of its towers business", true),
+            ("a discrete tax benefit of $0.40 per share", true),
+            (
+                "Net loss attributable to Acme shareholders totaled $2.4 billion",
+                false,
+            ),
+            ("launched a new operating model", false),
+        ] {
+            assert_eq!(names_item(q), item, "{q}");
+        }
+        // An item the release names but does not give as a reason is an
+        // ordinary highlight.
+        for (q, cause) in [
+            ("The third quarter net loss was primarily due to a $4.6 billion non-cash impairment", true),
+            ("Net loss for the quarter included a $4.6 billion non-cash impairment charge", true),
+            ("Diluted EPS of $(20.50) includes a $310 million restructuring charge", true),
+            ("The decline in net income reflects a $1.2 billion loss on the sale of the towers business", true),
+            ("Net income increased, driven by a gain on the sale of its towers business", true),
+            ("The net loss resulted from a $900 million litigation settlement", true),
+            ("Results included a $50 million restructuring charge", false),
+            ("The effective tax rate was 21% for the quarter", false),
+            ("Operating income benefited from gains in broadband pricing", false),
+            ("Net income attributable to Acme shareholders was $1.1 billion, with a tax rate of 21%", false),
+        ] {
+            assert_eq!(names_item(q) && attributes(q), cause, "{q}");
+        }
+    }
+
+    #[test]
+    fn notes_without_a_cause_field_still_parse() {
+        let v = json!({"highlights": [{"quote": "Acme closed the Metro Transactions on August 1, 2026", "summary_en": "Acme closed the Metro Transactions."}]});
+        let Field::Value(h) = from_reply(SWING, &v).highlights else {
+            panic!()
+        };
+        assert!(!h[0].cause);
+        // Stored without the field, as before it existed.
+        assert!(!serde_json::to_string(&h[0]).unwrap().contains("cause"));
+    }
+
     struct FailLlm;
     #[async_trait(?Send)]
     impl LlmProvider for FailLlm {
@@ -3830,5 +4210,234 @@ mod tests {
             "AAPL",
         );
         assert_eq!(p.to_ascii_lowercase().matches("</document>").count(), 1);
+    }
+
+    /// Berkshire Hathaway's third-quarter 2026 release (0001193125-26-452530),
+    /// which states after-tax earnings only: no revenue line, and earnings
+    /// per average equivalent Class A and Class B share, not "diluted".
+    const BRK: &str = include_str!("../../tests/fixtures/edgar_ex991_BRK.htm");
+
+    #[test]
+    fn a_release_with_no_revenue_line_waives_revenue_whatever_it_sold() {
+        let none = json!({"metrics": {}});
+        let reason = |t: &str| match from_reply(t, &none).metrics.revenue {
+            Field::Missing { reason } => reason,
+            Field::Value(_) => panic!("no figure was given"),
+        };
+        // "gains on sales of investments of $1.7 billion" is a gain, not
+        // sales.
+        assert_eq!(reason(&html_to_text(BRK)), NOT_STATED);
+        for t in [
+            "Investment gains include after-tax realized gains on sales of investments of $1.7 billion.",
+            "Losses on sales of securities of $12 million were recorded.",
+            "Proceeds from sales of businesses were $310 million.",
+            "Net gain (loss) on sales of assets 14 (3)",
+        ] {
+            assert_eq!(reason(t), NOT_STATED, "{t}");
+        }
+        // A sales or revenue figure next to one is still required.
+        for t in [
+            "Net sales of $4.2 billion; gains on sales of investments of $1.7 billion.",
+            "Net sales of $4.2 billion, including gains on sales of assets of $12 million.",
+            "Gains on sales of businesses and total revenues were $93.4 billion in the quarter.",
+            "We booked losses on sales of securities while net sales grew to $8.2 billion.",
+            "Proceeds from sales of businesses and revenues of $5.1 billion were recorded.",
+            "Gains on sales of investments of $1.7 billion. Revenues were $93.4 billion.",
+            "Sales of $8.9 billion rose 5%.",
+            "Same-store sales rose 4%.",
+        ] {
+            assert_ne!(reason(t), NOT_STATED, "{t}");
+        }
+    }
+
+    #[test]
+    fn net_earnings_per_share_of_the_listed_class_is_eps() {
+        let text = html_to_text(BRK);
+        let row_b = "Net earnings per average equivalent Class B Share $10.33 $14.28 $26.92 $22.14";
+        let row_a =
+            "Net earnings per average equivalent Class A Share $15,502 $21,413 $40,377 $33,214";
+        let f = verify_figure(
+            &text,
+            Metric::EpsGaap,
+            &raw("$10.33", "units", false, row_b),
+        )
+        .unwrap();
+        assert_eq!(f.value, 10.33);
+        // The prior-year and nine-month columns, the Class A figure (a
+        // share worth 1,500 Class B shares), the share count and the
+        // operating earnings row are not this quarter's EPS.
+        for (amount, q) in [
+            ("$14.28", row_b),
+            ("$26.92", row_b),
+            ("$15,502", row_a),
+            ("2,139,557,257", "Average equivalent Class B shares outstanding 2,139,557,257 2,157,335,139 2,150,404,500 2,157,335,139"),
+            ("12,705", "Operating earnings 12,705 13,485 37,034 34,286"),
+            ("1,500", "Note: Per share amounts for Class B shares are 1/1,500thof those shown for Class A shares."),
+        ] {
+            for m in [Metric::EpsGaap, Metric::EpsNonGaap] {
+                let r = verify_figure(&text, m, &raw(amount, "units", false, q));
+                assert!(r.is_err(), "{m:?} {q:?}: {r:?}");
+            }
+        }
+        // Other per-something-share rows name no EPS.
+        for q in [
+            "Net earnings per basic share $1.54 $1.86",
+            "Book value per Class B share $1.54 $1.86",
+            "Operating earnings per Class B share $1.54 $1.86",
+            "Dividends declared per Class B share $1.54 $1.86",
+            "Net income per common share — basic $1.54 $1.86",
+            "Net earnings per common share, basic $1.54 $1.86",
+            "Net income per common share (basic) $1.54 $1.86",
+        ] {
+            let t = format!(
+                "(In millions, except per share amounts)\nThree Months Ended\n2026 2025\n{q}"
+            );
+            let r = verify_figure(&t, Metric::EpsGaap, &raw("$1.54", "units", false, q));
+            assert!(r.is_err(), "{q:?}: {r:?}");
+        }
+        // A per-class-share row is not net income.
+        let r = verify_figure(
+            &text,
+            Metric::NetIncome,
+            &raw("$10.33", "millions", false, row_b),
+        );
+        assert!(r.is_err(), "{r:?}");
+        // "Third Quarter First Nine Months" puts the quarter first; with the
+        // nine months first the quarter is not the first column.
+        let swapped = text.replacen(
+            "Third Quarter First Nine Months\n2026 2025 2026 2025\nNet earnings attributable",
+            "First Nine Months Third Quarter\n2026 2025 2026 2025\nNet earnings attributable",
+            1,
+        );
+        assert_ne!(swapped, text);
+        let r = verify_figure(
+            &swapped,
+            Metric::EpsGaap,
+            &raw("$10.33", "units", false, row_b),
+        );
+        assert!(r.is_err(), "{r:?}");
+        // Ordinals count on a label line naming two periods, not on a bare
+        // "Fourth Quarter" that titles a second block: its row's latest-year
+        // column is no current column the header above can vouch for.
+        let col = |t: &str, amount: &str, q: &str| {
+            verify_figure(t, Metric::Revenue, &raw(amount, "millions", false, q))
+        };
+        let q = "Total revenues $130 $120 $480 $450";
+        assert_eq!(
+            col(
+                &format!("(In millions)\nFourth Quarter Full Year\n2026 2025 2026 2025\n{q}"),
+                "$130",
+                q
+            )
+            .map(|f| f.value),
+            Ok(130e6)
+        );
+        let q = "Total revenues $125 $130";
+        let r = col(
+            &format!("(In millions)\n2025 2026\nTotal revenues $100 $120\nFourth Quarter\n{q}"),
+            "$130",
+            q,
+        );
+        assert!(r.is_err(), "{r:?}");
+        // The whole reply: revenue waived, Class B EPS kept.
+        let reply = json!({"metrics": {"revenue": null, "eps_gaap_diluted": {"amount": "$10.33", "scale": "units", "negative": false, "quote": row_b}}});
+        let x = from_reply(&text, &reply);
+        assert_eq!(
+            x.metrics.revenue,
+            Field::Missing {
+                reason: NOT_STATED.into()
+            }
+        );
+        assert!(matches!(&x.metrics.eps_gaap, Field::Value(f) if f.value == 10.33));
+    }
+
+    #[test]
+    fn net_earnings_names_net_income() {
+        let text = html_to_text(BRK);
+        let row =
+            "Net earnings attributable to Berkshire shareholders $22,112 $30,796 $57,885 $47,769";
+        let f = verify_figure(
+            &text,
+            Metric::NetIncome,
+            &raw("$22,112", "millions", false, row),
+        )
+        .unwrap();
+        assert_eq!(f.value, 22_112e6);
+        // The prior-year and nine-month columns, operating earnings (a
+        // non-GAAP measure here) and the per-share rows are not net income.
+        for (amount, q) in [
+            ("$30,796", row),
+            ("$57,885", row),
+            ("12,705", "Operating earnings 12,705 13,485 37,034 34,286"),
+            (
+                "$15,502",
+                "Net earnings per average equivalent Class A Share $15,502 $21,413 $40,377 $33,214",
+            ),
+        ] {
+            let r = verify_figure(&text, Metric::NetIncome, &raw(amount, "millions", false, q));
+            assert!(r.is_err(), "{q:?}: {r:?}");
+        }
+        // Others' share, a segment's, and per-share rows, in a table of
+        // millions.
+        for q in [
+            "Net earnings attributable to noncontrolling interests 1,210 1,180",
+            "Segment net earnings 1,210 1,180",
+            "Insurance segment net earnings 1,210 1,180",
+            "Net earnings per common share 1,210 1,180",
+            "Net earnings per Class B share 1,210 1,180",
+        ] {
+            let t = format!("(In millions)\nThree Months Ended September 30,\n2026 2025\n{q}");
+            let r = verify_figure(&t, Metric::NetIncome, &raw("1,210", "millions", false, q));
+            assert!(r.is_err(), "{q:?}: {r:?}");
+        }
+        // Adjusted net earnings is not GAAP net income, as adjusted net
+        // income is not.
+        let t = "(In millions)\nThree Months Ended September 30,\n2026 2025\nAdjusted net earnings 1,210 1,180\nAdjusted net income 1,210 1,180";
+        for q in [
+            "Adjusted net earnings 1,210 1,180",
+            "Adjusted net income 1,210 1,180",
+        ] {
+            let reply = json!({"metrics": {"net_income": {"amount": "1,210", "scale": "millions", "negative": false, "quote": q}}});
+            assert!(
+                matches!(&from_reply(t, &reply).metrics.net_income, Field::Missing { reason } if reason.contains("non-GAAP wording")),
+                "{q}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_partial_or_broader_income_is_not_net_income() {
+        // Pre-tax, continuing-operations and comprehensive income, in
+        // either wording, are other measures; "excluding" items is
+        // non-GAAP wording, like "adjusted".
+        for net in ["Net income", "Net earnings"] {
+            for q in [
+                format!("{net} from continuing operations 1,210 1,180"),
+                format!("{net} before income taxes 1,210 1,180"),
+                format!("Pre-tax {} 1,210 1,180", net.to_lowercase()),
+                format!("Pretax {} 1,210 1,180", net.to_lowercase()),
+                format!("Comprehensive {} 1,210 1,180", net.to_lowercase()),
+                format!(
+                    "Total comprehensive income ({}) 1,210 1,180",
+                    net.to_lowercase()
+                ),
+                format!("{net}, excluding special items 1,210 1,180"),
+                format!("{net} excluding special items 1,210 1,180"),
+            ] {
+                let t = format!("(In millions)\nThree Months Ended September 30,\n2026 2025\n{q}");
+                let reply = json!({"metrics": {"net_income": {"amount": "1,210", "scale": "millions", "negative": false, "quote": q}}});
+                let x = from_reply(&t, &reply);
+                assert!(
+                    matches!(x.metrics.net_income, Field::Missing { .. }),
+                    "{q}: {:?}",
+                    x.metrics.net_income
+                );
+            }
+            // The plain row still counts.
+            let q = format!("{net} 1,210 1,180");
+            let t = format!("(In millions)\nThree Months Ended September 30,\n2026 2025\n{q}");
+            let r = verify_figure(&t, Metric::NetIncome, &raw("1,210", "millions", false, &q));
+            assert_eq!(r.map(|f| f.value), Ok(1_210e6), "{q}");
+        }
     }
 }

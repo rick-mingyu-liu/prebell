@@ -1,0 +1,38 @@
+{
+  "quoteResponse": {
+    "result": [
+      {
+        "language": "en-US",
+        "region": "US",
+        "quoteType": "EQUITY",
+        "typeDisp": "Equity",
+        "quoteSourceName": "Nasdaq Real Time Price",
+        "triggerable": true,
+        "currency": "USD",
+        "marketState": "POST",
+        "exchange": "NMS",
+        "shortName": "Charter Communications, Inc.",
+        "longName": "Charter Communications, Inc.",
+        "fullExchangeName": "NasdaqGS",
+        "exchangeTimezoneName": "America/New_York",
+        "preMarketPrice": 325.72,
+        "preMarketChange": -14.28,
+        "preMarketChangePercent": -4.2,
+        "preMarketTime": 1794316320,
+        "regularMarketPrice": 330.12,
+        "regularMarketChange": -9.88,
+        "regularMarketChangePercent": -2.905882,
+        "regularMarketTime": 1794344400,
+        "regularMarketPreviousClose": 340.0,
+        "regularMarketVolume": 3120554,
+        "postMarketPrice": 310.31,
+        "postMarketChange": -19.81,
+        "postMarketChangePercent": -6.000848,
+        "postMarketTime": 1794345720,
+        "earningsTimestamp": 1794312000,
+        "symbol": "CHTR"
+      }
+    ],
+    "error": null
+  }
+}
