@@ -1,5 +1,6 @@
 import { getCloudflareContext } from "@opennextjs/cloudflare";
 import { getDb } from "@/lib/db";
+import { mcpEnabled } from "@/lib/mcpswitch";
 import { siteOrigin } from "@/lib/seo";
 import { cachedSitemap, type EdgeCache, sitemapEntries, sitemapXml } from "@/lib/sitemap";
 
@@ -15,6 +16,6 @@ export async function GET(req: Request) {
     req.url,
     cache,
     (p) => ctx.waitUntil(p),
-    async () => sitemapXml(await sitemapEntries(getDb(), await siteOrigin())),
+    async () => sitemapXml(await sitemapEntries(getDb(), await siteOrigin(), mcpEnabled())),
   );
 }

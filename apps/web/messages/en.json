@@ -5,6 +5,7 @@
     "home": "Home",
     "archive": "Archive",
     "about": "About",
+    "mcp": "For AI agents",
     "legal": "Privacy & Terms",
     "otherLang": "中文",
     "otherLangLabel": "Read in Chinese",
@@ -58,6 +59,29 @@
     "p2": "Every post is generated automatically from public market data and news. Numbers are checked against the source data before publishing, and each post lists its sources. Times are US Eastern.",
     "p3": "English is published first; the Chinese version follows.",
     "whoHeading": "Who is behind it"
+  },
+  "mcp": {
+    "title": "For AI agents",
+    "description": "Connect your own AI agent to PreBell's read-only MCP server: the earnings calendar, earnings checks with their sources, and the latest brief.",
+    "intro": "PreBell runs a read-only MCP (Model Context Protocol) server. Your own AI agent can use it to read the earnings calendar, the earnings checks (each figure with the sentence it came from, plus the SEC filing link) and the latest brief or recap. There is no sign-in: everything it serves is already public on this site.",
+    "addressHeading": "Server address",
+    "connectHeading": "Connect your agent",
+    "claudeCode": "In Claude Code, run:",
+    "otherClients": "In another client, add it as a remote MCP server (Streamable HTTP) with the address above.",
+    "toolsHeading": "Tools",
+    "tools": {
+      "earnings_calendar": "Who reports earnings on which days and whether each date is confirmed, with the day's economic events (Fed decisions, jobs report, CPI).",
+      "earnings_report": "One company's latest results as PreBell checked them: the key figures, each with the press-release sentence it came from, and links to the check, the SEC filing and the press release. Without a check, it says whether the company has reported, or its next date on the calendar.",
+      "latest_brief": "The newest premarket brief or after-close recap: index futures or closes, the biggest movers with the published reason, and the day's events to watch."
+    },
+    "toolsLang": "Titles and summaries come in English or Chinese; quoted filing text and mover reasons stay in English.",
+    "askHeading": "Things to ask your agent",
+    "ask": ["Who reports earnings this week?", "Has Apple reported yet, and what were the numbers?", "What did this morning's brief say?"],
+    "limitsHeading": "Limits",
+    "limits": [
+      "The brief is a snapshot written at set times, not a live feed: the premarket brief comes out from 8:00 AM Eastern on trading days and is updated at 8:35, and the after-close recap from 4:45 PM Eastern. Before today's brief is out, your agent gets the most recent one, with a note saying when the next is due.",
+      "There are no live quotes: prices are the ones in the brief, as of its time."
+    ]
   },
   "legal": {
     "title": "Privacy & Terms",
