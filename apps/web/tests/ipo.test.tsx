@@ -687,6 +687,9 @@ describe("review fixes: what the reader refuses to print", () => {
     expect(await at(20, 24)).toBe(-16.67);
     expect(await at(24, 24)).toBe(0);
     expect(await at(30.0003, 24)).toBe(25);
+    // From the close as printed: $24.004 prints as $24.00, so the change is 0.00%, not +0.02%.
+    expect(await at(24.004, 24)).toBe(0);
+    expect(await at(24.006, 24)).toBe(0.04);
     expect(await at(31.2, 24, null)).toBe(30);
     expect(await at(31.2, null)).toBeNull();
     expect(await at(31.2, 0)).toBeNull();
@@ -708,23 +711,28 @@ describe("review fixes: what the reader refuses to print", () => {
     expect(out).not.toContain("Recent moves");
   });
 
-  it("writes valuations to three significant digits, the same magnitude in both languages, and hides implausible ones", () => {
+  it("writes valuations as stored, the unit from the raw value, promoted only when the printed number reaches it", () => {
     const table: [number, string | null, string | null][] = [
       [1.4e12, "$1.4 trillion", "1.4万亿美元"],
+      [1.45e12, "$1.45 trillion", "1.45万亿美元"],
+      [1.375e12, "$1.375 trillion", "1.375万亿美元"],
       [2e12, "$2 trillion", "2万亿美元"],
       [965e9, "$965 billion", "9650亿美元"],
-      [999_999_999_999, "$1 trillion", "1万亿美元"],
-      [999.9996e9, "$1 trillion", "1万亿美元"],
-      [999.6e9, "$1 trillion", "1万亿美元"],
-      [1.2345e12, "$1.23 trillion", "1.23万亿美元"],
+      [999.6e9, "$999.6 billion", "9996亿美元"],
+      [29.25e9, "$29.25 billion", "292.5亿美元"],
+      [1.2345e12, "$1.2345 trillion", "1.2345万亿美元"],
       [61.5e9, "$61.5 billion", "615亿美元"],
       [1.5e9, "$1.5 billion", "15亿美元"],
-      [999_999_999, "$1 billion", "10亿美元"],
       [250e6, "$250 million", "2.5亿美元"],
-      [99_950_000, "$100 million", "1亿美元"],
       [5e6, "$5 million", "500万美元"],
       [1e6, "$1 million", "100万美元"],
       [1e14, "$100 trillion", "100万亿美元"],
+      // The promotion edge: float noise that prints as 1000 (10000) moves up a unit, never "$1,000 billion".
+      [999_999_999_999, "$1 trillion", "1万亿美元"],
+      [999.9996e9, "$1 trillion", "1万亿美元"],
+      [999_999_999.9, "$1 billion", "10亿美元"],
+      [99_999_999.99, "$100 million", "1亿美元"],
+      [999.999e9, "$999.999 billion", "9999.99亿美元"],
       [999_999, null, null],
       [0, null, null],
       [-1.4e12, null, null],
@@ -736,8 +744,9 @@ describe("review fixes: what the reader refuses to print", () => {
     for (const [usd, en, zh] of table) {
       expect(fmtValuation(usd, "en"), String(usd)).toBe(en);
       expect(fmtValuation(usd, "zh"), String(usd)).toBe(zh);
-      expect(String(fmtValuation(usd, "en"))).not.toMatch(/1,000|\d{4}/);
-      expect(String(fmtValuation(usd, "zh"))).not.toMatch(/10000/);
+      // Never a number that has reached the next unit: four integer digits in English, five in Chinese.
+      expect(String(fmtValuation(usd, "en"))).not.toMatch(/^\$(\d{4}|\d,\d{3})/);
+      expect(String(fmtValuation(usd, "zh"))).not.toMatch(/^\d{5}/);
     }
   });
 

@@ -418,8 +418,9 @@ function sessionOf(r: TradingRow): IpoSession | null {
     close,
     volume,
     ipoPrice,
-    // Computed from the two numbers printed beside it, never read from the stored change_pct.
-    changePct: ipoPrice === null ? null : round2(((close - ipoPrice) / ipoPrice) * 100),
+    // Computed from the two numbers printed beside it (each rounded to cents as printed), never read from the
+    // stored change_pct, so the three numbers on the line always agree.
+    changePct: ipoPrice === null ? null : round2(((round2(close) - round2(ipoPrice)) / round2(ipoPrice)) * 100),
     sourceUrl: yahooUrl(r.source_url),
   };
 }
@@ -521,7 +522,8 @@ export async function listIpoSlugs(db: D1Like): Promise<{ slug: string; updatedA
 
 const PRICE = new Intl.NumberFormat("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 const COUNT = new Intl.NumberFormat("en-US", { maximumFractionDigits: 0 });
-const SCALED = new Intl.NumberFormat("en-US", { maximumFractionDigits: 2, useGrouping: false });
+/** Six significant digits: enough to drop float noise (1.4e12 / 1e12), never enough to round a reported figure. */
+const SCALED = new Intl.NumberFormat("en-US", { maximumSignificantDigits: 6, useGrouping: false });
 
 /** A share count with separators: "825,000,000". */
 export const fmtShares = (n: number): string => COUNT.format(n);
@@ -532,22 +534,34 @@ export const fmtSharePrice = (n: number): string => PRICE.format(n);
 export const VALUATION_MIN = 1e6;
 export const VALUATION_MAX = 1e14;
 
+/** Units largest first: [divisor, English word or Chinese suffix]. */
+const EN_UNITS: [number, string][] = [
+  [1e12, "trillion"],
+  [1e9, "billion"],
+  [1e6, "million"],
+];
+const ZH_UNITS: [number, string][] = [
+  [1e12, "万亿美元"],
+  [1e8, "亿美元"],
+  [1e4, "万美元"],
+];
+
 /**
  * A stored valuation in words, or null when it is not a plausible one (non-finite, under $1 million or over $100
- * trillion). The number is first rounded to three significant digits, and the unit is chosen from the rounded
- * value, so both languages show the same magnitude and nothing reads "$1,000 billion": "$1.4 trillion",
- * "$965 billion", "$1.23 trillion"; "1.4万亿美元", "9650亿美元", "1.23万亿美元".
+ * trillion). The unit comes from the raw value and the number is printed as stored (only float noise is rounded
+ * away), so the figure is the one the quote beside it gives: "$1.375 trillion", "$29.25 billion", "$999.6 billion";
+ * "1.375万亿美元", "292.5亿美元", "9996亿美元". Only when the printed number itself reaches the next unit (1000, or
+ * 10000 for 亿 and 万) is it promoted, so nothing reads "$1,000 billion" or "10000亿美元".
  */
 export function fmtValuation(usd: number, lang: Lang): string | null {
   if (!Number.isFinite(usd) || usd < VALUATION_MIN || usd > VALUATION_MAX) return null;
-  const v = Number(usd.toPrecision(3));
-  const scaled = (unit: number) => SCALED.format(v / unit);
-  if (lang === "zh") {
-    if (v >= 1e12) return `${scaled(1e12)}万亿美元`;
-    if (v >= 1e8) return `${scaled(1e8)}亿美元`;
-    return `${scaled(1e4)}万美元`;
+  const units = lang === "zh" ? ZH_UNITS : EN_UNITS;
+  const next = lang === "zh" ? 10000 : 1000;
+  let i = units.findIndex(([d]) => usd >= d);
+  let n = SCALED.format(usd / units[i][0]);
+  if (Number(n) >= next && i > 0) {
+    i -= 1;
+    n = SCALED.format(usd / units[i][0]);
   }
-  if (v >= 1e12) return `$${scaled(1e12)} trillion`;
-  if (v >= 1e9) return `$${scaled(1e9)} billion`;
-  return `$${scaled(1e6)} million`;
+  return lang === "zh" ? `${n}${units[i][1]}` : `$${n} ${units[i][1]}`;
 }
