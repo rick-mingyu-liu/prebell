@@ -8,7 +8,7 @@
  * on www.sec.gov, the trading source only on finance.yahoo.com).
  */
 
-import { isDate } from "./earnings";
+import { addDays, isDate, todayEt } from "./earnings";
 import { round2 } from "./format";
 import type { D1Like, Lang } from "./posts";
 
@@ -113,7 +113,7 @@ export interface IpoItem {
   publishedOn: string;
   /** Word for word from the article, in its own language. */
   quote: string;
-  /** The statement in the page's language, else English; null for a view or when there is none. */
+  /** A company move's statement in the page's language, else English; null for every other kind or when none. */
   statement: string | null;
   /** A view's speaker as the article names them (a view without one is not shown). */
   speaker: string | null;
@@ -146,9 +146,11 @@ export interface IpoPage extends IpoSummary {
   views: IpoItem[];
   /**
    * The earliest session and the latest by date, each null when its row is unusable (never replaced by the other);
-   * `latest` is also null when there is one session. Null when neither can be shown.
+   * `latest` is also null when there is one session. `firstIsDayOne` is true only when the date line is a trading
+   * date (`date_source = 'trading'`) equal to the earliest session's date: only then is that session the first
+   * trading day (the recap may have missed day one). Null when neither session can be shown.
    */
-  trading: { first: IpoSession | null; latest: IpoSession | null } | null;
+  trading: { first: IpoSession | null; latest: IpoSession | null; firstIsDayOne: boolean } | null;
   updatedAt: string | null;
 }
 
@@ -227,16 +229,25 @@ const DATE_PAIRS: Record<DateStatus, DateSource[]> = {
 };
 
 /**
- * The date line, or null ("date not set") for a withdrawn IPO, a malformed date, a status and source the contract
- * does not pair, or a news or filing date with no named source (an unattributed date is not shown). A link that
- * fails its source's check is dropped; the date stays.
+ * True when a reported (news) date has passed: it is before yesterday, ET (contract: the generator drops such a date,
+ * but only while IPO_WATCH_ENABLED is on, so the site applies the same rule). `today` is the ET date.
  */
-function dateLine(r: WatchRow, status: IpoStatus): IpoDate | null {
+export function reportedDatePassed(date: string, today: string): boolean {
+  return date < addDays(today, -1);
+}
+
+/**
+ * The date line, or null ("date not set") for a withdrawn IPO, a malformed date, a status and source the contract
+ * does not pair, a news or filing date with no named source (an unattributed date is not shown), or a reported
+ * date that has passed (before yesterday, ET). A link that fails its source's check is dropped; the date stays.
+ */
+function dateLine(r: WatchRow, status: IpoStatus, today: string): IpoDate | null {
   const date = dateOf(r.first_trade_date);
   const dateStatus = r.date_status as DateStatus;
   const source = r.date_source as DateSource;
   if (status === "withdrawn" || !date || !DATE_STATUSES.includes(dateStatus) || !DATE_SOURCES.includes(source)) return null;
   if (!DATE_PAIRS[dateStatus].includes(source)) return null;
+  if (dateStatus === "reported" && reportedDatePassed(date, today)) return null;
   const sourceName = source === "trading" ? "Yahoo Finance" : text(r.date_source_name);
   if (!sourceName) return null;
   const url = r.date_source_url;
@@ -251,23 +262,29 @@ function dateLine(r: WatchRow, status: IpoStatus): IpoDate | null {
   };
 }
 
-function summary(r: WatchRow, lang: Lang): IpoSummary | null {
+function summary(r: WatchRow, lang: Lang, today: string): IpoSummary | null {
   const slug = typeof r.slug === "string" && isIpoSlug(r.slug) ? r.slug : null;
   const name = (lang === "zh" ? text(r.name_zh) : null) ?? text(r.name);
   const status = r.status as IpoStatus;
   if (!slug || !name || !IPO_STATUSES.includes(status)) return null;
-  return { slug, name, symbol: text(r.symbol), status, date: dateLine(r, status) };
+  return { slug, name, symbol: text(r.symbol), status, date: dateLine(r, status, today) };
 }
 
 const SUMMARY_COLUMNS = `slug, name, name_zh, symbol, status, first_trade_date, date_status, date_source,
   date_source_name, date_source_url, date_quote, date_as_of`;
 
 /**
- * Tracked IPOs whose first trading day falls from `from` to `to` (ET dates), withdrawn ones left out, by date
- * then name: one read on idx_ipo_watch_date. Before migration 0009 is applied the table is missing; the calendar
- * then shows no IPOs.
+ * Tracked IPOs whose first trading day falls from `from` to `to` (ET dates), withdrawn ones and passed reported
+ * dates left out (`today` is the ET date), by date then name: one read on idx_ipo_watch_date. Before migration 0009
+ * is applied the table is missing; the calendar then shows no IPOs.
  */
-export async function listIposBetween(db: D1Like, from: string, to: string, lang: Lang): Promise<IpoSummary[]> {
+export async function listIposBetween(
+  db: D1Like,
+  from: string,
+  to: string,
+  lang: Lang,
+  today: string = todayEt(),
+): Promise<IpoSummary[]> {
   try {
     const { results } = await db
       .prepare(
@@ -277,7 +294,7 @@ export async function listIposBetween(db: D1Like, from: string, to: string, lang
       )
       .bind(from, to)
       .all<WatchRow>();
-    return results.flatMap((r) => summary(r, lang) ?? []).filter((s) => s.date !== null);
+    return results.flatMap((r) => summary(r, lang, today) ?? []).filter((s) => s.date !== null);
   } catch {
     return [];
   }
@@ -295,7 +312,8 @@ export const LISTED_DAYS = 30;
 
 /**
  * The calendar page's "IPO watch" list: every IPO not yet listed (filed, range set, priced) and those listed in
- * the last 30 days (`today` is the ET date), dated ones first by date, then "date not set", each group by name.
+ * the last 30 days (`today` is the ET date), dated ones first by date, then "date not set" (which includes a
+ * reported date that has passed), each group by name.
  * The table is the hand-kept list (a handful a year), so the read is bounded by it and capped at 20 rows.
  * Empty before migration 0009.
  */
@@ -311,7 +329,10 @@ export async function listIpoWatch(db: D1Like, today: string, lang: Lang): Promi
       )
       .bind(since.toISOString().slice(0, 10))
       .all<WatchRow>();
-    return results.flatMap((r) => summary(r, lang) ?? []);
+    // Ordered again here: a passed reported date reads "date not set" though its row still has the date.
+    const out = results.flatMap((r) => summary(r, lang, today) ?? []);
+    const key = (i: IpoSummary) => (i.date ? `0${i.date.date}` : "1");
+    return out.sort((a, b) => (key(a) < key(b) ? -1 : key(a) > key(b) ? 1 : a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
   } catch {
     return [];
   }
@@ -391,7 +412,9 @@ function itemOf(r: ItemRow, lang: Lang): IpoItem | null {
     outlet,
     publishedOn,
     quote,
-    statement: view ? null : ((lang === "zh" ? text(r.statement_zh) : null) ?? text(r.statement_en)),
+    // Only a company move carries a statement (contract); a valuation renders from value_usd, a view from its
+    // speaker and quote. A move with none shows its attributed quote alone.
+    statement: kind === "company_move" ? ((lang === "zh" ? text(r.statement_zh) : null) ?? text(r.statement_en)) : null,
     speaker: view ? text(r.speaker) : null,
     valueUsd: kind === "valuation" ? positive(r.value_usd) : null,
   };
@@ -431,13 +454,13 @@ function sessionOf(r: TradingRow): IpoSession | null {
  * with their filing, the filing timeline (at most 50), the news items (at most 40; the generator keeps 29) and the
  * first and latest trading sessions.
  */
-export async function loadIpo(db: D1Like, slug: string, lang: Lang): Promise<IpoPage | null> {
+export async function loadIpo(db: D1Like, slug: string, lang: Lang, today: string = todayEt()): Promise<IpoPage | null> {
   if (!isIpoSlug(slug)) return null;
   const row = await db
     .prepare(`SELECT ${SUMMARY_COLUMNS}, exchange, updated_at FROM ipo_watch WHERE slug = ?`)
     .bind(slug)
     .first<WatchRow>();
-  const base = row ? summary(row, lang) : null;
+  const base = row ? summary(row, lang, today) : null;
   if (!row || !base) return null;
 
   const [facts, filings, items, sessions] = await Promise.all([
@@ -495,7 +518,10 @@ export async function loadIpo(db: D1Like, slug: string, lang: Lang): Promise<Ipo
     valuations: of("valuation"),
     moves: of("company_move"),
     views: of("view").slice(0, VIEWS_SHOWN),
-    trading: first || latest ? { first, latest } : null,
+    trading:
+      first || latest
+        ? { first, latest, firstIsDayOne: first !== null && base.date?.source === "trading" && base.date.date === first.sessionDate }
+        : null,
     updatedAt: text(row.updated_at),
   };
 }

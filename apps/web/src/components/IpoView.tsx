@@ -122,8 +122,13 @@ export default function IpoView({ ipo, locale }: { ipo: IpoPage; locale: Locale 
       {ipo.trading && (
         <>
           <h2 id="trading">{t("ipo.trading.heading")}</h2>
-          {ipo.trading.first && <Session label={t("ipo.trading.first")} s={ipo.trading.first} locale={locale} t={t} />}
-          {ipo.trading.latest && <Session label={t("ipo.trading.latest")} s={ipo.trading.latest} locale={locale} t={t} />}
+          {/* "First trading day" only when the date line says this session was day one; else each by its date. */}
+          {ipo.trading.first && (
+            <Session label={ipo.trading.firstIsDayOne ? t("ipo.trading.first") : null} s={ipo.trading.first} locale={locale} t={t} />
+          )}
+          {ipo.trading.latest && (
+            <Session label={ipo.trading.firstIsDayOne ? t("ipo.trading.latest") : null} s={ipo.trading.latest} locale={locale} t={t} />
+          )}
           <TradingSource url={(ipo.trading.latest ?? ipo.trading.first)?.sourceUrl ?? null} t={t} />
         </>
       )}
@@ -314,12 +319,22 @@ function ArticleLink({ url, t }: { url: string | null; t: T }) {
   );
 }
 
-/** One trading session: close, volume (open only when stored) and the change from the IPO price beside both inputs. */
-function Session({ label, s, locale, t }: { label: string; s: IpoSession; locale: Locale; t: T }) {
+/**
+ * One trading session: close, volume (open only when stored) and the change from the IPO price beside both inputs.
+ * Headed by its label and day, or, with no label, by its full date alone.
+ */
+function Session({ label, s, locale, t }: { label: string | null; s: IpoSession; locale: Locale; t: T }) {
+  const full = formatDate(s.sessionDate, locale);
   return (
-    <section className="ipo-session" aria-label={`${label}, ${formatDate(s.sessionDate, locale)}`}>
+    <section className="ipo-session" aria-label={label ? `${label}, ${full}` : full}>
       <h3>
-        {label} · <time dateTime={s.sessionDate}>{formatDayShort(s.sessionDate, locale)}</time>
+        {label ? (
+          <>
+            {label} · <time dateTime={s.sessionDate}>{formatDayShort(s.sessionDate, locale)}</time>
+          </>
+        ) : (
+          <time dateTime={s.sessionDate}>{full}</time>
+        )}
       </h3>
       <dl className="ipo-facts">
         {s.open !== null && (

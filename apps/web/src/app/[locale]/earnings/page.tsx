@@ -51,7 +51,7 @@ export default async function EarningsCalendar({ params, searchParams }: PagePro
   const [days, events, weekIpos, watch] = await Promise.all([
     listCalendarWeek(db, start, locale),
     listEvents(db, start, addDays(start, 4), locale),
-    listIposBetween(db, start, addDays(start, 4), locale),
+    listIposBetween(db, start, addDays(start, 4), locale, today),
     listIpoWatch(db, today, locale),
   ]);
   const href = (d: string) => `/${locale}/earnings?week=${d}`;

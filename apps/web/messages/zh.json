@@ -394,7 +394,7 @@
     "trading": {
       "heading": "上市后表现",
       "session": "交易日",
-      "first": "首日",
+      "first": "首个交易日",
       "latest": "最新",
       "open": "开盘价",
       "close": "收盘价",
