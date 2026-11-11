@@ -27,7 +27,7 @@ describe("SignupForm result", () => {
   });
 
   it("describes what the digest holds: earnings checks and the week ahead, no briefs", () => {
-    expect(en.copy).toBe("One email a week: three earnings checks and the week ahead. No spam, unsubscribe anytime.");
+    expect(en.copy).toBe("One email a week: earnings checks from the past week, and the week ahead. No spam, unsubscribe anytime.");
     expect(en.copy).not.toMatch(/brief/i);
   });
 
