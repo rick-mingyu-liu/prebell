@@ -152,17 +152,20 @@ describe("IPO readers", () => {
     expect(ipo.trading).toBeNull();
   });
 
-  it("reads Chinese names and statements when set, English otherwise; quotes stay as written", async () => {
+  it("reads Chinese names when set; v1 stores no statements, and a move's statement is still read if a row has one", async () => {
     const db = memoryD1(SEED);
     const zh = (await loadIpo(db, "anthropic", "zh"))!;
     expect(zh.name).toBe("Anthropic");
-    expect(zh.moves[0].statement).toBe("面向企业客户推出了 AI 文字处理和演示文稿软件。");
+    // The seed, like v1, has no statement on any item; quotes stay as written.
+    expect(zh.moves[0].statement).toBeNull();
     expect(zh.moves[0].quote).toMatch(/^Anthropic on Tuesday released/);
     expect((await loadIpo(db, "northwind-robotics", "zh"))!.name).toBe("北风机器人");
-    const noZh = memoryD1(`${SEED}\nUPDATE ipo_items SET statement_zh = NULL WHERE slug = 'anthropic';`);
-    expect((await loadIpo(noZh, "anthropic", "zh"))!.moves[0].statement).toBe(
-      "Released AI word-processing and presentation software for business customers.",
-    );
+    // The columns remain: a move that carries statements shows the page's language, else English.
+    const withBoth = memoryD1(`${SEED}\nUPDATE ipo_items SET statement_en = 'Released AI word-processing and presentation software for business customers.', statement_zh = '面向企业客户推出了 AI 文字处理和演示文稿软件。' WHERE slug = 'anthropic' AND kind = 'company_move';`);
+    expect((await loadIpo(withBoth, "anthropic", "zh"))!.moves[0].statement).toBe("面向企业客户推出了 AI 文字处理和演示文稿软件。");
+    expect((await loadIpo(withBoth, "anthropic", "en"))!.moves[0].statement).toBe("Released AI word-processing and presentation software for business customers.");
+    const enOnly = memoryD1(`${SEED}\nUPDATE ipo_items SET statement_en = 'Released AI word-processing and presentation software for business customers.' WHERE slug = 'anthropic' AND kind = 'company_move';`);
+    expect((await loadIpo(enOnly, "anthropic", "zh"))!.moves[0].statement).toBe("Released AI word-processing and presentation software for business customers.");
   });
 
   it("reads the first and the latest session, keeping the change only beside both inputs", async () => {
@@ -353,7 +356,9 @@ describe("IPO page", () => {
     expect(val.indexOf("$1.4 trillionReported by Example News on Nov 10, 2026")).toBeGreaterThan(0);
     expect(val.indexOf("$2 trillionReported by Sample Times on Oct 12, 2026")).toBeGreaterThan(val.indexOf("$1.4 trillion"));
     expect(val).toContain("“At the top of the range the offering would value Anthropic at roughly $1.4 trillion, the people said.”");
-    expect(text).toContain("Recent movesReleased AI word-processing and presentation software for business customers.Reported by Sample Times on Nov 4, 2026");
+    expect(text).toContain(
+      "Recent movesSample Times reported on Nov 4, 2026:“Anthropic on Tuesday released AI versions of word-processing and presentation software for business customers.”Article ↗",
+    );
     expect(out).not.toContain("After listing");
     expect(text).toContain(
       "This page is generated automatically from SEC filings and public news reports for information only. It is not investment advice. Valuations, dates and company news before listing are as reported by the named sources and may be wrong.",
@@ -404,7 +409,9 @@ describe("IPO page", () => {
     expect(out).toContain('<dt>发行价区间</dt><dd><span class="ipo-value">每股70.00至78.00美元</span>');
     expect(text).toContain("2026年11月10日 注册声明修订（S-1/A）文件 ↗");
     expect(text).toContain("1.4万亿美元Example News 2026年11月10日报道");
-    expect(text).toContain("面向企业客户推出了 AI 文字处理和演示文稿软件。");
+    expect(text).toContain(
+      "公司近期动态Sample Times 2026年11月4日报道：“Anthropic on Tuesday released AI versions of word-processing and presentation software for business customers.”原文 ↗",
+    );
     expect(text).toContain("“Anthropic on Tuesday released AI versions of word-processing and presentation software for business customers.”");
     expect(text).toContain("本页根据美国证监会文件和公开新闻报道自动生成，仅供参考，不构成投资建议。");
   });
@@ -945,25 +952,14 @@ describe("contract revision: statements, first trading day, passed reported date
     expect(stripOf(after)).toContain("AnthropicANTPrice range setDate not set");
   });
 
-  it("renders items with NULL statements from their own fields, in both languages", async () => {
-    // The seed: valuations and the date report carry no statement; the move has both.
+  it("renders every item from its own fields and quote with NULL statements, as the v1 seed has them, in both languages", async () => {
     for (const locale of ["en", "zh"] as const) {
       const ipo = (await loadIpo(db(), "anthropic", locale))!;
-      expect(ipo.valuations.map((v) => v.statement)).toEqual([null, null]);
-      expect(ipo.views[0].statement).toBeNull();
+      expect([...ipo.valuations, ...ipo.moves, ...ipo.views].map((i) => i.statement)).toEqual([null, null, null, null]);
       const text = textOf(await page("anthropic", locale));
       expect(text).toContain(locale === "en" ? "$1.4 trillionReported by Example News on Nov 10, 2026“At the top" : "1.4万亿美元Example News 2026年11月10日报道“At the top");
     }
-    // A statement stored on a valuation or a view anyway is not printed.
-    env.db = db(`UPDATE ipo_items SET statement_en = 'Stray sentence.', statement_zh = '多余的句子。' WHERE kind IN ('valuation', 'view');`);
-    for (const locale of ["en", "zh"] as const) expect(await page("anthropic", locale)).not.toMatch(/Stray sentence|多余的句子/);
-    // A move with no Chinese statement uses the English one on the Chinese page.
-    env.db = db(`UPDATE ipo_items SET statement_zh = NULL WHERE kind = 'company_move';`);
-    expect(textOf(await page("anthropic", "zh"))).toContain(
-      "公司近期动态Released AI word-processing and presentation software for business customers.Sample Times 2026年11月4日报道",
-    );
-    // A move with no statement at all shows its attributed quote alone.
-    env.db = db(`UPDATE ipo_items SET statement_en = NULL, statement_zh = NULL WHERE kind = 'company_move';`);
+    // The seed's moves: the attribution introduces the quote, then the link; no empty lead line.
     for (const [locale, line] of [
       ["en", "Recent movesSample Times reported on Nov 4, 2026:“Anthropic on Tuesday released"],
       ["zh", "公司近期动态Sample Times 2026年11月4日报道：“Anthropic on Tuesday released"],
@@ -977,6 +973,17 @@ describe("contract revision: statements, first trading day, passed reported date
         /^<h2 id="moves">[^<]+<\/h2><ul class="ipo-items"><li class="ipo-item"><p class="ipo-by ipo-by-lead">[^<]+<\/p><blockquote class="ipo-quote">“[^<]+”<\/blockquote><p class="ipo-link"><a class="more" href="https:\/\/sampletimes\.example\/2026\/11\/04\/anthropic-office-apps" rel="nofollow noopener noreferrer">[^<]+ ↗<\/a><\/p><\/li><\/ul>$/,
       );
     }
+    const northwind = textOf(await page("northwind-robotics", "zh"));
+    expect(northwind).toContain("公司近期动态Example News 2026年10月30日报道：“Northwind Robotics signed a deal");
+    // A statement stored on a valuation or a view anyway is not printed.
+    env.db = db(`UPDATE ipo_items SET statement_en = 'Stray sentence.', statement_zh = '多余的句子。' WHERE kind IN ('valuation', 'view');`);
+    for (const locale of ["en", "zh"] as const) expect(await page("anthropic", locale)).not.toMatch(/Stray sentence|多余的句子/);
+    // A move that does carry a statement (the columns remain) leads with it, the attribution under it.
+    env.db = db(`UPDATE ipo_items SET statement_en = 'Released AI word-processing and presentation software for business customers.' WHERE kind = 'company_move';`);
+    expect(textOf(await page("anthropic", "zh"))).toContain(
+      "公司近期动态Released AI word-processing and presentation software for business customers.Sample Times 2026年11月4日报道“Anthropic",
+    );
+    expect(textOf(await page("anthropic"))).toContain("Recent movesReleased AI word-processing and presentation software for business customers.Reported by Sample Times on Nov 4, 2026“Anthropic");
   });
 
   it("prints a speaker given by name alone", async () => {
