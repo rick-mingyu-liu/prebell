@@ -218,6 +218,8 @@ interface WatchRow {
   date_source_url: unknown;
   date_quote: unknown;
   date_as_of: unknown;
+  /** The earliest stored trading session's date for this IPO, or null when none is stored. */
+  first_session: unknown;
   updated_at?: unknown;
 }
 
@@ -238,8 +240,10 @@ export function reportedDatePassed(date: string, today: string): boolean {
 
 /**
  * The date line, or null ("date not set") for a withdrawn IPO, a malformed date, a status and source the contract
- * does not pair, a news or filing date with no named source (an unattributed date is not shown), or a reported
- * date that has passed (before yesterday, ET). A link that fails its source's check is dropped; the date stays.
+ * does not pair, a news or filing date with no named source (an unattributed date is not shown), a reported
+ * date that has passed (before yesterday, ET), or a trading date that is not the earliest stored session's day (the
+ * same first-day check as the session headings: Yahoo's record shows that day as the first only when it is the
+ * earliest one stored). A link that fails its source's check is dropped; the date stays.
  */
 function dateLine(r: WatchRow, status: IpoStatus, today: string): IpoDate | null {
   const date = dateOf(r.first_trade_date);
@@ -248,6 +252,7 @@ function dateLine(r: WatchRow, status: IpoStatus, today: string): IpoDate | null
   if (status === "withdrawn" || !date || !DATE_STATUSES.includes(dateStatus) || !DATE_SOURCES.includes(source)) return null;
   if (!DATE_PAIRS[dateStatus].includes(source)) return null;
   if (dateStatus === "reported" && reportedDatePassed(date, today)) return null;
+  if (source === "trading" && r.first_session !== date) return null;
   const sourceName = source === "trading" ? "Yahoo Finance" : text(r.date_source_name);
   if (!sourceName) return null;
   const url = r.date_source_url;
@@ -270,8 +275,10 @@ function summary(r: WatchRow, lang: Lang, today: string): IpoSummary | null {
   return { slug, name, symbol: text(r.symbol), status, date: dateLine(r, status, today) };
 }
 
+// The earliest session comes from the trading table's primary key (slug, session_date): one index probe per row.
 const SUMMARY_COLUMNS = `slug, name, name_zh, symbol, status, first_trade_date, date_status, date_source,
-  date_source_name, date_source_url, date_quote, date_as_of`;
+  date_source_name, date_source_url, date_quote, date_as_of,
+  (SELECT MIN(session_date) FROM ipo_trading WHERE ipo_trading.slug = ipo_watch.slug) AS first_session`;
 
 /**
  * Tracked IPOs whose first trading day falls from `from` to `to` (ET dates), withdrawn ones and passed reported

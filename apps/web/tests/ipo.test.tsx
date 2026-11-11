@@ -635,7 +635,12 @@ describe("review fixes: what the reader refuses to print", () => {
       ["reported", "trading", false],
       ["expected", "trading", false],
     ] as const) {
-      const db = watch(`date_status = '${status}', date_source = '${source}'`);
+      // A trading date also needs Yahoo's first session on that day (the first-day check).
+      const session =
+        source === "trading"
+          ? `INSERT INTO ipo_trading (slug, session_date, symbol, open, close, volume, ipo_price, change_pct, source_url, fetched_at) VALUES ('anthropic', '2026-11-16', 'ANT', NULL, 80, 1, 75, NULL, 'https://finance.yahoo.com/quote/ANT', 'x');`
+          : "";
+      const db = memoryD1(`${SEED}\n${session}\n${UNCHECKED(`UPDATE ipo_watch SET date_status = '${status}', date_source = '${source}' WHERE slug = 'anthropic';`)}`);
       const ipo = (await loadIpo(db, "anthropic", "en"))!;
       expect(ipo.date !== null, `${status}+${source}`).toBe(ok);
       const week = await listIposBetween(db, "2026-11-16", "2026-11-20", "en");
@@ -857,6 +862,39 @@ describe("contract revision: statements, first trading day, passed reported date
     expect(reportedDatePassed("2026-11-20", "2026-11-22")).toBe(true);
     // The fake clock says Nov 11, but an injected Nov 18 wins.
     expect((await loadIpo(db(), "anthropic", "en", "2026-11-18"))!.date).toBeNull();
+  });
+
+  it("shows a trading-sourced date only when it is the earliest stored session's day, on the page, the calendar and the strip", async () => {
+    // The seed passes: Yahoo's first session Nov 5 is the earliest stored, so the date line and a solid card show.
+    env.db = db();
+    expect(textOf(await page("northwind-robotics"))).toContain("Confirmed First trading day Thu, Nov 5, 2026: its first regular session, per Yahoo Finance.");
+    expect(await calendar("2026-11-02")).toContain('class="cal-card cal-card-text cal-confirmed"');
+    // The row says trading on Nov 5, but the earliest stored session is Nov 6 (or none is stored): date not set.
+    for (const sql of [
+      `DELETE FROM ipo_trading WHERE session_date = '2026-11-05';
+       INSERT INTO ipo_trading (slug, session_date, symbol, open, close, volume, ipo_price, change_pct, source_url, fetched_at) VALUES
+         ('northwind-robotics', '2026-11-06', 'NWRB', NULL, 30.1, 20100000, 24, NULL, 'https://finance.yahoo.com/quote/NWRB', 'x');`,
+      `DELETE FROM ipo_trading WHERE slug = 'northwind-robotics';`,
+      // An earlier session than the date (the date is later than the first stored session).
+      `INSERT INTO ipo_trading (slug, session_date, symbol, open, close, volume, ipo_price, change_pct, source_url, fetched_at) VALUES
+         ('northwind-robotics', '2026-11-04', 'NWRB', NULL, 25, 100, 24, NULL, 'https://finance.yahoo.com/quote/NWRB', 'x');`,
+    ]) {
+      env.db = db(sql);
+      expect((await loadIpo(env.db as D1Like, "northwind-robotics", "en"))!.date, sql).toBeNull();
+      for (const [locale, notSet] of [
+        ["en", "First trading day: date not set."],
+        ["zh", "首个交易日：日期未定。"],
+      ] as const) {
+        const text = textOf(await page("northwind-robotics", locale));
+        expect(text, sql).toContain(notSet);
+        expect(text, sql).not.toMatch(/per Yahoo Finance\.|当日为其首个常规交易日/);
+      }
+      const cal = await calendar("2026-11-02");
+      expect(cal, sql).not.toContain('class="cal-ipo"');
+      expect(cal, sql).not.toContain("cal-confirmed");
+      const at = cal.indexOf('<section class="cal-ipo-watch"');
+      expect(textOf(cal.slice(at, cal.indexOf("</section>", at))), sql).toContain("Northwind RoboticsNWRBListedDate not set");
+    }
   });
 
   it("treats a reported date before yesterday (ET) as date not set, at the boundary", async () => {
