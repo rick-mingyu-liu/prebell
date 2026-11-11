@@ -2,6 +2,7 @@ import Database from "better-sqlite3";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
+import { listIpoSlugs, listIposBetween, listIpoWatch, loadIpo } from "../src/lib/ipo";
 import { prepareCall, type ToolContext } from "../src/lib/mcptools";
 import { getLatestPost, type D1Like } from "../src/lib/posts";
 import { migrations } from "./d1";
@@ -13,10 +14,10 @@ import { bucket, FRIDAY, objects, seed } from "./mcpseed";
  */
 const dir = fileURLToPath(new URL("../../../migrations/", import.meta.url));
 
-function database(analyze: boolean) {
+function database(analyze: boolean, seedSql = seed()) {
   const sqlite = new Database(":memory:");
   for (const f of migrations) sqlite.exec(readFileSync(dir + f, "utf8"));
-  sqlite.exec(seed());
+  sqlite.exec(seedSql);
   if (analyze) sqlite.exec("ANALYZE");
   return sqlite;
 }
@@ -75,5 +76,48 @@ describe.each([false, true])("query plans (ANALYZE: %s)", (analyze) => {
         expect(plans[0].plan).not.toMatch(POSTS_SCAN);
       }
     }
+  });
+});
+
+/**
+ * The IPO reads stay on the keys and indexes of migration 0009. The watch list alone reads ipo_watch whole: the
+ * table is the hand-kept list of tracked IPOs (a handful a year), and the read is capped at 20 rows.
+ */
+const IPO_SEED = readFileSync(new URL("../../../db/seed-ipo-preview.sql", import.meta.url), "utf8");
+
+describe.each([false, true])("IPO query plans (ANALYZE: %s)", (analyze) => {
+  it("the calendar's IPOs walk the first-trade-date index", async () => {
+    const { db, plans } = planning(database(analyze, IPO_SEED));
+    await listIposBetween(db, "2026-11-16", "2026-11-20", "en");
+    expect(plans).toHaveLength(1);
+    expect(plans[0].plan).toMatch(/SEARCH ipo_watch USING INDEX idx_ipo_watch_date \(first_trade_date>\? AND first_trade_date<\?\)/);
+  });
+
+  it("the watch list is one capped read of the hand-kept list", async () => {
+    const { db, plans } = planning(database(analyze, IPO_SEED));
+    await listIpoWatch(db, "2026-11-11", "en");
+    expect(plans).toHaveLength(1);
+    expect(plans[0].sql).toMatch(/LIMIT 20$/);
+  });
+
+  it("an IPO page reads each table by its key or index, never a whole table", async () => {
+    const { db, plans } = planning(database(analyze, IPO_SEED));
+    await loadIpo(db, "anthropic", "en");
+    expect(plans).toHaveLength(5);
+    const plan = (table: string) => plans.find((p) => new RegExp(`FROM ${table}\\b`).test(p.sql))!.plan;
+    expect(plans[0].plan).toMatch(/SEARCH ipo_watch USING INDEX sqlite_autoindex_ipo_watch_1 \(slug=\?\)/);
+    expect(plan("ipo_facts")).toMatch(/SEARCH f USING INDEX sqlite_autoindex_ipo_facts_1 \(accession=\?\)/);
+    expect(plan("ipo_facts")).toMatch(/SEARCH g USING INDEX sqlite_autoindex_ipo_filings_1 \(accession=\?\)/);
+    expect(plan("ipo_filings")).toMatch(/SEARCH ipo_filings USING INDEX idx_ipo_filings_slug \(slug=\?\)/);
+    expect(plan("ipo_items")).toMatch(/SEARCH ipo_items USING INDEX (idx_ipo_items_slug|sqlite_autoindex_ipo_items_1) \(slug=\?\)/);
+    expect(plan("ipo_trading")).toMatch(/SEARCH ipo_trading USING (COVERING )?INDEX sqlite_autoindex_ipo_trading_1 \(slug=\?/);
+    for (const p of plans) expect(p.plan, p.sql).not.toMatch(/SCAN (ipo_\w+|f|g)\b/);
+  });
+
+  it("the sitemap's IPO read is capped", async () => {
+    const { db, plans } = planning(database(analyze, IPO_SEED));
+    await listIpoSlugs(db);
+    expect(plans).toHaveLength(1);
+    expect(plans[0].sql).toMatch(/LIMIT 200$/);
   });
 });

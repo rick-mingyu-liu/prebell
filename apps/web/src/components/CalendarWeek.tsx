@@ -2,6 +2,7 @@ import Link from "next/link";
 import type { Locale } from "../i18n/routing";
 import { type CalendarDay, type CalendarEntry, type Slot, todayEt } from "../lib/earnings";
 import type { MacroEvent } from "../lib/events";
+import type { IpoSummary } from "../lib/ipo";
 import { companyLogoInfo } from "../lib/logos";
 import { formatBoardDay, formatWeekday } from "../lib/time";
 import { translator } from "../lib/translator";
@@ -50,12 +51,15 @@ export default function CalendarWeek({
   days,
   locale,
   events = {},
+  ipos = {},
   today = todayEt(),
 }: {
   days: CalendarDay[];
   locale: Locale;
   /** The week's macro events by date, shown at the top of each day's column. */
   events?: Record<string, MacroEvent[]>;
+  /** The week's tracked IPOs by first trading day, shown under the day's events. */
+  ipos?: Record<string, IpoSummary[]>;
   /** Today's US Eastern date, which decides the highlighted and the past columns. */
   today?: string;
 }) {
@@ -127,6 +131,7 @@ export default function CalendarWeek({
                 {when === "is-past" && <span className="sr-only">{t("earnings.past")}</span>}
               </h2>
               <EconomyEvents events={dayEvents} locale={locale} />
+              <IpoCards ipos={ipos[d.date] ?? []} locale={locale} t={t} />
               {d.entries.length === 0 ? (
                 <p className="muted cal-none">{t(dayEvents.length ? "earnings.noneWithEvents" : "earnings.none")}</p>
               ) : (
@@ -146,6 +151,38 @@ export default function CalendarWeek({
         })}
       </div>
       {hasToday && <BoardStart target={dayId(today)} />}
+    </div>
+  );
+}
+
+/**
+ * A day's tracked IPOs as cards like the companies', under an "IPO" label: the symbol (or the name) over the name,
+ * dashed while the date is only reported or expected, solid once confirmed, each linking to its IPO page.
+ */
+function IpoCards({ ipos, locale, t }: { ipos: IpoSummary[]; locale: Locale; t: T }) {
+  if (ipos.length === 0) return null;
+  return (
+    <div className="cal-ipo">
+      <h3 className="cal-slot">{t("ipo.calendarGroup")}</h3>
+      <ul className="cal-cards">
+        {ipos.map((i) => {
+          const confirmed = i.date?.status === "confirmed";
+          return (
+            <li key={i.slug} className={`cal-card cal-card-text ${confirmed ? "cal-confirmed" : "cal-unconfirmed"}`}>
+              <Link className="cal-card-link" href={`/${locale}/ipo/${i.slug}`} title={i.name}>
+                <span className="cal-card-body">
+                  <span className="cal-card-sym" aria-hidden={i.symbol ? "true" : undefined}>
+                    {i.symbol ?? i.name}
+                  </span>
+                  {i.symbol && <span className="cal-card-name">{i.name}</span>}
+                </span>
+                <span className="sr-only">{t(confirmed ? "earnings.confirmed" : "earnings.unconfirmed")}</span>
+                <span className="sr-only">{t("ipo.openPage")}</span>
+              </Link>
+            </li>
+          );
+        })}
+      </ul>
     </div>
   );
 }

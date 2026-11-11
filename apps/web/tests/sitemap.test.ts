@@ -94,11 +94,11 @@ describe("sitemap", () => {
     expect(sitemapXml([{ url: "https://x.test/?a=1&b=<2>" }])).toContain("<loc>https://x.test/?a=1&amp;b=&lt;2&gt;</loc>");
   });
 
-  it("costs one D1 query", async () => {
+  it("costs two D1 queries: the posts and the tracked IPOs", async () => {
     const db = memoryD1(seed);
     const prepare = vi.spyOn(db, "prepare");
     await sitemapEntries(db, origin);
-    expect(prepare).toHaveBeenCalledTimes(1);
+    expect(prepare).toHaveBeenCalledTimes(2);
   });
 
   it("robots.txt allows every crawler and points at the sitemap", async () => {

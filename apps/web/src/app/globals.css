@@ -418,6 +418,59 @@ h3.cal-slot .num { margin-left: auto; color: var(--ink); font-variant-caps: norm
 .cal-event-postponed .cal-event-title { color: var(--muted); text-decoration: line-through; }
 .cal-event .cal-read { flex-basis: auto; }
 
+/* IPO watch on the calendar: the list above the board as a quiet strip like the economy one, one line per IPO
+   that wraps on a phone; a day's IPOs as company cards under an "IPO" label (dashed until the date is confirmed). */
+.ipo-watch { margin: 0 0 0.9rem; padding: 5px 9px 7px; border: 1px solid var(--rule); border-left: 3px solid var(--kicker); background: var(--card); }
+.ipo-watch > h2.cal-slot { margin: 0 0 0.2rem; font-family: var(--sans); font-size: 11.5px; font-weight: 600; line-height: 1.3; color: var(--kicker); }
+.ipo-watch-list { display: grid; gap: 0.3rem; margin: 0; padding: 0; list-style: none; }
+.ipo-watch-row { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0.1rem 0.6rem; font-size: 13.5px; line-height: 1.4; }
+.ipo-watch-name { font-weight: 700; }
+.ipo-watch-sym { font-family: var(--font-serif), Georgia, serif; font-weight: 700; color: var(--muted); }
+.ipo-watch-status { color: var(--muted); }
+.ipo-watch-date { display: inline-flex; flex-wrap: wrap; align-items: baseline; gap: 0.35rem; font-variant-numeric: tabular-nums; }
+.ipo-flag { display: inline-block; padding: 0 0.35rem; border: 1px dashed var(--muted); color: var(--ink); font-size: 11px; font-weight: 600; line-height: 1.5; white-space: nowrap; }
+.ipo-flag-solid { border-style: solid; border-color: var(--ink); }
+.cal-ipo { margin: 0 0 10px; }
+.cal-ipo > h3.cal-slot { color: var(--kicker); }
+
+/* The IPO page: the centred reading column, sections under serif heads; facts as label/value rows, each source
+   sentence behind a native disclosure; reported items as ruled entries with the quote set off by a rule. */
+.prose-ipo > h2 { margin-top: 2rem; }
+.prose-ipo > h1 { margin-bottom: 0.4rem; }
+.ipo-meta { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0.25rem 0.75rem; margin: 0 0 0.75rem; color: var(--muted); font-size: 15px; }
+.ipo-status { padding: 0 0.4rem; border: 1px solid var(--ink); color: var(--ink); font-size: 12.5px; font-weight: 600; line-height: 1.6; }
+.ipo-withdrawn { font-weight: 600; }
+.ipo-date { margin: 0 0 0.5rem; }
+.ipo-date > p, p.ipo-date { margin: 0; font-size: 16px; line-height: 1.6; }
+.ipo-date .ipo-flag { vertical-align: 0.1em; }
+.prose > .ipo-src, .prose > .ipo-note, .ipo-src { margin: 0 0 0.6rem; color: var(--muted); font-size: 14px; }
+.ipo-src a { color: var(--muted); font-weight: 600; }
+.ipo-facts { margin: 0; }
+.ipo-fact { display: grid; grid-template-columns: minmax(9rem, 34%) minmax(0, 1fr); gap: 0 1rem; padding: 0.5rem 0; border-top: 1px solid var(--rule); }
+.ipo-fact:first-child { border-top: 0; }
+.ipo-fact dt { color: var(--muted); font-size: 14px; }
+.ipo-fact dd { margin: 0; min-width: 0; font-size: 15.5px; }
+.ipo-value { font-weight: 600; font-variant-numeric: tabular-nums; }
+.ipo-src-quote { margin-top: 0.15rem; font-size: 13px; }
+.ipo-src-quote > summary { cursor: pointer; color: var(--muted); font-weight: 600; }
+.ipo-src-quote > summary:hover, .ipo-src-quote > summary:focus-visible { color: var(--ink); }
+.ipo-quote { margin: 0.35rem 0 0; padding-left: 0.75rem; border-left: 2px solid var(--rule-strong); color: var(--ink); font-size: 14.5px; line-height: 1.55; overflow-wrap: anywhere; }
+.ipo-timeline .ipo-form { color: var(--ink); }
+.ipo-timeline time { font-variant-numeric: tabular-nums; color: var(--muted); }
+.ipo-items { margin: 0; padding: 0; list-style: none; }
+.ipo-item { padding: 0.75rem 0; border-top: 1px solid var(--rule); }
+.ipo-item:first-child { border-top: 0; padding-top: 0.25rem; }
+.ipo-item p { margin: 0; }
+.ipo-lead { font-size: 16px; line-height: 1.55; }
+.ipo-figure { font-family: var(--serif); font-size: 20px; font-variant-numeric: tabular-nums; }
+.ipo-by { color: var(--muted); font-size: 13.5px; }
+.ipo-view .ipo-by { color: var(--ink); font-size: 14.5px; font-weight: 600; }
+.ipo-item p.ipo-link { margin-top: 0.25rem; }
+.ipo-session { margin: 0 0 0.75rem; }
+.ipo-session h3 { margin: 0.75rem 0 0.25rem; font-size: 17px; }
+.ipo-inputs { color: var(--muted); font-size: 13.5px; }
+.prose > p.ipo-disclaimer { color: var(--muted); font-size: 13.5px; line-height: 1.55; }
+
 @media (prefers-reduced-motion: no-preference) {
   .cal-board { scroll-behavior: smooth; }
   .cal-card-link { transition: border-color 0.15s, box-shadow 0.15s, transform 0.15s; }
@@ -494,4 +547,6 @@ h3.cal-slot .num { margin-left: auto; color: var(--ink); font-variant-caps: norm
   .post-row .cover-stat { font-size: 13px; }
   .post-main .story-sum { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; white-space: normal; }
   .notfound h1 { font-size: 28px; }
+  .ipo-fact { grid-template-columns: minmax(0, 1fr); }
+  .ipo-fact dt { font-size: 13px; }
 }
