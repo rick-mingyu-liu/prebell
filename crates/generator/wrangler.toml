@@ -87,3 +87,8 @@ DIGEST_ENABLED = "true"
 # DIGEST_MODE: "draft" (the default; the owner sends it) or "scheduled" (Sunday
 # 18:00 ET).
 DIGEST_MODE = "draft"
+# IPO watch (docs/runbook.md "IPO watch"): on. Only exactly "true" is on; unset,
+# " true" or "TRUE" is off. Off means no hourly EDGAR filing check, no news
+# sweeps (Tavily and the LLM) and no extra symbols in the recap; the site keeps
+# showing what is stored. To turn it off, delete this line and deploy.
+IPO_WATCH_ENABLED = "true"

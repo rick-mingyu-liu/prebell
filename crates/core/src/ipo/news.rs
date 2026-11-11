@@ -612,8 +612,8 @@ pub async fn sweep_tick(
     };
     out.slug = t.slug.clone();
     out.slot = slot.clone();
-    let mut st = ipo.ipo_state().await?;
-    // Marked first: a failing sweep waits for the next slot.
+    // Marked first: a failing sweep (a missing table included) waits for
+    // the next slot instead of being queued by every poll.
     sweeps.insert(t.slug.clone(), slot);
     es.kv_set(
         KV_SWEEPS,
@@ -621,6 +621,7 @@ pub async fn sweep_tick(
         &iso(now),
     )
     .await?;
+    let mut st = ipo.ipo_state().await?;
     let today = et(now).date_naive();
     if !active(&st, &t.slug, today) {
         out.skipped = Some("inactive (withdrawn or listed over 30 days)".into());

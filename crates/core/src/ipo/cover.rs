@@ -14,8 +14,7 @@ use std::sync::OnceLock;
 use chrono::NaiveDate;
 use regex::{Captures, Regex};
 
-use crate::anchor::{normalize, verify_quote};
-use crate::facts::quote_numbers;
+use crate::anchor::normalize;
 
 /// Bytes of the primary document read: Anthropic's S-1/A cover ends near
 /// byte 85,000 (its underwriters' option sentence) and its
@@ -38,8 +37,10 @@ const MONTH: &str =
 const EXCHANGES: &str = "Nasdaq Global Select Market|Nasdaq Global Market|Nasdaq Capital Market|Nasdaq Stock Market|New York Stock Exchange|NYSE American|NYSE Arca|NYSE Texas|NYSE|Cboe BZX Exchange";
 const SHARES_NUM: &str = r"(\d{1,3}(?:,\d{3})+)";
 
+/// ASCII `\b`, `\s` and `\d`: a Unicode pattern compiles 5-10 times slower
+/// (about 10 ms for the set natively), and the cover read has 10 ms of CPU.
 fn re(p: &str) -> Regex {
-    Regex::new(p).expect("valid built-in regex")
+    Regex::new(&format!("(?-u){p}")).expect("valid built-in regex")
 }
 
 struct Patterns {
@@ -71,7 +72,7 @@ fn patterns() -> &'static Patterns {
             r"\b(?:We are|is) (?:offering|selling) {SHARES_NUM} (?:shares|American Depositary Shares|ADSs)\b"
         )),
         selling: re(&format!(
-            r"selling (?:stockholders|shareholders)\b[^.]{{0,200}}?\b(?:are )?(?:offering|selling) (?:an additional |a total of )?{SHARES_NUM} (?:shares|American Depositary Shares|ADSs)\b"
+            r"selling (?:stockholders|shareholders)\b(?u:[^.])*?\b(?:are )?(?:offering|selling) (?:an additional |a total of )?{SHARES_NUM} (?:shares|American Depositary Shares|ADSs)\b"
         )),
         option: re(&format!(
             r"option to purchase (?:up to )?(?:an additional |a maximum of )?{SHARES_NUM} (?:additional )?(?:shares|American Depositary Shares|ADSs)\b"
@@ -81,10 +82,10 @@ fn patterns() -> &'static Patterns {
             r"(?i)\binitial public offering price(?: per (?:share|ADS))? (?:is|of) \$\s?(\d{1,4}(?:\.\d{2})?)",
         ),
         listing: re(&format!(
-            r"\b(?:list|listing|listed)\b[^.]{{0,160}}? on (?:the |The )?({EXCHANGES})(?:\s*\(the “[A-Za-z]+”\)|\s*\(“[A-Za-z]+”\))?,?\s+under the (?:ticker |trading )?symbol\s+[“\x22]([A-Z]{{1,5}}(?:\.[A-Z])?)\.?[”\x22]"
+            r"\b(?:list|listing|listed)\b(?u:[^.])*? on (?:the |The )?({EXCHANGES})(?:\s*\(the “[A-Za-z]+”\)|\s*\(“[A-Za-z]+”\))?,?\s+under the (?:ticker |trading )?symbol\s+(?:“|\x22)([A-Z]{{1,5}}(?:\.[A-Z])?)\.?(?:”|\x22)"
         )),
         trading: re(&format!(
-            r"(?:expected to|will) (?:begin|commence) trading\b[^.]{{0,160}}? on {MONTH} (\d{{1,2}}), (\d{{4}})"
+            r"(?:expected to|will) (?:begin|commence) trading\b(?u:[^.])*? on {MONTH} (\d{{1,2}}), (\d{{4}})"
         )),
     })
 }
@@ -212,14 +213,46 @@ fn fact_text(kind: &'static str, v: String, quote: String) -> CoverFact {
 /// The fact's words are in the document and carry its value: the number
 /// among the quote's numbers, the text or the date (as the cover writes
 /// it) in the quote.
-fn verified(text: &str, f: &CoverFact) -> bool {
-    if !verify_quote(text, &f.quote) {
+/// `v` written in `quote` as a cover writes it ("825,000,000", "$70.00",
+/// "$24"), not inside a longer number. String matching, not the number
+/// checker, whose ~30 Unicode patterns would cost a cold read several ms.
+fn num_in_quote(v: f64, quote: &str) -> bool {
+    let mut forms = vec![format!("{v:.2}")];
+    if v.fract() == 0.0 && v.abs() < 1e15 {
+        let digits = format!("{}", v as i64);
+        let mut grouped = String::new();
+        for (i, c) in digits.chars().enumerate() {
+            if i > 0 && (digits.len() - i) % 3 == 0 {
+                grouped.push(',');
+            }
+            grouped.push(c);
+        }
+        forms.push(grouped);
+        forms.push(digits);
+    }
+    forms.iter().any(|f| {
+        quote.match_indices(f.as_str()).any(|(i, _)| {
+            let before = quote[..i].chars().next_back();
+            let after = quote[i + f.len()..].chars().next();
+            let digitish = |c: Option<char>| c.is_some_and(|c| c.is_ascii_digit() || c == ',');
+            // A trailing "." ends a sentence; ".5" would be a decimal.
+            let decimal = quote[i + f.len()..]
+                .strip_prefix('.')
+                .is_some_and(|r| r.starts_with(|c: char| c.is_ascii_digit()));
+            !digitish(before) && !digitish(after) && !decimal
+        })
+    })
+}
+
+/// `doc` is `normalize(text)`, made once for every fact (as
+/// `anchor::verify_quote` checks it).
+fn verified(doc: &str, f: &CoverFact) -> bool {
+    let q = normalize(&f.quote);
+    if q.chars().count() < 20 || !doc.contains(&q) {
         return false;
     }
     match (&f.num, &f.text) {
-        (Some(v), _) => quote_numbers(&f.quote)
-            .iter()
-            .any(|n| (n - v).abs() <= 1e-9 * v.abs().max(1.0)),
+        (Some(v), _) => num_in_quote(*v, &f.quote),
         (None, Some(t)) => match NaiveDate::parse_from_str(t, "%Y-%m-%d") {
             Ok(d) => normalize(&f.quote).contains(&d.format("%B %-d, %Y").to_string()),
             Err(_) => f.quote.contains(t.as_str()),
@@ -318,7 +351,8 @@ pub fn extract(text: &str, form: &str) -> Vec<CoverFact> {
             out.push(fact_text("trading_date", d, quote_of(text, &c)));
         }
     }
-    out.retain(|f| verified(text, f));
+    let doc = normalize(text);
+    out.retain(|f| verified(&doc, f));
     out
 }
 
@@ -330,6 +364,7 @@ pub fn find<'a>(facts: &'a [CoverFact], kind: &str) -> Option<&'a CoverFact> {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+    use crate::anchor::verify_quote;
     use crate::edgar::head_text;
 
     pub(crate) const S1A: &str =
@@ -451,6 +486,23 @@ pub(crate) mod tests {
     fn a_range_outside_an_offering_price_sentence_is_ignored() {
         let t = "Our revenue grew between $1.00 and $2.00 per user. No range here.";
         assert!(extract(t, "S-1/A").is_empty());
+    }
+
+    #[test]
+    fn numbers_are_found_as_the_cover_writes_them() {
+        assert!(num_in_quote(
+            825_000_000.0,
+            "Class A Common Stock 825,000,000 Shares"
+        ));
+        assert!(num_in_quote(70.0, "between $70.00 and $78.00."));
+        assert!(num_in_quote(24.0, "is $24 per share"));
+        assert!(!num_in_quote(
+            825_000.0,
+            "Class A Common Stock 825,000,000 Shares"
+        ));
+        assert!(!num_in_quote(70.0, "between $170.00 and $78.00"));
+        assert!(!num_in_quote(70.0, "between $70.005 and $78.00"));
+        assert!(!num_in_quote(7.0, "between $70.00 and $78.00"));
     }
 
     #[test]

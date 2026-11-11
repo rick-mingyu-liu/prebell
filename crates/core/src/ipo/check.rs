@@ -209,24 +209,47 @@ pub async fn check_tick(
     let (reads, superseded) = to_read(&st, list);
     let mut changed: Vec<FilingRow> = superseded;
     let mut facts: Vec<FactRow> = Vec::new();
+    // The first `MAX_COVER_READS` with a document are read now; the rest wait.
+    let mut now_reads: Vec<FilingRow> = Vec::new();
     for mut f in reads {
-        if out.throttled || out.covers.len() >= MAX_COVER_READS {
-            if f.read_state == "none" {
-                f.read_state = "pending".into();
-                changed.push(f);
-            }
-            continue;
-        }
-        let Some(url) = f.doc_url.clone() else {
+        if f.doc_url.is_none() {
             f.read_state = "failed".into();
             out.errors.push(format!(
                 "{}: {} has no primary document",
                 f.slug, f.accession
             ));
             changed.push(f);
+        } else if out.throttled || now_reads.len() >= MAX_COVER_READS {
+            if f.read_state == "none" {
+                f.read_state = "pending".into();
+                changed.push(f);
+            }
+        } else {
+            f.attempts += 1;
+            f.read_state = "pending".into();
+            now_reads.push(f);
+        }
+    }
+    // The attempts are written before the reads, so a read killed for CPU
+    // still counts toward `MAX_READ_ATTEMPTS` instead of retrying forever.
+    if !now_reads.is_empty() {
+        let mut pre = w.clone();
+        for f in &now_reads {
+            match pre.filings.iter_mut().find(|x| x.accession == f.accession) {
+                Some(x) => *x = f.clone(),
+                None => pre.filings.push(f.clone()),
+            }
+        }
+        ipo.ipo_write(&pre).await?;
+    }
+    for mut f in now_reads {
+        if out.throttled {
+            // Not tried: SEC refused an earlier request.
+            f.attempts -= 1;
+            changed.push(f);
             continue;
-        };
-        f.attempts += 1;
+        }
+        let url = f.doc_url.clone().unwrap_or_default();
         match src.cover_text(&url).await {
             Ok(text) => {
                 let got = extract(&text, &f.form);
@@ -428,8 +451,8 @@ mod tests {
             .filings
             .iter()
             .all(|f| f.index_url.ends_with("-index.htm")));
-        // One state read and one write.
-        assert_eq!(ipo.calls.get(), 2);
+        // One state read, the attempt and the result: two writes.
+        assert_eq!(ipo.calls.get(), 3);
         drop(st);
 
         // An hour later nothing is new: one request, nothing written.
@@ -449,7 +472,7 @@ mod tests {
             "{out:?}"
         );
         assert_eq!(sent(&e2).len(), 1);
-        assert_eq!(ipo.calls.get(), 3);
+        assert_eq!(ipo.calls.get(), 4);
     }
 
     #[tokio::test]
@@ -546,6 +569,42 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(sent(&e).len(), 1);
+    }
+
+    /// Reads the stored attempts while the cover is being read.
+    struct Probe<'a> {
+        ipo: &'a MemIpoStore,
+        seen: std::cell::Cell<i64>,
+    }
+    #[async_trait(?Send)]
+    impl IpoFilings for Probe<'_> {
+        async fn submissions(&self, _: u64) -> Result<Vec<Submission>, ProviderError> {
+            parse_submissions(SUBS)
+        }
+        async fn cover_text(&self, _: &str) -> Result<String, ProviderError> {
+            let st = self.ipo.state.borrow();
+            let f = st
+                .filings
+                .iter()
+                .find(|f| f.accession == "0001628280-26-072484");
+            self.seen.set(f.map_or(-1, |f| f.attempts));
+            Err(ProviderError::Network("killed".into()))
+        }
+    }
+
+    #[tokio::test]
+    async fn the_attempt_is_stored_before_the_cover_is_read() {
+        let ipo = MemIpoStore::default();
+        let probe = Probe {
+            ipo: &ipo,
+            seen: std::cell::Cell::new(0),
+        };
+        let (es, store) = (MemEarningsStore::default(), MemStore::default());
+        check_tick(utc(NOW), &anthropic(), &ipo, &es, &store, &probe)
+            .await
+            .unwrap();
+        // A read killed for CPU at this point still counts.
+        assert_eq!(probe.seen.get(), 1);
     }
 
     #[tokio::test]

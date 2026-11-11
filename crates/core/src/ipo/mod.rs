@@ -328,6 +328,16 @@ mod tests {
     }
 
     #[test]
+    fn the_generator_config_turns_it_on_exactly() {
+        const WRANGLER: &str = include_str!("../../../generator/wrangler.toml");
+        let line = WRANGLER
+            .lines()
+            .find(|l| l.starts_with("IPO_WATCH_ENABLED"))
+            .expect("IPO_WATCH_ENABLED in wrangler.toml");
+        assert_eq!(line, "IPO_WATCH_ENABLED = \"true\"");
+    }
+
+    #[test]
     fn forms_and_their_kinds() {
         for f in ["S-1", "S-1/A", "F-1", "F-1/A"] {
             assert!(is_registration(f) && is_kept(f));
