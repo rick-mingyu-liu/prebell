@@ -71,16 +71,16 @@
     "toolsHeading": "Tools",
     "tools": {
       "earnings_calendar": "Who reports earnings on which days and whether each date is confirmed, with the day's economic events (Fed decisions, jobs report, CPI).",
-      "earnings_report": "One company's latest results as PreBell checked them: the key figures, each with the press-release sentence it came from, and links to the check, the SEC filing and the press release. Without a check, it says whether the company has reported, or its next date on the calendar.",
-      "latest_brief": "The newest premarket brief or after-close recap: index futures or closes, the biggest movers with the published reason, and the day's events to watch."
+      "earnings_report": "The newest earnings check PreBell has published for one company: the key figures, each with the press-release sentence it came from, and links to the check, the SEC filing and the press release. Without a check, it says whether the company has reported, or its next date on the calendar.",
+      "latest_brief": "The newest premarket brief or after-close recap: index futures or closes, the biggest movers with the published reason, and, in the premarket brief, the day's events to watch."
     },
-    "toolsLang": "Titles and summaries come in English or Chinese; quoted filing text and mover reasons stay in English.",
+    "toolsLang": "Titles and summaries come in Chinese when the Chinese version is published, otherwise in English; quoted filing text, mover reasons and the guidance and highlight notes stay in English.",
     "askHeading": "Things to ask your agent",
-    "ask": ["Who reports earnings this week?", "Has Apple reported yet, and what were the numbers?", "What did this morning's brief say?"],
+    "ask": ["Who reports earnings this week?", "What did PreBell's latest earnings check on Apple show?", "What did this morning's brief say?"],
     "limitsHeading": "Limits",
     "limits": [
-      "The brief is a snapshot written at set times, not a live feed: the premarket brief comes out from 8:00 AM Eastern on trading days and is updated at 8:35, and the after-close recap from 4:45 PM Eastern. Before today's brief is out, your agent gets the most recent one, with a note saying when the next is due.",
-      "There are no live quotes: prices are the ones in the brief, as of its time."
+      "The brief is a snapshot written at set times, not a live feed: the premarket brief comes out from 8:00 AM Eastern on trading days and is usually updated after 8:35 with the 8:30 economic data, and the after-close recap from 4:45 PM Eastern (1:45 PM on early-close days). Before today's brief is out, your agent gets the most recent one, with a note saying when the next is due.",
+      "There are no live quotes: every price comes from a published brief or earnings check and carries its own time."
     ]
   },
   "legal": {

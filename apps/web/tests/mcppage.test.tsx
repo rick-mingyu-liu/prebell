@@ -9,18 +9,26 @@ import { memoryD1 } from "./d1";
 
 vi.mock("next-intl/server", () => ({ setRequestLocale: () => {} }));
 // The page builds the address from the site origin: SITE_URL, else the request host.
-vi.mock("next/headers", () => ({ headers: async () => new Headers({ host: "prebell.site" }) }));
+const req = vi.hoisted(() => ({ host: "prebell.site" }));
+vi.mock("next/headers", () => ({ headers: async () => new Headers({ host: req.host }) }));
 // The language link reads the router; these tests only need it in the row.
 vi.mock("../src/components/LangSwitchLink", () => ({
   default: ({ label, className }: { label: string; className: string }) => <a className={className}>{label}</a>,
 }));
 // The page, the footer link and the sitemap entry follow MCP_ENABLED, read from the Worker env as the route reads it.
-const cf = vi.hoisted(() => ({ env: {} as Record<string, unknown> }));
-vi.mock("@opennextjs/cloudflare", () => ({ getCloudflareContext: () => ({ env: cf.env, ctx: { waitUntil: () => {} } }) }));
+// `throws` stands for a request with no Cloudflare context.
+const cf = vi.hoisted(() => ({ env: {} as Record<string, unknown>, throws: false }));
+vi.mock("@opennextjs/cloudflare", () => ({
+  getCloudflareContext: () => {
+    if (cf.throws) throw new Error("no Cloudflare context");
+    return { env: cf.env, ctx: { waitUntil: () => {} } };
+  },
+}));
 
 const { default: Mcp, generateMetadata } = await import("../src/app/[locale]/mcp/page");
 const { default: FooterLinks } = await import("../src/components/FooterLinks");
 const { GET: sitemapGet } = await import("../src/app/sitemap.xml/route");
+const { mcpEnabled } = await import("../src/lib/mcpswitch");
 
 const props = (locale: Locale) => ({ params: Promise.resolve({ locale }) }) as never;
 const render = async (locale: Locale) => renderToStaticMarkup(await Mcp(props(locale)));
@@ -34,6 +42,8 @@ describe("For AI agents page", () => {
   });
   afterEach(() => {
     vi.unstubAllEnvs();
+    req.host = "prebell.site";
+    cf.throws = false;
   });
 
   it("shows the address, the Claude Code command, the three tools and the limits, in both locales", async () => {
@@ -64,11 +74,26 @@ describe("For AI agents page", () => {
     expect(out).toContain("Streamable HTTP");
     expect(out).toContain("美东时间上午 8:00");
     expect(out).toContain("8:35");
+    expect(out).toContain("（提前收盘日为下午 1:45）");
+    expect(out).toContain("盘前铃为某家公司发布的最新一期财报速评");
+    expect(out).toContain("盘前简报另附当日关注要点");
   });
 
   it("states the limits and makes no live-data or forecast claims", async () => {
     const out = await render("en");
-    for (const fact of ["8:00 AM Eastern", "8:35", "4:45 PM Eastern", "no live quotes", "not investment advice", "no sign-in"]) {
+    for (const fact of [
+      "8:00 AM Eastern",
+      "usually updated after 8:35 with the 8:30 economic data",
+      "4:45 PM Eastern (1:45 PM on early-close days)",
+      "no live quotes",
+      "published brief or earnings check and carries its own time",
+      "not investment advice",
+      "no sign-in",
+      // The tool returns the newest published check, which can be last quarter's on a report day.
+      "The newest earnings check PreBell has published for one company",
+      "in the premarket brief, the day&#x27;s events to watch",
+      "guidance and highlight notes stay in English",
+    ]) {
       expect(out, fact).toContain(fact);
     }
     for (const messages of [en, zh]) {
@@ -84,6 +109,25 @@ describe("For AI agents page", () => {
     const out = await render("en");
     expect(out).toContain("<pre><code>http://localhost:8787/mcp</code></pre>");
     expect(out).toContain("<pre><code>claude mcp add --transport http prebell http://localhost:8787/mcp</code></pre>");
+  });
+
+  it("shows SITE_URL's address even when the request carries another Host", async () => {
+    vi.stubEnv("SITE_URL", "https://prebell.site");
+    req.host = "evil.test";
+    const out = await render("en");
+    expect(out).toContain("<pre><code>https://prebell.site/mcp</code></pre>");
+    expect(out).toContain(`<pre><code>${COMMAND}</code></pre>`);
+    expect(out).not.toContain("evil.test");
+  });
+
+  it("is off when there is no Cloudflare context: 404, no metadata, no footer link", async () => {
+    cf.throws = true;
+    expect(mcpEnabled()).toBe(false);
+    await expect(Mcp(props("en"))).rejects.toMatchObject({ digest: "NEXT_HTTP_ERROR_FALLBACK;404" });
+    expect(await generateMetadata(props("en"))).toEqual({});
+    const footer = renderToStaticMarkup(<FooterLinks locale="en" />);
+    expect(footer).not.toContain("/mcp");
+    expect(footer).toContain('<a href="/en/about">About</a><a href="/en/legal">');
   });
 
   it("has a title, a description and paired alternates in both locales", async () => {
