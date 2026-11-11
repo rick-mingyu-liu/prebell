@@ -329,7 +329,7 @@ describe("IPO page", () => {
       ["Price range", "$70.00 to $78.00 per share"],
     ])
       expect(out, label).toContain(`<dt>${label}</dt><dd><span class="ipo-value">${value}</span><details class="ipo-src-quote"><summary>Filing text</summary><blockquote class="ipo-quote">“`);
-    expect(text).toContain("Filing text“It is currently estimated that the initial public offering price per share will be between $70.00 and $78.00”");
+    expect(text).toContain("Filing text“It is currently estimated that the initial public offering price per share will be between $70.00 and $78.00.”");
     expect(out.match(/<details class="ipo-src-quote">/g)).toHaveLength(8);
     expect(out).not.toContain("IPO price");
     // Timeline: glossary names, newest first, each linked.
