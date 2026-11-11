@@ -568,6 +568,8 @@ mod tests {
             },
             name: format!("{sym} Inc"),
             reasons: vec![],
+            search_failed: false,
+            fallback: None,
         };
         assert_eq!(
             cover_movers(&[mover("MOS", 17.37)], &[mover("FIS", -23.67)]),

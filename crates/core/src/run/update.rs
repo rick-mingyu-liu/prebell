@@ -73,7 +73,14 @@ pub async fn tick_with_watch(
     watch: Option<&dyn WatchSource>,
     hooks: &Hooks<'_>,
 ) -> TickOutcome {
-    step(now, store, &Premarket { md, ns, llm, watch }, hooks)
+    let c = Premarket {
+        md,
+        ns,
+        llm,
+        watch,
+        reports: Some(store),
+    };
+    step(now, store, &c, hooks)
         .await
         .unwrap_or_else(TickOutcome::Retrying)
 }
@@ -782,6 +789,108 @@ mod tests {
             TickOutcome::Nothing
         );
         assert!(s.alerts.borrow().is_empty());
+    }
+
+    /// Lists today's CPI, released with its figures.
+    struct ReleasedCpi;
+    #[async_trait(?Send)]
+    impl crate::events::watch::WatchSource for ReleasedCpi {
+        async fn watch_list(
+            &self,
+            _: NaiveDate,
+            _: DateTime<Utc>,
+            _: &dyn Fn() -> usize,
+        ) -> crate::facts::Field<Vec<crate::events::watch::WatchItem>> {
+            use crate::events::figures::{FigureKey, ReleaseFigure};
+            use crate::events::watch::{WatchItem, WatchKind};
+            let fig = |key, value| ReleaseFigure {
+                key,
+                value,
+                quote: "The release's sentence.".into(),
+            };
+            crate::facts::Field::Value(vec![WatchItem {
+                kind: WatchKind::Event,
+                id: "bls:cpi:2026-09".into(),
+                time_et: Some("8:30 AM ET".into()),
+                time_zh: Some("上午8:30（美东）".into()),
+                title: "September CPI".into(),
+                title_zh: "9月消费者物价指数（CPI）".into(),
+                note: None,
+                note_zh: None,
+                status: "released".into(),
+                link: Some("https://www.bls.gov/news.release/archives/cpi_10292026.htm".into()),
+                source_only: false,
+                moved_from: None,
+                figures: vec![
+                    fig(FigureKey::CpiMonth, 0.4),
+                    fig(FigureKey::CoreMonth, 0.3),
+                ],
+            }])
+        }
+    }
+
+    /// Drafts that always set the CPI against forecasts in their summary.
+    struct HotterThanExpected(FakeLlm);
+    #[async_trait(?Send)]
+    impl crate::providers::LlmProvider for HotterThanExpected {
+        async fn complete_json(&self, system: &str, user: &str) -> Result<Value, ProviderError> {
+            let mut v = self.0.complete_json(system, user).await?;
+            if v.get("summary").is_some() {
+                v["summary"] = Value::from("CPI came in hotter than expected.");
+            }
+            Ok(v)
+        }
+    }
+
+    #[tokio::test]
+    async fn a_forecast_guard_refusal_keeps_the_8_00_brief_and_retries() {
+        let s = base_brief(true).await;
+        let before = snapshot(&s);
+        let (m, l) = (md(true), HotterThanExpected(llm(true, true)));
+        let hooks = Hooks {
+            log: &|_| {},
+            extra: &Vec::new,
+            budget: &|| 0,
+        };
+        let w = ReleasedCpi;
+        for t in [UPDATE_AT, "2026-10-29T13:20:00Z"] {
+            match tick_with_watch(utc(t), &s, &m, &FakeNs, &l, Some(&w), &hooks).await {
+                TickOutcome::Retrying(e) => {
+                    assert!(e.contains("compares a released figure"), "{e}")
+                }
+                o => panic!("{o:?}"),
+            }
+            // Nothing a reader sees changed.
+            assert_eq!(snapshot(&s), before);
+        }
+        assert_eq!(
+            tick_with_watch(
+                utc("2026-10-29T13:25:00Z"),
+                &s,
+                &m,
+                &FakeNs,
+                &l,
+                Some(&w),
+                &hooks
+            )
+            .await,
+            TickOutcome::Skipped
+        );
+        assert_eq!(snapshot(&s), before);
+        assert_eq!(s.posts.borrow()[0].revised_at, None);
+        assert!(s.alerts.borrow().is_empty());
+
+        // A draft that states the figure only goes through.
+        let s = base_brief(true).await;
+        let l = llm(true, true);
+        assert_eq!(
+            tick_with_watch(utc(UPDATE_AT), &s, &m, &FakeNs, &l, Some(&w), &hooks).await,
+            TickOutcome::Published
+        );
+        let en = s.translations.borrow()[&(1, "en".to_string())]
+            .body_md
+            .clone();
+        assert!(en.contains("✓ Released: +0.4% on the month"), "{en}");
     }
 
     fn building(updated_at: &str) -> RunRow {

@@ -32,7 +32,14 @@ pub const IR_CHECKS: usize = 5;
 pub const IR_HORIZON_DAYS: i64 = 7;
 /// Quarantined rows are looked at again after this long.
 pub const RECHECK_HOURS: i64 = 12;
+/// The ET date the day's refresh finished (`2026-11-10`), or, while a failed
+/// aggregator read waits for its retry, that date, the attempts so far and the
+/// last one's time (`2026-11-10 1 2026-11-10T11:01:00Z`).
 const KV_REFRESHED: &str = "calendar_refreshed_on";
+/// Aggregator reads per ET day when they fail (a 429, a 401, a network error).
+pub const REFRESH_ATTEMPTS: u32 = 3;
+/// A failed aggregator read is tried again no sooner than this.
+pub const RETRY_HOURS: i64 = 2;
 /// A row's company-announcement check is not repeated within this window.
 pub const IR_RECHECK_HOURS: i64 = 20;
 /// Press-release wires companies publish their own announcements through.
@@ -592,6 +599,10 @@ pub struct RefreshOutcome {
     pub errors: Vec<String>,
     /// The aggregator's diagnostic lines (`yahoo_429=1` after a 429).
     pub diagnostics: Vec<String>,
+    /// The day's attempt this was (1 to `REFRESH_ATTEMPTS`).
+    pub attempt: u32,
+    /// The aggregator read failed and is tried again after `RETRY_HOURS`.
+    pub retry: bool,
 }
 
 /// The next `SEED_DAYS` NYSE trading days from `today` (inclusive).
@@ -661,24 +672,47 @@ async fn apply(
     Ok(())
 }
 
-/// Whether the calendar refresh already ran on `now`'s ET date.
-pub async fn refreshed_today(es: &dyn EarningsStore, now: DateTime<Utc>) -> Result<bool, String> {
+/// The attempt a refresh at `now` would be, from the `KV_REFRESHED` value:
+/// `None` when the day is done or its retry is not due yet.
+fn next_attempt(marker: Option<&str>, now: DateTime<Utc>) -> Option<u32> {
     let today = ymd(et(now).date_naive());
-    Ok(es.kv_get(KV_REFRESHED).await?.as_deref() == Some(today.as_str()))
+    let mut parts = marker.unwrap_or_default().split_whitespace();
+    if parts.next() != Some(today.as_str()) {
+        return Some(1);
+    }
+    let n: u32 = parts.next()?.parse().ok()?;
+    let at = DateTime::parse_from_rfc3339(parts.next()?).ok()?;
+    (n < REFRESH_ATTEMPTS && now - at.with_timezone(&Utc) >= Duration::hours(RETRY_HOURS))
+        .then_some(n + 1)
+}
+
+/// Whether a calendar refresh is due at `now`: the day's first, or the retry
+/// of a failed aggregator read.
+pub async fn refresh_due(es: &dyn EarningsStore, now: DateTime<Utc>) -> Result<bool, String> {
+    Ok(next_attempt(es.kv_get(KV_REFRESHED).await?.as_deref(), now).is_some())
+}
+
+/// Whether the day's calendar refresh is over at `now`: it ran, and no retry
+/// of a failed aggregator read is still to come.
+pub async fn refreshed_today(es: &dyn EarningsStore, now: DateTime<Utc>) -> Result<bool, String> {
+    Ok(es.kv_get(KV_REFRESHED).await?.as_deref() == Some(ymd(et(now).date_naive()).as_str()))
 }
 
 /// Reads the aggregator and reconciles its dates (rules 1-7), drops the
 /// guessed dates of companies no longer on the watchlist, then rule 8. The
 /// calendar is read in one ranged query and written in one batch: at about
 /// 560 companies, a read and a write per ticker would pass the Free plan's
-/// 1,000 D1 calls per invocation in the busiest weeks.
+/// 1,000 D1 calls per invocation in the busiest weeks. Returns whether every
+/// ticker was read; a read that failed outright alerts only on the day's
+/// last attempt (`last_attempt`).
 async fn seed_from(
     now: DateTime<Utc>,
     es: &dyn EarningsStore,
     store: &dyn Store,
     src: &dyn CalendarSource,
+    last_attempt: bool,
     out: &mut RefreshOutcome,
-) -> Result<(), String> {
+) -> Result<bool, String> {
     let today = et(now).date_naive();
     let tickers: Vec<&'static str> = watchlist().iter().map(|e| e.ticker).collect();
     let on: HashSet<&str> = tickers.iter().copied().collect();
@@ -690,19 +724,20 @@ async fn seed_from(
             read.failed,
             tickers.len()
         ));
-        if read.failed >= tickers.len() {
+        if last_attempt && read.failed >= tickers.len() {
+            let n = out.attempt;
             store
                 .add_alert(
                     "calendar",
                     "warn",
-                    &format!("earnings calendar not refreshed on {today}: {e}"),
+                    &format!("earnings calendar not refreshed on {today} ({n} attempts): {e}"),
                 )
                 .await?;
         }
     }
     let days = trading_days(today);
     let Some(&last) = days.last() else {
-        return Ok(());
+        return Ok(read.failed == 0);
     };
     let mut seeds: BTreeMap<String, Seed> = BTreeMap::new();
     for s in read.seeds {
@@ -765,7 +800,7 @@ async fn seed_from(
         }
         apply(es, store, confirmed, &rows, out).await?;
     }
-    Ok(())
+    Ok(read.failed == 0)
 }
 
 /// Once per ET day (from 06:00, the polling window): read the aggregator
@@ -773,6 +808,10 @@ async fn seed_from(
 /// every ticker with a date in the next `SEED_DAYS` trading days, then check
 /// up to `IR_CHECKS` near, unconfirmed dates of write-up companies against
 /// company announcements.
+/// A read that misses tickers (a 429, a 401, a network error) is tried again
+/// `RETRY_HOURS` later, up to `REFRESH_ATTEMPTS` a day, while the window
+/// lasts; the announcement checks and the "not refreshed" alert wait for the
+/// attempt that ends the day.
 /// Provider errors are collected; a store error aborts.
 pub async fn refresh_tick(
     now: DateTime<Utc>,
@@ -784,14 +823,30 @@ pub async fn refresh_tick(
 ) -> Result<RefreshOutcome, String> {
     let mut out = RefreshOutcome::default();
     let today = et(now).date_naive();
-    if !crate::earnings::in_window(now) || refreshed_today(es, now).await? {
+    if !crate::earnings::in_window(now) {
         return Ok(out);
     }
+    let Some(n) = next_attempt(es.kv_get(KV_REFRESHED).await?.as_deref(), now) else {
+        return Ok(out);
+    };
     out.ran = true;
-    // Mark first: a failing aggregator must not be retried every firing.
-    es.kv_set(KV_REFRESHED, &ymd(today), &iso(now)).await?;
+    out.attempt = n;
+    let last =
+        n >= REFRESH_ATTEMPTS || !crate::earnings::in_window(now + Duration::hours(RETRY_HOURS));
+    // Mark first: a failing aggregator (or an invocation that dies) must not
+    // be retried every firing. The last attempt ends the day whatever happens.
+    let done = ymd(today);
+    let pending = format!("{done} {n} {}", iso(now));
+    let marker = if last { &done } else { &pending };
+    es.kv_set(KV_REFRESHED, marker, &iso(now)).await?;
     if let Some(src) = src {
-        seed_from(now, es, store, src, &mut out).await?;
+        if !seed_from(now, es, store, src, last, &mut out).await? && !last {
+            out.retry = true;
+            return Ok(out);
+        }
+    }
+    if !last {
+        es.kv_set(KV_REFRESHED, &done, &iso(now)).await?;
     }
 
     let horizon = ymd(today + Duration::days(IR_HORIZON_DAYS));
@@ -849,7 +904,7 @@ mod tests {
     use crate::earnings::store::MemEarningsStore;
     use crate::store::MemStore;
     use serde_json::json;
-    use std::cell::RefCell;
+    use std::cell::{Cell, RefCell};
     use std::rc::Rc;
 
     fn utc(s: &str) -> DateTime<Utc> {
@@ -1478,40 +1533,124 @@ mod tests {
         assert!(es.calendar_for("HPQ").await.unwrap().is_empty());
     }
 
-    #[tokio::test]
-    async fn aggregator_down_alerts_once() {
-        let base = Rc::new(MemStore::default());
-        let es = MemEarningsStore::new(base.clone());
-        struct Down;
-        #[async_trait(?Send)]
-        impl CalendarSource for Down {
-            async fn upcoming(&self, tickers: &[&str]) -> SeedRead {
-                SeedRead {
+    /// Fails every ticker with a 429 for its first `fails` reads, then seeds
+    /// XOM; counts the reads.
+    struct Flaky {
+        fails: u32,
+        reads: Cell<u32>,
+    }
+    #[async_trait(?Send)]
+    impl CalendarSource for Flaky {
+        async fn upcoming(&self, tickers: &[&str]) -> SeedRead {
+            self.reads.set(self.reads.get() + 1);
+            if self.reads.get() <= self.fails {
+                return SeedRead {
                     seeds: vec![],
                     failed: tickers.len(),
                     error: Some("http status 429".into()),
                     diagnostics: vec!["yahoo_429=1".into()],
-                }
+                };
+            }
+            SeedRead {
+                seeds: vec![Seed {
+                    ticker: "XOM".into(),
+                    date: d("2026-10-30"),
+                    slot: TimeSlot::Bmo,
+                    estimate: false,
+                }],
+                ..Default::default()
             }
         }
-        let o = refresh_tick(utc(NOW), &es, base.as_ref(), Some(&Down), &Ns, &Llm)
-            .await
-            .unwrap();
+    }
+    fn flaky(fails: u32) -> Flaky {
+        Flaky {
+            fails,
+            reads: Cell::new(0),
+        }
+    }
+
+    #[tokio::test]
+    async fn aggregator_down_is_retried_twice_and_alerts_once() {
+        let base = Rc::new(MemStore::default());
+        let es = MemEarningsStore::new(base.clone());
+        let src = flaky(u32::MAX);
+        let tick =
+            |t: &'static str| refresh_tick(utc(t), &es, base.as_ref(), Some(&src), &Ns, &Llm);
+        // 07:00 ET: the first read fails; no alert and no announcement
+        // checks yet, a retry in two hours.
+        let o = tick(NOW).await.unwrap();
+        assert_eq!(
+            (o.ran, o.attempt, o.retry, o.ir_checked),
+            (true, 1, true, 0)
+        );
         assert_eq!(o.errors.len(), 1, "{:?}", o.errors);
         assert!(o.errors[0].contains("429"));
         assert_eq!(o.diagnostics, ["yahoo_429=1"]);
+        assert!(base.alerts.borrow().is_empty());
+        // Every firing until 09:00 ET leaves Yahoo alone.
+        let early = utc("2026-10-26T12:59:00Z");
+        assert!(!refresh_due(&es, early).await.unwrap());
+        assert!(!tick("2026-10-26T12:59:00Z").await.unwrap().ran);
+        assert_eq!(src.reads.get(), 1);
+        // 09:00 ET: the second attempt, still quiet.
+        assert!(refresh_due(&es, utc("2026-10-26T13:00:00Z")).await.unwrap());
+        let o = tick("2026-10-26T13:00:00Z").await.unwrap();
+        assert_eq!((o.attempt, o.retry), (2, true));
+        assert!(base.alerts.borrow().is_empty());
+        // 11:00 ET: the last attempt ends the day with one alert.
+        let o = tick("2026-10-26T15:00:00Z").await.unwrap();
+        assert_eq!((o.attempt, o.retry), (3, false));
+        let alerts = base.alerts.borrow().clone();
+        assert_eq!(alerts.len(), 1);
+        assert!(
+            alerts[0].2.contains("(3 attempts): http status 429"),
+            "{alerts:?}"
+        );
+        for t in ["2026-10-26T17:00:00Z", "2026-10-27T01:59:00Z"] {
+            assert!(!refresh_due(&es, utc(t)).await.unwrap());
+            assert!(!tick(t).await.unwrap().ran);
+        }
+        assert_eq!(src.reads.get(), 3);
+        // The next day starts over.
+        let o = tick("2026-10-27T11:00:00Z").await.unwrap();
+        assert_eq!((o.ran, o.attempt), (true, 1));
+    }
+
+    #[tokio::test]
+    async fn a_retry_that_reads_everything_ends_the_day() {
+        let base = Rc::new(MemStore::default());
+        let es = MemEarningsStore::new(base.clone());
+        let src = flaky(1);
+        let tick =
+            |t: &'static str| refresh_tick(utc(t), &es, base.as_ref(), Some(&src), &Ns, &Llm);
+        assert!(tick(NOW).await.unwrap().retry);
+        let o = tick("2026-10-26T13:30:00Z").await.unwrap();
+        assert_eq!((o.attempt, o.retry, o.seeds), (2, false, 1));
+        assert!(o.errors.is_empty(), "{:?}", o.errors);
+        let xom = es.calendar_for("XOM").await.unwrap();
+        assert_eq!(summary(&xom), [s3("2026-10-30", "unconfirmed", "yahoo")]);
+        assert!(!refresh_due(&es, utc("2026-10-26T16:00:00Z")).await.unwrap());
+        assert!(!tick("2026-10-26T16:00:00Z").await.unwrap().ran);
+        assert_eq!(src.reads.get(), 2);
+        assert!(base.alerts.borrow().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_failure_too_late_for_a_retry_ends_the_day() {
+        // 20:30 ET: a retry at 22:30 would be outside the window.
+        let base = Rc::new(MemStore::default());
+        let es = MemEarningsStore::new(base.clone());
+        let src = flaky(u32::MAX);
+        let late = utc("2026-10-27T00:30:00Z");
+        let o = refresh_tick(late, &es, base.as_ref(), Some(&src), &Ns, &Llm)
+            .await
+            .unwrap();
+        assert_eq!((o.attempt, o.retry), (1, false));
         assert_eq!(base.alerts.borrow().len(), 1);
-        refresh_tick(
-            utc("2026-10-26T12:00:00Z"),
-            &es,
-            base.as_ref(),
-            Some(&Down),
-            &Ns,
-            &Llm,
-        )
-        .await
-        .unwrap();
-        assert_eq!(base.alerts.borrow().len(), 1);
+        assert!(!refresh_due(&es, utc("2026-10-27T01:59:00Z")).await.unwrap());
+        // A marker from before retries ("YYYY-MM-DD" alone) still means done.
+        es.kv_set(KV_REFRESHED, "2026-10-27", "x").await.unwrap();
+        assert!(!refresh_due(&es, utc("2026-10-27T20:00:00Z")).await.unwrap());
     }
 
     #[tokio::test]
@@ -1629,10 +1768,11 @@ mod tests {
         .unwrap();
         assert_eq!((o.seeds, o.changes), (300, 300));
         assert_eq!(es.calendar.borrow().len(), 300);
-        // Refresh marker, one ranged read, one batched write, rule 8's read,
-        // the announcement candidates' read and their checks (2 kv calls each).
+        // Refresh marker (read, attempt, done), one ranged read, one batched
+        // write, rule 8's read, the announcement candidates' read and their
+        // checks (2 kv calls each).
         let calls = es.calls.get();
-        assert!(calls <= 6 + 2 * IR_CHECKS, "{calls}");
+        assert!(calls <= 7 + 2 * IR_CHECKS, "{calls}");
         // Next day the aggregator agrees everywhere: nothing is rewritten.
         es.calls.set(0);
         let next = utc("2026-10-27T11:00:00Z");
@@ -1648,7 +1788,7 @@ mod tests {
         .unwrap();
         assert!(o.ran);
         assert_eq!(o.changes, 0);
-        assert!(es.calls.get() <= 6 + 2 * IR_CHECKS, "{}", es.calls.get());
+        assert!(es.calls.get() <= 7 + 2 * IR_CHECKS, "{}", es.calls.get());
     }
 
     #[tokio::test]

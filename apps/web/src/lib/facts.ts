@@ -21,9 +21,15 @@ export interface MoverView {
   symbol: string;
   name: string;
   quote: QuoteView;
-  /** English only (`summary_en`) of the first reason. */
+  /**
+   * English only: the first reason's `summary_en`, else the generator's fallback (`fallback.text_en`: the company
+   * reported results, or the stock moved with a theme group). Null means "No clear news".
+   */
   reason: string | null;
+  /** The reason's source, or the fallback's SEC filing; http(s) only. */
   reasonUrl: string | null;
+  /** The fallback's earnings check on this site, linked as `/{locale}/p/{slug}`; it wins over `reasonUrl`. */
+  reasonPost: string | null;
 }
 
 export interface ThemeMemberView {
@@ -119,6 +125,22 @@ function indexViews(kind: Kind, list: unknown[]): IndexView[] {
   });
 }
 
+const httpUrl = (u: unknown): string | null => (typeof u === "string" && /^https?:\/\//i.test(u) ? u : null);
+const POST_SLUG = /^[a-z0-9][a-z0-9-]*$/;
+
+/**
+ * A mover's optional fallback Why, read defensively: absent in facts stored before it existed, and a malformed one
+ * reads as absent rather than failing the facts.
+ */
+function fallbackWhy(v: unknown): Pick<MoverView, "reason" | "reasonUrl" | "reasonPost"> | null {
+  if (typeof v !== "object" || v === null || Array.isArray(v)) return null;
+  const f = v as Record<string, unknown>;
+  const text = typeof f.text_en === "string" ? f.text_en.trim() : "";
+  if (!text) return null;
+  const post = typeof f.post_slug === "string" && POST_SLUG.test(f.post_slug) ? f.post_slug : null;
+  return { reason: text, reasonUrl: post ? null : httpUrl(f.filing_url), reasonPost: post };
+}
+
 function moverView(v: unknown): MoverView {
   const m = obj(v, "mover");
   const quote = quoteView(m.quote);
@@ -126,14 +148,10 @@ function moverView(v: unknown): MoverView {
   const r = first === undefined ? null : obj(first, "reason");
   const summary = r ? str(r.summary_en, "summary_en").trim() : "";
   const url = r ? str(r.url, "url") : "";
-  const safeUrl = /^https?:\/\//i.test(url) ? url : null;
-  return {
-    symbol: quote.symbol,
-    name: str(m.name, "name"),
-    quote,
-    reason: summary || null,
-    reasonUrl: summary ? safeUrl : null,
-  };
+  const why = summary
+    ? { reason: summary, reasonUrl: httpUrl(url), reasonPost: null }
+    : (fallbackWhy(m.fallback) ?? { reason: null, reasonUrl: null, reasonPost: null });
+  return { symbol: quote.symbol, name: str(m.name, "name"), quote, ...why };
 }
 
 function themeView(v: unknown): ThemeView {

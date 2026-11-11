@@ -17,6 +17,7 @@ use crate::earnings::draft::{slug, write, CONTENT_TYPE, TEMPLATE_ID};
 use crate::earnings::extract::{extract, Extracted};
 use crate::earnings::facts::{missing_required, EarningsFacts, Metric, Metrics, NOT_STATED};
 use crate::earnings::foreign::{foreign_tick, ForeignOutcome};
+use crate::earnings::share::{read as read_share_move, Shares};
 use crate::earnings::store::{ChartRow, EarningsStore, FilingRow};
 use crate::earnings::xbrl::fetch_trend;
 use crate::earnings::{find, in_window, Tier, WatchEntry};
@@ -275,7 +276,7 @@ pub async fn poll_job(
         out.foreign.reads,
     ));
     let refreshed = crate::earnings::calendar::refreshed_today(es, now).await?;
-    if !refreshed {
+    if crate::earnings::calendar::refresh_due(es, now).await? {
         out.follow_ups.push(EarningsStep::Calendar);
     }
     if !crate::events::check::checked_today(es, now).await?
@@ -365,12 +366,28 @@ fn retry_builds(open: &[(FilingRow, Option<RunRow>)], now: DateTime<Utc>) -> usi
 /// skips in-flight or recently retried ones, and does at most one piece of
 /// LLM work (a build or a Chinese retry) per tick. `log` receives the
 /// cover outcome, `cover=ok|err|none`, once per build that publishes.
+/// Without a quote source, a check carries no share move.
 pub async fn build_tick(
     now: DateTime<Utc>,
     es: &dyn EarningsStore,
     store: &dyn Store,
     filings: &dyn Filings,
     llm: &dyn LlmProvider,
+    log: &dyn Fn(&str),
+) -> Result<Vec<(String, TickOutcome)>, String> {
+    build_tick_with_shares(now, es, store, filings, llm, None, log).await
+}
+
+/// `build_tick`, reading the share move at build time from `shares` (best
+/// effort; `log` also receives `share_move=ok|missing (reason)` for each
+/// build whose facts are publishable).
+pub async fn build_tick_with_shares(
+    now: DateTime<Utc>,
+    es: &dyn EarningsStore,
+    store: &dyn Store,
+    filings: &dyn Filings,
+    llm: &dyn LlmProvider,
+    shares: Option<&Shares<'_>>,
     log: &dyn Fn(&str),
 ) -> Result<Vec<(String, TickOutcome)>, String> {
     let mut out = Vec::new();
@@ -411,7 +428,7 @@ pub async fn build_tick(
                 if let Some(o) = reconcile(now, es, store, &f, &run).await? {
                     o
                 } else {
-                    build(now, es, store, filings, llm, log, &f, run).await?
+                    build(now, es, store, filings, llm, shares, log, &f, run).await?
                 }
             }
         };
@@ -564,6 +581,10 @@ async fn gather(
         guidance: x.guidance,
         highlights: x.highlights,
         trend,
+        // Read by `build` once the facts are publishable.
+        share_move: Field::Missing {
+            reason: "not read".into(),
+        },
     })
 }
 
@@ -705,6 +726,7 @@ async fn build(
     store: &dyn Store,
     filings: &dyn Filings,
     llm: &dyn LlmProvider,
+    shares: Option<&Shares<'_>>,
     log: &dyn Fn(&str),
     f: &FilingRow,
     mut row: RunRow,
@@ -715,11 +737,19 @@ async fn build(
     row.updated_at = ts.clone();
     store.upsert_run(&row).await?;
 
-    let facts = gather(filings, llm, f).await?;
+    let mut facts = gather(filings, llm, f).await?;
     let missing = missing_required(&facts);
     if !missing.is_empty() {
         let err = missing_error(&facts, &missing);
         return not_ready(now, es, store, f, row, err).await;
+    }
+    // Best effort: a missing move never holds the check back.
+    facts.share_move = read_share_move(shares, &facts.ticker, facts.accepted_at, now).await;
+    if shares.is_some() {
+        log(&match &facts.share_move {
+            Field::Value(_) => "share_move=ok".to_string(),
+            Field::Missing { reason } => format!("share_move=missing ({reason})"),
+        });
     }
     let (en, en_md) = match write(llm, &facts, Lang::En).await {
         Ok(x) => x,
@@ -968,12 +998,16 @@ mod tests {
     use super::*;
     use crate::cover::{earnings_graphic, earnings_lines};
     use crate::earnings::draft::tests::reply;
+    use crate::earnings::facts::ShareSession;
+    use crate::earnings::share::SHARE_QUOTE_COST;
     use crate::earnings::store::MemEarningsStore;
     use crate::earnings::xbrl::tests::aapl_concept;
     use crate::earnings::Filer;
     use crate::edgar::tests::{EX991, FEED, INDEX};
     use crate::edgar::{html_to_text, parse_current_feed, parse_filing_index, Concept, FilingDoc};
+    use crate::providers::{CountingHttp, Http, HttpResp};
     use crate::store::{MemStore, PostRow, TranslationRow};
+    use crate::yahoo::Yahoo;
     use async_trait::async_trait;
     use serde_json::Value;
     use std::cell::{Cell, RefCell};
@@ -1420,6 +1454,27 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn polls_queue_a_failed_calendar_refresh_again_after_two_hours() {
+        let (base, es) = stores();
+        // The 07:01 ET attempt failed on a 429.
+        es.kv_set(
+            "calendar_refreshed_on",
+            "2026-11-10 1 2026-11-10T12:01:00Z",
+            "x",
+        )
+        .await
+        .unwrap();
+        let fl = FakeFilings::default();
+        let calendar = |o: &PollOutcome| o.follow_ups.contains(&EarningsStep::Calendar);
+        let t = utc("2026-11-10T13:56:00Z");
+        let o = poll_job(t, Some(t), &es, base.as_ref(), &fl).await.unwrap();
+        assert!(!calendar(&o), "{o:?}");
+        let t = utc("2026-11-10T14:01:00Z");
+        let o = poll_job(t, Some(t), &es, base.as_ref(), &fl).await.unwrap();
+        assert!(calendar(&o), "{o:?}");
+    }
+
+    #[tokio::test]
     async fn polls_queue_the_events_check_daily_and_after_a_release_time() {
         let (base, es) = stores();
         es.kv.borrow_mut().clear();
@@ -1768,7 +1823,6 @@ mod tests {
         use crate::earnings::xbrl::tests::{EPS, NET_INCOME, REVENUE};
         use crate::edgar::tests::{FakeHttp, RecTimer};
         use crate::edgar::{concept_url, Edgar};
-        use crate::providers::CountingHttp;
         let (base, es, _) = detected().await;
         let mut http = FakeHttp::default();
         let mut route = |u: String, body: &str| {
@@ -1794,17 +1848,200 @@ mod tests {
         .unwrap();
         let inner = llm(true, false);
         let l = CountingLlm(&inner, Cell::new(0));
-        let o = build_tick(poll_time(), &es, base.as_ref(), &edgar, &l, &|_| {})
-            .await
-            .unwrap();
+        // The share move's worst case: the first quote answers 401, so the
+        // cookie and crumb are fetched again.
+        let yahoo = Yahoo::new(CountingHttp::new(YahooHttp {
+            refresh: Cell::new(true),
+            body: after_hours_body(),
+        }));
+        let budget = || edgar.http.count() + yahoo.http.count() + l.1.get();
+        let shares = Shares {
+            quotes: &yahoo,
+            budget: &budget,
+        };
+        let o = build_tick_with_shares(
+            poll_time(),
+            &es,
+            base.as_ref(),
+            &edgar,
+            &l,
+            Some(&shares),
+            &|_| {},
+        )
+        .await
+        .unwrap();
         assert_eq!(o[0].1, TickOutcome::PublishedEnOnly, "{o:?}");
         let fetches = edgar.http.count();
-        let used = fetches + l.1.get();
+        let used = budget();
         // index + exhibit + 4 concepts (no `Revenues`, then the current tag,
-        // EPS, net income) = 6 fetches; extraction + EN + 2 ZH attempts = 4.
+        // EPS, net income) = 6 fetches; extraction + EN + 2 ZH attempts = 4;
+        // the share move's cookie, crumb, quote (401) and all three again = 6.
         assert_eq!((fetches, l.1.get()), (6, 4));
+        assert_eq!(yahoo.http.count(), SHARE_QUOTE_COST);
+        assert!(matches!(stored_facts(&base).share_move, Field::Value(_)));
         // A Chinese retry for another filing in the same invocation adds 2.
         assert!(used + 2 <= 40, "{used}");
+    }
+
+    /// fc.yahoo.com (the cookie), getcrumb and the v7 quote answering `body`;
+    /// with `refresh`, the first quote request answers 401.
+    struct YahooHttp {
+        refresh: Cell<bool>,
+        body: String,
+    }
+    #[async_trait(?Send)]
+    impl Http for YahooHttp {
+        async fn get(&self, url: &str, _: &[(&str, &str)]) -> Result<HttpResp, ProviderError> {
+            let r = |status: u16, body: &str| HttpResp {
+                status,
+                body: body.into(),
+                set_cookie: None,
+            };
+            Ok(if url.starts_with("https://fc.yahoo.com") {
+                HttpResp {
+                    set_cookie: Some("A3=d=x; Path=/".into()),
+                    ..r(404, "")
+                }
+            } else if url.contains("/v1/test/getcrumb") {
+                r(200, "crumb1")
+            } else if url.contains("/v7/finance/quote") && self.refresh.replace(false) {
+                r(401, "")
+            } else if url.contains("/v7/finance/quote") {
+                r(200, &self.body)
+            } else {
+                r(404, "")
+            })
+        }
+        async fn post_json(
+            &self,
+            _: &str,
+            _: &[(&str, &str)],
+            _: &Value,
+        ) -> Result<HttpResp, ProviderError> {
+            unreachable!("Yahoo only GETs")
+        }
+    }
+
+    /// AAPL on Fri 2026-10-30 (EDT): closed at $230.00 at 4:00 PM, $220.80
+    /// at 4:40 PM after hours (invented prices).
+    fn after_hours_body() -> String {
+        serde_json::json!({"quoteResponse": {"result": [{"symbol": "AAPL",
+            "regularMarketPrice": 230.0, "regularMarketPreviousClose": 228.1,
+            "regularMarketChangePercent": 0.83, "regularMarketTime": 1793390400_i64,
+            "postMarketPrice": 220.8, "postMarketChangePercent": -4.0,
+            "postMarketTime": 1793392800_i64}], "error": null}})
+        .to_string()
+    }
+
+    fn body_of(base: &MemStore, lang: &str) -> String {
+        base.translations.borrow()[&(1, lang.to_string())]
+            .body_md
+            .clone()
+    }
+
+    #[tokio::test]
+    async fn a_build_shows_the_share_move_at_publishing_time() {
+        let (base, es, fl) = detected().await;
+        let l = llm(true, true);
+        let yahoo = Yahoo::new(YahooHttp {
+            refresh: Cell::new(false),
+            body: after_hours_body(),
+        });
+        let shares = Shares {
+            quotes: &yahoo,
+            budget: &|| 0,
+        };
+        let logs = RefCell::new(Vec::<String>::new());
+        let log = |m: &str| logs.borrow_mut().push(m.to_string());
+        let o = build_tick_with_shares(
+            poll_time(),
+            &es,
+            base.as_ref(),
+            &fl,
+            &l,
+            Some(&shares),
+            &log,
+        )
+        .await
+        .unwrap();
+        assert_eq!(o, vec![(KEY.to_string(), TickOutcome::Published)]);
+        let Field::Value(m) = stored_facts(&base).share_move else {
+            panic!("no share move")
+        };
+        assert_eq!(
+            (m.session, m.change_pct, m.last, m.ref_close),
+            (ShareSession::AfterHours, -4.0, 220.8, 230.0)
+        );
+        let en = body_of(&base, "en");
+        assert!(
+            en.contains("Form 8-K filed Oct 30, 2026\n\nShares: -4.0% after hours (as of 4:40 PM ET)\n\n| Key figure"),
+            "{en}"
+        );
+        let zh = body_of(&base, "zh");
+        assert!(
+            zh.contains("\n\n股价：盘后下跌4.0%（截至美东时间下午4:40）\n\n| 关键数据"),
+            "{zh}"
+        );
+        assert_eq!(*logs.borrow(), ["share_move=ok", "cover=ok"]);
+    }
+
+    #[tokio::test]
+    async fn a_missing_share_move_never_holds_the_check() {
+        use crate::earnings::share::tests::FakeQuotes;
+        use crate::yahoo::SessionQuote;
+        for (reply, used, why) in [
+            (Err(ProviderError::Http(429)), 0, "yahoo: http status 429"),
+            // Monday's close, not today's: stale.
+            (
+                Ok(SessionQuote {
+                    regular_price: Some(230.0),
+                    regular_time: Some("2026-10-26T20:00:00Z".parse().unwrap()),
+                    post_price: Some(220.8),
+                    post_time: Some("2026-10-26T20:40:00Z".parse().unwrap()),
+                    ..SessionQuote::default()
+                }),
+                0,
+                "stale",
+            ),
+            // The invocation has already spent its optional budget.
+            (Ok(SessionQuote::default()), 35, "subrequest budget"),
+        ] {
+            let (base, es, fl) = detected().await;
+            let l = llm(true, true);
+            let quotes = FakeQuotes::new(reply);
+            let budget = move || used;
+            let shares = Shares {
+                quotes: &quotes,
+                budget: &budget,
+            };
+            let logs = RefCell::new(Vec::<String>::new());
+            let log = |m: &str| logs.borrow_mut().push(m.to_string());
+            let o = build_tick_with_shares(
+                poll_time(),
+                &es,
+                base.as_ref(),
+                &fl,
+                &l,
+                Some(&shares),
+                &log,
+            )
+            .await
+            .unwrap();
+            assert_eq!(o, vec![(KEY.to_string(), TickOutcome::Published)], "{why}");
+            match stored_facts(&base).share_move {
+                Field::Missing { reason } => assert!(reason.starts_with(why), "{reason}"),
+                v => panic!("{v:?}"),
+            }
+            assert!(logs.borrow()[0].starts_with(&format!("share_move=missing ({why}")));
+            for lang in ["en", "zh"] {
+                let body = body_of(&base, lang);
+                assert!(
+                    !body.contains("Shares:") && !body.contains("股价："),
+                    "{body}"
+                );
+            }
+            assert_eq!(quotes.calls.get(), usize::from(used == 0), "{why}");
+        }
     }
 
     #[tokio::test]

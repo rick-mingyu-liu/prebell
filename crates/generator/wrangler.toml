@@ -67,7 +67,7 @@ max_retries = 1
 
 [vars]
 # LLM_PROVIDER: "claude" (default; secret ANTHROPIC_API_KEY) or "deepseek" (fallback; secret DEEPSEEK_API_KEY).
-# Optional LLM_MODEL overrides the provider's default model (claude-sonnet-5-5 / deepseek-chat).
+# Optional LLM_MODEL overrides the provider's default model (claude-sonnet-5-5 / deepseek-flash).
 # LLM_EFFORT (Claude only): low | medium | high, or "none" to omit the field for models without effort support.
 # See docs/runbook.md.
 LLM_PROVIDER = "claude"

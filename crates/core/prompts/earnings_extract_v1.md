@@ -11,7 +11,7 @@ For each figure, copy:
 Figures (use the current reporting period — the quarter the release reports, not the prior year or a year-to-date total — and null when the document does not state it):
 - `revenue`: total revenue / total net sales / total net revenue as reported under GAAP (never a segment or product line, and never "managed", "adjusted" or fully-taxable-equivalent revenue).
 - `net_income`: GAAP net income (or net loss) attributable to the company.
-- `eps_gaap_diluted`: GAAP diluted earnings (or loss) per share (never a dividend per share).
+- `eps_gaap_diluted`: GAAP diluted earnings (or loss) per share (never a dividend per share). If the document states no diluted figure, the net earnings (or loss) per share it states, unless labelled basic; if it states one per share class, the class of the ticker named in the user message (for BRK.B, "Net earnings per average equivalent Class B Share").
 - `eps_non_gaap_diluted`: non-GAAP (adjusted) diluted earnings per share, only if the document labels it non-GAAP or adjusted.
 - `gross_margin_pct`: gross margin as a percentage, only if the document states the percentage.
 - `operating_margin_pct`: GAAP operating margin as a percentage, only if the document states the percentage (never "adjusted" or non-GAAP operating margin).
@@ -22,6 +22,7 @@ Also return:
 - `fiscal_period`: `{"quarter": 1-4 or null for a full-year-only release, "fiscal_year": the company's fiscal year as a number, "quote": a passage naming the quarter and fiscal year}`, or null.
 - `guidance`: up to 4 items of forward-looking outlook the company gives, each `{"quote": verbatim passage, "summary_en": at most 30 words}`; [] if none.
 - `highlights`: up to 4 other notable results (segments, products, buybacks, dividends), same shape; [] if none.
+- A sharp swing needs its cause: when GAAP net income or diluted EPS changes sign against the year-earlier period or recent quarters (a profit turning into a loss, or back), or the document itself names a large one-time item (an impairment, a restructuring charge, litigation or a settlement, a tax item, a gain or loss on a deal), the FIRST highlight must be that item as the document gives it, with `"cause": true` added: `{"quote": the passage in which the document attributes the result to the item, e.g. "net loss was primarily due to …", "driven by …", "net loss included …" (with its amount, if the document gives one), "summary_en": "...", "cause": true}`. Quote only what the document says; if it does not attribute the swing to an item, add no such highlight (an item merely listed, such as "results included a restructuring charge", is an ordinary highlight). Never give a cause from outside knowledge. Every other note has no `cause` field.
 
 `summary_en` is plain text: no links, URLs, email addresses, HTML or markdown, and no number that is not in its quote. Do not mention analyst estimates, consensus, or whether results beat or missed anything.
 

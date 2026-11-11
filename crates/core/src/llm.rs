@@ -4,7 +4,8 @@ use crate::claude::{self, Claude};
 use crate::deepseek::DeepSeek;
 use crate::providers::{Http, LlmProvider, ProviderError};
 
-const DEEPSEEK_DEFAULT_MODEL: &str = "deepseek-chat";
+/// `deepseek-chat` was retired; `deepseek-flash` without thinking is what it served.
+const DEEPSEEK_DEFAULT_MODEL: &str = "deepseek-flash";
 
 /// Name of the secret holding the API key for `provider` (the `LLM_PROVIDER` value).
 pub fn api_key_var(provider: &str) -> Option<&'static str> {
@@ -138,7 +139,7 @@ mod tests {
         assert!(seen[0]
             .1
             .contains(&("Authorization".into(), "Bearer dk".into())));
-        assert_eq!(seen[0].2["model"], "deepseek-chat");
+        assert_eq!(seen[0].2["model"], "deepseek-flash");
     }
 
     #[tokio::test]
@@ -180,7 +181,7 @@ mod tests {
             "deepseek",
             h2.clone(),
             "dk".into(),
-            Some("deepseek-reasoner".into()),
+            Some("deepseek-v4-pro".into()),
             None,
             no_warn,
         )
@@ -189,7 +190,7 @@ mod tests {
         let seen = h.seen.borrow();
         assert_eq!(seen[0].2["model"], "claude-opus-5-5");
         assert_eq!(seen[1].2["model"], "claude-sonnet-5-5");
-        assert_eq!(h2.seen.borrow()[0].2["model"], "deepseek-reasoner");
+        assert_eq!(h2.seen.borrow()[0].2["model"], "deepseek-v4-pro");
     }
 
     #[tokio::test]

@@ -2,6 +2,8 @@
 
 Auto-generated US-market briefs in English and Simplified Chinese: a premarket brief at 8:00 ET, updated at 8:35 ET after the 8:30 economic releases, an after-close recap, and earnings health checks built from SEC filings. Every number in a brief is checked against its source data before publishing.
 
+Agents can read the same data through a read-only MCP server at `https://prebell.site/mcp` (`claude mcp add --transport http prebell https://prebell.site/mcp`; see `docs/runbook.md`, "MCP server").
+
 **Status:** pre-launch. Nothing is deployed yet; see `docs/runbook.md` for the deploy steps.
 
 ## Layout

@@ -112,9 +112,12 @@ export function toCover(r: CoverRow): PostCover {
   };
 }
 
-// A post is shown in `lang` when that translation is published, or (ZH only)
-// pending while the EN text is published — the page then links to English.
-const VISIBLE = `(t.status = 'published' OR (t.lang = 'zh' AND t.status = 'pending' AND o.status = 'published'))`;
+/**
+ * A post is shown in `lang` when that translation is published, or (ZH only) pending while the EN text is
+ * published — the page then links to English. SQL over the aliases `t` (the `lang` translation) and `o` (the other
+ * language's); since only the ZH case reads `o`, `o` may also be the EN row itself.
+ */
+export const VISIBLE = `(t.status = 'published' OR (t.lang = 'zh' AND t.status = 'pending' AND o.status = 'published'))`;
 
 const HEAD_COLUMNS = `p.id, p.slug, p.content_type, p.trading_date, p.published_at, p.revised_at, p.facts_r2_key, t.status,
   t.title, t.summary, o.status AS other_status, ${COVER_COLUMNS}`;
@@ -123,7 +126,6 @@ JOIN post_translations t ON t.post_id = p.id AND t.lang = ?
 LEFT JOIN post_translations o ON o.post_id = p.id AND o.lang = ?
 ${JOIN_FILING}`;
 const SELECT_VIEW = `SELECT ${HEAD_COLUMNS}, t.body_md ${FROM_VIEW}`;
-const SELECT_HEAD = `SELECT ${HEAD_COLUMNS} ${FROM_VIEW}`;
 
 interface ListRow extends CoverRow {
   slug: string;
@@ -183,11 +185,20 @@ export async function getPostBySlug(db: D1Like, slug: string, lang: Lang): Promi
   return toView(db, row);
 }
 
-/** The newest visible post of `type` in `lang`, without its body (one D1 read). */
+/**
+ * The newest visible post of `type` in `lang`, without its body (one D1 read). `INDEXED BY`, CROSS JOIN (posts
+ * outer) and the always-true range term make SQLite walk idx_posts_trading_date backwards and stop at the first
+ * match, whatever its table statistics say, instead of reading every translation in the language
+ * (tests/queryplan.test.ts).
+ */
 export async function getLatestPost(db: D1Like, lang: Lang, type: ContentType): Promise<PostHead | null> {
   const row = await db
     .prepare(
-      `${SELECT_HEAD} WHERE p.content_type = ? AND ${VISIBLE}
+      `SELECT ${HEAD_COLUMNS} FROM posts p INDEXED BY idx_posts_trading_date
+       CROSS JOIN post_translations t ON t.post_id = p.id AND t.lang = ?
+       LEFT JOIN post_translations o ON o.post_id = p.id AND o.lang = ?
+       ${JOIN_FILING}
+       WHERE p.trading_date <= '9999-12-31' AND p.content_type = ? AND ${VISIBLE}
        ORDER BY p.trading_date DESC, p.published_at DESC LIMIT 1`,
     )
     .bind(lang, other(lang), type)
