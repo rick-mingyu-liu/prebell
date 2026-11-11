@@ -297,7 +297,7 @@ The generator goes first and the signup form last, so nobody signs up before one
 
 1. A Buttondown account at buttondown.com (free up to 100 subscribers). In its settings, set the newsletter's sender ("From") name to `Rick`. It is a newsletter setting (`from_name`); no email carries its own. Check the reply-to address too: replies to the digest's question go there (by default the account email).
 2. Settings → API: copy the API key. Paste it only into the `wrangler secret put` prompts below, never into a file, chat or commit.
-3. The digest on the generator (`prebell-generator`): `cd crates/generator && pnpm exec wrangler secret put BUTTONDOWN_API_KEY`. Then in `crates/generator/wrangler.toml` `[vars]` add `DIGEST_ENABLED = "true"`, **commit that edit** (a later deploy from a clean checkout would otherwise drop it and the digest would quietly go off), and deploy the generator.
+3. The digest on the generator (`prebell-generator`): `cd crates/generator && pnpm exec wrangler secret put BUTTONDOWN_API_KEY`. `DIGEST_ENABLED = "true"` is already in `crates/generator/wrangler.toml` `[vars]` (committed 2026-11-10 at Rick's request), so then deploy the generator.
 4. On the first Friday evening after that, open the draft in Buttondown and use its preview, while there are still no subscribers:
    - it is a draft (not scheduled or sending);
    - it renders as plain paragraphs, headings and lists, with every link going to the right page;
@@ -321,7 +321,7 @@ From then on, the first earnings poll from 18:00 ET each Friday, after that day'
 
 ### Switches (`crates/generator/wrangler.toml`, `[vars]`)
 
-- `DIGEST_ENABLED`: off unless it is exactly `"true"`, with no spaces or newline around it. Unset (the default; it is not in the file), `"false"`, `" true"` or any other value means polls never queue a `digest` message, and a stray one logs `job digest: disabled (DIGEST_ENABLED is not true); skipped`. Setting `BUTTONDOWN_API_KEY` alone does not turn it on.
+- `DIGEST_ENABLED`: off unless it is exactly `"true"`, with no spaces or newline around it. Unset, `"false"`, `" true"` or any other value means polls never queue a `digest` message, and a stray one logs `job digest: disabled (DIGEST_ENABLED is not true); skipped`. Setting `BUTTONDOWN_API_KEY` alone does not turn it on.
 - `DIGEST_ENABLED = "true"` without the generator's `BUTTONDOWN_API_KEY` secret is a dry run: it gathers next week, renders the email and logs `job digest: 2026-11-09 (draft): dry run, no sender: "Week ahead: Nov 9–13" (3 picks, <n> bytes); BUTTONDOWN_API_KEY is not set`. It sends nothing and writes nothing, so it runs on every poll until 22:00 ET, and the run from 21:55 ET alerts `digest-missed` once.
 - `DIGEST_MODE`: `"draft"` (the default: Rick sends) or `"scheduled"`, which schedules the draft for Sunday 18:00 America/New_York (23:00Z under EST, 22:00Z under EDT, using that Sunday's own offset) once Buttondown confirms it is a draft. Any other `DIGEST_MODE` is a config error: one `error` alert per ET day keyed `config:digest:<date>`, which names the variable and value. Leave it on `"draft"` until Rick asks for automatic sending.
 
