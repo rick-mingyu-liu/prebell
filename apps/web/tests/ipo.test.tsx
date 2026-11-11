@@ -11,12 +11,14 @@ import {
   listIposBetween,
   listIpoWatch,
   loadIpo,
+  reportedDatePassed,
   secUrl,
   yahooUrl,
 } from "../src/lib/ipo";
 import type { D1Like } from "../src/lib/posts";
 import { sitemapEntries } from "../src/lib/sitemap";
 import { translator } from "../src/lib/translator";
+import { todayEt } from "../src/lib/earnings";
 import { memoryD1 } from "./d1";
 
 // The pages read D1 through getDb() and messages through next-intl/server; both are swapped for an in-memory D1
@@ -844,6 +846,19 @@ describe("contract revision: statements, first trading day, passed reported date
     expect((await loadIpo(db(), "northwind-robotics", "en"))!.trading!.firstIsDayOne).toBe(true);
   });
 
+  it("takes the clock as an injected ET date: the readers never read it themselves when given one", async () => {
+    // todayEt of an instant is the New York calendar date; the readers take that date as an argument.
+    expect(todayEt(new Date("2026-11-18T04:59:59Z"))).toBe("2026-11-17");
+    expect(todayEt(new Date("2026-11-18T05:00:00Z"))).toBe("2026-11-18");
+    expect(reportedDatePassed("2026-11-16", "2026-11-17")).toBe(false);
+    expect(reportedDatePassed("2026-11-16", "2026-11-18")).toBe(true);
+    // A Friday report shows through Saturday and is gone on Sunday (calendar days, not trading days).
+    expect(reportedDatePassed("2026-11-20", "2026-11-21")).toBe(false);
+    expect(reportedDatePassed("2026-11-20", "2026-11-22")).toBe(true);
+    // The fake clock says Nov 11, but an injected Nov 18 wins.
+    expect((await loadIpo(db(), "anthropic", "en", "2026-11-18"))!.date).toBeNull();
+  });
+
   it("treats a reported date before yesterday (ET) as date not set, at the boundary", async () => {
     // Anthropic's reported date is Mon Nov 16.
     for (const [today, shown] of [
@@ -874,11 +889,22 @@ describe("contract revision: statements, first trading day, passed reported date
     // The day before: still shown, dashed.
     vi.setSystemTime(new Date("2026-11-17T15:00:00Z"));
     expect(await calendar("2026-11-16")).toContain('class="cal-card cal-card-text cal-unconfirmed"');
-    // The edge is midnight in New York, not UTC: 23:59 ET on Tue Nov 17 still shows it, 00:00 ET Wed Nov 18 does not.
-    vi.setSystemTime(new Date("2026-11-18T04:59:00Z"));
-    expect(await calendar("2026-11-16")).toContain('class="cal-ipo"');
+    // The edge is midnight in New York, not UTC (the core test's boundary): 23:59 ET on Tue Nov 17 still shows the
+    // Nov 16 report on the page, the calendar and the strip; 00:00 ET Wed Nov 18 shows "date not set" on all three.
+    const stripOf = (out: string) => {
+      const at = out.indexOf('<section class="cal-ipo-watch"');
+      return textOf(out.slice(at, out.indexOf("</section>", at)));
+    };
+    vi.setSystemTime(new Date("2026-11-18T04:59:59Z"));
+    expect(textOf(await page("anthropic"))).toContain("Expected to start trading Mon, Nov 16, 2026, as reported by Example News");
+    const before = await calendar("2026-11-16");
+    expect(before).toContain('class="cal-ipo"');
+    expect(stripOf(before)).toContain("AnthropicANTPrice range setNov 16, 2026Unconfirmed");
     vi.setSystemTime(new Date("2026-11-18T05:00:00Z"));
-    expect(await calendar("2026-11-16")).not.toContain('class="cal-ipo"');
+    expect(await page("anthropic")).toContain('<p class="ipo-date">First trading day: date not set.</p>');
+    const after = await calendar("2026-11-16");
+    expect(after).not.toContain('class="cal-ipo"');
+    expect(stripOf(after)).toContain("AnthropicANTPrice range setDate not set");
   });
 
   it("renders items with NULL statements from their own fields, in both languages", async () => {

@@ -5,11 +5,13 @@ import { getTranslations, setRequestLocale } from "next-intl/server";
 import IpoView from "@/components/IpoView";
 import type { Locale } from "@/i18n/routing";
 import { getDb } from "@/lib/db";
+import { todayEt } from "@/lib/earnings";
 import { loadIpo } from "@/lib/ipo";
 import { pairedAlternates, shareMetadata } from "@/lib/seo";
 
-// One load shared by generateMetadata and the page: five D1 reads, no R2.
-const load = cache((slug: string, locale: Locale) => loadIpo(getDb(), slug, locale));
+// One load shared by generateMetadata and the page: five D1 reads, no R2. The clock is read here, once per request,
+// and handed to the reader as the ET date (a passed reported date reads "date not set").
+const load = cache((slug: string, locale: Locale) => loadIpo(getDb(), slug, locale, todayEt()));
 
 export async function generateMetadata({ params }: PageProps<"/[locale]/ipo/[slug]">): Promise<Metadata> {
   const { locale, slug } = await params;
