@@ -1,63 +1,77 @@
-//! Every word of the weekly digest email, English and Chinese side by side
-//! as `(EN, ZH)` pairs, so the wording can be redrafted here without
-//! touching the layout in `render`. A `{name}` placeholder is filled in by
-//! `render`; keep it when rewording. Labels the site already shows use the
-//! site's own strings (`apps/web/messages/*.json`), so the email and the
-//! calendar page read the same.
+//! Every word of the weekly digest email, so the wording can be redrafted
+//! here without touching the layout in `render`. A `{name}` placeholder is
+//! filled in by `render`; keep it when rewording. Labels the site already
+//! shows use the site's own strings (`apps/web/messages/en.json`), so the
+//! email and the calendar page read the same.
 //!
-//! v0 (2026-11-06): plain and functional; the owner drafts the final wording.
+//! One English email (Rick, 2026-11-10: "just english"). The wording below
+//! is a first draft for Rick to rewrite. It claims nothing the site does not
+//! do: the picks are earnings checks already on the site, the dates are the
+//! calendar's, and nothing is compared with analyst estimates.
 
-/// `(EN, ZH)`.
-pub type Pair = (&'static str, &'static str);
+/// Subject line. `{range}`: "Nov 9–13".
+pub const SUBJECT: &str = "Week ahead: {range}";
 
-/// Subject line. `{range}`: "Nov 9–13" / "11月9日–13日".
-pub const SUBJECT: Pair = ("Week ahead: {range}", "一周前瞻：{range}");
+/// The first line, when last week has earnings checks to pick from.
+/// `{picks}`: one of `PICK_COUNTS`.
+pub const OPENING: &str =
+    "Hi, it's Rick from PreBell. First, {picks} from last week; then the dates to know for the week of {range}.";
+/// `{picks}` for one, two and three picks (`super::PICKS`).
+pub const PICK_COUNTS: [&str; super::PICKS] = [
+    "one earnings check",
+    "two earnings checks",
+    "three earnings checks",
+];
+/// The first line when last week has no earnings check at all.
+pub const OPENING_NONE: &str =
+    "Hi, it's Rick from PreBell. Here are the dates to know for the week of {range}.";
 
-/// The body's first line.
-pub const INTRO: Pair = (
-    "Earnings and economic dates for the week of {range}. Times are US Eastern.",
-    "{range}当周的财报与经济日程。时间均为美东时间。",
-);
+/// The picks' heading.
+pub const PICKS_HEADING: &str = "From last week's earnings checks";
+/// Under the picks (site: `home.allEarnings`).
+pub const ALL_CHECKS: &str = "All earnings checks →";
 
 /// The week's section heading (site: `earnings.calendarTitle`).
-pub const CALENDAR_HEADING: Pair = ("Market calendar", "市场日历");
+pub const CALENDAR_HEADING: &str = "Market calendar";
+/// Under the heading.
+pub const TIMES_NOTE: &str = "Times are US Eastern.";
 
 /// Report slots (site: `earnings.bmo`, `earnings.amc`, `earnings.timeUnknown`).
-pub const BMO: Pair = ("Before open", "盘前");
-pub const AMC: Pair = ("After close", "盘后");
-pub const TIME_UNKNOWN: Pair = ("Time n/a", "时间暂缺");
+pub const BMO: &str = "Before open";
+pub const AMC: &str = "After close";
+pub const TIME_UNKNOWN: &str = "Time n/a";
 
 /// After a company whose date is an aggregator's (site: `earnings.unconfirmed`).
-pub const UNCONFIRMED: Pair = (" (unconfirmed)", "（未确认）");
+pub const UNCONFIRMED: &str = " (unconfirmed)";
 
 /// After the listed write-up companies: the slot's other companies (site:
 /// `earnings.stripMore`).
-pub const MORE: Pair = ("+{count} more", "另有{count}家");
+pub const MORE: &str = "+{count} more";
 /// A slot with no write-up company: only the count.
-pub const COMPANIES: Pair = ("{count} companies", "{count}家公司");
-pub const ONE_COMPANY: Pair = ("1 company", "1家公司");
+pub const COMPANIES: &str = "{count} companies";
+pub const ONE_COMPANY: &str = "1 company";
 
 /// A trading day with no earnings on the calendar (site: `earnings.none`).
-pub const NO_EARNINGS: Pair = ("No earnings reports.", "无财报。");
+pub const NO_EARNINGS: &str = "No earnings reports.";
 
 /// After an event (site: `events.postponed`, `events.movedFrom`).
-pub const POSTPONED: Pair = (" (postponed)", "（已推迟）");
-pub const MOVED_FROM: Pair = (" (moved from {date})", "（由{date}改期）");
+pub const POSTPONED: &str = " (postponed)";
+pub const MOVED_FROM: &str = " (moved from {date})";
 
 /// Under the week (site: `earnings.stripAll`).
-pub const FULL_CALENDAR: Pair = ("Full calendar →", "完整日历 →");
+pub const FULL_CALENDAR: &str = "Full calendar →";
 
-/// Last week's earnings checks (site: `home.earningsChecks`, `home.allEarnings`).
-pub const CHECKS_HEADING: Pair = ("Last week's earnings checks", "上周财报速评");
-pub const ALL_CHECKS: Pair = ("All earnings checks →", "全部财报速评 →");
+/// The one question, the last line before the sign-off. Replies go to the
+/// newsletter's reply-to address (Buttondown: your account email).
+pub const QUESTION: &str =
+    "One question: what would make this email more useful to you? Just hit reply.";
 
-/// Day headings: "Mon, Nov 9" / "11月9日 周一" (the site's `formatDayShort`).
-pub const WEEKDAYS: [Pair; 7] = [
-    ("Mon", "周一"),
-    ("Tue", "周二"),
-    ("Wed", "周三"),
-    ("Thu", "周四"),
-    ("Fri", "周五"),
-    ("Sat", "周六"),
-    ("Sun", "周日"),
-];
+/// The sign-off.
+pub const SIGN_OFF: &str = "Rick";
+
+/// Last, under the sign-off.
+pub const FOOTER: &str =
+    "PreBell is generated automatically from public data and SEC filings, for information only. It is not investment advice.";
+
+/// Day headings: "Mon, Nov 9" (the site's `formatDayShort`).
+pub const WEEKDAYS: [&str; 7] = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];

@@ -9,7 +9,8 @@ mod store;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use prebell_core::cover::card::{cards_tick, wants_card};
-use prebell_core::digest::{digest_tick, enabled, gate, parse_mode};
+use prebell_core::digest::buttondown::Buttondown;
+use prebell_core::digest::{digest_tick, gate, parse_mode, run_kind, RunKind, Sender};
 use prebell_core::earnings::calendar::{refresh_tick, yahoo_seeding, CalendarSource};
 use prebell_core::earnings::foreign::foreign_read;
 use prebell_core::earnings::run::{build_tick_with_shares, poll_job};
@@ -329,17 +330,28 @@ impl JobRunner for Runner<'_> {
                 Ok((format!("{o:?}"), false))
             }
             EarningsStep::Digest => {
-                if !enabled(text(env, "DIGEST_ENABLED").as_deref()) {
+                // Read quietly: no key is the normal state until the owner
+                // sets it, and it means a dry run, not a failure.
+                let key = env.secret("BUTTONDOWN_API_KEY").ok().map(|v| v.to_string());
+                let kind = run_kind(text(env, "DIGEST_ENABLED").as_deref(), key.as_deref());
+                if kind == RunKind::Off {
                     return Ok((
                         "disabled (DIGEST_ENABLED is not true); skipped".into(),
                         false,
                     ));
                 }
                 let mode = parse_mode(text(env, "DIGEST_MODE").as_deref())?;
-                // No sender until the language split is decided
-                // (docs/decisions.md): a dry run that gathers and renders.
-                let line = digest_tick(t, store, store, store, store, None, mode).await?;
-                Ok((line, false))
+                let log = |m: &str| console_log!("{m}");
+                let bd = key
+                    .as_deref()
+                    .filter(|_| kind == RunKind::Send)
+                    .map(|k| Buttondown::new(&self.http, k, &log));
+                let sender = bd.as_ref().map(|b| b as &dyn Sender);
+                let line = digest_tick(t, store, store, store, store, sender, mode).await?;
+                Ok(match kind {
+                    RunKind::Send => (line, false),
+                    _ => (format!("{line}; BUTTONDOWN_API_KEY is not set"), false),
+                })
             }
         }
     }

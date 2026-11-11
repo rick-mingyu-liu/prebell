@@ -1515,6 +1515,17 @@ mod tests {
             o.follow_ups.contains(&EarningsStep::Calendar) && !digest(&o),
             "{o:?}"
         );
+        // The day's first read failed and its retry is still to come: the
+        // digest waits for it.
+        es.kv_set(
+            "calendar_refreshed_on",
+            "2026-11-13 1 2026-11-13T22:00:00Z",
+            "x",
+        )
+        .await
+        .unwrap();
+        let o = poll_job(t, Some(t), &es, base.as_ref(), &fl).await.unwrap();
+        assert!(!digest(&o), "{o:?}");
         es.kv_set("calendar_refreshed_on", "2026-11-13", "x")
             .await
             .unwrap();
@@ -1534,9 +1545,9 @@ mod tests {
             let o = poll_job(t, Some(t), &es, base.as_ref(), &fl).await.unwrap();
             assert!(!digest(&o), "{early}: {o:?}");
         }
-        // Half done (English only) still queues; done for Nov 16 stops.
+        // Still queued at 21:00 ET until saved; saved for Nov 16 stops.
         let t = utc("2026-11-14T02:00:00Z"); // Fri 21:00 ET
-        es.kv_set("digest_built_for", "2026-11-16:en", "x")
+        es.kv_set("digest_built_for", "2026-11-09", "x")
             .await
             .unwrap();
         let o = poll_job(t, Some(t), &es, base.as_ref(), &fl).await.unwrap();

@@ -656,17 +656,15 @@ impl CardStore for D1Store {
     }
 }
 
-/// The digest's posts: as the sitemap reads them (`apps/web/src/lib/sitemap.ts`),
-/// a title only for a published translation, by type and trading-date range.
+/// The digest's posts: those whose English page is published, with that
+/// page's title and one-line summary, by type and trading-date range.
 pub(crate) const DIGEST_POSTS: &str = "SELECT p.slug, p.trading_date, f.ticker, \
-     CASE WHEN en.status = 'published' THEN en.title END AS title_en, \
-     CASE WHEN zh.status = 'published' THEN zh.title END AS title_zh \
+     en.title AS title, en.summary AS summary \
      FROM posts p \
-     LEFT JOIN post_translations en ON en.post_id = p.id AND en.lang = 'en' \
-     LEFT JOIN post_translations zh ON zh.post_id = p.id AND zh.lang = 'zh' \
+     JOIN post_translations en ON en.post_id = p.id AND en.lang = 'en' \
      LEFT JOIN earnings_filings f ON f.run_key = p.run_key \
      WHERE p.content_type = ?1 AND p.trading_date BETWEEN ?2 AND ?3 AND p.published_at IS NOT NULL \
-     AND (en.status = 'published' OR zh.status = 'published') \
+     AND en.status = 'published' AND en.title IS NOT NULL \
      ORDER BY p.trading_date, p.published_at, p.id";
 
 #[derive(Deserialize)]
@@ -674,8 +672,8 @@ struct DigestPostRec {
     slug: String,
     trading_date: String,
     ticker: Option<String>,
-    title_en: Option<String>,
-    title_zh: Option<String>,
+    title: String,
+    summary: Option<String>,
 }
 
 #[async_trait(?Send)]
@@ -695,8 +693,8 @@ impl DigestStore for D1Store {
                 slug: r.slug,
                 trading_date: r.trading_date,
                 ticker: r.ticker,
-                title_en: r.title_en,
-                title_zh: r.title_zh,
+                title: r.title,
+                summary: r.summary.unwrap_or_default(),
             })
             .collect())
     }
