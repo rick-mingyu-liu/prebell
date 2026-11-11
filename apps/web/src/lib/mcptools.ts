@@ -296,11 +296,11 @@ export const TOOLS = [
     name: "latest_brief",
     title: "Latest market brief",
     description:
-      "The newest premarket brief (published from 8:00 AM ET on trading days, rebuilt at 8:35 after the 8:30 data) " +
-      "or after-close recap (from 4:45 PM ET): title, summary, index futures or closes, the biggest movers with the " +
-      "published reason and its source link, industry themes, and the day's events to watch. Prices are a snapshot " +
-      "taken at as_of, never live quotes. is_today is false when today's brief is not out yet; the newest one is " +
-      "returned with a note saying when the next is due.",
+      "The newest premarket brief (published from 8:00 AM ET on trading days, usually rebuilt after 8:35 with fresh " +
+      "prices and any 8:30 economic releases) or after-close recap (from 4:45 PM ET): title, summary, index futures " +
+      "or closes, the biggest movers with the published reason and its source link, industry themes, and the day's " +
+      "events to watch. Prices are a snapshot taken at as_of, never live quotes. is_today is false when today's " +
+      "brief is not out yet; the newest one is returned with a note saying when the next is due.",
     inputSchema: {
       type: "object",
       properties: {
@@ -791,7 +791,12 @@ interface BriefRow {
   en_body: string | null;
 }
 
-const BRIEF_KEY = /^(premarket|recap)\/\d{4}-\d{2}-\d{2}\.json$/;
+/**
+ * R2 keys the generator writes for briefs (`crates/core`): `premarket/YYYY-MM-DD.json` and `recap/YYYY-MM-DD.json`
+ * (`run.rs` `facts_key`), and the 8:35 update's `premarket/YYYY-MM-DD-update.json` (`run/update.rs`), which the
+ * post points at from then on. A recap has no update.
+ */
+const BRIEF_KEY = /^(premarket\/\d{4}-\d{2}-\d{2}(-update)?|recap\/\d{4}-\d{2}-\d{2})\.json$/;
 const httpsUrl = (v: unknown): string | null => (typeof v === "string" && /^https:\/\/[^\s]+$/.test(v) ? v : null);
 const text = (v: unknown): string | null => (typeof v === "string" && v.trim() !== "" ? v : null);
 
@@ -975,7 +980,10 @@ async function latestBrief(ctx: ToolContext, kind: Kind | null, lang: Lang, full
   };
   // One R2 read gives both the page's facts view and the watch list (loadFacts keeps only the former).
   let factsJson: unknown = null;
-  if (ctx.bucket && row.facts_r2_key && BRIEF_KEY.test(row.facts_r2_key)) {
+  // A stored key of another shape is never read, but it is reported (not its contents), so the answer is
+  // logged as degraded and not cached.
+  if (row.facts_r2_key && !BRIEF_KEY.test(row.facts_r2_key)) report(new Error(`${row.content_type} facts key: unexpected shape`));
+  else if (ctx.bucket && row.facts_r2_key) {
     try {
       const obj = await ctx.bucket.get(row.facts_r2_key);
       if (obj) factsJson = JSON.parse(await obj.text());

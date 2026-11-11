@@ -156,6 +156,7 @@ Connect (Streamable HTTP):
 Tools: earnings_calendar, earnings_report, latest_brief (English and Chinese).
 Summaries and reasons are machine-written from the linked sources.
 Informational only; not investment advice; not real-time.
+How to connect, for people: https://prebell.site/en/mcp
 `;
 
 /**
