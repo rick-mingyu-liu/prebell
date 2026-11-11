@@ -74,8 +74,10 @@ describe("paper shell", () => {
     expect(en.indexOf("footer-links")).toBeLessThan(en.indexOf("footer-copy"));
     const zh = renderToStaticMarkup(<FooterLinks locale="zh" year={2027} />);
     expect(zh).toContain('<p class="footer-copy">© 2027 盘前铃 PreBell · prebell.site</p>');
-    // With no year passed it is the current one.
-    expect(renderToStaticMarkup(<FooterLinks locale="en" />)).toContain(`© ${new Date().getUTCFullYear()} PreBell`);
+    // With no year passed it is the current one (either side of a New Year that falls mid-test).
+    const before = new Date().getUTCFullYear();
+    const out = renderToStaticMarkup(<FooterLinks locale="en" />);
+    expect([before, new Date().getUTCFullYear()].some((y) => out.includes(`© ${y} PreBell`))).toBe(true);
   });
 
   it("puts the Chinese name first on the Chinese edition", () => {
