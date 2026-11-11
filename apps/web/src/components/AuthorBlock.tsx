@@ -9,7 +9,7 @@ const LINKS = [
   { key: "linkedin", href: "https://www.linkedin.com/in/rick-mingyu-liu/" },
 ] as const;
 
-/** Who is behind the site: greyscale photo (when shipped), name in the serif, one-line bio, links, archive link. */
+/** Who is behind the site: greyscale photo (when shipped), name in the serif, one-line bio, links ending in the archive link. */
 export default function AuthorBlock({ locale }: { locale: Locale }) {
   const t = translator(locale);
   return (
@@ -25,11 +25,11 @@ export default function AuthorBlock({ locale }: { locale: Locale }) {
               {t(`author.${l.key}`)}
             </a>
           ))}
+          <Link className="author-all" href={`/${locale}/archive`}>
+            {t("author.allBriefs")}
+          </Link>
         </p>
       </div>
-      <Link className="author-all" href={`/${locale}/archive`}>
-        {t("author.allBriefs")}
-      </Link>
     </section>
   );
 }
