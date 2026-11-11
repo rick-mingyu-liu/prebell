@@ -2,8 +2,6 @@
 
 import { type FormEvent, useState } from "react";
 import { signup as signupEn } from "../../messages/en.json";
-import { signup as signupZh } from "../../messages/zh.json";
-import type { Locale } from "../i18n/routing";
 
 type Status = "idle" | "loading" | "done" | "already" | "error" | "invalid";
 type SignupMessages = typeof signupEn;
@@ -36,10 +34,12 @@ export function messageFor(status: Status, m: SignupMessages): string | null {
 /**
  * Weekly-digest signup: email field, Subscribe button and an inline result. Posts JSON to
  * /api/subscribe; the honeypot `website` field stays out of sight (not display:none, which bots skip).
- * Only the signup strings are pulled in, not the whole message catalogue.
+ * English only: the digest is one English email, so only English pages show the form
+ * (`signupEnabled`). `source` keeps the field ids unique per page. Only the signup strings are pulled
+ * in, not the whole message catalogue.
  */
-export default function SignupForm({ source, locale }: { source: "post" | "home" | "about"; locale: Locale }) {
-  const m = locale === "zh" ? signupZh : signupEn;
+export default function SignupForm({ source }: { source: "post" | "home" | "about" }) {
+  const m = signupEn;
   const [status, setStatus] = useState<Status>("idle");
 
   async function onSubmit(e: FormEvent<HTMLFormElement>) {
@@ -52,7 +52,7 @@ export default function SignupForm({ source, locale }: { source: "post" | "home"
       const res = await fetch("/api/subscribe", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ email, source, lang: locale, website: String(data.get("website") ?? "") }),
+        body: JSON.stringify({ email, website: String(data.get("website") ?? "") }),
       });
       setStatus(await statusOf(res));
     } catch {

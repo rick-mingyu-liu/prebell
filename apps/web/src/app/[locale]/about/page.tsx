@@ -42,7 +42,7 @@ export default async function About({ params }: PageProps<"/[locale]/about">) {
           {t("termpocket.cta")}
         </a>
       </p>
-      {signupEnabled() && <SignupForm source="about" locale={locale} />}
+      {signupEnabled(locale) && <SignupForm source="about" />}
     </article>
   );
 }

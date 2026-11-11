@@ -303,18 +303,5 @@
     "linkedin": "LinkedIn",
     "allBriefs": "全部简报 →",
     "heading": "关于作者"
-  },
-  "signup": {
-    "heading": "订阅每周精选",
-    "copy": "每周一封邮件：本周的简报与财报速评。不发垃圾邮件，随时可退订。",
-    "emailLabel": "邮箱地址",
-    "placeholder": "you@example.com",
-    "submit": "订阅",
-    "sending": "正在订阅…",
-    "success": "请查收邮件并确认订阅。",
-    "already": "你已经在订阅名单上了。",
-    "error": "出了点问题，请稍后再试。",
-    "invalid": "请输入有效的邮箱地址。",
-    "manage": "已经订阅？管理订阅偏好"
   }
 }

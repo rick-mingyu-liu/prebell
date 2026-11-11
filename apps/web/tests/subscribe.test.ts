@@ -36,17 +36,15 @@ describe("validEmail", () => {
 });
 
 describe("subscribe", () => {
-  const tags = ["prebell", "lang:en", "source:home"];
-
   it("maps 201 to ok, already-subscribed 400 to already, 500 to error", async () => {
     const ok = vi.fn(() => reply(201, { id: "x" }));
-    expect(await subscribe("KEY", "a@b.co", tags, ok)).toBe("ok");
+    expect(await subscribe("KEY", "a@b.co", ok)).toBe("ok");
     const already = vi.fn(() => reply(400, { detail: "This email address is already subscribed." }));
-    expect(await subscribe("KEY", "a@b.co", tags, already)).toBe("already");
+    expect(await subscribe("KEY", "a@b.co", already)).toBe("already");
     const other400 = vi.fn(() => reply(400, { detail: "Invalid email" }));
-    expect(await subscribe("KEY", "a@b.co", tags, other400)).toBe("error");
-    expect(await subscribe("KEY", "a@b.co", tags, vi.fn(() => reply(500, "boom")))).toBe("error");
-    expect(await subscribe("KEY", "a@b.co", tags, vi.fn(() => Promise.reject(new Error("offline"))))).toBe("error");
+    expect(await subscribe("KEY", "a@b.co", other400)).toBe("error");
+    expect(await subscribe("KEY", "a@b.co", vi.fn(() => reply(500, "boom")))).toBe("error");
+    expect(await subscribe("KEY", "a@b.co", vi.fn(() => Promise.reject(new Error("offline"))))).toBe("error");
     // Only the status (or "network error") is logged: never the upstream body, the error or the key.
     expect(logged()).toEqual([
       "buttondown subscribe failed, status 400",
@@ -55,14 +53,14 @@ describe("subscribe", () => {
     ]);
   });
 
-  it("posts the subscriber to Buttondown with the token and tags", async () => {
+  it("posts the subscriber to Buttondown with the token and no tags (tags need a paid plan)", async () => {
     const f = vi.fn<typeof fetch>(() => reply(201));
-    await subscribe("KEY", "a@b.co", tags, f);
+    await subscribe("KEY", "a@b.co", f);
     const [url, init] = f.mock.calls[0];
     expect(url).toBe("https://api.buttondown.com/v1/subscribers");
     expect(init?.method).toBe("POST");
     expect((init?.headers as Record<string, string>).Authorization).toBe("Token KEY");
-    expect(JSON.parse(init?.body as string)).toEqual({ email_address: "a@b.co", tags, type: "unactivated" });
+    expect(JSON.parse(init?.body as string)).toEqual({ email_address: "a@b.co", type: "unactivated" });
   });
 });
 
@@ -75,7 +73,7 @@ describe("POST /api/subscribe", () => {
         body: typeof body === "string" ? body : JSON.stringify(body),
       }),
     );
-  const good = { email: "a@b.co", source: "home", lang: "en" };
+  const good = { email: "a@b.co", website: "" };
 
   beforeEach(() => {
     ctx.env = { BUTTONDOWN_API_KEY: "SECRETKEY" };
@@ -89,8 +87,7 @@ describe("POST /api/subscribe", () => {
     expect((await post("{not json")).status).toBe(400);
     expect((await post({ ...good, email: "nope" })).status).toBe(400);
     expect((await post({ ...good, website: "http://spam" })).status).toBe(400);
-    expect((await post({ ...good, source: "elsewhere" })).status).toBe(400);
-    expect((await post({ ...good, lang: "fr" })).status).toBe(400);
+    expect((await post({ website: "" })).status).toBe(400);
     expect((await post(null)).status).toBe(400);
     expect(f).not.toHaveBeenCalled();
   });
@@ -104,14 +101,17 @@ describe("POST /api/subscribe", () => {
     expect((await post(good)).status).toBe(503);
   });
 
-  it("returns 200 for ok and already, tagging the subscriber", async () => {
+  it("returns 200 for ok and already, sending Buttondown only the address", async () => {
     const f = vi.fn<typeof fetch>(() => reply(201));
     vi.stubGlobal("fetch", f);
-    const res = await post({ ...good, source: "post", lang: "zh", website: "" });
+    // Fields an older form sent (source, lang) are ignored: nothing becomes a tag.
+    const res = await post({ ...good, email: " a@b.co ", source: "post", lang: "zh" });
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ ok: true });
     expect(res.headers.get("Cache-Control")).toBe("private, no-store");
-    expect(JSON.parse(f.mock.calls[0][1]?.body as string).tags).toEqual(["prebell", "lang:zh", "source:post"]);
+    expect(f).toHaveBeenCalledTimes(1);
+    expect(f.mock.calls[0][0]).toBe("https://api.buttondown.com/v1/subscribers");
+    expect(JSON.parse(f.mock.calls[0][1]?.body as string)).toEqual({ email_address: "a@b.co", type: "unactivated" });
     // An address already on the list is a success too, flagged so the form can say so.
     vi.stubGlobal("fetch", vi.fn(() => reply(400, { detail: "already subscribed" })));
     const again = await post(good);

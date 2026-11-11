@@ -84,7 +84,7 @@ export default async function PostPage({ params }: PageProps<"/[locale]/p/[slug]
   return (
     <>
       {ld && <script type="application/ld+json" dangerouslySetInnerHTML={{ __html: jsonLd(ld) }} />}
-      <BriefView data={data} locale={locale} signup={signupEnabled()} />
+      <BriefView data={data} locale={locale} signup={signupEnabled(locale)} />
     </>
   );
 }
