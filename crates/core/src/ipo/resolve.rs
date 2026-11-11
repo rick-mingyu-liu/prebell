@@ -603,6 +603,13 @@ mod tests {
             later("2026-11-17T15:00:00Z").first_trade_date.as_deref(),
             Some("2026-11-16")
         );
+        // The day turns at midnight in New York, not UTC: 23:59 ET on the
+        // 17th still shows it, 00:00 ET on the 18th does not.
+        assert_eq!(
+            later("2026-11-18T04:59:00Z").first_trade_date.as_deref(),
+            Some("2026-11-16")
+        );
+        assert_eq!(later("2026-11-18T05:00:00Z").first_trade_date, None);
         let gone = later("2026-11-18T15:00:00Z");
         assert_eq!((gone.first_trade_date, gone.date_status), (None, None));
     }
