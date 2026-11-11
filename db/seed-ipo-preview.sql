@@ -46,20 +46,18 @@ INSERT INTO ipo_facts (accession, kind, slug, value_num, value_text, quote) VALU
   ('0001628280-26-072484', 'option_shares', 'anthropic', 123750000, NULL, 'To the extent that the underwriters sell more than 825,000,000 shares of Class A common stock, the underwriters have the option to purchase up to an additional 123,750,000 shares of Class A common stock from Anthropic, PBC at the initial public offering price less the underwriting discount.');
 
 -- FIXTURE: made-up news items for Anthropic (two valuations on different dates, a date report,
--- a company move, a view).
+-- a company move, a view). Only a company move carries a statement; the others render from
+-- value_usd / value_date / speaker and the quote (contract, ipo_items).
 INSERT INTO ipo_items (slug, kind, url, outlet, published_on, quote, statement_en, statement_zh, speaker, value_usd, value_date, found_at) VALUES
   ('anthropic', 'valuation', 'https://sampletimes.example/2026/10/12/anthropic-valuation', 'Sample Times', '2026-10-12',
    'Bankers have pitched a valuation of about $2 trillion for the listing, according to people familiar with the talks.',
-   'Bankers pitched a valuation of about $2 trillion, according to people familiar with the talks.',
-   '据知情人士称，投行提出的估值约为2万亿美元。', NULL, 2000000000000, NULL, '2026-11-11T15:00:00Z'),
+   NULL, NULL, NULL, 2000000000000, NULL, '2026-11-11T15:00:00Z'),
   ('anthropic', 'valuation', 'https://news.example/2026/11/10/anthropic-ipo-pricing', 'Example News', '2026-11-10',
    'At the top of the range the offering would value Anthropic at roughly $1.4 trillion, the people said.',
-   'At the top of the range the offering would value the company at roughly $1.4 trillion, people familiar said.',
-   '知情人士称，按区间上限计算，此次发行对公司的估值约为1.4万亿美元。', NULL, 1400000000000, NULL, '2026-11-11T15:00:00Z'),
+   NULL, NULL, NULL, 1400000000000, NULL, '2026-11-11T15:00:00Z'),
   ('anthropic', 'expected_date', 'https://news.example/2026/11/10/anthropic-ipo-pricing', 'Example News', '2026-11-10',
    'Anthropic is expected to begin trading on the Nasdaq on Nov. 16 after pricing its shares on Nov. 13, the people said.',
-   'Trading is expected to begin on Nov. 16, after pricing on Nov. 13, people familiar said.',
-   '知情人士称，公司预计于11月13日定价，11月16日开始交易。', NULL, NULL, '2026-11-16', '2026-11-11T15:00:00Z'),
+   NULL, NULL, NULL, NULL, '2026-11-16', '2026-11-11T15:00:00Z'),
   ('anthropic', 'company_move', 'https://sampletimes.example/2026/11/04/anthropic-office-apps', 'Sample Times', '2026-11-04',
    'Anthropic on Tuesday released AI versions of word-processing and presentation software for business customers.',
    'Released AI word-processing and presentation software for business customers.',

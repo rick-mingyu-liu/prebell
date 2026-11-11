@@ -23,7 +23,15 @@ CREATE TABLE ipo_watch (
   date_quote TEXT,
   date_as_of TEXT,
   checked_at TEXT NOT NULL,
-  updated_at TEXT NOT NULL
+  updated_at TEXT NOT NULL,
+  -- A date always comes with its status and source, in these pairs only.
+  CHECK ((first_trade_date IS NULL) = (date_status IS NULL)),
+  CHECK ((date_status IS NULL) = (date_source IS NULL)),
+  CHECK (date_status IS NULL
+    OR (date_status = 'reported' AND date_source = 'news')
+    OR (date_status = 'expected' AND date_source = 'filing')
+    OR (date_status = 'confirmed' AND date_source IN ('filing', 'trading'))),
+  CHECK (date_source_url IS NULL OR date_source_url LIKE 'https://%' OR date_source_url LIKE 'http://%')
 );
 CREATE INDEX idx_ipo_watch_date ON ipo_watch(first_trade_date);
 
@@ -38,7 +46,9 @@ CREATE TABLE ipo_filings (
   -- none: timeline only; pending: its cover is to be read; read; failed (gave up).
   read_state TEXT NOT NULL CHECK (read_state IN ('none', 'pending', 'read', 'failed')),
   attempts INTEGER NOT NULL DEFAULT 0,
-  first_seen_at TEXT NOT NULL
+  first_seen_at TEXT NOT NULL,
+  CHECK (index_url LIKE 'https://%'),
+  CHECK (doc_url IS NULL OR doc_url LIKE 'https://%')
 );
 CREATE INDEX idx_ipo_filings_slug ON ipo_filings(slug, filing_date);
 
@@ -70,7 +80,8 @@ CREATE TABLE ipo_items (
   value_usd REAL,
   value_date TEXT,
   found_at TEXT NOT NULL,
-  PRIMARY KEY (slug, kind, url)
+  PRIMARY KEY (slug, kind, url),
+  CHECK (url LIKE 'https://%')
 );
 CREATE INDEX idx_ipo_items_slug ON ipo_items(slug, kind, published_on);
 
@@ -86,5 +97,6 @@ CREATE TABLE ipo_trading (
   change_pct REAL,
   source_url TEXT NOT NULL,
   fetched_at TEXT NOT NULL,
-  PRIMARY KEY (slug, session_date)
+  PRIMARY KEY (slug, session_date),
+  CHECK (source_url LIKE 'https://%')
 );

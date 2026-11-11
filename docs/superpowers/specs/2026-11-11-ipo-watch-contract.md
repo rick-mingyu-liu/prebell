@@ -1,6 +1,6 @@
 # IPO watch: the data contract
 
-Date: 2026-11-11. Design: `2026-11-11-ipo-watch-design.md`. Migration: `migrations/0009_ipo_watch.sql`. Seed for local preview: `db/seed-ipo-preview.sql`.
+Date: 2026-11-11 (revised the same day after review: statements, speaker, first day, passed dates, CHECKs). Design: `2026-11-11-ipo-watch-design.md`. Migration: `migrations/0009_ipo_watch.sql`. Seed for local preview: `db/seed-ipo-preview.sql`.
 
 This is what the site (`apps/web`) reads. The generator is the only writer. Everything lives in D1; there is no R2 bundle for IPOs (the facts are small, and one indexed read per table is cheaper than an R2 object). If this contract has to change, the builder says so in a message first.
 
@@ -19,7 +19,7 @@ Dates are `YYYY-MM-DD` (ET calendar days) unless named `*_at`, which are UTC RFC
 | `status` | TEXT | no | `filed`, `range_set`, `priced`, `listed`, `withdrawn` (below). |
 | `exchange` | TEXT | yes | As the filing names it (`Nasdaq Global Select Market`). NULL until a cover states it. |
 | `symbol` | TEXT | yes | Ticker the filing names (`ANT`). NULL until a cover states it. |
-| `facts_accession` | TEXT | yes | The filing whose cover facts are current: join `ipo_facts.accession` and `ipo_filings.accession`. NULL until a cover was read. |
+| `facts_accession` | TEXT | yes | The filing whose cover facts are current: join `ipo_facts.accession` and `ipo_filings.accession`. NULL until a cover was read. A newer filing becomes it only when its cover yields everything it must (a final prospectus its price and shares; an amendment every kind the current cover has); otherwise the newer filing is only in the timeline. Never moves after listing. |
 | `first_trade_date` | TEXT | yes | The ET day shown as the first trading day. NULL = "date not set". |
 | `date_status` | TEXT | yes | `reported`, `expected` or `confirmed`; NULL exactly when `first_trade_date` is NULL. |
 | `date_source` | TEXT | yes | `news`, `filing` or `trading`; NULL with the date. |
@@ -35,8 +35,8 @@ Dates are `YYYY-MM-DD` (ET calendar days) unless named `*_at`, which are UTC RFC
 |---|---|---|
 | `filed` | A registration statement (S-1/F-1, or only a DRS so far) with no price range on its cover. | "Filed"; offering facts as stated, no price. |
 | `range_set` | The latest registration statement's cover states a price range. | "Price range set"; shares and the range. |
-| `priced` | A final prospectus (424B4 or 424B1) is on file. | "Priced"; the final price (`price_final`). |
-| `listed` | Yahoo reported a regular-session close for the symbol (it traded). | "Listed"; the after-listing numbers. |
+| `priced` | A final prospectus (424B4 or 424B1) is the facts source: its price and shares were read and verified. A 424B4 on file whose cover could not be read fully leaves the status where it was. | "Priced"; the final price (`price_final`). |
+| `listed` | Yahoo reported a regular-session close for the symbol (it traded). Terminal: later filings (a follow-on, a resale withdrawal) change nothing, and the timeline stops at the first session. | "Listed"; the after-listing numbers. |
 | `withdrawn` | An `RW` (withdrawal) filed after the last registration statement or prospectus. | "Withdrawn". Hidden from the calendar and the IPO watch list; the page still renders. |
 
 **Date status** (the calendar's dashed/solid treatment):
@@ -47,7 +47,11 @@ Dates are `YYYY-MM-DD` (ET calendar days) unless named `*_at`, which are UTC RFC
 | `expected` | `filing` | The next trading day after the pricing date stated on the final prospectus ("Prospectus dated ..."), or after the SEC's `EFFECT` notice when an `8-A12B` is also on file. A rule, not a statement: "Expected Nov 13, the trading day after pricing ({source} filed {date_as_of})". | dashed (unconfirmed) |
 | `confirmed` | `filing` or `trading` | A filing states the first trading day in its own words (`date_quote`), or Yahoo shows the symbol's first regular session on that day. | solid |
 
-A reported date that has passed (before yesterday, ET) without a listing is dropped: the row goes back to `first_trade_date` NULL ("date not set"). The item itself stays in `ipo_items`.
+A reported date that has passed (before yesterday, ET) without a listing is dropped: the row goes back to `first_trade_date` NULL ("date not set"). The item itself stays in `ipo_items`. **The site applies this rule too**: treat `date_status = 'reported'` with `first_trade_date` before yesterday (ET) as "date not set". The generator recomputes rows only while `IPO_WATCH_ENABLED` is on, so with the switch off a passed date would otherwise stay.
+
+`confirmed` with source `trading` means the first stored session is the day the filings pointed to, so it is the first trading day. If the recap missed day one, later sessions are stored but the row keeps the filing's `expected` date: no session is then labelled the first day.
+
+The database enforces the pairs: a date always has a status and a source, and only `reported`/`news`, `expected`/`filing`, `confirmed`/`filing` and `confirmed`/`trading` occur.
 
 ### `ipo_filings`: the timeline
 
@@ -119,19 +123,20 @@ There is no deal-size dollar figure in v1: the fee exhibit's "maximum aggregate 
 | `slug` | TEXT | no | PK part. |
 | `kind` | TEXT | no | `valuation`, `expected_date`, `company_move`, `view` (PK part). |
 | `url` | TEXT | no | The article (PK part). `http(s)` only. |
-| `outlet` | TEXT | no | The outlet's name, checked against the URL's site. |
+| `outlet` | TEXT | no | The outlet's name from PreBell's allowlist (`OUTLETS` in `crates/core/src/ipo/news.rs`), by the URL's site; never the model's. Items from other sites are dropped. |
 | `published_on` | TEXT | no | The article's publication day (ET). |
 | `quote` | TEXT | no | Word for word from the article. Original language; never translated. |
-| `statement_en` | TEXT | yes | One English sentence written from the quote; every number in it is in the quote. NULL for `view`. |
-| `statement_zh` | TEXT | yes | The Chinese sentence, number-checked; NULL for `view`, or when the Chinese draft failed (show `statement_en` then, or the quote). |
-| `speaker` | TEXT | yes | `view` only: who said it, as the article names them (`Jane Doe, an analyst at Example Securities`). |
+| `statement_en` | TEXT | yes | `company_move` only: one English sentence made of the quote's own words (checked by code), every number in the quote. NULL for every other kind. |
+| `statement_zh` | TEXT | yes | `company_move` only: the Chinese sentence, number- and date-checked against the quote, with no predictive or evaluative word; NULL otherwise, or when it failed (show `statement_en` then). |
+| `speaker` | TEXT | yes | `view` only: who said it. The name, plus `, <affiliation>` only when the article writes the affiliation next to the name (`Jane Doe, an analyst at Example Securities`, or just `Jane Doe`). |
 | `value_usd` | REAL | yes | `valuation` only: the valuation in dollars (`1.4e12`). |
 | `value_date` | TEXT | yes | `expected_date` only: the first trading day the article gives. |
 | `found_at` | TEXT | no | When PreBell stored it. |
 
 Queries: `SELECT ... FROM ipo_items WHERE slug = ? AND kind = ? ORDER BY published_on DESC, found_at DESC`. Show:
 
-- **Valuation as reported**: every `valuation` item, newest first, each "$1.4 trillion, reported by {outlet} on {published_on}" with the link and the quote available. PreBell prints each figure; it never writes the change between them.
+- **Valuation as reported**: every `valuation` item, newest first, rendered from `value_usd` (no statement): "$1.4 trillion, reported by {outlet} on {published_on}" with the link and the quote available. PreBell prints each figure; it never writes the change between them.
+- `expected_date` items render from `value_date` (no statement).
 - **Recent moves**: `company_move` items, newest first (at most 8 are kept).
 - **What others say**: `view` items, at most the 3 newest, each as "{speaker}, quoted by {outlet} on {published_on}: “{quote}”". No paraphrase, no PreBell sentence. Omit the section when there are none.
 - `expected_date` items need not be listed; the date line already uses the newest one. A page may list them as "Date reports".
@@ -152,7 +157,7 @@ Kept per IPO: valuation 10, expected_date 5, company_move 8, view 6 (newest by `
 | `source_url` | TEXT | no | `https://finance.yahoo.com/quote/{symbol}`; name the source "Yahoo Finance". |
 | `fetched_at` | TEXT | no | Bookkeeping. |
 
-First day: the row with the smallest `session_date`; latest: the largest. Rows are written for 30 days after the first session.
+Latest: the row with the largest `session_date`. **First day**: call the row with the smallest `session_date` the first trading day only when `ipo_watch.date_source = 'trading'` and `ipo_watch.first_trade_date` equals it; otherwise label every session by its date (day one was missed). Rows are written for 30 days after the first session; a tracked symbol is read from `range_set` once an `EFFECT` notice or a final prospectus is on file.
 
 ## Calendar and the "IPO watch" list
 
@@ -162,8 +167,8 @@ First day: the row with the smallest `session_date`; latest: the largest. Rows a
 
 ## Text the site must treat as untrusted
 
-Everything that came from outside: `ipo_items.quote`, `statement_en`, `statement_zh`, `outlet`, `speaker`, `url`; `ipo_facts.quote` and `value_text`; `ipo_watch.date_quote`, `date_source_name`, `date_source_url`, `exchange`, `symbol`; `ipo_filings.index_url`, `doc_url`. Render as plain text (no Markdown, no HTML), and link a URL only when it starts with `https://` or `http://`. Statements are model-written from the quotes and checked by code (quote word for word in the article, numbers in the quote), but they are still third-party text, not PreBell's voice.
+Everything that came from outside: `ipo_items.quote`, `statement_en`, `statement_zh`, `outlet`, `speaker`, `url`; `ipo_facts.quote` and `value_text`; `ipo_watch.date_quote`, `date_source_name`, `date_source_url`, `exchange`, `symbol`; `ipo_filings.index_url`, `doc_url`. Render as plain text (no Markdown, no HTML), and link a URL only when it starts with `https://` or `http://` (the database also refuses other schemes in its URL columns). Company-move statements are model-written from the quotes and checked by code (quote word for word in the article, only the quote's words and numbers), but they are still third-party text, not PreBell's voice.
 
 ## Language
 
-English and Chinese pages read the same rows. Chinese pages use `name_zh` when set, `statement_zh` when set (else the English statement), the form glossary's Chinese, and the quotes as they are (original language).
+English and Chinese pages read the same rows. Chinese pages use `name_zh` when set, `statement_zh` when set for a company move (else its English statement), the form glossary's Chinese, and the quotes as they are (original language).

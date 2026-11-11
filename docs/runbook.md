@@ -332,46 +332,56 @@ From then on, the first earnings poll from 18:00 ET each Friday, after that day'
 
 ## IPO watch
 
-Big upcoming US listings on the market calendar and a page each (`/en/ipo/<slug>`, `/zh/ipo/<slug>`). Design `docs/superpowers/specs/2026-11-11-ipo-watch-design.md`; what the site reads, `docs/superpowers/specs/2026-11-11-ipo-watch-contract.md`; the rules, `docs/decisions.md` (2026-11-11). Code in `crates/core/src/ipo/`.
+Big upcoming US listings on the market calendar and a page each (`/en/ipo/<slug>`, `/zh/ipo/<slug>`). Design `docs/superpowers/specs/2026-11-11-ipo-watch-design.md`; what the site reads, `docs/superpowers/specs/2026-11-11-ipo-watch-contract.md`; the rules, `docs/decisions.md` (2026-11-11, including the review fixes). Code in `crates/core/src/ipo/`.
 
 ### Add or remove an IPO
 
 1. Find the company's CIK on EDGAR (company search; Anthropic is 2130357).
-2. Add one tab-separated line to `crates/core/data/ipo-watch.tsv`: slug (the page URL: lowercase letters, digits, `-`), CIK, display name, Chinese name or `-`, a note. At most 10 lines.
+2. Add one tab-separated line to `crates/core/data/ipo-watch.tsv`: slug (the page URL: lowercase letters, digits, `-`), CIK, display name, Chinese name or `-`, aliases or `-`, a note. Aliases are other names news quotes use for the company, comma-separated: a news item is kept only when its quote names the company by its name or an alias. At most 10 lines.
 3. `cargo test -p prebell-core` (it checks the file parses), commit, deploy the generator.
 
-The next hourly check reads the company's EDGAR submissions, adds its filings to the timeline, reads the newest registration statement's cover and creates its row; the next sweep slot adds news. Removing a line stops checks and sweeps; its rows stay in D1 and its page keeps showing them. To take a page down, delete its rows by hand (`DELETE FROM ipo_watch WHERE slug = '<slug>'`, and the same for `ipo_filings`, `ipo_facts`, `ipo_items`, `ipo_trading`).
+The next hourly check reads the company's EDGAR submissions, adds its filings to the timeline, reads the newest registration statement's cover and creates its row; the next day's sweep adds news. Removing a line stops checks and sweeps; its rows stay in D1 and its page keeps showing them. To take a page down, delete its rows by hand (`DELETE FROM ipo_watch WHERE slug = '<slug>'`, and the same for `ipo_filings`, `ipo_facts`, `ipo_items`, `ipo_trading`).
 
 ### What runs, and when
 
-- **`ipo:check`** (earnings queue, serial with the polls): queued by an earnings poll at most once an hour (kv `ipo_checked_at`), 06:00-22:00 ET weekdays. One EDGAR submissions request per tracked IPO (at most 10) and at most 3 cover reads (the first 160 KB of the newest S-1/S-1/A/F-1/F-1/A/424B4/424B1): at most 13 requests, paced like the poll (125 ms). The earnings polls' own requests and pacing are unchanged. D1: one state read, one write per run with changes, one more when a cover is read (the attempt, written first), and the kv marker. CPU: reading a cover (text, patterns, checks) took about 1.7-1.9 ms cold and 0.1 ms warm natively in release on 2026-11-11 with Anthropic's S-1/A; Wasm is a few times slower. Covers are read only when a company files, a few times per IPO.
-- **`ipo:sweep`** (jobs queue): queued by an earnings poll from 07:00 ET and from 16:30 ET on trading days, one message per IPO not yet swept in that half-day (kv `ipo_sweeps`). One Tavily search, one model call, and one more for the Chinese statements when it kept any: 3 requests. D1: about 6 queries.
-- **Recap**: with the switch on, the recap's batched Yahoo close read also asks for priced or listed IPOs' symbols, only while the last 50-symbol batch has room (32 slots now), so no extra request; plus 1 D1 read and, with a close, 1 write. Its diagnostics line shows `ipo symbols=N closes=M` (or `ipo_err=...`).
-- Logs: `job ipo:check: CheckOutcome { companies, new_filings, covers, rows, throttled, errors }` and `job ipo:sweep: SweepOutcome { slug, slot, skipped, hits, proposed, kept, rejected, zh, errors }`. `rejected` lists each dropped item's reason (`QuoteNotInArticle`, `WrongOutlet`, `NumberNotInQuote`, `Voice`, `Paraphrased`, ...) and URL.
+- **`ipo:check`** (earnings queue, serial with the polls): queued by an earnings poll at most once an hour (kv `ipo_checked_at`), 06:00-22:00 ET on trading days. One EDGAR submissions request per tracked IPO that has not listed (at most 10) and at most 3 cover reads (the first 160 KB of the newest S-1/S-1/A/F-1/F-1/A/424B4/424B1): at most 13 requests, paced like the poll (125 ms). The earnings polls' own requests and pacing are unchanged. A listed IPO is not checked again: its timeline stops at the first session. A cover replaces the page's facts only when it yields everything it must (a final prospectus its price and shares; an amendment every kind the current cover has); otherwise an `ipo-cover-partial` warning names what was missing. D1: one state read, one write per cover read (its attempt, written first), one write with the results, and the kv marker. CPU: a cover read took about 1.7-1.9 ms cold and 0.1 ms warm natively in release; Wasm is a few times slower.
+- **`ipo:sweep`** (jobs queue): queued by an earnings poll from 16:30 ET on trading days, one message per IPO not yet swept that day (kv `ipo_sweeps`). One Tavily search (results with the full article text only), one model call, and one more for the Chinese statements of company moves when any was kept: 3 requests. D1: about 6 queries. A sweep stops for an IPO 30 days after its first session, after 60 days with no new filing, or once withdrawn.
+- **Recap**: with the switch on, the recap's batched Yahoo close read also asks for tracked symbols from `range_set` on, once an `EFFECT` notice or a final prospectus is on file, only while the last 50-symbol batch has room (32 slots now), so no extra request; plus 1 D1 read and, with a close, 1 write. Its diagnostics line shows `ipo symbols=N closes=M` (or `ipo_err=...`).
+- Logs: `job ipo:check: CheckOutcome { companies, new_filings, covers, rows, throttled, errors }` and `job ipo:sweep: SweepOutcome { slug, slot, skipped, hits, proposed, kept, rejected, zh, errors }`. `rejected` lists each dropped item's reason (`QuoteNotInArticle`, `NotAnOutlet`, `CompanyNotNamed`, `ValueNotTheValuation`, `NotTradingDate`, `NotExtractive`, `Voice`, `Paraphrased`, ...) and URL.
+
+### Outlets
+
+News items come only from these sites (https, the site or a subdomain), and the outlet name shown is the one here, never the model's. Adding an outlet is a code change (`OUTLETS` in `crates/core/src/ipo/news.rs`) and a line here:
+
+Reuters (reuters.com), Bloomberg (bloomberg.com), The Wall Street Journal (wsj.com), Financial Times (ft.com), CNBC (cnbc.com), The New York Times (nytimes.com), Yahoo Finance (finance.yahoo.com), MarketWatch (marketwatch.com), Barron's (barrons.com), Axios (axios.com), Fortune (fortune.com), Forbes (forbes.com), Business Insider (businessinsider.com), AP (apnews.com), The Information (theinformation.com), TechCrunch (techcrunch.com), The Verge (theverge.com), Semafor (semafor.com), Investor's Business Daily (investors.com), The Economist (economist.com), The Washington Post (washingtonpost.com), The Guardian (theguardian.com), BBC (bbc.com, bbc.co.uk), South China Morning Post (scmp.com), Nikkei Asia (asia.nikkei.com), Caixin Global (caixinglobal.com).
 
 ### Costs (counted from the code, 2026-11-11)
 
 | | Today, per trading day (most) | IPO watch adds |
 |---|---|---|
-| Tavily searches | premarket 12 (8 movers, 3 macro, 1 theme), update 12, recap 13 (8, 3, after-hours 1, theme 1), calendar 5: **42**, about **880 a month** (21 trading days), more when a build retries | **2 per tracked IPO** a trading day, about 42 a month per IPO; **capped at 100 a month** in all (kv `ipo_searches`) |
-| Model calls | premarket 14 (8 mover extractions, macro 1, theme 1, 2-4 drafts), update 14, recap 15, calendar 5: **48**, plus 3-5 per earnings check | **up to 4 per tracked IPO** (2 sweeps × English items + Chinese) |
-| Monthly model cost | about $23-32 (2026-11-06 eval, Sonnet 5.5 at $2 / $10 per million input / output tokens) | about **$2 a month per IPO**; at most about **$5 a month** in all |
+| Tavily searches | premarket 12 (8 movers at 4 a side, 3 macro, 1 theme), update 12, recap 13 (8 movers, 3 macro, after-hours 1, theme 1), calendar 5: **42**. That is **882 in a 21-trading-day month, 924 in 22, 966 in 23**, and more when a build retries (each retry searches again) | **1 per tracked IPO a trading day**, **capped at 30 a month** in all (kv `ipo_searches`) |
+| Model calls | premarket 14 (8 mover extractions, macro 1, theme 1, 2-4 drafts), update 14, recap 15, calendar 5: **48**, plus 3-5 per earnings check | **up to 2 per tracked IPO** a trading day (the English items, and Chinese for company moves) |
+| Monthly model cost | about $23-32 (2026-11-06 eval, Sonnet 5.5 at $2 / $10 per million input / output tokens) | about **$1 a month per IPO**; at most about **$1.50 a month** in all |
 
-How the model cost is estimated: a sweep's English call reads up to 5 articles cut to 6,000 characters each, about 8,000 input tokens ($0.016), and writes up to 8 items, about 2,000 output tokens with effort `low` ($0.02); the Chinese call is about $0.01. So about $0.05 a sweep, $0.10 a trading day and $2 a month per IPO; the 100-search cap is also a cap of about $5 a month. These are estimates from the code, not measured: check the Claude Console's usage after the first week.
+How the model cost is estimated: a sweep's English call reads up to 5 articles cut to 6,000 characters each, about 8,000 input tokens ($0.016), and writes up to 8 items, about 2,000 output tokens with effort `low` ($0.02); the Chinese call is about $0.01. So about $0.05 a sweep and about $1 a month per IPO (21-23 sweeps); the 30-search cap is also a cap of about $1.50 a month. These are estimates from the code, not measured: check the Claude Console's usage after the first week.
 
-Tavily's free plan is 1,000 API credits a month (a basic search is 1). The site alone can reach about 880 before retries, so the IPO cap of 100 keeps the planned total at about 980. A month with many premarket or recap retries can pass 1,000 without IPO watch; watch the Tavily dashboard. At the cap the sweeps stop until the 1st (ET) with one `ipo-search-cap` warning a day; the filing check and the recap closes go on.
+**Tavily's free allowance is 1,000 API credits a month** (a basic search is 1). The briefs alone can reach 966 in a 23-trading-day month before retries, so the allowance can run out with or without IPO watch; with its 30, the planned worst case is 996. **What readers lose if it runs out**: every search fails until the allowance resets, so the briefs' movers lose their news reasons (they fall back to "reported results" or a theme, else "No clear news"), the macro and theme sections thin out, the calendar's company-announcement checks stop, and IPO sweeps stop. The brief still publishes. Watch the Tavily dashboard near month end; a paid Tavily plan is the fix if it runs out. At the IPO cap the sweeps stop until the 1st (ET) with one `ipo-search-cap` warning a day; the filing check and the recap closes go on.
 
 ### The switch
 
-`IPO_WATCH_ENABLED = "true"` in `crates/generator/wrangler.toml` `[vars]`. Only exactly `"true"` is on; unset, `"false"`, `" true"` or `"TRUE"` is off. Off: polls queue no IPO messages (and read nothing for them), a stray `ipo:check` or `ipo:sweep` logs `disabled (IPO_WATCH_ENABLED is not true); skipped`, and the recap reads no IPO symbols. The site keeps showing what is stored. To turn it off, delete the line (or set it to anything else), commit and deploy the generator.
+`IPO_WATCH_ENABLED = "true"` in `crates/generator/wrangler.toml` `[vars]`. Only exactly `"true"` is on; unset, `"false"`, `" true"` or `"TRUE"` is off. Off: polls queue no IPO messages (and read nothing for them), a stray `ipo:check` or `ipo:sweep` logs `disabled (IPO_WATCH_ENABLED is not true); skipped`, and the recap reads no IPO symbols. The site keeps showing what is stored, and drops a reported date that has passed by itself (nothing recomputes rows while off). To turn it off, delete the line (or set it to anything else), commit and deploy the generator.
 
 ### Alerts
 
-- `ipo-cover:<slug>` (error): a cover failed 3 reads and is given up; (warn) a cover read gave no facts. The page keeps the earlier filing's facts. Look at the filing on EDGAR: a new cover wording may need a pattern in `cover.rs`.
+Each at most once a day per key; the IPO keys are per IPO.
+
+- `ipo-cover-failed:<slug>` (error): a cover failed 3 reads (one an hour) and is given up. Look at the filing on EDGAR.
+- `ipo-cover-partial:<slug>` (warn): a newer cover was read but lacks what it needs to replace the current facts (it names the filing and the kinds); the page keeps the earlier facts and status. A new cover wording may need a pattern in `cover.rs`; check it against the filing.
+- `ipo-cover-empty:<slug>` (warn): a cover read gave no facts at all.
 - `sec-throttled` (error, shared with the earnings poll): SEC answered 403/429 in the IPO check, which then stopped for that hour.
-- `ipo-sweep` (warn): the news search or the model call failed; the next slot tries again.
-- `ipo-search-cap` (warn): the month's 100 searches are used.
-- `config:ipo:<date>` (error): a store error or a bad LLM config in an IPO job.
+- `ipo-sweep:<slug>` (warn): the news search or the model call failed; the next day tries again.
+- `ipo-search-cap` (warn): the month's 30 searches are used.
+- `config:ipo:<date>` (error): a store error or a bad LLM or `SEC_CONTACT` config in an IPO job. The hour (check) or the day's slot (sweep) is marked first, so it is not re-queued every 5 minutes.
 
 ### Deploy order (owner only)
 
@@ -384,8 +394,9 @@ Local preview data: `cd crates/generator && pnpm exec wrangler d1 execute prebel
 ### Known limits
 
 - No opening price after listing (the recap's quote read has none); the page shows close, volume and the change against the IPO price.
-- A new listing's first-day close is stored only if Yahoo's v7 quote gives a previous close for it (the movers' close check needs one). Not verifiable before a listing; if the first evening shows `ipo symbols=1 closes=0`, the status stays `priced` with the filing's expected date.
-- Patterns were checked on one real cover (Anthropic's S-1/A) and a made-up 424B4 in the usual shape; a cover worded differently may yield fewer facts (an `ipo-cover` warning when none).
+- A new listing's first-day close is stored only if Yahoo's v7 quote gives a previous close for it (the movers' close check needs one). Not verifiable before a listing. If day one has no close, later sessions are stored but none is called the first day, and the date line keeps the filing's expected date.
+- Cover patterns are checked on four real covers (Anthropic's S-1/A; Reddit's, Arm's and CoreWeave's 424B4s). A cover worded differently may yield fewer facts; then the earlier facts stay and an `ipo-cover-partial` or `ipo-cover-empty` warning says so.
+- Items are deduplicated by URL, so an article updated in place keeps its first stored version; the sweeps' monthly counter can be off by one if two sweeps start at the same moment.
 
 ## Logos
 
