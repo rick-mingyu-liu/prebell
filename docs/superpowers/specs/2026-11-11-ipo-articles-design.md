@@ -1,6 +1,6 @@
 # IPO on the front page, and IPO write-ups
 
-Date: 2026-11-11. Status: approved direction, details below are the builder's to follow.
+Date: 2026-11-11. Status: approved direction, details below are the builder's to follow. Revised 2026-11-11 after review: the write-ups are written by code, not by a model.
 
 ## Why
 
@@ -55,18 +55,15 @@ Facts bundle (stored in R2 like other posts), gathered by code:
 - the cover facts with their filing sentences, the filing's form, date and EDGAR link;
 - for `range_changed`: the previous range and share count, from the previous write-up's facts;
 - the filing timeline;
-- figures derived by code and labelled as derived: the raise at the low and high end of the range (shares offered x price), and after pricing, the raise at the offering price. The model may not derive anything itself;
+- figures derived by code and labelled as derived: the gross offering size at the low and high end of the range (the cover's shares offered x price), and after pricing, at the offering price, always with both inputs and what the figure is (before underwriting discounts, including selling stockholders' shares, excluding the underwriters' option; not proceeds, not a valuation);
 - for `listed`: the first session's open, close, volume and the change from the offering price, as stored;
 - the stored news items for this IPO (valuation, date, company moves, views), each with its outlet, link, date and exact quote.
 
-The model receives that bundle and nothing else, and writes the English and the Chinese version separately, as the earnings write-ups do.
+**Written by code, not a model** (changed 2026-11-11 after review, the lead's ruling, Claude's call pending Rick; see `docs/decisions.md`). The title, the summary and both prose sections are sentence templates per milestone and language, filled only from the bundle's filing facts; Chinese has its own templates, with full-digit share counts and 亿 / 万 only when the result has at most two decimals. There is no model call, no prompt and no retry with a reason. The first design had a model write the prose under checks; a review showed the checks could not stop a filing figure being given a false meaning, or comment and prediction in PreBell's voice, and a live run showed the model adding nothing the table did not say.
 
-Checks before publishing (code, not the model):
-- Every number in the draft is in the bundle (the existing number checker and its rounding rules).
-- The headline states the milestone with a figure from the bundle (for `range_set`: the price range).
-- Anything taken from a news item appears as an attributed quote: the outlet is named and the quoted words are word-for-word from the stored item. A valuation, a listing date, or a view outside such a quote rejects the draft. In the Chinese version the quote stays in its original English, with the attribution in Chinese.
-- Banned outright: advice, price predictions, "oversubscribed" or other demand claims not inside a quote, "expected" comparisons, and beat/miss language.
-- One retry with the rejection reason, then no publish and an alert, with later attempts on the schedule the earnings write-ups use.
+What the templates state, per milestone: the filing and its date; `range_set` the range and the shares; `range_changed` the old and the new range and which end moved; `priced` the price and where it sits against the last range only as within, above or below it; `listed` the open, close and volume and the change from the offering price with both inputs; `withdrawn` the filing and its date and the withdrawn offering's last terms. Who sells (the company and any selling stockholders), the underwriters' option and the exchange and symbol follow the cover, and are left out when the cover does not state them. ADS deals say ADSs.
+
+Checks before publishing (code): every number and date on the page outside the quoted news is one the bundle holds; a page that fails is not published (it would be a template bug) and is alerted. Anything taken from a news item appears only as an attributed, word-for-word quote, in its English original in the Chinese version.
 
 Length and shape: about the size of an earnings write-up; what happened and the figures first, then what the filing says about the offering, then "What has been reported" with the quoted news items if any exist, then the next step in the process stated generally (for example, that a final prospectus follows pricing) without a date unless a stored reported date is quoted.
 
@@ -99,7 +96,7 @@ Elsewhere on the site:
 ## Switches and cost
 
 - `IPO_ARTICLES_ENABLED`, exactly `"true"`, in the generator's `wrangler.toml`. The home section needs no switch; it shows what is stored.
-- Cost: two model calls per milestone and language pair, about five milestones per IPO; a few cents each.
+- Cost: no model calls (the text is written by code): a few D1 queries and one R2 write per milestone.
 - Free-plan limits: the build runs as its own queue message like an earnings build, within 50 outbound requests.
 
 ## Calls made by Claude, for Rick to overrule

@@ -409,15 +409,18 @@ The list for v1, with the reasons, is in `docs/decisions.md` (2026-11-11, "IPO w
 
 ## IPO write-ups
 
-A short write-up in English and Chinese each time a tracked IPO's filings prove a step: `filed`, `range_set`, `range_changed`, `priced`, `listed`, `withdrawn`. An ordinary post (`content_type = 'ipo'`) in the recent list and the archive, linked from the IPO page. Design `docs/superpowers/specs/2026-11-11-ipo-articles-design.md`; what the site reads, `docs/superpowers/specs/2026-11-11-ipo-articles-contract.md`; the rules, `docs/decisions.md` (2026-11-11, "IPO write-ups at filing milestones" and "the derived offering size"). Code: `crates/core/src/ipo/milestone.rs` (what proves a step, the facts bundle), `writeup.rs` (the model's part, its checks and the page), `article.rs` (the message), prompts `crates/core/prompts/ipo_v1_{en,zh}.md`.
+A short write-up in English and Chinese each time a tracked IPO's filings prove a step: `filed`, `range_set`, `range_changed`, `priced`, `listed`, `withdrawn`. An ordinary post (`content_type = 'ipo'`) in the recent list and the archive, linked from the IPO page. **Written entirely by code** from stored filing facts (sentence templates per milestone and language): no model call. Design `docs/superpowers/specs/2026-11-11-ipo-articles-design.md`; what the site reads, `docs/superpowers/specs/2026-11-11-ipo-articles-contract.md`; the rules, `docs/decisions.md` (2026-11-11, the "IPO write-ups" entries). Code: `crates/core/src/ipo/milestone.rs` (what proves a step, the facts bundle), `writeup.rs` (the templates, the page and its guard), `article.rs` (the message).
 
 ### What runs, and when
 
-- **`ipo:article`** (earnings-build queue, serial with the earnings builds): queued by an earnings poll, 06:00-22:00 ET on trading days, once kv `ipo_article_next` is reached (an hour after an idle pass; 5 minutes after a pass that left a retry). One D1 state read, then per tracked IPO its latest milestone and its run (`runs.run_key` = `ipo:<slug>:<milestone>:<key>`). At most one build per message: 2 model calls (English, then Chinese), up to 4 with one retry each; one R2 write (the facts object); about 10 D1 queries. No EDGAR, Yahoo or Tavily request. Well under the 50-subrequest limit.
-- **Once only**: a run that is `published`, `skipped` or `failed` is never built again. Only the latest milestone an IPO has reached is written; one it has moved past is never written later.
-- **Never in one language only**: both drafts must pass their checks; then the post row, and both translations with the sources in one D1 batch. A refused draft publishes nothing and is retried every 5 minutes; after 3 builds and 6 hours the run is `failed`.
-- **The first live run**: Anthropic's `range_set` (the S-1/A of 2026-11-10, run key `ipo:anthropic:range_set:0001628280-26-072484`, slug `anthropic-ipo-price-range-2026-11-10`), at the first poll after deploy, with no news items stored yet (so no "What has been reported" section). A test builds it from the real cover facts.
-- CPU: the draft checks' own regexes compile in about 8 ms in a debug test build, a fraction of that in release; the number checker they share with the earnings write-ups costs the same as there.
+- **`ipo:article`** (earnings-build queue, serial with the earnings builds): queued by an earnings poll, 06:00-22:00 ET on trading days, once kv `ipo_article_next` is reached (an hour after an idle pass; at a failed build's retry time). One D1 state read, then per tracked IPO its latest milestone and its run (`runs.run_key` = `ipo:<slug>:<milestone>:<key>`). At most one build per message: one R2 write (the facts object) and about 10 D1 queries. No model, EDGAR, Yahoo or Tavily request.
+- **Once only**: a run that is `published`, `skipped` or `failed` is never built again. Only the latest milestone an IPO has reached is written; one it has moved past is never written later. A range or a price counts only from a cover that became the IPO page's facts source, so a write-up never disagrees with the page.
+- **`listed` waits for the confirmed first day**: it is written only once `ipo_watch.date_source = 'trading'` (the stored session is the filings' first trading day). Until then the pass logs `waiting for the first trading day to be confirmed`; never confirmed within 7 days, it is skipped with a warning.
+- **Never in one language only**: both pages are rendered and checked; then the post row, and both translations with the sources in one D1 batch.
+- **The guard**: every number and date on the page outside the quoted news must be one the facts hold (`writeup::verify_page`). A page that fails is a template bug: nothing is published and the run is retried and then failed as below.
+- **Retries are bounded**: a build that fails (a D1 or R2 error, or the guard) is tried again after 5, 15, 30 and 60 minutes (a build that dies mid-way holds its 15-minute lease first); the fifth failed build marks the run `failed` with an error alert. So a milestone costs at most 5 builds, over about two hours.
+- **The first live run**: Anthropic's `range_set` (the S-1/A of 2026-11-10, run key `ipo:anthropic:range_set:0001628280-26-072484`, slug `anthropic-ipo-price-range-2026-11-10`) at the first poll after deploy, with no news items stored yet. A test renders it from the real cover facts.
+- CPU: a build is template formatting and the guard's number check (the same checker the earnings write-ups use); no model wait.
 
 See a write-up's state: `cd crates/generator && pnpm exec wrangler d1 execute prebell --remote --command "SELECT run_key, status, attempts, last_error, updated_at FROM runs WHERE content_type = 'ipo' ORDER BY updated_at DESC"`; the next pass: `SELECT value FROM kv WHERE key = 'ipo_article_next'`.
 
@@ -427,25 +430,25 @@ See a write-up's state: `cd crates/generator && pnpm exec wrangler d1 execute pr
 
 ### Alerts
 
-- `<run_key>` (warn): the milestone was first found more than 7 ET days after its filing or session and is skipped, never published late.
-- `<run_key>:<ET date>` (warn, once a day): a draft was refused or the model failed; the run retries every 5 minutes. `runs.last_error` has each language's reasons.
-- `<run_key>` (error): the run gave up after 3 builds and 6 hours. Read `last_error`; a recurring check failure may need the prompt or a check adjusted.
-- `config:ipo:<date>` (error, shared with IPO watch): a bad LLM config or a store error. The hour is marked first.
+- `<run_key>` (warn): the milestone was first found more than 7 ET days after its filing or session, or a `listed` session was never confirmed as the first day; skipped, never published late.
+- `<run_key>:<ET date>` (warn, once a day): a build failed and will be retried (`runs.last_error` says why: a store error, or the guard's numbers or dates).
+- `<run_key>` (error): the fifth build failed; the run is `failed`. A guard failure means a template printed something the facts do not hold: fix the template.
+- `config:ipo:<date>` (error, shared with IPO watch): a store error that ended the message.
 
 ### Costs
 
-About 2 model calls a milestone, about five milestones an IPO: with roughly 3,000 input and 600 output tokens a call (estimated from the prompt and the facts, not measured), about $0.01 a call at Sonnet 5.5's $2 / $10 per million, so about $0.02-0.04 a milestone and $0.10-0.20 an IPO. The worst case is a draft refused all day: a build every 5 minutes for 6 hours, up to 4 calls each, about $3 for that milestone. No Tavily searches.
+No model calls and no Tavily searches. Per milestone: one queue message with one R2 write and about 10 D1 queries, five at the most when builds fail. About five milestones an IPO.
 
 ### Preview and deploy
 
-Local preview: after `db/seed-ipo-preview.sql`, `cd crates/generator && pnpm exec wrangler d1 execute prebell --local --file ../../db/seed-ipo-articles-preview.sql`, then `bash db/load-preview-facts.sh` for the facts object. The filing facts are real; the prose is a sample reply and the quoted items are the made-up ones of the IPO seed. No migration. Deploy is the generator's usual `pnpm exec wrangler deploy` (owner only) with the site's support for `content_type = 'ipo'`.
+Local preview: after `db/seed-ipo-preview.sql`, `cd crates/generator && pnpm exec wrangler d1 execute prebell --local --file ../../db/seed-ipo-articles-preview.sql`, then `bash db/load-preview-facts.sh` for the facts object. The filing facts are real and the text is the generator's own rendering; the quoted items are the made-up ones of the IPO seed. No migration. Deploy is the generator's usual `pnpm exec wrangler deploy` (owner only) with the site's support for `content_type = 'ipo'`.
 
 ### Known limits
 
-- A step the stored data does not prove gets no write-up: a cover that could not be read, a 424B4 read only after the first session (no `priced` write-up then), or a listing whose first-day close Yahoo did not give.
-- The checks refuse a draft for any refused word, even in a harmless sense ("most", "will", 将于); the prompt names them, and a refused draft is retried with the reason.
-- The model's description stays thin by design: it may state only filing figures, filing dates and the cover's terms. Anything about the business or the market is left out.
-- Quotes are as stored by the news sweep; in Chinese they stay in English.
+- A step the stored data does not prove gets no write-up: a cover that could not be read completely, a 424B4 read only after the first session (no `priced` write-up then; the `listed` one states the price if the 424B4 is the facts source by then), or a listing whose first day Yahoo did not give.
+- The text says only what the covers and the first session state. Nothing about the business, the market, demand or valuation appears except in the quoted news.
+- "The first registration statement to state a price range" is said only when every earlier registration statement was read (not for Anthropic, whose S-1 and first S-1/A were never read).
+- Quotes are as stored by the news sweep; in Chinese they stay in English. Outlet names stay as stored.
 
 ## Logos
 

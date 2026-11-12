@@ -1,6 +1,6 @@
 # IPO write-ups: the data contract
 
-Date: 2026-11-11 (revised the same day: the derived offering size's inputs and definition, and the model never writing it). Design: `2026-11-11-ipo-articles-design.md`. IPO tables: `2026-11-11-ipo-watch-contract.md`. Seed for local preview: `db/seed-ipo-articles-preview.sql` (one published `range_set` write-up for Anthropic in both languages; apply after `db/seed-ipo-preview.sql`), with its facts object at `db/preview-facts/ipo/anthropic/range_set-0001628280-26-072484.json` (loaded into local R2 by `db/load-preview-facts.sh`).
+Date: 2026-11-11 (revised the same day: the derived offering size's inputs and definition; then, after review, the whole text written by code with no model, `security`, and the milestone rules below). Design: `2026-11-11-ipo-articles-design.md`. IPO tables: `2026-11-11-ipo-watch-contract.md`. Seed for local preview: `db/seed-ipo-articles-preview.sql` (one published `range_set` write-up for Anthropic in both languages; apply after `db/seed-ipo-preview.sql`), with its facts object at `db/preview-facts/ipo/anthropic/range_set-0001628280-26-072484.json` (loaded into local R2 by `db/load-preview-facts.sh`).
 
 This is what the site (`apps/web`) reads for the IPO write-ups. The generator is the only writer. No migration: a write-up is an ordinary post (`runs`, `posts`, `post_translations`, `sources`, and one facts object in R2). If this contract has to change, the builder says so in a message first.
 
@@ -11,10 +11,10 @@ Dates are `YYYY-MM-DD` (ET calendar days) unless named `*_at`, which are UTC RFC
 | `milestone` | Proven by | `key` | `as_of` (and `posts.trading_date`) |
 |---|---|---|---|
 | `filed` | the IPO's first public registration statement (`S-1` or `F-1`; a `DRS` never counts) | its accession | its filing date |
-| `range_set` | the first read registration cover with a price range | its accession | its filing date |
-| `range_changed` | a later read registration cover whose price range or share count differs from the previous range milestone's | its accession | its filing date |
-| `priced` | the first read final prospectus (`424B4` or `424B1`) with the offering price | its accession | its filing date |
-| `listed` | the first stored trading session (`ipo_trading`) | the session date | the session date |
+| `range_set` | the first registration cover with a price range that became the IPO page's facts source (`ipo_watch.facts_accession` at its time: read and complete) | its accession | its filing date |
+| `range_changed` | a later such facts source whose price range or share count differs from the previous range milestone's | its accession | its filing date |
+| `priced` | the first final prospectus (`424B4` or `424B1`) that became the facts source (its price and shares read) | its accession | its filing date |
+| `listed` | the first stored trading session (`ipo_trading`), written only once `ipo_watch.date_source = 'trading'` (that session is the filings' first trading day); one never confirmed is skipped after 7 days | the session date | the session date |
 | `withdrawn` | an `RW` filed after the last offering filing, before any listing | its accession | its filing date |
 
 Only the latest milestone an IPO has reached is ever written up; one it has moved past without a write-up is not written later. A milestone more than 7 days old (ET days from `as_of`) when found is skipped with a `warn` alert.
@@ -74,12 +74,14 @@ One row per link the article cites, in order: the milestone filing's index page 
 
 ## `body_md`
 
-Markdown like the earnings write-up. The model writes only the title, the summary and the two prose sections; everything else is rendered by code from the facts. News items reach the article only through the code-rendered "What has been reported" section, word for word. In Chinese the quotes stay in English.
+Markdown like the earnings write-up, written entirely by code from the facts object: no model writes any of it. News items reach the article only through the "What has been reported" section (left out when none is stored), word for word with the outlet and date; in Chinese the quotes stay in English. Reported-date items are left out once a filing or the first session gives the date.
+
+Anthropic's real `range_set`, as the generator renders it (EN; no news items stored yet, so no "What has been reported"):
 
 ```
-# <title>
+# Anthropic sets IPO price range at $70 to $78 a share
 
-<summary>
+Anthropic filed an amended registration statement (Form S-1/A) on Nov 10, 2026 with a price range of $70.00 to $78.00 per share for 825,000,000 shares.
 
 **Anthropic (ANT)** · Nasdaq Global Select Market · Form S-1/A filed Nov 10, 2026
 
@@ -98,30 +100,26 @@ Offering size is computed by PreBell from the cover: shares offered (including s
 
 ## What happened
 
-<model prose>
+Anthropic filed an amended registration statement (Form S-1/A) with the SEC on Nov 10, 2026. The cover sets a price range of $70.00 to $78.00 per share for 825,000,000 shares.
 
 ## What the filing says
 
-<model prose>
-
-## What has been reported
-
-- Reuters, Nov 10, 2026: "<exact quote>" ([article](https://...))
-- Jane Doe, an analyst at Example Securities, in Sample Times, Nov 9, 2026: "<exact quote>" ([article](https://...))
+Anthropic is selling 801,351,354 shares and the selling stockholders are selling 23,648,646 shares. The underwriters have an option to purchase up to 123,750,000 shares more. At $70.00 a share, the 825,000,000 shares offered come to $57.75 billion; at $78.00 a share, the 825,000,000 shares offered come to $64.35 billion. These are PreBell's gross figures before underwriting discounts, including any shares sold by selling stockholders and excluding the underwriters' option; they are not the company's proceeds. The filing names the Nasdaq Global Select Market as the exchange and ANT as the symbol.
 
 ## What comes next
 
-<one fixed paragraph per milestone, by code>
+The range can still change in a later amendment. The offering price is set at pricing and stated in a final prospectus (Form 424B4 or 424B1), after which the shares begin trading.
 
 ## Sources
 
-- [Form S-1/A filed Nov 10, 2026 (SEC EDGAR)](https://www.sec.gov/...)
-- [Reuters, Nov 10, 2026](https://...)
+- [Form S-1/A filed Nov 10, 2026 (SEC EDGAR)](https://www.sec.gov/Archives/edgar/data/2130357/000162828026072484/0001628280-26-072484-index.htm)
 
 This IPO write-up is generated automatically from SEC filings and public news reports, for information only. It is not investment advice.
 ```
 
-Chinese headings: `发生了什么`, `文件披露了什么`, `已有报道`, `下一步`, `来源`; table header `招股文件数据`; offering-size rows like `按每股70.00美元计算的发行规模（825,000,000股×70.00美元）`, with the definition under the table. The "What has been reported" section is left out when no item is stored. Table rows are shown only for facts the filing has; the derived rows only when the filing has the shares and the price.
+With news items, "What has been reported" sits between "What the filing says" and "What comes next", one line per item: `- Reuters, Nov 10, 2026: "<exact quote>" ([article](<url>))`, or for a view `- <speaker>, in <outlet>, <date>: "<exact quote>" ([article](<url>))`; ZH `- Reuters（2026年11月10日）报道：“<exact quote>”（[原文](<url>)）`. Link targets have spaces, parentheses and angle brackets percent-encoded.
+
+Chinese headings: `发生了什么`, `文件披露了什么`, `已有报道`, `下一步`, `来源`; table header `招股文件数据`. Table rows are shown only for facts the filing has. For an ADS deal (`security = "ads"`) the text and the table say ADSs (`ADSs offered`, `per ADS`; ZH `份美国存托股`).
 
 ## The facts object (R2, `facts_r2_key`)
 
@@ -142,9 +140,10 @@ JSON, written once before the post. Every field is present; a field without data
 | `as_of` | string | the filing date, or the session date for `listed` |
 | `filing` | object or null | The filing whose cover facts are in `cover`: `accession`, `form`, `filing_date`, `index_url`, `doc_url` (string or null). For `listed` the IPO's facts source at the time; for `withdrawn` the `RW`. |
 | `cover` | list | `ipo_facts` rows of `filing`: `kind`, `value_num` (number or null), `value_text` (string or null), `quote` (the cover's sentence). Kinds as in the IPO watch contract. |
-| `previous` | object or null | `range_changed` only: the previous range milestone's `accession`, `form`, `filing_date`, `index_url`, `price_low`, `price_high`, `shares_offered` (numbers or null). |
+| `security` | string | `shares`, or `ads` when the cover's own sentences call the securities American depositary shares (Arm). |
+| `previous` | object or null | `range_changed`: the previous range milestone's; `priced`: the last range milestone's (the price is placed against its range); `withdrawn`: the facts source the withdrawal ends. Fields: `accession`, `form`, `filing_date`, `index_url`, `price_low`, `price_high`, `shares_offered` (numbers or null). |
 | `first_range` | boolean | `range_set` only: true when every earlier registration statement of the IPO was read and none stated a range, so this is provably the first range; false otherwise (Anthropic: false, its S-1 and first S-1/A were never read). The write-up calls the range the first only when true. |
-| `derived` | list | The only figures PreBell computes, by code (the model is never given them and may not write them): `kind` (`offering_at_low`, `offering_at_high`, `offering_at_price`), `value_usd`, its two inputs `shares` (the cover's `shares_offered`: sold by the company and by selling stockholders, excluding the underwriters' option) and `price` (the range's low or high end, or the offering price once priced), and `definition` (the sentence below). Nothing else is ever multiplied, never shares outstanding. Show it only with both inputs and as the gross offering size: never as the company's proceeds, what it raises, or a valuation. `definition`: "Gross offering size at this price: shares offered on the cover (sold by the company and by selling stockholders, excluding the underwriters' option) x the price per share, before underwriting discounts. Not the company's proceeds and not a valuation." |
+| `derived` | list | The only figures PreBell computes, by code: `kind` (`offering_at_low`, `offering_at_high`, `offering_at_price`), `value_usd`, its two inputs `shares` (the cover's `shares_offered`: sold by the company and by selling stockholders, excluding the underwriters' option) and `price` (the range's low or high end, or the offering price once priced), and `definition` (the sentence below). Nothing else is ever multiplied, never shares outstanding. Show it only with both inputs and as the gross offering size: never as the company's proceeds, what it raises, or a valuation. `definition`: "Gross offering size at this price: shares offered on the cover (sold by the company and by selling stockholders, excluding the underwriters' option) x the price per share, before underwriting discounts. Not the company's proceeds and not a valuation." |
 | `session` | object or null | `listed` only: the first session's `session_date`, `symbol`, `open` (number or null), `close`, `volume` (number or null), `ipo_price` (number or null), `change_pct` (number or null), `source_url`, as stored in `ipo_trading`. |
 | `timeline` | list | The IPO's filings, newest first: `accession`, `form`, `filing_date`, `index_url`. |
 | `items` | list | The news items quoted in the article, in the order shown (newest first, at most 6): `kind`, `outlet`, `url`, `published_on`, `quote`, `speaker` (string or null), `value_usd` (number or null), `value_date` (string or null). |
@@ -179,6 +178,7 @@ Example (Anthropic, `range_set`, the real cover facts of the S-1/A of 2026-11-10
   ],
   "previous": null,
   "first_range": false,
+  "security": "shares",
   "derived": [
     {"kind": "offering_at_low", "value_usd": 57750000000.0, "shares": 825000000.0, "price": 70.0, "definition": "Gross offering size at this price: ..."},
     {"kind": "offering_at_high", "value_usd": 64350000000.0, "shares": 825000000.0, "price": 78.0, "definition": "Gross offering size at this price: ..."}
@@ -196,4 +196,4 @@ Example (Anthropic, `range_set`, the real cover facts of the S-1/A of 2026-11-10
 
 ## Text the site must treat as untrusted
 
-`title`, `summary` and `body_md` are model-written prose checked by code, and quotes from filings and news articles: render them as Markdown with raw HTML disabled, as for other posts. Links in `body_md` are only SEC, allowlisted outlets and Yahoo.
+`title`, `summary` and `body_md` are written by code from stored data, and include quotes from news articles and stored names: render them as Markdown with raw HTML disabled, as for other posts. Links in `body_md` are only SEC, allowlisted outlets and Yahoo.
