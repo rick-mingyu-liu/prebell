@@ -66,11 +66,15 @@ fn trim_dec(v: f64, max: usize) -> String {
     }
 }
 
-fn grouped(v: f64) -> String {
-    let int = format!("{:.0}", v.abs());
+/// An integer with thousands separators: 801351354 -> "801,351,354".
+fn group_int(n: i128) -> String {
+    let int = n.abs().to_string();
     let mut out = String::new();
+    if n < 0 {
+        out.push('-');
+    }
     for (i, c) in int.chars().enumerate() {
-        if i > 0 && (int.len() - i) % 3 == 0 {
+        if i > 0 && (int.len() - i).is_multiple_of(3) {
             out.push(',');
         }
         out.push(c);
@@ -78,64 +82,110 @@ fn grouped(v: f64) -> String {
     out
 }
 
-/// A per-unit price: "$70.00" / "70.00美元".
+fn grouped(v: f64) -> String {
+    group_int(v.round() as i128)
+}
+
+/// A dollar figure in whole cents: every amount is formatted from these,
+/// so no float rounding can change what is printed.
+fn cents(v: f64) -> i128 {
+    (v * 100.0).round() as i128
+}
+
+/// Dollars and cents with separators: "1,500.00".
+fn dollars_cents(c: i128) -> String {
+    format!("{}.{:02}", group_int(c / 100), (c % 100).abs())
+}
+
+/// A per-unit price: "$70.00", "$1,500.00" / "70.00美元".
 fn price(v: f64, lang: Lang) -> String {
     match lang {
-        Lang::En => format!("${v:.2}"),
-        Lang::Zh => format!("{v:.2}美元"),
+        Lang::En => format!("${}", dollars_cents(cents(v))),
+        Lang::Zh => format!("{}美元", dollars_cents(cents(v))),
     }
 }
 
 /// A price without its currency word: "70.00" (the Chinese range's low end).
 fn bare(v: f64) -> String {
-    format!("{v:.2}")
+    dollars_cents(cents(v))
 }
 
-/// A headline price: "70", or "70.50" when it has cents.
+/// A headline price: "70", "1,500", or "70.50" when it has cents.
 fn price_short(v: f64) -> String {
-    if v.fract() == 0.0 {
-        format!("{v:.0}")
+    let c = cents(v);
+    if c % 100 == 0 {
+        group_int(c / 100)
     } else {
-        format!("{v:.2}")
+        dollars_cents(c)
     }
 }
 
 /// A range: "$70.00–$78.00" / "70.00–78.00美元".
 fn range(lo: f64, hi: f64, lang: Lang) -> String {
     match lang {
-        Lang::En => format!("${lo:.2}–${hi:.2}"),
-        Lang::Zh => format!("{lo:.2}–{hi:.2}美元"),
+        Lang::En => format!("{}–{}", price(lo, lang), price(hi, lang)),
+        Lang::Zh => format!("{}–{}美元", bare(lo), bare(hi)),
     }
 }
 
-/// Whether `v` in `unit`s has at most `places` decimals.
-fn exact(v: f64, unit: f64, places: i32) -> bool {
-    let x = v / unit * 10f64.powi(places);
-    (x - x.round()).abs() < 1e-6
+/// `c` cents in units of `unit` dollars, exactly, with at most four
+/// decimals: (5_775_000_000_000, 1e9) -> "57.75"; None when that would round.
+fn in_unit(c: i128, unit: i128) -> Option<String> {
+    let unit_c = unit * 100;
+    let step = unit_c / 10_000;
+    if c % step != 0 {
+        return None;
+    }
+    let frac = (c % unit_c) / step;
+    // No separators in a unit's count ("2200万", "48.705亿").
+    let mut out = (c / unit_c).to_string();
+    if frac != 0 {
+        out.push('.');
+        out.push_str(format!("{frac:04}").trim_end_matches('0'));
+    }
+    Some(out)
 }
 
-/// The fewest decimals (at most 4) that write `v` in `unit`s exactly.
-fn places(v: f64, unit: f64) -> Option<usize> {
-    (0..=4).find(|&k| exact(v, unit, k as i32))
-}
-
-/// A dollar amount, never rounded, in the largest unit that stays exact
-/// within four decimals: "$57.75 billion", "$4.8705 billion",
-/// "$1,419,354,816" / "577.5亿美元", "48.705亿美元", "1,419,354,816美元".
+/// A dollar amount, exact to the cent, in its own unit when that takes at
+/// most four decimals ("$57.75 billion", "$4.8705 billion", "$1.5
+/// trillion" / "577.5亿美元", "48.705亿美元", "1.5万亿美元"); otherwise every
+/// digit, with the cents when there are any ("$1,306,451,551.50"). A unit is
+/// used only in its own range, never "141935.4816万". Both languages state
+/// the same amount.
 fn money(v: f64, lang: Lang) -> String {
-    let unit = |u: f64| (v >= u).then(|| places(v, u)).flatten();
+    let c = cents(v);
+    let units: &[(i128, &str)] = match lang {
+        Lang::En => &[
+            (1_000_000_000_000, " trillion"),
+            (1_000_000_000, " billion"),
+            (1_000_000, " million"),
+        ],
+        Lang::Zh => &[
+            (1_000_000_000_000, "万亿"),
+            (100_000_000, "亿"),
+            (10_000, "万"),
+        ],
+    };
+    let mut upper = i128::MAX;
+    for &(u, word) in units {
+        if c >= u * 100 && c < upper {
+            if let Some(x) = in_unit(c, u) {
+                return match lang {
+                    Lang::En => format!("${x}{word}"),
+                    Lang::Zh => format!("{x}{word}美元"),
+                };
+            }
+        }
+        upper = u * 100;
+    }
+    let plain = if c % 100 == 0 {
+        group_int(c / 100)
+    } else {
+        dollars_cents(c)
+    };
     match lang {
-        // A smaller unit only below the larger one: never "141935.4816万".
-        Lang::En => match (unit(1e9), unit(1e6).filter(|_| v < 1e9)) {
-            (Some(k), _) => format!("${} billion", trim_dec(v / 1e9, k)),
-            (None, Some(k)) => format!("${} million", trim_dec(v / 1e6, k)),
-            _ => format!("${}", grouped(v)),
-        },
-        Lang::Zh => match (unit(1e8), unit(1e4).filter(|_| v < 1e8)) {
-            (Some(k), _) => format!("{}亿美元", trim_dec(v / 1e8, k)),
-            (None, Some(k)) => format!("{}万美元", trim_dec(v / 1e4, k)),
-            _ => format!("{}美元", grouped(v)),
-        },
+        Lang::En => format!("${plain}"),
+        Lang::Zh => format!("{plain}美元"),
     }
 }
 
@@ -143,12 +193,22 @@ fn money(v: f64, lang: Lang) -> String {
 /// (825,000,000 is 8.25亿, 22,000,000 is 2200万); otherwise every digit with
 /// separators (801,351,354).
 fn zh_count(v: f64) -> String {
-    if v >= 1e8 && exact(v, 1e8, 2) {
-        format!("{}亿", trim_dec(v / 1e8, 2))
-    } else if (1e4..1e8).contains(&v) && exact(v, 1e4, 2) {
-        format!("{}万", trim_dec(v / 1e4, 2))
+    let n = v.round() as i128;
+    let unit = |u: i128| {
+        let mut out = (n / u).to_string();
+        let frac = (n % u) / (u / 100);
+        if frac != 0 {
+            out.push('.');
+            out.push_str(format!("{frac:02}").trim_end_matches('0'));
+        }
+        out
+    };
+    if n >= 100_000_000 && n % 1_000_000 == 0 {
+        format!("{}亿", unit(100_000_000))
+    } else if (10_000..100_000_000).contains(&n) && n % 100 == 0 {
+        format!("{}万", unit(10_000))
     } else {
-        grouped(v)
+        group_int(n)
     }
 }
 
@@ -1016,11 +1076,11 @@ fn listed(f: &IpoArticleFacts, lang: Lang) -> Text {
             vec![
                 match lang {
                     Lang::En => format!(
-                        "The offering terms PreBell last read are from the {form} filed {on}, which gave {}. The offering price is added once the final prospectus is read.",
+                        "The offering terms PreBell last read are from the {form} filed {on}, which gave {}. The IPO page shows the offering price once the final prospectus is read.",
                         range_words(lo, hi, &u, lang)
                     ),
                     Lang::Zh => format!(
-                        "PreBell最近读取的发行条款来自{on}提交的{form}，价格区间为{}。读取最终招股说明书后会补充发行价。",
+                        "PreBell最近读取的发行条款来自{on}提交的{form}，价格区间为{}。读取最终招股说明书后，IPO页面会显示发行价。",
                         range_words(lo, hi, &u, lang)
                     ),
                 },
@@ -1548,11 +1608,11 @@ pub fn allowed_dates(f: &IpoArticleFacts) -> HashSet<NaiveDate> {
     out
 }
 
-/// The figures the page may hold: the cover's, the previous range's, the
-/// first session's and code's derived offering sizes.
+/// The figures the page may hold besides the derived offering sizes: the
+/// cover's, the previous range's and the first session's. A derived size
+/// is checked to the cent instead (`verify_page`).
 pub fn allowed_numbers(f: &IpoArticleFacts) -> Vec<f64> {
     let mut out: Vec<f64> = f.cover.iter().filter_map(|c| c.value_num).collect();
-    out.extend(f.derived.iter().map(|d| d.value_usd));
     if let Some(p) = &f.previous {
         out.extend(
             [p.price_low, p.price_high, p.shares_offered]
@@ -1612,6 +1672,27 @@ fn date_ok(c: &regex::Captures, allowed: &HashSet<NaiveDate>) -> bool {
         .any(|a| a.month() == m && a.day() == d && y.is_none_or(|y| y == a.year()))
 }
 
+/// Every occurrence of the amount `a` taken out, where no digit, "." or ","
+/// comes right before it (so "5亿美元" is not taken from "15亿美元").
+fn replace_amount(text: &str, a: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = 0;
+    for (i, _) in text.match_indices(a) {
+        let glued = text[..i]
+            .chars()
+            .next_back()
+            .is_some_and(|c| c.is_ascii_digit() || c == '.' || c == ',');
+        if i < rest || glued {
+            continue;
+        }
+        out.push_str(&text[rest..i]);
+        out.push(' ');
+        rest = i + a.len();
+    }
+    out.push_str(&text[rest..]);
+    out
+}
+
 /// `word` replaced where no ASCII letter or digit touches it.
 fn replace_word(text: &str, word: &str, with: &str) -> String {
     if word.is_empty() {
@@ -1649,12 +1730,38 @@ pub fn verify_page(md: &str, f: &IpoArticleFacts, lang: Lang) -> Result<(), Vec<
         text.replace_range(a..end, "");
     }
     let mut text = without_link_targets(&text);
+    // A derived size must be its inputs' product to the cent, and appears
+    // only written exactly as `money` writes that product: it is taken out
+    // before the number check, which never sees (or forgives) a rounded one.
+    let mut bad: Vec<String> = Vec::new();
+    for d in &f.derived {
+        let product = (d.shares.round() as i128) * cents(d.price);
+        if cents(d.value_usd) != product {
+            bad.push(format!(
+                "derived {} is not {} x {}",
+                d.value_usd, d.shares, d.price
+            ));
+        }
+        text = replace_amount(&text, &money(d.value_usd, lang));
+    }
+    // Any other amount in a unit ("$1 billion", "10亿美元") is a rounded
+    // one: the number check's tolerance would match it to some other figure.
+    bad.extend(
+        crate::numbers::extract(&text, lang)
+            .into_iter()
+            .filter(|n| {
+                let after = &text[n.at + n.raw.len()..];
+                n.multiplier != 1.0 && (n.raw.contains('$') || after.starts_with("美元"))
+            })
+            .map(|n| format!("amount not exact: {}", n.raw)),
+    );
     let allowed = allowed_dates(f);
-    let mut bad: Vec<String> = date_re()
-        .captures_iter(&text)
-        .filter(|c| !date_ok(c, &allowed))
-        .map(|c| format!("date not in the facts: {}", &c[0]))
-        .collect();
+    bad.extend(
+        date_re()
+            .captures_iter(&text)
+            .filter(|c| !date_ok(c, &allowed))
+            .map(|c| format!("date not in the facts: {}", &c[0])),
+    );
     text = date_re().replace_all(&text, " ").into_owned();
     let mut words: Vec<&str> = FORMS.iter().map(|(f, _, _)| *f).collect();
     words.extend(f.symbol.as_deref());
@@ -1867,6 +1974,119 @@ pub(crate) mod tests {
                 "{v}"
             );
         }
+    }
+
+    /// An amount as written, back to cents, exactly (decimal string math).
+    fn cents_of(text: &str) -> i128 {
+        let t = text.trim_start_matches('$').trim_end_matches("美元");
+        let (num, unit): (&str, i128) = [
+            (" trillion", 1_000_000_000_000),
+            (" billion", 1_000_000_000),
+            (" million", 1_000_000),
+            ("万亿", 1_000_000_000_000),
+            ("亿", 100_000_000),
+            ("万", 10_000),
+        ]
+        .iter()
+        .find_map(|(w, u)| t.strip_suffix(w).map(|n| (n, *u)))
+        .unwrap_or((t, 1));
+        let num = num.replace(',', "");
+        let (int, frac) = num.split_once('.').unwrap_or((&num, ""));
+        let scale = 10i128.pow(frac.len() as u32);
+        let frac: i128 = if frac.is_empty() {
+            0
+        } else {
+            frac.parse().unwrap()
+        };
+        (int.parse::<i128>().unwrap() * scale + frac) * unit * 100 / scale
+    }
+
+    #[test]
+    fn every_amount_is_exact_to_the_cent_and_the_same_in_both_languages() {
+        for (shares, p, en, zh) in [
+            // The reviewer's cases: never rounded to the unit.
+            (20_000_010.0, 50.0, "$1,000,000,500", "1,000,000,500美元"),
+            (33_333_333.0, 30.0, "$999,999,990", "999,999,990美元"),
+            // Cents are shown when there are any.
+            (
+                32_258_063.0,
+                40.5,
+                "$1,306,451,551.50",
+                "1,306,451,551.50美元",
+            ),
+            (22_000_001.0, 34.25, "$753,500,034.25", "753,500,034.25美元"),
+            // The natural unit when it stays exact.
+            (825e6, 70.0, "$57.75 billion", "577.5亿美元"),
+            (95_500_000.0, 51.0, "$4.8705 billion", "48.705亿美元"),
+            (825e6, 65.0, "$53.625 billion", "536.25亿美元"),
+            (22e6, 34.0, "$748 million", "7.48亿美元"),
+            (30e9, 50.0, "$1.5 trillion", "1.5万亿美元"),
+            (1_000_000_000.0, 1_500.0, "$1.5 trillion", "1.5万亿美元"),
+        ] {
+            let v = shares * p;
+            let (e, z) = (money(v, Lang::En), money(v, Lang::Zh));
+            assert_eq!((e.as_str(), z.as_str()), (en, zh), "{shares} x {p}");
+            let want = (shares as i128) * cents(p);
+            assert_eq!((cents_of(&e), cents_of(&z)), (want, want), "{e} / {z}");
+        }
+        assert_eq!(price(1_500.0, Lang::En), "$1,500.00");
+        assert_eq!(price(1_500.0, Lang::Zh), "1,500.00美元");
+        assert_eq!(price_short(1_500.0), "1,500");
+        assert_eq!(range(1_000.0, 1_250.5, Lang::En), "$1,000.00–$1,250.50");
+        // Through the whole page, in both languages.
+        let mut f = facts();
+        f.cover.retain(|c| c.kind != "price_high");
+        for c in &mut f.cover {
+            match c.kind.as_str() {
+                "shares_offered" => c.value_num = Some(20_000_010.0),
+                "price_low" => c.value_num = Some(50.0),
+                _ => {}
+            }
+        }
+        f.cover.push(crate::ipo::milestone::CoverFact {
+            kind: "price_high".into(),
+            value_num: Some(52.0),
+            value_text: None,
+            quote: "q".into(),
+        });
+        f.derived = vec![
+            crate::ipo::milestone::Derived {
+                kind: "offering_at_low".into(),
+                value_usd: 20_000_010.0 * 50.0,
+                shares: 20_000_010.0,
+                price: 50.0,
+                definition: String::new(),
+            },
+            crate::ipo::milestone::Derived {
+                kind: "offering_at_high".into(),
+                value_usd: 20_000_010.0 * 52.0,
+                shares: 20_000_010.0,
+                price: 52.0,
+                definition: String::new(),
+            },
+        ];
+        let en = page(&f, Lang::En).1;
+        let zh = page(&f, Lang::Zh).1;
+        assert!(
+            en.contains("come to $1,000,000,500;") && zh.contains("发行规模为1,000,000,500美元"),
+            "{en}\n{zh}"
+        );
+        // A rounded product is refused, though the number checker would
+        // round it to the same figure.
+        let rounded = en.replacen("$1,000,000,500", "$1 billion", 1);
+        assert!(verify_page(&rounded, &f, Lang::En).unwrap_err()[0].contains("$1 billion"));
+        let rounded = zh.replacen("1,000,000,500美元", "10亿美元", 1);
+        assert!(verify_page(&rounded, &f, Lang::Zh).unwrap_err()[0].contains("10亿"));
+        // A derived size that is not its inputs' product is refused.
+        let mut wrong = f.clone();
+        wrong.derived[0].value_usd = 1e9;
+        assert!(verify_page(
+            &render_markdown(&write(&wrong, Lang::En), &wrong),
+            &wrong,
+            Lang::En
+        )
+        .unwrap_err()[0]
+            .contains("is not"));
     }
 
     #[test]
@@ -2456,10 +2676,10 @@ pub(crate) mod tests {
         let r = latest(&st, "anthropic").unwrap();
         let f = bundle(&st, &anthropic(), &r, at());
         let (d, _) = page(&f, Lang::En);
-        assert!(section(&d, 1).starts_with("The offering terms PreBell last read are from the S-1/A filed Nov 10, 2026, which gave a price range of $70.00 to $78.00 per share. The offering price is added once the final prospectus is read."), "{}", section(&d, 1));
+        assert!(section(&d, 1).starts_with("The offering terms PreBell last read are from the S-1/A filed Nov 10, 2026, which gave a price range of $70.00 to $78.00 per share. The IPO page shows the offering price once the final prospectus is read."), "{}", section(&d, 1));
         assert_eq!(section(&d, 0), "Anthropic's shares (ANT) began trading on the Nasdaq Global Select Market on Nov 19, 2026. In that session the shares closed at $90.00.");
         let (z, _) = page(&f, Lang::Zh);
-        assert!(section(&z, 1).starts_with("PreBell最近读取的发行条款来自2026年11月10日提交的S-1/A，价格区间为每股70.00至78.00美元。读取最终招股说明书后会补充发行价。"), "{}", section(&z, 1));
+        assert!(section(&z, 1).starts_with("PreBell最近读取的发行条款来自2026年11月10日提交的S-1/A，价格区间为每股70.00至78.00美元。读取最终招股说明书后，IPO页面会显示发行价。"), "{}", section(&z, 1));
         assert!(
             section(&z, 0)
                 .starts_with("Anthropic（ANT）于2026年11月19日在纳斯达克全球精选市场开始交易。"),
