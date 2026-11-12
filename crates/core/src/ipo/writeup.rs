@@ -587,15 +587,29 @@ fn ranged(f: &IpoArticleFacts, lang: Lang) -> Text {
         _ => ("changes", "调整"),
     };
     let total = f.num("shares_offered");
+    // "Sets" only when the facts prove no earlier cover had a range
+    // (`first_range`); otherwise the filing only "gives" one.
     let title = match (changed, range_moved || total.is_none(), lang) {
-        (false, _, Lang::En) => format!(
+        (false, _, Lang::En) if f.first_range => format!(
             "{n} sets IPO price range at ${} to ${} {}",
             price_short(lo),
             price_short(hi),
             u.a_one
         ),
-        (false, _, Lang::Zh) => format!(
+        (false, _, Lang::En) => format!(
+            "{n}'s IPO filing gives a price range of ${} to ${} {}",
+            price_short(lo),
+            price_short(hi),
+            u.a_one
+        ),
+        (false, _, Lang::Zh) if f.first_range => format!(
             "{n}公布IPO价格区间：{}{}至{}美元",
+            u.zh_each,
+            price_short(lo),
+            price_short(hi)
+        ),
+        (false, _, Lang::Zh) => format!(
+            "{n}IPO文件载明价格区间：{}{}至{}美元",
             u.zh_each,
             price_short(lo),
             price_short(hi)
@@ -663,8 +677,8 @@ fn ranged(f: &IpoArticleFacts, lang: Lang) -> Text {
         );
     }
     s1.push(match lang {
-        Lang::En => format!("The cover sets {words}{for_shares}."),
-        Lang::Zh => format!("封面将价格区间定为{words}{for_shares}。"),
+        Lang::En => format!("The cover states {words}{for_shares}."),
+        Lang::Zh => format!("封面载明的价格区间为{words}{for_shares}。"),
     });
     if let (Some(p), Some((a, b))) = (prev, old) {
         s1.push(match lang {
@@ -1652,19 +1666,25 @@ pub(crate) mod tests {
         &d.sections[i].1
     }
 
-    pub(crate) const EN_HAPPENED: &str = "Anthropic filed an amended registration statement (Form S-1/A) with the SEC on Nov 10, 2026. The cover sets a price range of $70.00 to $78.00 per share for 825,000,000 shares.";
+    pub(crate) const EN_HAPPENED: &str = "Anthropic filed an amended registration statement (Form S-1/A) with the SEC on Nov 10, 2026. The cover states a price range of $70.00 to $78.00 per share for 825,000,000 shares.";
     pub(crate) const EN_TERMS: &str = "Anthropic is selling 801,351,354 shares and the selling stockholders are selling 23,648,646 shares. The underwriters have an option to purchase up to 123,750,000 shares more. At $70.00 a share, the 825,000,000 shares offered come to $57.75 billion; at $78.00 a share, the 825,000,000 shares offered come to $64.35 billion. These are PreBell's gross figures before underwriting discounts, including any shares sold by selling stockholders and excluding the underwriters' option; they are not the company's proceeds. The filing names the Nasdaq Global Select Market as the exchange and ANT as the symbol.";
-    pub(crate) const ZH_HAPPENED: &str = "Anthropic于2026年11月10日向美国证监会递交注册声明修订稿（S-1/A表格）。封面将价格区间定为每股70.00至78.00美元，发行8.25亿股。";
+    pub(crate) const ZH_HAPPENED: &str = "Anthropic于2026年11月10日向美国证监会递交注册声明修订稿（S-1/A表格）。封面载明的价格区间为每股70.00至78.00美元，发行8.25亿股。";
     pub(crate) const ZH_TERMS: &str = "其中公司发售801,351,354股，售股股东发售23,648,646股。承销商有权额外购买至多123,750,000股。按每股70.00美元计算，8.25亿股的发行规模为577.5亿美元；按每股78.00美元计算，8.25亿股的发行规模为643.5亿美元。以上为PreBell按发行数量乘以价格算出的总额，未扣除承销折扣，含售股股东发售的部分（如有），不含承销商超额配售权，并非公司所得款项。文件载明的交易所为Nasdaq Global Select Market，股票代码为ANT。";
 
     #[test]
     fn the_real_range_set_is_written_by_code_in_both_languages() {
         let f = facts();
         let (d, md) = page(&f, Lang::En);
+        // Its earlier covers were never read: the filing "gives" a range;
+        // nothing says it is the first or that it is new.
         assert_eq!(
             d.title,
-            "Anthropic sets IPO price range at $70 to $78 a share"
+            "Anthropic's IPO filing gives a price range of $70 to $78 a share"
         );
+        for not in ["first", " sets ", "new"] {
+            let before = md.split("## What comes next").next().unwrap();
+            assert!(!before.contains(not), "{not:?} in\n{md}");
+        }
         assert_eq!(d.summary, "Anthropic filed an amended registration statement (Form S-1/A) on Nov 10, 2026 with a price range of $70.00 to $78.00 per share for 825,000,000 shares.");
         assert_eq!(section(&d, 0), EN_HAPPENED);
         assert_eq!(section(&d, 1), EN_TERMS);
@@ -1687,7 +1707,11 @@ pub(crate) mod tests {
         assert!(!md.contains("first registration statement"));
         assert!(!md.contains("What has been reported"));
         let (z, zmd) = page(&f, Lang::Zh);
-        assert_eq!(z.title, "Anthropic公布IPO价格区间：每股70至78美元");
+        assert_eq!(z.title, "AnthropicIPO文件载明价格区间：每股70至78美元");
+        for not in ["首次", "首份", "公布", "定为", "新"] {
+            let before = zmd.split("## 下一步").next().unwrap();
+            assert!(!before.contains(not), "{not:?} in\n{zmd}");
+        }
         assert_eq!(z.summary, "Anthropic于2026年11月10日递交注册声明修订稿（S-1/A表格），价格区间为每股70.00至78.00美元，发行8.25亿股。");
         assert_eq!(section(&z, 0), ZH_HAPPENED);
         assert_eq!(section(&z, 1), ZH_TERMS);
@@ -1709,9 +1733,18 @@ pub(crate) mod tests {
         // With every earlier cover read and rangeless, it is the first.
         let mut first = f.clone();
         first.first_range = true;
-        assert!(section(&write(&first, Lang::En), 0).contains(
+        let d = write(&first, Lang::En);
+        assert_eq!(
+            d.title,
+            "Anthropic sets IPO price range at $70 to $78 a share"
+        );
+        assert!(section(&d, 0).contains(
             "It is the first registration statement for this offering to state a price range."
         ));
+        assert_eq!(
+            write(&first, Lang::Zh).title,
+            "Anthropic公布IPO价格区间：每股70至78美元"
+        );
     }
 
     #[test]
@@ -1897,9 +1930,9 @@ pub(crate) mod tests {
         let (f, en, zh) = both(&st, &t);
         assert_eq!(f.milestone, Milestone::RangeSet);
         for w in [
-            "# Birkenstock sets IPO price range at $44 to $49 a share",
+            "# Birkenstock's IPO filing gives a price range of $44 to $49 a share",
             "Birkenstock filed an amended registration statement (Form F-1/A) with the SEC on Oct 4, 2023.",
-            "The cover sets a price range of $44.00 to $49.00 per share for 32,258,064 shares.",
+            "The cover states a price range of $44.00 to $49.00 per share for 32,258,064 shares.",
             "Birkenstock is selling 10,752,688 shares and the selling shareholders are selling 21,505,376 shares.",
             "| Sold by selling shareholders | 21,505,376 |",
             "including any shares sold by selling shareholders",
