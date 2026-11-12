@@ -4,7 +4,8 @@ import type { Locale } from "../src/i18n/routing";
 import { translator } from "../src/lib/translator";
 import { memoryD1 } from "./d1";
 
-// The weekly digest is one English email, so the signup is on English pages only. The pages read D1
+// The weekly digest is one English email; the signup is on pages in both languages, and the Chinese
+// form says the email is in English. The pages read D1
 // through getDb(), the Worker env (FACTS, BUTTONDOWN_API_KEY) through the Cloudflare context and
 // messages through next-intl/server; each is swapped for an in-memory or synchronous stand-in.
 const env = vi.hoisted(() => ({ db: null as unknown, locale: "en" as string, key: "KEY" as string | undefined }));
@@ -67,20 +68,24 @@ describe("weekly-digest signup placement", () => {
     }
   });
 
-  it("leaves it out of every Chinese page, even with the key set", async () => {
+  it("shows it in Chinese on the Chinese home, post and About pages, saying the email is in English", async () => {
     for (const [name, page] of Object.entries(pages)) {
       const out = await html(await page("zh"));
-      expect(out, name).not.toContain('class="signup"');
-      expect(out, name).not.toContain("signup-email");
-      expect(out, name).not.toContain("订阅");
+      expect(out, name).toContain('class="signup"');
+      expect(out, name).toContain(`id="signup-email-${name}"`);
+      expect(out, name).toContain("订阅每周摘要");
+      expect(out, name).toContain("邮件目前只有英文版");
+      expect(out, name).not.toContain("Get the weekly digest");
     }
   });
 
-  it("stays hidden on English pages until the web Worker has the key", async () => {
+  it("stays hidden in both languages until the web Worker has the key", async () => {
     env.key = undefined;
     for (const [name, page] of Object.entries(pages)) {
-      const out = await html(await page("en"));
-      expect(out, name).not.toContain('class="signup"');
+      for (const locale of ["en", "zh"] as const) {
+        const out = await html(await page(locale));
+        expect(out, `${name} ${locale}`).not.toContain('class="signup"');
+      }
     }
   });
 });

@@ -2,6 +2,8 @@
 
 import { type FormEvent, useState } from "react";
 import { signup as signupEn } from "../../messages/en.json";
+import { signup as signupZh } from "../../messages/zh.json";
+import type { Locale } from "../i18n/routing";
 
 type Status = "idle" | "loading" | "done" | "already" | "error" | "invalid";
 type SignupMessages = typeof signupEn;
@@ -34,12 +36,13 @@ export function messageFor(status: Status, m: SignupMessages): string | null {
 /**
  * Weekly-digest signup: email field, Subscribe button and an inline result. Posts JSON to
  * /api/subscribe; the honeypot `website` field stays out of sight (not display:none, which bots skip).
- * English only: the digest is one English email, so only English pages show the form
- * (`signupEnabled`). `source` names the page (the route checks it) and keeps the field ids unique. Only the signup strings are pulled
- * in, not the whole message catalogue.
+ * The digest is one English email to every subscriber. Pages in both languages show the form, in
+ * the page's language (`locale`), and the Chinese copy says the email is in English. `source` names
+ * the page (the route checks it) and keeps the field ids unique. Only the signup strings are pulled
+ * in, not the whole message catalogues.
  */
-export default function SignupForm({ source }: { source: "post" | "home" | "about" }) {
-  const m = signupEn;
+export default function SignupForm({ source, locale }: { source: "post" | "home" | "about"; locale: Locale }) {
+  const m: SignupMessages = locale === "zh" ? signupZh : signupEn;
   const [status, setStatus] = useState<Status>("idle");
 
   async function onSubmit(e: FormEvent<HTMLFormElement>) {

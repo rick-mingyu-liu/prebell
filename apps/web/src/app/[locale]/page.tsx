@@ -41,7 +41,7 @@ export default async function Home({ params }: PageProps<"/[locale]">) {
   return (
     <>
       <script type="application/ld+json" dangerouslySetInnerHTML={{ __html: jsonLd(ld) }} />
-      <HomeView data={data} locale={locale} signup={signupEnabled(locale)} />
+      <HomeView data={data} locale={locale} signup={signupEnabled()} />
     </>
   );
 }

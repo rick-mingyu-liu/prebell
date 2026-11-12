@@ -72,9 +72,13 @@ describe("About page", () => {
     expect(out).not.toContain('class="disclaimer"');
   });
 
-  it("renders in Chinese, without the signup even with the key set", async () => {
+  it("renders in Chinese, with the signup in Chinese saying the email is in English", async () => {
     const out = await render("zh");
-    expect(out).not.toContain('class="signup"');
+    expect(out).toContain('class="signup"');
+    expect(out).toContain('id="signup-email-about"');
+    expect(out).toContain("订阅每周摘要");
+    expect(out).toContain("邮件目前只有英文版");
+    expect(out).not.toContain("Get the weekly digest");
     expect(out).toContain("<h2>关于作者</h2>");
     expect(out).toContain("来自 PreBell 团队。");
     expect(out).toContain("试用 TermPocket →");

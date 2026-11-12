@@ -329,6 +329,19 @@
     "allBriefs": "全部简报 →",
     "heading": "关于作者"
   },
+  "signup": {
+    "heading": "订阅每周摘要",
+    "copy": "每周一封邮件：过去一周的财报速评，以及下周看点。邮件目前只有英文版。不发垃圾邮件，可随时退订。",
+    "emailLabel": "邮箱地址",
+    "placeholder": "you@example.com",
+    "submit": "订阅",
+    "sending": "正在订阅…",
+    "success": "请查收确认邮件（英文）。",
+    "already": "你已在订阅名单中。",
+    "error": "出了点问题，请重试。",
+    "invalid": "请输入有效的邮箱地址。",
+    "manage": "已订阅？管理订阅设置"
+  },
   "ipo": {
     "kicker": "IPO 追踪",
     "watchTitle": "IPO 追踪",
