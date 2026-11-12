@@ -446,6 +446,7 @@ Local preview: after `db/seed-ipo-preview.sql`, `cd crates/generator && pnpm exe
 ### Known limits
 
 - A step the stored data does not prove gets no write-up: a cover that could not be read completely, a 424B4 read only after the first session (no `priced` write-up then; the `listed` one states the price if the 424B4 is the facts source by then), or a listing whose first day Yahoo did not give.
+- If day one's session is missed and no `priced` write-up was published, that IPO gets neither a `priced` nor a `listed` write-up: `listed` waits for the confirmed first day, then is skipped with an alert after 7 days.
 - The text says only what the covers and the first session state. Nothing about the business, the market, demand or valuation appears except in the quoted news.
 - "The first registration statement to state a price range" is said only when every earlier registration statement was read (not for Anthropic, whose S-1 and first S-1/A were never read).
 - Quotes are as stored by the news sweep; in Chinese they stay in English. Outlet names stay as stored.

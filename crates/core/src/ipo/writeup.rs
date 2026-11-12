@@ -114,25 +114,28 @@ fn exact(v: f64, unit: f64, places: i32) -> bool {
     (x - x.round()).abs() < 1e-6
 }
 
-/// A dollar amount, never rounded: "$57.75 billion", "$53.625 billion",
-/// "$1,419,354,816" / "577.5亿美元", "1,419,354,816美元".
+/// The fewest decimals (at most 4) that write `v` in `unit`s exactly.
+fn places(v: f64, unit: f64) -> Option<usize> {
+    (0..=4).find(|&k| exact(v, unit, k as i32))
+}
+
+/// A dollar amount, never rounded, in the largest unit that stays exact
+/// within four decimals: "$57.75 billion", "$4.8705 billion",
+/// "$1,419,354,816" / "577.5亿美元", "48.705亿美元", "1,419,354,816美元".
 fn money(v: f64, lang: Lang) -> String {
+    let unit = |u: f64| (v >= u).then(|| places(v, u)).flatten();
     match lang {
-        Lang::En if v >= 1e9 && exact(v, 1e9, 3) => format!("${} billion", trim_dec(v / 1e9, 3)),
-        Lang::En if v >= 1e6 && exact(v, 1e6, 2) => {
-            let m = trim_dec(v / 1e6, 2);
-            let (int, frac) = m.split_once('.').map_or((m.as_str(), ""), |(a, b)| (a, b));
-            let int = grouped(int.parse().unwrap_or_default());
-            if frac.is_empty() {
-                format!("${int} million")
-            } else {
-                format!("${int}.{frac} million")
-            }
-        }
-        Lang::En => format!("${}", grouped(v)),
-        Lang::Zh if v >= 1e8 && exact(v, 1e8, 2) => format!("{}亿美元", trim_dec(v / 1e8, 2)),
-        Lang::Zh if v >= 1e4 && exact(v, 1e4, 2) => format!("{}万美元", trim_dec(v / 1e4, 2)),
-        Lang::Zh => format!("{}美元", grouped(v)),
+        // A smaller unit only below the larger one: never "141935.4816万".
+        Lang::En => match (unit(1e9), unit(1e6).filter(|_| v < 1e9)) {
+            (Some(k), _) => format!("${} billion", trim_dec(v / 1e9, k)),
+            (None, Some(k)) => format!("${} million", trim_dec(v / 1e6, k)),
+            _ => format!("${}", grouped(v)),
+        },
+        Lang::Zh => match (unit(1e8), unit(1e4).filter(|_| v < 1e8)) {
+            (Some(k), _) => format!("{}亿美元", trim_dec(v / 1e8, k)),
+            (None, Some(k)) => format!("{}万美元", trim_dec(v / 1e4, k)),
+            _ => format!("{}美元", grouped(v)),
+        },
     }
 }
 
@@ -270,13 +273,55 @@ fn form_label(form: &str, lang: Lang) -> String {
     }
 }
 
-/// The cover's word for the other sellers: an F-1 says shareholders.
+/// The cover's word for the other sellers: a foreign issuer (an F-1 in its
+/// registration history, as Arm and Birkenstock) says shareholders.
 fn sellers(f: &IpoArticleFacts) -> &'static str {
-    let form = f.filing.as_ref().map_or("", |x| x.form.as_str());
-    if form.starts_with("F-") {
+    let foreign = f
+        .timeline
+        .iter()
+        .map(|t| t.form.as_str())
+        .chain(f.filing.as_ref().map(|x| x.form.as_str()))
+        .any(|form| form.starts_with("F-"));
+    if foreign {
         "selling shareholders"
     } else {
         "selling stockholders"
+    }
+}
+
+/// The exchange as written in each language: the standard Chinese name for
+/// the strings the cover patterns produce, the stored English otherwise.
+fn exchange_name(x: &str, lang: Lang) -> String {
+    let zh = match x {
+        "Nasdaq Global Select Market" => Some("纳斯达克全球精选市场"),
+        "Nasdaq Global Market" => Some("纳斯达克全球市场"),
+        "Nasdaq Capital Market" => Some("纳斯达克资本市场"),
+        "Nasdaq Stock Market" => Some("纳斯达克股票市场"),
+        "New York Stock Exchange" | "NYSE" => Some("纽约证券交易所"),
+        "NYSE American" => Some("纽约证券交易所美国市场"),
+        _ => None,
+    };
+    match (lang, zh) {
+        (Lang::Zh, Some(z)) => z.to_string(),
+        _ => x.to_string(),
+    }
+}
+
+/// A Latin-script name before Latin text in Chinese gets a space
+/// ("Anthropic IPO文件").
+fn zh_join(name: &str, rest: &str) -> String {
+    let latin_end = name
+        .chars()
+        .next_back()
+        .is_some_and(|c| c.is_ascii_alphanumeric());
+    let latin_start = rest
+        .chars()
+        .next()
+        .is_some_and(|c| c.is_ascii_alphanumeric());
+    if latin_end && latin_start {
+        format!("{name} {rest}")
+    } else {
+        format!("{name}{rest}")
     }
 }
 
@@ -350,7 +395,7 @@ fn split_sentence(f: &IpoArticleFacts, lang: Lang) -> String {
             count(s, f, lang)
         ),
         (Some(c), Some(s), Lang::Zh) if s > 0.0 => format!(
-            "其中公司发售{}，售股股东发售{}。",
+            "公司发售{}，售股股东发售{}。",
             count(c, f, lang),
             count(s, f, lang)
         ),
@@ -373,8 +418,9 @@ fn split_sentence(f: &IpoArticleFacts, lang: Lang) -> String {
 fn option_sentence(f: &IpoArticleFacts, lang: Lang) -> String {
     match (f.num("option_shares"), lang) {
         (Some(o), Lang::En) => format!(
-            "The underwriters have an option to purchase up to {} more.",
-            count(o, f, lang)
+            "The underwriters have an option to purchase up to {} more {}.",
+            grouped(o),
+            unit(f).plural
         ),
         (Some(o), Lang::Zh) => format!("承销商有权额外购买至多{}。", count(o, f, lang)),
         (None, _) => String::new(),
@@ -428,9 +474,14 @@ fn exchange_sentence(f: &IpoArticleFacts, lang: Lang) -> String {
         (Some(x), Some(s), Lang::En) => {
             format!("The filing names the {x} as the exchange and {s} as the symbol.")
         }
-        (Some(x), Some(s), Lang::Zh) => format!("文件载明的交易所为{x}，股票代码为{s}。"),
+        (Some(x), Some(s), Lang::Zh) => {
+            format!(
+                "文件载明的交易所为{}，股票代码为{s}。",
+                exchange_name(x, lang)
+            )
+        }
         (Some(x), None, Lang::En) => format!("The filing names the {x} as the exchange."),
-        (Some(x), None, Lang::Zh) => format!("文件载明的交易所为{x}。"),
+        (Some(x), None, Lang::Zh) => format!("文件载明的交易所为{}。", exchange_name(x, lang)),
         (None, Some(s), Lang::En) => format!("The filing gives {s} as the symbol."),
         (None, Some(s), Lang::Zh) => format!("文件载明的股票代码为{s}。"),
         (None, None, _) => String::new(),
@@ -517,18 +568,35 @@ fn filed(f: &IpoArticleFacts, lang: Lang) -> Text {
         .filter(|t| t.form.starts_with("DRS") && t.filing_date < date)
         .map(|t| t.filing_date.as_str())
         .collect();
-    let follows = match (drs.iter().min(), lang) {
-        (Some(d), Lang::En) => format!(
-            "It follows {} confidential draft registration statements (Form DRS and DRS/A), the first submitted on {}.",
-            drs.len(),
+    // "DRS/A" only when an amended draft is on file.
+    let amended = f
+        .timeline
+        .iter()
+        .any(|t| t.form == "DRS/A" && t.filing_date < date);
+    let forms = match (amended, lang) {
+        (true, Lang::En) => "Form DRS and DRS/A",
+        (false, Lang::En) => "Form DRS",
+        (true, Lang::Zh) => "DRS及DRS/A表格",
+        (false, Lang::Zh) => "DRS表格",
+    };
+    let follows = match (drs.iter().min(), drs.len(), lang) {
+        (Some(d), 1, Lang::En) => format!(
+            "It follows a confidential draft registration statement ({forms}) submitted on {}.",
             day(d, lang)
         ),
-        (Some(d), Lang::Zh) => format!(
-            "此前公司已保密提交{}份注册草案（DRS及DRS/A表格），首份提交于{}。",
-            drs.len(),
+        (Some(d), n, Lang::En) => format!(
+            "It follows {n} confidential draft registration statements ({forms}), the first submitted on {}.",
             day(d, lang)
         ),
-        (None, _) => String::new(),
+        (Some(d), 1, Lang::Zh) => format!(
+            "此前公司已于{}保密提交1份注册草案（{forms}）。",
+            day(d, lang)
+        ),
+        (Some(d), n, Lang::Zh) => format!(
+            "此前公司已保密提交{n}份注册草案（{forms}），首份提交于{}。",
+            day(d, lang)
+        ),
+        (None, _, _) => String::new(),
     };
     let cover = match (f.num("shares_offered"), f.num("price_low"), lang) {
         (Some(t), None, Lang::En) => {
@@ -609,7 +677,8 @@ fn ranged(f: &IpoArticleFacts, lang: Lang) -> Text {
             price_short(hi)
         ),
         (false, _, Lang::Zh) => format!(
-            "{n}IPO文件载明价格区间：{}{}至{}美元",
+            "{}文件载明价格区间：{}{}至{}美元",
+            zh_join(n, "IPO"),
             u.zh_each,
             price_short(lo),
             price_short(hi)
@@ -629,8 +698,9 @@ fn ranged(f: &IpoArticleFacts, lang: Lang) -> Text {
             price_short(hi)
         ),
         (true, false, Lang::En) => format!(
-            "{n} changes IPO to {} at ${} to ${} {}",
-            count(total.unwrap_or_default(), f, lang),
+            "{n} changes IPO {} count to {} at ${} to ${} {}",
+            u.one,
+            grouped(total.unwrap_or_default()),
             price_short(lo),
             price_short(hi),
             u.a_one
@@ -645,7 +715,29 @@ fn ranged(f: &IpoArticleFacts, lang: Lang) -> Text {
     };
     let words = range_words(lo, hi, &u, lang);
     let for_shares = for_total(f, lang);
+    let shares_change = prev.and_then(|p| p.shares_offered).zip(total);
     let summary = match (prev, old, lang) {
+        // The range is unchanged: the share count is the news.
+        (Some(p), Some(_), Lang::En) if !range_moved => match shares_change {
+            Some((ps, t)) => format!(
+                "{n}'s {form} filed {on} keeps {words} and changes the number offered from {} to {}, against its {} filed {}.",
+                count(ps, f, lang),
+                count(t, f, lang),
+                p.form,
+                day(&p.filing_date, lang)
+            ),
+            None => format!("{n}'s {form} filed {on} keeps {words}{for_shares}."),
+        },
+        (Some(p), Some(_), Lang::Zh) if !range_moved => match shares_change {
+            Some((ps, t)) => format!(
+                "{n}于{on}递交{form}，价格区间维持{words}不变，发行数量由{}调整为{}（相较{}提交的{}）。",
+                count(ps, f, lang),
+                count(t, f, lang),
+                day(&p.filing_date, lang),
+                p.form
+            ),
+            None => format!("{n}于{on}递交{form}，价格区间维持{words}不变{for_shares}。"),
+        },
         (Some(p), Some((a, b)), Lang::En) => format!(
             "{n}'s {form} filed {on} sets {words}{for_shares}, against {} to {} in its {} filed {}.",
             price(a, lang),
@@ -823,7 +915,6 @@ fn listed(f: &IpoArticleFacts, lang: Lang) -> Text {
     let s = f.session.as_ref();
     let close = s.map_or(0.0, |s| s.close);
     let when = s.map_or(String::new(), |s| day(&s.session_date, lang));
-    let sym = f.symbol.clone().unwrap_or_else(|| n.to_string());
     let change = s.and_then(|s| s.ipo_price.zip(s.change_pct));
     let vs = change.map_or(String::new(), |(ipo, c)| match lang {
         Lang::En => format!(
@@ -839,11 +930,17 @@ fn listed(f: &IpoArticleFacts, lang: Lang) -> Text {
             trim_dec(c.abs(), 2)
         ),
     });
+    let who = match (&f.symbol, lang) {
+        (Some(s), Lang::En) => format!("{n}'s {} ({s})", u.plural),
+        (None, Lang::En) => format!("{n}'s {}", u.plural),
+        (Some(s), Lang::Zh) => format!("{n}（{s}）"),
+        (None, Lang::Zh) => n.to_string(),
+    };
     let mut s1 = vec![match (&f.exchange, lang) {
-        (Some(x), Lang::En) => format!("{sym} began trading on the {x} on {when}."),
-        (Some(x), Lang::Zh) => format!("{sym}于{when}在{x}开始交易。"),
-        (None, Lang::En) => format!("{sym} began trading on {when}."),
-        (None, Lang::Zh) => format!("{sym}于{when}开始交易。"),
+        (Some(x), Lang::En) => format!("{who} began trading on the {x} on {when}."),
+        (Some(x), Lang::Zh) => format!("{who}于{when}在{}开始交易。", exchange_name(x, lang)),
+        (None, Lang::En) => format!("{who} began trading on {when}."),
+        (None, Lang::Zh) => format!("{who}于{when}开始交易。"),
     }];
     if let Some(s) = s {
         let mut bits: Vec<String> = Vec::new();
@@ -919,11 +1016,11 @@ fn listed(f: &IpoArticleFacts, lang: Lang) -> Text {
             vec![
                 match lang {
                     Lang::En => format!(
-                        "No final prospectus had been read when this was written. The last registration statement read, Form {form} filed {on}, set {}.",
+                        "The offering terms PreBell last read are from the {form} filed {on}, which gave {}. The offering price is added once the final prospectus is read.",
                         range_words(lo, hi, &u, lang)
                     ),
                     Lang::Zh => format!(
-                        "撰写本文时尚未读取最终招股说明书。最近读取的注册声明为{on}提交的{form}，价格区间为{}。",
+                        "PreBell最近读取的发行条款来自{on}提交的{form}，价格区间为{}。读取最终招股说明书后会补充发行价。",
                         range_words(lo, hi, &u, lang)
                     ),
                 },
@@ -932,8 +1029,8 @@ fn listed(f: &IpoArticleFacts, lang: Lang) -> Text {
         ),
         (None, None) => pick(
             lang,
-            "No offering terms from the filings were stored when this was written.",
-            "撰写本文时，尚未存储招股文件中的发行条款。",
+            "The offering terms appear once PreBell reads them from the filings.",
+            "PreBell从招股文件读取发行条款后会补充在此。",
         )
         .to_string(),
     };
@@ -980,12 +1077,12 @@ fn withdrawn(f: &IpoArticleFacts, lang: Lang) -> Text {
             filed_sentence(n, &label, &on, lang),
             prev.map_or(String::new(), |p| match lang {
                 Lang::En => format!(
-                    "The latest registration statement on file before it is the {} filed {}.",
+                    "The offering terms PreBell last read are from the {} filed {}.",
                     p.form,
                     day(&p.filing_date, lang)
                 ),
                 Lang::Zh => format!(
-                    "此前最近的注册文件为{}提交的{}。",
+                    "PreBell最近读取的发行条款来自{}提交的{}。",
                     day(&p.filing_date, lang),
                     p.form
                 ),
@@ -1152,7 +1249,11 @@ fn table(f: &IpoArticleFacts, lang: Lang) -> String {
     if let (Some(x), Some(s)) = (&f.exchange, &f.symbol) {
         rows.push((
             l("Exchange and symbol", "交易所与代码"),
-            format!("{}{}{s}", escape_md(x), pick(lang, ": ", "：")),
+            format!(
+                "{}{}{s}",
+                escape_md(&exchange_name(x, lang)),
+                pick(lang, ": ", "：")
+            ),
         ));
     }
     if let Some(s) = &f.session {
@@ -1203,9 +1304,10 @@ fn table(f: &IpoArticleFacts, lang: Lang) -> String {
     out
 }
 
-/// The definition under the table, in the cover's unit.
+/// The definition under the table, in the cover's unit and its word for
+/// the other sellers.
 pub fn offering_size_note(f: &IpoArticleFacts, lang: Lang) -> String {
-    match (lang, f.security == "ads") {
+    let note = match (lang, f.security == "ads") {
         (Lang::En, true) => OFFERING_SIZE_EN
             .replace(
                 "shares offered (including shares sold",
@@ -1220,7 +1322,8 @@ pub fn offering_size_note(f: &IpoArticleFacts, lang: Lang) -> String {
             .replace("×每股价格", "×每份价格"),
         (Lang::En, false) => OFFERING_SIZE_EN.to_string(),
         (Lang::Zh, false) => OFFERING_SIZE_ZH.to_string(),
-    }
+    };
+    note.replace("selling stockholders", sellers(f))
 }
 
 /// One news item, quoted word for word with its outlet and date (in
@@ -1268,7 +1371,7 @@ fn meta_line(f: &IpoArticleFacts, lang: Lang) -> String {
         (None, _) => format!("**{name}**"),
     }];
     if let Some(x) = &f.exchange {
-        parts.push(escape_md(x));
+        parts.push(escape_md(&exchange_name(x, lang)));
     }
     if let Some(s) = f
         .session
@@ -1670,9 +1773,9 @@ pub(crate) mod tests {
     }
 
     pub(crate) const EN_HAPPENED: &str = "Anthropic filed an amended registration statement (Form S-1/A) with the SEC on Nov 10, 2026. The cover states a price range of $70.00 to $78.00 per share for 825,000,000 shares.";
-    pub(crate) const EN_TERMS: &str = "Anthropic is selling 801,351,354 shares and the selling stockholders are selling 23,648,646 shares. The underwriters have an option to purchase up to 123,750,000 shares more. At $70.00 a share, the 825,000,000 shares offered come to $57.75 billion; at $78.00 a share, the 825,000,000 shares offered come to $64.35 billion. These are PreBell's gross figures before underwriting discounts, including any shares sold by selling stockholders and excluding the underwriters' option; they are not the company's proceeds. The filing names the Nasdaq Global Select Market as the exchange and ANT as the symbol.";
+    pub(crate) const EN_TERMS: &str = "Anthropic is selling 801,351,354 shares and the selling stockholders are selling 23,648,646 shares. The underwriters have an option to purchase up to 123,750,000 more shares. At $70.00 a share, the 825,000,000 shares offered come to $57.75 billion; at $78.00 a share, the 825,000,000 shares offered come to $64.35 billion. These are PreBell's gross figures before underwriting discounts, including any shares sold by selling stockholders and excluding the underwriters' option; they are not the company's proceeds. The filing names the Nasdaq Global Select Market as the exchange and ANT as the symbol.";
     pub(crate) const ZH_HAPPENED: &str = "Anthropic于2026年11月10日向美国证监会递交注册声明修订稿（S-1/A表格）。封面载明的价格区间为每股70.00至78.00美元，发行8.25亿股。";
-    pub(crate) const ZH_TERMS: &str = "其中公司发售801,351,354股，售股股东发售23,648,646股。承销商有权额外购买至多123,750,000股。按每股70.00美元计算，8.25亿股的发行规模为577.5亿美元；按每股78.00美元计算，8.25亿股的发行规模为643.5亿美元。以上为PreBell按发行数量乘以价格算出的总额，未扣除承销折扣，含售股股东发售的部分（如有），不含承销商超额配售权，并非公司所得款项。文件载明的交易所为Nasdaq Global Select Market，股票代码为ANT。";
+    pub(crate) const ZH_TERMS: &str = "公司发售801,351,354股，售股股东发售23,648,646股。承销商有权额外购买至多123,750,000股。按每股70.00美元计算，8.25亿股的发行规模为577.5亿美元；按每股78.00美元计算，8.25亿股的发行规模为643.5亿美元。以上为PreBell按发行数量乘以价格算出的总额，未扣除承销折扣，含售股股东发售的部分（如有），不含承销商超额配售权，并非公司所得款项。文件载明的交易所为纳斯达克全球精选市场，股票代码为ANT。";
 
     #[test]
     fn the_real_range_set_is_written_by_code_in_both_languages() {
@@ -1710,7 +1813,7 @@ pub(crate) mod tests {
         assert!(!md.contains("first registration statement"));
         assert!(!md.contains("What has been reported"));
         let (z, zmd) = page(&f, Lang::Zh);
-        assert_eq!(z.title, "AnthropicIPO文件载明价格区间：每股70至78美元");
+        assert_eq!(z.title, "Anthropic IPO文件载明价格区间：每股70至78美元");
         for not in ["首次", "首份", "公布", "定为", "新"] {
             let before = zmd.split("## 下一步").next().unwrap();
             assert!(!before.contains(not), "{not:?} in\n{zmd}");
@@ -1747,6 +1850,58 @@ pub(crate) mod tests {
         let z = write(&first, Lang::Zh);
         assert_eq!(z.title, "Anthropic公布IPO价格区间：每股70至78美元");
         assert!(section(&z, 0).contains("封面将价格区间定为每股70.00至78.00美元，发行8.25亿股。"));
+    }
+
+    #[test]
+    fn money_stays_exact_in_the_natural_unit() {
+        for (v, en, zh) in [
+            (57.75e9, "$57.75 billion", "577.5亿美元"),
+            (4_870_500_000.0, "$4.8705 billion", "48.705亿美元"),
+            (53_625_000_000.0, "$53.625 billion", "536.25亿美元"),
+            (748e6, "$748 million", "7.48亿美元"),
+            (1_419_354_816.0, "$1,419,354,816", "1,419,354,816美元"),
+        ] {
+            assert_eq!(
+                (money(v, Lang::En), money(v, Lang::Zh)),
+                (en.to_string(), zh.to_string()),
+                "{v}"
+            );
+        }
+    }
+
+    #[test]
+    fn chinese_names_the_exchange_and_spaces_a_latin_name_before_ipo() {
+        assert_eq!(
+            exchange_name("New York Stock Exchange", Lang::Zh),
+            "纽约证券交易所"
+        );
+        assert_eq!(
+            exchange_name("Nasdaq Capital Market", Lang::Zh),
+            "纳斯达克资本市场"
+        );
+        assert_eq!(
+            exchange_name("NYSE American", Lang::Zh),
+            "纽约证券交易所美国市场"
+        );
+        assert_eq!(
+            exchange_name("Cboe BZX Exchange", Lang::Zh),
+            "Cboe BZX Exchange"
+        );
+        assert_eq!(
+            exchange_name("New York Stock Exchange", Lang::En),
+            "New York Stock Exchange"
+        );
+        assert_eq!(zh_join("Anthropic", "IPO"), "Anthropic IPO");
+        assert_eq!(zh_join("北风机器人", "IPO"), "北风机器人IPO");
+        let (_, zh) = page(&facts(), Lang::Zh);
+        assert!(
+            zh.contains("**Anthropic（ANT）** · 纳斯达克全球精选市场 ·"),
+            "{zh}"
+        );
+        assert!(
+            !zh.split("## 下一步").next().unwrap().contains("其中"),
+            "{zh}"
+        );
     }
 
     #[test]
@@ -1845,26 +2000,26 @@ pub(crate) mod tests {
                 "# Reddit prices IPO at $34 a share",
                 "It prices 22,000,000 shares at $34.00 per share.",
                 "Reddit is selling 15,276,527 shares and the selling stockholders are selling 6,723,473 shares.",
-                "The underwriters have an option to purchase up to 3,300,000 shares more.",
+                "The underwriters have an option to purchase up to 3,300,000 more shares.",
                 "At $34.00 a share, the 22,000,000 shares offered come to $748 million.",
                 "The filing names the New York Stock Exchange as the exchange and RDDT as the symbol.",
-            ], &["# Reddit完成IPO定价：每股34美元", "其中公司发售15,276,527股，售股股东发售6,723,473股。", "承销商有权额外购买至多330万股。", "发行价为每股34.00美元，发行2200万股。"]),
+            ], &["# Reddit完成IPO定价：每股34美元", "公司发售15,276,527股，售股股东发售6,723,473股。", "承销商有权额外购买至多330万股。", "发行价为每股34.00美元，发行2200万股。"]),
             (ARM, "Arm", "2023-09-14", &[
                 "# Arm prices IPO at $51 an ADS",
                 "It prices 95,500,000 ADSs at $51.00 per ADS.",
-                "The underwriters have an option to purchase up to 7,000,000 ADSs more.",
-                "At $51.00 an ADS, the 95,500,000 ADSs offered come to $4,870.5 million.",
+                "The underwriters have an option to purchase up to 7,000,000 more ADSs.",
+                "At $51.00 an ADS, the 95,500,000 ADSs offered come to $4.8705 billion.",
                 "| ADSs offered | 95,500,000 |",
                 "Offering size is computed by PreBell from the cover: ADSs offered (including ADSs sold",
             ], &["发行价为每份美国存托股51.00美元，发行9550万份美国存托股。", "承销商有权额外购买至多700万份美国存托股。"]),
             (COREWEAVE, "CoreWeave", "2025-03-28", &[
                 "CoreWeave is selling 36,590,000 shares and the selling stockholders are selling 910,000 shares.",
                 "The filing names the Nasdaq Stock Market as the exchange and CRWV as the symbol.",
-            ], &["其中公司发售3659万股，售股股东发售91万股。"]),
+            ], &["公司发售3659万股，售股股东发售91万股。"]),
             (INSTACART, "Instacart", "2023-09-19", &[
                 "Instacart is selling 14,100,000 shares and the selling stockholders are selling 7,900,000 shares.",
                 "The prospectus is dated Sep 18, 2023.",
-            ], &["其中公司发售1410万股，售股股东发售790万股。", "招股说明书日期为2023年9月18日。"]),
+            ], &["公司发售1410万股，售股股东发售790万股。", "招股说明书日期为2023年9月18日。"]),
             (CIRCLE, "Circle", "2025-06-05", &[
                 "Circle is selling 14,800,000 shares and the selling stockholders are selling 19,200,000 shares.",
                 "It prices 34,000,000 shares at $31.00 per share.",
@@ -1944,7 +2099,7 @@ pub(crate) mod tests {
         assert!(!en.contains("first registration statement"));
         for w in [
             "每股44.00至49.00美元，发行32,258,064股",
-            "其中公司发售10,752,688股，售股股东发售21,505,376股。",
+            "公司发售10,752,688股，售股股东发售21,505,376股。",
         ] {
             assert!(zh.contains(w), "missing {w:?} in\n{zh}");
         }
@@ -2161,7 +2316,7 @@ pub(crate) mod tests {
         let (d, md) = page(&f, Lang::En);
         assert_eq!(d.title, "Anthropic closes first trading day at $101.50");
         assert_eq!(d.summary, "Anthropic shares closed their first trading session on Nov 19, 2026 at $101.50, up 26.88% from the $80.00 offering price.");
-        assert_eq!(section(&d, 0), "ANT began trading on the Nasdaq Global Select Market on Nov 19, 2026. In that session the shares opened at $95.00, closed at $101.50 and 120,000,000 shares traded. The close of $101.50 is 26.88% above the offering price of $80.00.");
+        assert_eq!(section(&d, 0), "Anthropic's shares (ANT) began trading on the Nasdaq Global Select Market on Nov 19, 2026. In that session the shares opened at $95.00, closed at $101.50 and 120,000,000 shares traded. The close of $101.50 is 26.88% above the offering price of $80.00.");
         assert!(
             md.contains("The close of $101.50 is 26.88% above the offering price of $80.00."),
             "{md}"
@@ -2209,8 +2364,108 @@ pub(crate) mod tests {
             section(&d, 1),
             "That filing set a price range of $70.00 to $78.00 per share for 825,000,000 shares."
         );
+        assert_eq!(
+            section(&d, 0),
+            "Anthropic filed a request to withdraw its registration statement (Form RW) with the SEC on Nov 20, 2026. The offering terms PreBell last read are from the S-1/A filed Nov 10, 2026."
+        );
         let (z, _) = page(&f, Lang::Zh);
         assert_eq!(z.title, "Anthropic撤回IPO注册");
+    }
+
+    #[test]
+    fn one_draft_is_named_in_the_singular_and_drs_a_only_when_amended() {
+        let mut st = real_state();
+        st.filings.retain(|f| f.form == "S-1" || f.form == "DRS");
+        st.facts.clear();
+        let r = latest(&st, "anthropic").unwrap();
+        let f = bundle(&st, &anthropic(), &r, at());
+        let (d, _) = page(&f, Lang::En);
+        assert!(section(&d, 0).ends_with("It follows a confidential draft registration statement (Form DRS) submitted on Jun 1, 2026."), "{}", section(&d, 0));
+        let (z, _) = page(&f, Lang::Zh);
+        assert!(
+            section(&z, 0).ends_with("此前公司已于2026年6月1日保密提交1份注册草案（DRS表格）。"),
+            "{}",
+            section(&z, 0)
+        );
+    }
+
+    #[test]
+    fn a_share_count_change_alone_names_the_count_not_the_range() {
+        let mut st = real_state();
+        with_amendment(
+            &mut st,
+            "0001628280-26-080006",
+            "2026-11-14",
+            70.0,
+            78.0,
+            900e6,
+        );
+        let r = latest(&st, "anthropic").unwrap();
+        assert_eq!(r.milestone, Milestone::RangeChanged);
+        let f = bundle(&st, &anthropic(), &r, at());
+        let (d, _) = page(&f, Lang::En);
+        assert_eq!(
+            d.title,
+            "Anthropic changes IPO share count to 900,000,000 at $70 to $78 a share"
+        );
+        assert_eq!(d.summary, "Anthropic's S-1/A filed Nov 14, 2026 keeps a price range of $70.00 to $78.00 per share and changes the number offered from 825,000,000 shares to 900,000,000 shares, against its S-1/A filed Nov 10, 2026.");
+        let (z, _) = page(&f, Lang::Zh);
+        assert_eq!(z.summary, "Anthropic于2026年11月14日递交S-1/A，价格区间维持每股70.00至78.00美元不变，发行数量由8.25亿股调整为9亿股（相较2026年11月10日提交的S-1/A）。");
+    }
+
+    #[test]
+    fn a_foreign_issuers_sellers_follow_its_registration_form() {
+        let (mut st, t) = one_cover("arm", 1_973_239, "Arm", ARM, "424B4", "2023-09-14");
+        st.filings.push(FilingRow {
+            accession: "0001973239-23-000002".into(),
+            slug: "arm".into(),
+            form: "F-1".into(),
+            filing_date: "2023-08-21".into(),
+            index_url:
+                "https://www.sec.gov/Archives/edgar/data/1973239/x/0001973239-23-000002-index.htm"
+                    .into(),
+            read_state: "none".into(),
+            ..Default::default()
+        });
+        let (_, en, _) = both(&st, &t);
+        assert!(
+            en.contains("including any ADSs sold by selling shareholders"),
+            "{en}"
+        );
+        assert!(!en.contains("stockholders"), "{en}");
+    }
+
+    #[test]
+    fn a_listing_without_a_final_prospectus_says_what_was_read() {
+        let mut st = real_state();
+        st.trading.push(TradingRow {
+            slug: "anthropic".into(),
+            session_date: "2026-11-19".into(),
+            symbol: "ANT".into(),
+            open: None,
+            close: 90.0,
+            volume: None,
+            ipo_price: None,
+            change_pct: None,
+            source_url: "https://finance.yahoo.com/quote/ANT".into(),
+            fetched_at: "x".into(),
+        });
+        st.watch[0].date_source = Some("trading".into());
+        st.watch[0].date_status = Some("confirmed".into());
+        st.watch[0].first_trade_date = Some("2026-11-19".into());
+        let r = latest(&st, "anthropic").unwrap();
+        let f = bundle(&st, &anthropic(), &r, at());
+        let (d, _) = page(&f, Lang::En);
+        assert!(section(&d, 1).starts_with("The offering terms PreBell last read are from the S-1/A filed Nov 10, 2026, which gave a price range of $70.00 to $78.00 per share. The offering price is added once the final prospectus is read."), "{}", section(&d, 1));
+        assert_eq!(section(&d, 0), "Anthropic's shares (ANT) began trading on the Nasdaq Global Select Market on Nov 19, 2026. In that session the shares closed at $90.00.");
+        let (z, _) = page(&f, Lang::Zh);
+        assert!(section(&z, 1).starts_with("PreBell最近读取的发行条款来自2026年11月10日提交的S-1/A，价格区间为每股70.00至78.00美元。读取最终招股说明书后会补充发行价。"), "{}", section(&z, 1));
+        assert!(
+            section(&z, 0)
+                .starts_with("Anthropic（ANT）于2026年11月19日在纳斯达克全球精选市场开始交易。"),
+            "{}",
+            section(&z, 0)
+        );
     }
 
     #[test]
