@@ -56,6 +56,9 @@ use crate::store::Store;
 pub const MONTHLY_SEARCH_CAP: u32 = 30;
 /// Articles read per sweep.
 pub const HITS: usize = 5;
+/// Results asked for beyond `HITS`, so a duplicate does not cost a slot
+/// (a basic Tavily search is one credit whatever the count).
+pub const SEARCH_EXTRA: usize = 2;
 /// How far back an article may be.
 pub const LOOKBACK_DAYS: i64 = 14;
 /// Items considered per sweep.
@@ -171,6 +174,49 @@ const EXCLUDED_SEGMENTS: [&str; 14] = [
     "brandvoice",
 ];
 
+/// The allowlisted hosts, for the search's `include_domains`: built from
+/// `OUTLETS`, so the request filter and the gate (`outlet_for`) never drift.
+pub fn outlet_hosts() -> Vec<&'static str> {
+    OUTLETS.iter().map(|(host, _)| *host).collect()
+}
+
+/// Lowercase letters and digits of `s`, for comparing two hits.
+fn squash(s: &str) -> String {
+    s.chars()
+        .filter(|c| c.is_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
+/// `hits` without a second copy of an article (the same story under two
+/// URLs on one host): the same title, or the same first 300 characters of
+/// text, ignoring case, spaces and punctuation. The first copy stays. Two
+/// outlets with the same headline or the same opening both stay.
+pub fn distinct(hits: Vec<SearchHit>) -> Vec<SearchHit> {
+    let mut seen: Vec<(String, String, String)> = Vec::new();
+    let mut out = Vec::new();
+    for h in hits {
+        let host = host_of(&h.url);
+        let title = squash(&h.title);
+        let head: String = squash(&h.content).chars().take(300).collect();
+        let dup = seen.iter().any(|(o, t, c)| {
+            *o == host && ((!title.is_empty() && *t == title) || (!head.is_empty() && *c == head))
+        });
+        if !dup {
+            seen.push((host, title, head));
+            out.push(h);
+        }
+    }
+    out
+}
+
+/// The URL's host, lowercase, without `www.`.
+fn host_of(url: &str) -> String {
+    let rest = url.split_once("://").map_or(url, |(_, r)| r);
+    let h = rest[..rest.find(['/', '?', '#']).unwrap_or(rest.len())].to_ascii_lowercase();
+    h.strip_prefix("www.").map(str::to_string).unwrap_or(h)
+}
+
 /// The outlet of an https article URL on an allowlisted host.
 pub fn outlet_for(url: &str) -> Option<&'static str> {
     let rest = url.strip_prefix("https://")?;
@@ -198,6 +244,45 @@ fn re(p: &str) -> Regex {
 /// The marker the company's names are replaced with before the templates
 /// run, so a template reads `@CO` wherever the quote names the company.
 const CO: &str = "@CO";
+
+/// A character that renders as nothing: zero-width space, joiners and
+/// direction marks (U+200B-U+200F), word joiner and invisible operators
+/// (U+2060-U+2064), the byte-order mark, the soft hyphen (`&shy;`), the
+/// combining grapheme joiner and the Mongolian vowel separator.
+fn invisible(c: char) -> bool {
+    matches!(
+        c,
+        '\u{ad}' | '\u{34f}' | '\u{180e}' | '\u{200b}'..='\u{200f}' | '\u{2060}'..='\u{2064}' | '\u{feff}'
+    )
+}
+
+/// `text` without invisible characters (`invisible`), which some sites put
+/// inside a sentence ("on \u{200b}the Nasdaq", Reuters 2026-11-10): the
+/// shapes then read the words as written. The quote itself is verified as
+/// stored.
+pub fn visible(text: &str) -> String {
+    text.chars().filter(|c| !invisible(*c)).collect()
+}
+
+/// Whether reading `quote`'s invisible characters as spaces shows a word
+/// from one of `refusals` that deleting them hides ("in\u{200b}May" reads
+/// "inMay" once deleted, "in May" once spaced). The shapes read the deleted
+/// variant (`visible`); a refusal in either variant refuses.
+fn hides_refusal(quote: &str, refusals: &[&Regex]) -> bool {
+    if !quote.chars().any(invisible) {
+        return false;
+    }
+    let joined = normalize(&visible(quote));
+    let split = normalize(
+        &quote
+            .chars()
+            .map(|c| if invisible(c) { ' ' } else { c })
+            .collect::<String>(),
+    );
+    refusals
+        .iter()
+        .any(|r| r.find_iter(&split).count() > r.find_iter(&joined).count())
+}
 
 /// `text` with each of the company's names (case-insensitive, whole words,
 /// longest first) replaced by `CO`.
@@ -425,7 +510,18 @@ fn years_re() -> &'static Regex {
 /// word, a trailing "if" or "unless", or (outside the aside) a past-time
 /// word in its clause; a "would" shape needs the offering in the sentence.
 pub fn valuation_figures(quote: &str, t: &Tracked, year: i32) -> Vec<f64> {
-    let marked = mark_company(&normalize(quote), t);
+    let refusals = [
+        speculation_re(),
+        contrast_re(),
+        other_party_re(),
+        past_re(),
+        years_re(),
+        tail_conditional_re(),
+    ];
+    if hides_refusal(quote, &refusals) {
+        return Vec::new();
+    }
+    let marked = mark_company(&normalize(&visible(quote)), t);
     let mut out = Vec::new();
     for s in sentences(&marked) {
         let future_year = years_re()
@@ -596,14 +692,33 @@ fn title_party_re() -> &'static Regex {
 /// template (`date_templates`), with nothing after it that makes it
 /// conditional or past (`tail_re`), and no negation or change word in the
 /// sentence (`CHANGE_WORDS`).
-pub fn is_trading_date(quote: &str, d: NaiveDate, t: &Tracked) -> bool {
-    let marked = mark_company(&normalize(quote), t);
+///
+/// `ticker` is the symbol from the company's filing, given only when the
+/// article's headline names the company: a sentence that does not name it
+/// but gives the ticker as the listing's own symbol ("Shares are expected
+/// to start trading on the Nasdaq on November 19 under the symbol "ANT."",
+/// Reuters 2026-11-10) is read with "Shares" or "The stock" as the
+/// company's shares (`ticker_subject`), under every check above, and the
+/// symbol phrase must sit after the date with no other name there
+/// (`gives_symbol`).
+pub fn is_trading_date(quote: &str, d: NaiveDate, t: &Tracked, ticker: Option<&str>) -> bool {
+    if hides_refusal(
+        quote,
+        &[change_re(), contrast_re(), tail_re(), title_party_re()],
+    ) {
+        return false;
+    }
+    let marked = mark_company(&normalize(&visible(quote)), t);
     sentences(&marked).iter().any(|s| {
+        let (s, by_ticker) = match ticker {
+            Some(sym) if !s.contains(CO) && gives_symbol(s, sym) => (ticker_subject(s), Some(sym)),
+            _ => (s.clone(), None),
+        };
         !s.ends_with('?')
-            && !change_re().is_match(s)
-            && !contrast_re().is_match(s)
+            && !change_re().is_match(&s)
+            && !contrast_re().is_match(&s)
             && date_templates().iter().any(|r| {
-                r.captures_iter(s).any(|c| {
+                r.captures_iter(&s).any(|c| {
                     let tail_ok = c
                         .name("tail")
                         .is_none_or(|m| !tail_re().is_match(m.as_str()));
@@ -615,10 +730,56 @@ pub fn is_trading_date(quote: &str, d: NaiveDate, t: &Tracked) -> bool {
                     let title_ok = c.name("title").is_none_or(|m| {
                         !title_party_re().is_match(&m.as_str().replace("Investor Relations", ""))
                     });
-                    tail_ok && date_ok && title_ok
+                    // "…, the day Acme's stock begins trading under the
+                    // symbol "ANT."": the symbol is another listing's.
+                    let ticker_ok = by_ticker.is_none_or(|sym| {
+                        c.name("tail").is_some_and(|m| {
+                            gives_symbol(m.as_str(), sym) && names_only(m.as_str(), sym)
+                        })
+                    });
+                    tail_ok && date_ok && title_ok && ticker_ok
                 })
             })
     })
+}
+
+/// `text` gives `symbol` as the listing's own: "under the symbol X",
+/// "under the ticker (symbol) X" (quoted or not), "(Nasdaq: X)" or
+/// "(NYSE: X)". The symbol is matched as written (case-sensitive) and
+/// whole: "ANT" is in "under the symbol "ANT."" but not in "ANTHROPIC",
+/// "ant" or "ANTX". A bare mention ("a day after ANT's debut") is not one.
+pub fn gives_symbol(text: &str, symbol: &str) -> bool {
+    if symbol.is_empty() {
+        return false;
+    }
+    let sym = regex::escape(symbol);
+    let phrase = format!(
+        r#"(?:(?i:under\s+the\s+(?:ticker\s+symbol|stock\s+symbol|symbol|ticker))\s+"?{sym}(?:[^A-Za-z0-9]|$)|\((?i:Nasdaq|NYSE(?:\s+American)?)\s*:\s*{sym}\))"#
+    );
+    Regex::new(&phrase).is_ok_and(|r| r.is_match(&normalize(&visible(text))))
+}
+
+/// `tail` names no one but the listing: every word with an uppercase letter
+/// is in `ALLOWED_CAPS` or is `symbol`.
+fn names_only(tail: &str, symbol: &str) -> bool {
+    tail.split(|c: char| c.is_whitespace() || matches!(c, ',' | '(' | ')' | '"' | ';' | '$' | ':'))
+        .map(|w| w.trim_end_matches("'s").trim_end_matches(['.', '\'']))
+        .filter(|w| w.chars().any(|c| c.is_uppercase()))
+        .all(|w| w == symbol || ALLOWED_CAPS.contains(&w))
+}
+
+/// A sentence opening with "Shares", "The shares", "Its stock" (not
+/// "Shares of" or "Shares in", which name their own company) rewritten to
+/// open with the company's shares, so the date templates can read it.
+fn ticker_subject(s: &str) -> String {
+    static R: OnceLock<Regex> = OnceLock::new();
+    let r = R.get_or_init(|| {
+        re(r"(?i)^(?:(?:the|its|their)\s+)?(?:common\s+)?(?:shares|stock)(?P<of>\s+(?:of|in)\b)?")
+    });
+    match r.captures(s) {
+        Some(c) if c.name("of").is_none() => format!("{CO}'s shares{}", &s[c[0].len()..]),
+        _ => s.to_string(),
+    }
 }
 
 /// Decoded, whitespace collapsed, curly quotes kept.
@@ -729,6 +890,7 @@ pub fn check_item(
     p: &Proposed,
     hits: &[SearchHit],
     t: &Tracked,
+    symbol: Option<&str>,
     now: DateTime<Utc>,
 ) -> Result<ItemRow, Reject> {
     if !["valuation", "expected_date", "company_move", "view"].contains(&p.kind.as_str()) {
@@ -776,7 +938,12 @@ pub fn check_item(
         row.speaker = Some(speaker);
         return Ok(row);
     }
-    if !names_company(&quote, t) {
+    // A listing date may name the company by the ticker from its filing,
+    // given as the listing's symbol, in an article whose headline names it
+    // (decisions.md, 2026-11-11, "filed ticker"). No stored symbol: no such
+    // path.
+    let ticker = symbol.filter(|_| p.kind == "expected_date" && names_company(&hit.title, t));
+    if !names_company(&quote, t) && !ticker.is_some_and(|s| gives_symbol(&quote, s)) {
         return Err(Reject::CompanyNotNamed);
     }
     match p.kind.as_str() {
@@ -803,7 +970,7 @@ pub fn check_item(
             {
                 return Err(Reject::DateNotInQuote);
             }
-            if !is_trading_date(&quote, d, t) {
+            if !is_trading_date(&quote, d, t, ticker) {
                 return Err(Reject::NotTheCompanysTradingDate);
             }
             row.value_date = Some(ymd(d));
@@ -844,12 +1011,22 @@ pub fn over_caps(items: &[&ItemRow]) -> Vec<(String, String, String)> {
     out
 }
 
-#[derive(Debug, Clone, Default, PartialEq)]
+/// kv key prefix: the latest sweep's outcome per IPO (`ipo_sweep_last:<slug>`,
+/// JSON of `SweepRecord`), so a sweep that kept nothing says why.
+pub const KV_SWEEP_LAST: &str = "ipo_sweep_last";
+
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize)]
 pub struct SweepOutcome {
     pub slug: String,
     pub slot: String,
     /// Why nothing was searched, when nothing was.
     pub skipped: Option<String>,
+    /// Results the search returned.
+    pub found: usize,
+    /// Results dropped as the same article under another URL.
+    pub duplicates: usize,
+    /// Articles sent to the model: dated, recent, with text, from an
+    /// allowlisted outlet, no duplicates.
     pub hits: usize,
     pub proposed: usize,
     /// `kind url` of each new item kept.
@@ -942,12 +1119,51 @@ pub async fn sweep_tick(
     };
     out.slug = t.slug.clone();
     out.slot = slot;
+    let r = sweep_one(now, &t, list, ipo, es, store, ns, llm, &mut out).await;
+    // Recorded whatever happened, a store error included (the record itself
+    // failing is not worth failing the message for).
+    let record = SweepRecord {
+        at: iso(now),
+        outcome: out.clone(),
+        error: r.as_ref().err().cloned(),
+    };
+    if let Ok(json) = serde_json::to_string(&record) {
+        let _ = es
+            .kv_set(&format!("{KV_SWEEP_LAST}:{}", t.slug), &json, &iso(now))
+            .await;
+    }
+    r.map(|_| out)
+}
+
+/// What `KV_SWEEP_LAST` holds for an IPO.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct SweepRecord {
+    pub at: String,
+    #[serde(flatten)]
+    pub outcome: SweepOutcome,
+    /// A store error that ended the sweep, if any.
+    pub error: Option<String>,
+}
+
+/// The sweep of one claimed IPO, filling `out` as it goes.
+#[allow(clippy::too_many_arguments)]
+async fn sweep_one(
+    now: DateTime<Utc>,
+    t: &Tracked,
+    list: &[Tracked],
+    ipo: &dyn IpoStore,
+    es: &dyn EarningsStore,
+    store: &dyn Store,
+    ns: &dyn NewsSearch,
+    llm: &dyn LlmProvider,
+    out: &mut SweepOutcome,
+) -> Result<(), String> {
     let mut st = ipo.ipo_state().await?;
     let today = et(now).date_naive();
     if !active(&st, &t.slug, today) {
         out.skipped =
             Some("inactive (withdrawn, listed over 30 days, or no filing in 60 days)".into());
-        return Ok(out);
+        return Ok(());
     }
     if !take_search(es, now).await? {
         let msg = format!(
@@ -955,12 +1171,17 @@ pub async fn sweep_tick(
         );
         alert_once_today(now, "ipo-search-cap", "warn", &msg, store).await?;
         out.skipped = Some("monthly search cap".into());
-        return Ok(out);
+        return Ok(());
     }
     let since = now - Duration::days(LOOKBACK_DAYS);
     let sweep_key = format!("ipo-sweep:{}", t.slug);
     let mut hits = match ns
-        .search_full(&format!("{} IPO", t.name), HITS, since)
+        .search_full(
+            &format!("{} IPO", t.name),
+            HITS + SEARCH_EXTRA,
+            since,
+            &outlet_hosts(),
+        )
         .await
     {
         Ok(h) => h,
@@ -968,18 +1189,23 @@ pub async fn sweep_tick(
             out.errors.push(format!("search: {e}"));
             let msg = format!("IPO watch: the news search for {} failed: {e}", t.slug);
             alert_once_today(now, &sweep_key, "warn", &msg, store).await?;
-            return Ok(out);
+            return Ok(());
         }
     };
+    out.found = hits.len();
     hits.retain(|h| {
         h.published.is_some_and(|p| p >= since && p <= now)
             && !h.content.trim().is_empty()
             && outlet_for(&h.url).is_some()
     });
+    let before = hits.len();
+    let hits = distinct(hits);
+    out.duplicates = before - hits.len();
+    let mut hits = hits;
     hits.truncate(HITS);
     out.hits = hits.len();
     if hits.is_empty() {
-        return Ok(out);
+        return Ok(());
     }
     let header = format!("Company: {}\n{}", t.name, as_of(now));
     let v = match llm
@@ -991,7 +1217,7 @@ pub async fn sweep_tick(
             out.errors.push(format!("llm: {e}"));
             let msg = format!("IPO watch: the news extraction for {} failed: {e}", t.slug);
             alert_once_today(now, &sweep_key, "warn", &msg, store).await?;
-            return Ok(out);
+            return Ok(());
         }
     };
     let proposed: Vec<Proposed> = v
@@ -1004,8 +1230,10 @@ pub async fn sweep_tick(
         .collect();
     out.proposed = proposed.len();
     let mut new: Vec<ItemRow> = Vec::new();
+    // The ticker as stored from the verified cover (`ipo_watch.symbol`).
+    let symbol = st.row(&t.slug).and_then(|r| r.symbol.clone());
     for p in &proposed {
-        match check_item(p, &hits, &t, now) {
+        match check_item(p, &hits, &t, symbol.as_deref(), now) {
             Ok(row) => {
                 let dup = st.items.iter().chain(&new).any(|i| i.key() == row.key());
                 if !dup {
@@ -1017,7 +1245,7 @@ pub async fn sweep_tick(
         }
     }
     if new.is_empty() {
-        return Ok(out);
+        return Ok(());
     }
     let mut w = IpoWrite {
         items: new,
@@ -1034,7 +1262,7 @@ pub async fn sweep_tick(
     st.apply(&w);
     w.watch = changed_rows(now, list, &st);
     ipo.ipo_write(&w).await?;
-    Ok(out)
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1079,7 +1307,7 @@ mod tests {
     fn hit(url: &str, content: &str, published: Option<&str>) -> SearchHit {
         SearchHit {
             url: url.into(),
-            title: "t".into(),
+            title: format!("title of {url}"),
             content: content.into(),
             published: published.map(utc),
         }
@@ -1131,7 +1359,7 @@ mod tests {
         }
     }
     fn ck(p: &Proposed) -> Result<ItemRow, Reject> {
-        check_item(p, &hits(), &anthropic(), utc(NOW))
+        check_item(p, &hits(), &anthropic(), None, utc(NOW))
     }
 
     #[test]
@@ -1160,7 +1388,7 @@ mod tests {
         valuation_figures(q, &anthropic(), 2026)
     }
     fn td(q: &str, day: &str) -> bool {
-        is_trading_date(q, d(day), &anthropic())
+        is_trading_date(q, d(day), &anthropic(), None)
     }
 
     #[test]
@@ -1328,6 +1556,11 @@ mod tests {
         ] {
             assert!(td(q, "2026-11-16"), "{q}");
         }
+        // A zero-width character inside the sentence, as in Reuters' copy.
+        assert!(td(
+            "Anthropic is expected to start trading on \u{200b}the Nasdaq on November 19.",
+            "2026-11-19"
+        ));
         // The pricing day in the same sentence is never the trading day.
         assert!(!td(
             "Anthropic is expected to begin trading on the Nasdaq on Nov. 16 after pricing its shares on Nov. 13.",
@@ -1428,7 +1661,7 @@ mod tests {
             ..date_item()
         };
         assert_eq!(
-            check_item(&p, &h, &anthropic(), utc(NOW)),
+            check_item(&p, &h, &anthropic(), None, utc(NOW)),
             Err(Reject::NotTheCompanysTradingDate)
         );
     }
@@ -1554,7 +1787,7 @@ mod tests {
         );
         let undated = vec![hit(A_URL, ARTICLE_A, None)];
         assert_eq!(
-            check_item(&valuation(), &undated, &anthropic(), utc(NOW)),
+            check_item(&valuation(), &undated, &anthropic(), None, utc(NOW)),
             Err(Reject::NoDate)
         );
     }
@@ -1576,13 +1809,13 @@ mod tests {
             ..view_item()
         };
         assert_eq!(
-            check_item(&p, &h, &anthropic(), utc(NOW)),
+            check_item(&p, &h, &anthropic(), None, utc(NOW)),
             Err(Reject::CompanyNotNamed)
         );
         // In the same paragraph: kept.
         let one = "“The sector is hot right now,” said Jane Doe, an analyst at Example Securities, of Anthropic's offering.";
         let h = vec![hit(A_URL, one, Some("2026-11-10T18:00:00Z"))];
-        assert!(check_item(&p, &h, &anthropic(), utc(NOW)).is_ok());
+        assert!(check_item(&p, &h, &anthropic(), None, utc(NOW)).is_ok());
     }
 
     #[test]
@@ -1675,6 +1908,8 @@ mod tests {
         hits: Result<Vec<SearchHit>, ProviderError>,
         calls: Cell<usize>,
         queries: RefCell<Vec<String>>,
+        /// The last request's result count and site list.
+        asked: RefCell<(usize, Vec<String>)>,
     }
     #[async_trait(?Send)]
     impl NewsSearch for FakeNs {
@@ -1684,11 +1919,13 @@ mod tests {
         async fn search_full(
             &self,
             q: &str,
-            _: usize,
+            max: usize,
             _: DateTime<Utc>,
+            domains: &[&str],
         ) -> Result<Vec<SearchHit>, ProviderError> {
             self.calls.set(self.calls.get() + 1);
             self.queries.borrow_mut().push(q.into());
+            *self.asked.borrow_mut() = (max, domains.iter().map(|d| d.to_string()).collect());
             self.hits.clone()
         }
     }
@@ -1708,6 +1945,7 @@ mod tests {
             hits: Ok(h),
             calls: Cell::new(0),
             queries: RefCell::new(vec![]),
+            asked: RefCell::new((0, vec![])),
         }
     }
     fn to_json(p: &Proposed) -> Value {
@@ -1814,6 +2052,142 @@ mod tests {
         assert_eq!(ipo.state.borrow().items.len(), 4);
     }
 
+    fn last_record(es: &MemEarningsStore) -> Value {
+        let raw = es
+            .kv
+            .borrow()
+            .get(&format!("{KV_SWEEP_LAST}:anthropic"))
+            .cloned()
+            .expect("a recorded outcome");
+        serde_json::from_str(&raw).unwrap()
+    }
+
+    #[tokio::test]
+    async fn the_search_asks_for_the_allowlist_and_drops_duplicate_articles() {
+        let ipo = MemIpoStore::default();
+        with_filing(&ipo);
+        let (es, store) = (MemEarningsStore::default(), MemStore::default());
+        // The same story under two URLs, as WSJ served it on 2026-11-10.
+        let copy = "Anthropic to Seek $1.3 Trillion Valuation in IPO. The AI company set terms for its offering.";
+        let wsj = |url: &str| SearchHit {
+            url: url.into(),
+            title: "Anthropic to Seek $1.3 Trillion Valuation in IPO - WSJ".into(),
+            content: copy.into(),
+            published: Some(utc("2026-11-10T16:57:00Z")),
+        };
+        let mut h = hits();
+        h.push(wsj(
+            "https://www.wsj.com/finance/stocks/anthropic-ipo-valuation-8337b669",
+        ));
+        h.push(wsj("https://www.wsj.com/finance/stocks/anthropic-to-seek-1-3-trillion-valuation-in-ipo-8337b669"));
+        let n = ns(h);
+        let l = llm(vec![]);
+        let out = sweep_tick(utc(NOW), &list(), &ipo, &es, &store, &n, &l)
+            .await
+            .unwrap();
+        let (max, domains) = n.asked.borrow().clone();
+        assert_eq!(max, HITS + SEARCH_EXTRA);
+        assert_eq!(domains, outlet_hosts());
+        assert_eq!(domains.len(), OUTLETS.len());
+        // 6 found; the blog is off the list and one WSJ copy is a duplicate.
+        assert_eq!((out.found, out.duplicates, out.hits), (6, 1, 4));
+        let distinct_urls: Vec<String> = distinct(vec![
+            wsj("https://www.wsj.com/a"),
+            wsj("https://www.wsj.com/b"),
+        ])
+        .into_iter()
+        .map(|h| h.url)
+        .collect();
+        assert_eq!(distinct_urls, ["https://www.wsj.com/a"]);
+    }
+
+    #[tokio::test]
+    async fn every_sweep_records_its_outcome_in_kv() {
+        let ipo = MemIpoStore::default();
+        with_filing(&ipo);
+        let (es, store) = (MemEarningsStore::default(), MemStore::default());
+        let l = llm(vec![
+            valuation(),
+            Proposed {
+                value_usd: Some(6e10),
+                ..valuation()
+            },
+        ]);
+        sweep_tick(utc(NOW), &list(), &ipo, &es, &store, &ns(hits()), &l)
+            .await
+            .unwrap();
+        let r = last_record(&es);
+        assert_eq!(r["at"], "2026-11-11T21:30:00Z");
+        assert_eq!(r["slot"], "2026-11-11:pm");
+        assert_eq!(
+            (
+                r["found"].as_u64(),
+                r["hits"].as_u64(),
+                r["proposed"].as_u64()
+            ),
+            (Some(4), Some(3), Some(2))
+        );
+        assert_eq!(r["kept"], json!([format!("valuation {A_URL}")]));
+        assert_eq!(
+            r["rejected"],
+            json!([format!("NotTheCompanysValuation {A_URL}")])
+        );
+        assert_eq!(r["error"], Value::Null);
+        // A failed search is recorded with its error, a skip with its reason.
+        let failing = FakeNs {
+            hits: Err(ProviderError::Http(432)),
+            calls: Cell::new(0),
+            queries: RefCell::new(vec![]),
+            asked: RefCell::new((0, vec![])),
+        };
+        sweep_tick(
+            utc("2026-11-12T21:30:00Z"),
+            &list(),
+            &ipo,
+            &es,
+            &store,
+            &failing,
+            &l,
+        )
+        .await
+        .unwrap();
+        let r = last_record(&es);
+        assert_eq!(r["slot"], "2026-11-12:pm");
+        assert_eq!(r["errors"], json!(["search: http status 432"]));
+        es.kv_set(KV_SEARCHES, &format!("2026-11 {MONTHLY_SEARCH_CAP}"), "x")
+            .await
+            .unwrap();
+        sweep_tick(
+            utc("2026-11-13T21:30:00Z"),
+            &list(),
+            &ipo,
+            &es,
+            &store,
+            &ns(hits()),
+            &l,
+        )
+        .await
+        .unwrap();
+        assert_eq!(last_record(&es)["skipped"], "monthly search cap");
+        // A store error is recorded too, and still fails the message.
+        let broken = MemIpoStore {
+            fail: Some("no such table: ipo_watch".into()),
+            ..Default::default()
+        };
+        assert!(sweep_tick(
+            utc("2026-11-16T21:30:00Z"),
+            &list(),
+            &broken,
+            &es,
+            &store,
+            &ns(hits()),
+            &l
+        )
+        .await
+        .is_err());
+        assert_eq!(last_record(&es)["error"], "no such table: ipo_watch");
+    }
+
     #[tokio::test]
     async fn the_monthly_cap_stops_searches_with_one_alert() {
         let ipo = MemIpoStore::default();
@@ -1854,6 +2228,7 @@ mod tests {
             hits: Err(ProviderError::Http(432)),
             calls: Cell::new(0),
             queries: RefCell::new(vec![]),
+            asked: RefCell::new((0, vec![])),
         };
         let l = llm(vec![]);
         let out = sweep_tick(utc(NOW), &list(), &ipo, &es, &store, &failing, &l)
@@ -1921,5 +2296,322 @@ mod tests {
             .await
             .unwrap();
         assert_eq!((out.hits, l.calls.get()), (0, 0));
+    }
+
+    // Rick, 2026-11-11, "ticker match": the three date sentences of the
+    // 2026-11-10 articles, one sentence each.
+    const REUTERS_HEAD: &str =
+        "EXCLUSIVE: Anthropic eyes $1.4 trillion IPO valuation in test of Wall Street's AI fervor | Reuters";
+    const REUTERS_DATE: &str = "Shares are expected to start trading on \u{200b}the Nasdaq on November 19 under the symbol \"ANT.\"";
+    const CNBC_DATE: &str = "The company is planning to price on Nov. 18 and trade on Nov. 19, according to people familiar with the details";
+    const CRAMER_DATE: &str =
+        "The company plans to price its shares Nov. 18 and begin trading the following day.";
+
+    fn headed(url: &str, title: &str, content: &str) -> SearchHit {
+        SearchHit {
+            title: title.into(),
+            ..hit(url, content, Some("2026-11-10T19:55:19Z"))
+        }
+    }
+    fn on_19(url: &str, quote: &str) -> Proposed {
+        Proposed {
+            kind: "expected_date".into(),
+            url: url.into(),
+            quote: quote.into(),
+            date: Some("2026-11-19".into()),
+            ..Default::default()
+        }
+    }
+    fn ck_ticker(content: &str, title: &str, symbol: Option<&str>) -> Result<ItemRow, Reject> {
+        let h = [headed(A_URL, title, content)];
+        check_item(&on_19(A_URL, content), &h, &anthropic(), symbol, utc(NOW))
+    }
+
+    #[test]
+    fn a_listing_date_may_name_the_company_by_the_ticker_from_its_filing() {
+        let r = ck_ticker(REUTERS_DATE, REUTERS_HEAD, Some("ANT")).unwrap();
+        assert_eq!(
+            (r.value_date.as_deref(), r.outlet.as_str()),
+            (Some("2026-11-19"), "Reuters")
+        );
+        // No ticker in the sentence: still refused.
+        let cnbc = [headed(
+            C_URL,
+            "Anthropic sets price range of $70 to $78 in upcoming IPO",
+            CNBC_DATE,
+        )];
+        assert_eq!(
+            check_item(
+                &on_19(C_URL, CNBC_DATE),
+                &cnbc,
+                &anthropic(),
+                Some("ANT"),
+                utc(NOW)
+            ),
+            Err(Reject::CompanyNotNamed)
+        );
+        let cramer = [headed(
+            C_URL,
+            "Anthropic IPO: Cramer on revenue growth and valuation",
+            CRAMER_DATE,
+        )];
+        assert_eq!(
+            check_item(
+                &on_19(C_URL, CRAMER_DATE),
+                &cramer,
+                &anthropic(),
+                Some("ANT"),
+                utc(NOW)
+            ),
+            Err(Reject::CompanyNotNamed)
+        );
+        // Another company's ticker, a headline that does not name the
+        // company, or no symbol stored yet: the path is closed.
+        let other = REUTERS_DATE.replace("ANT", "XYZ");
+        assert_eq!(
+            ck_ticker(&other, REUTERS_HEAD, Some("ANT")),
+            Err(Reject::CompanyNotNamed)
+        );
+        assert_eq!(
+            ck_ticker(
+                REUTERS_DATE,
+                "AI listings test Wall Street's fervor | Reuters",
+                Some("ANT")
+            ),
+            Err(Reject::CompanyNotNamed)
+        );
+        assert_eq!(
+            ck_ticker(REUTERS_DATE, REUTERS_HEAD, None),
+            Err(Reject::CompanyNotNamed)
+        );
+        // Case-sensitive on the stored symbol.
+        assert_eq!(
+            ck_ticker(
+                &REUTERS_DATE.replace("ANT", "ant"),
+                REUTERS_HEAD,
+                Some("ANT")
+            ),
+            Err(Reject::CompanyNotNamed)
+        );
+        // The ticker opens the path; every other date check still applies.
+        for q in [
+            "Shares are no longer expected to start trading on the Nasdaq on November 19 under the symbol \"ANT.\"",
+            "Shares are expected to start trading on the Nasdaq on November 19 under the symbol \"ANT\" unless markets fall.",
+            // The symbol phrase attached to another company's shares.
+            "Shares are expected to start trading on the Nasdaq on November 19, the day Acme's stock begins trading under the symbol \"ANT.\"",
+            "Shares are expected to start trading on the Nasdaq on November 19 under the symbol \"ANT\"?",
+        ] {
+            assert_eq!(
+                ck_ticker(q, REUTERS_HEAD, Some("ANT")),
+                Err(Reject::NotTheCompanysTradingDate),
+                "{q}"
+            );
+        }
+        assert_eq!(
+            ck_ticker(
+                "Shares started trading on the Nasdaq on November 2 under the symbol \"ANT.\"",
+                REUTERS_HEAD,
+                Some("ANT")
+            ),
+            Err(Reject::DateNotInQuote)
+        );
+        // A bare mention of the ticker is not the listing's symbol.
+        for q in [
+            "Shares are expected to start trading on Nov. 20, a day after ANT's debut.",
+            "Shares are expected to start trading on Nov. 20 alongside ANT.",
+            "Shares of Acme are expected to start trading on the Nasdaq on Nov. 20, a day after \"ANT.\"",
+        ] {
+            let h = [headed(A_URL, REUTERS_HEAD, q)];
+            let p = Proposed {
+                date: Some("2026-11-20".into()),
+                ..on_19(A_URL, q)
+            };
+            assert_eq!(
+                check_item(&p, &h, &anthropic(), Some("ANT"), utc(NOW)),
+                Err(Reject::CompanyNotNamed),
+                "{q}"
+            );
+        }
+        // The exchange form after the date.
+        let r = ck_ticker(
+            "Shares are expected to start trading on Nov. 19 (Nasdaq: ANT).",
+            REUTERS_HEAD,
+            Some("ANT"),
+        )
+        .unwrap();
+        assert_eq!(r.value_date.as_deref(), Some("2026-11-19"));
+        // Valuations keep the name-in-sentence rule.
+        let v = "Shares under the symbol \"ANT\" would value it at $1.4 trillion.";
+        let h = [headed(A_URL, REUTERS_HEAD, v)];
+        let p = Proposed {
+            kind: "valuation".into(),
+            url: A_URL.into(),
+            quote: v.into(),
+            value_usd: Some(1.4e12),
+            ..Default::default()
+        };
+        assert_eq!(
+            check_item(&p, &h, &anthropic(), Some("ANT"), utc(NOW)),
+            Err(Reject::CompanyNotNamed)
+        );
+    }
+
+    #[test]
+    fn the_ticker_counts_only_as_the_listings_own_symbol() {
+        for (text, found) in [
+            ("under the symbol \"ANT.\"", true),
+            ("under the symbol \u{201c}ANT\u{201d}", true),
+            ("under the ticker ANT", true),
+            ("under the ticker symbol \"ANT\"", true),
+            ("(Nasdaq: ANT)", true),
+            ("(NASDAQ: ANT)", true),
+            ("(NYSE: ANT)", true),
+            ("ANT", false),
+            ("a day after ANT's debut", false),
+            ("alongside ANT", false),
+            ("ANT's shares", false),
+            ("under the symbol \"ANTHROPIC\"", false),
+            ("investors want more", false),
+            ("under the symbol \"ant\"", false),
+            ("under the symbol \"ANTX\"", false),
+            ("(Nasdaq: ANTX)", false),
+        ] {
+            assert_eq!(gives_symbol(text, "ANT"), found, "{text}");
+        }
+        assert!(!gives_symbol("under the symbol ANT", ""));
+    }
+
+    #[tokio::test]
+    async fn a_sweep_dates_the_row_from_a_ticker_sentence_once_the_symbol_is_stored() {
+        for (symbol, kept) in [(Some("ANT"), true), (None, false)] {
+            let ipo = MemIpoStore::default();
+            with_filing(&ipo);
+            ipo.state.borrow_mut().watch.push(WatchRow {
+                slug: "anthropic".into(),
+                symbol: symbol.map(Into::into),
+                ..Default::default()
+            });
+            let (es, store) = (MemEarningsStore::default(), MemStore::default());
+            let n = ns(vec![headed(A_URL, REUTERS_HEAD, REUTERS_DATE)]);
+            let l = llm(vec![on_19(A_URL, REUTERS_DATE)]);
+            let out = sweep_tick(utc(NOW), &list(), &ipo, &es, &store, &n, &l)
+                .await
+                .unwrap();
+            let st = ipo.state.borrow();
+            let r = st.row("anthropic").unwrap();
+            if kept {
+                assert_eq!(out.kept, [format!("expected_date {A_URL}")], "{out:?}");
+                assert_eq!(r.first_trade_date.as_deref(), Some("2026-11-19"));
+                assert_eq!(
+                    (r.date_status.as_deref(), r.date_source.as_deref()),
+                    (Some("reported"), Some("news"))
+                );
+            } else {
+                assert_eq!(out.rejected, [format!("CompanyNotNamed {A_URL}")]);
+                assert!(st.items.is_empty());
+                assert_eq!(r.first_trade_date, None);
+            }
+        }
+    }
+
+    #[test]
+    fn an_invisible_character_inside_a_refusal_word_still_refuses() {
+        assert_eq!(
+            visible("a\u{ad}b\u{34f}c\u{180e}d\u{200e}e\u{200f}f\u{2061}g\u{2064}h"),
+            "abcdefgh"
+        );
+        // Deleted, these would read "inMay" and "lastyear".
+        for q in [
+            "Anthropic is valued at $965 billion in\u{200b}May.",
+            "Anthropic is valued at $965 billion in\u{ad}May.",
+            "Anthropic is valued at $965 billion last\u{200b}year.",
+            "Anthropic could\u{2060}be valued at $965 billion.",
+        ] {
+            assert!(val(q).is_empty(), "{q}");
+        }
+        for q in [
+            "Anthropic is expected to list on Nov. 16 un\u{ad}less markets fall.",
+            "Anthropic is expected to list on Nov. 16 un\u{200e}less markets fall.",
+            "Anthropic is expected to list on Nov. 16 un\u{2061}less markets fall.",
+            "Anthropic is expected to list on Nov. 16, a date now in\u{200b}doubt.",
+        ] {
+            assert!(!td(q, "2026-11-16"), "{q}");
+        }
+        // Between words, an invisible character changes nothing.
+        assert_eq!(
+            val("Anthropic is valued at \u{200b}$965 billion."),
+            [9.65e11]
+        );
+        assert!(td(
+            "Anthropic is expected to list on \u{ad}the Nasdaq on Nov. 16.",
+            "2026-11-16"
+        ));
+    }
+
+    #[test]
+    fn distinct_merges_copies_only_within_one_host() {
+        let titled = |url: &str, title: &str, content: &str| SearchHit {
+            title: title.into(),
+            ..hit(url, content, Some("2026-11-10T18:00:00Z"))
+        };
+        let banner = "We use cookies to improve your experience on our site. ".repeat(8);
+        let reuters2 = "https://www.reuters.com/markets/2026-11-10/anthropic-ipo-copy";
+        let kept = |h: Vec<SearchHit>| distinct(h).into_iter().map(|h| h.url).collect::<Vec<_>>();
+        // The same headline at two outlets, different text: both stay.
+        assert_eq!(
+            kept(vec![
+                titled(A_URL, "Anthropic IPO: what to know", "Reuters text."),
+                titled(C_URL, "Anthropic IPO: what to know", "CNBC text."),
+            ]),
+            [A_URL, C_URL]
+        );
+        // The same opening at two outlets: both stay.
+        assert_eq!(
+            kept(vec![
+                titled(A_URL, "One", &format!("{banner}Reuters text.")),
+                titled(C_URL, "Two", &format!("{banner}CNBC text.")),
+            ]),
+            [A_URL, C_URL]
+        );
+        // One host, the same title or the same opening: one copy.
+        assert_eq!(
+            kept(vec![
+                titled(A_URL, "Anthropic IPO: what to know", "First text."),
+                titled(reuters2, "Anthropic IPO: what to know", "Second text."),
+            ]),
+            [A_URL]
+        );
+        assert_eq!(
+            kept(vec![
+                titled(A_URL, "One", &format!("{banner}First.")),
+                titled(reuters2, "Two", &format!("{banner}Second.")),
+            ]),
+            [A_URL]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failing_outcome_record_leaves_the_sweep_result_unchanged() {
+        let mut outs = Vec::new();
+        for fail in [false, true] {
+            let ipo = MemIpoStore::default();
+            with_filing(&ipo);
+            let (es, store) = (MemEarningsStore::default(), MemStore::default());
+            if fail {
+                *es.fail_kv_set.borrow_mut() = Some(format!("{KV_SWEEP_LAST}:anthropic"));
+            }
+            let l = llm(vec![valuation(), date_item()]);
+            let out = sweep_tick(utc(NOW), &list(), &ipo, &es, &store, &ns(hits()), &l).await;
+            assert_eq!(ipo.state.borrow().items.len(), 2);
+            assert_eq!(
+                es.kv
+                    .borrow()
+                    .contains_key(&format!("{KV_SWEEP_LAST}:anthropic")),
+                !fail
+            );
+            outs.push(out);
+        }
+        assert_eq!(outs[0].as_ref().unwrap().kept.len(), 2);
+        assert_eq!(outs[0], outs[1]);
     }
 }

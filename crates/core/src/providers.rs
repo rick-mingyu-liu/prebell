@@ -244,12 +244,15 @@ pub trait NewsSearch {
         self.search(query, max).await
     }
     /// `search_since` with only results whose full article text the
-    /// provider returned. The default trusts `search_since`.
+    /// provider returned, from `domains` only when given (a provider that
+    /// can filter by site should; callers still check each hit's site). The
+    /// default trusts `search_since` and ignores `domains`.
     async fn search_full(
         &self,
         query: &str,
         max: usize,
         since: DateTime<Utc>,
+        _domains: &[&str],
     ) -> Result<Vec<SearchHit>, ProviderError> {
         self.search_since(query, max, since).await
     }

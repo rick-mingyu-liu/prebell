@@ -107,6 +107,8 @@ pub struct MemEarningsStore {
     pub calls: Cell<usize>,
     /// `kv_get` of this key fails, as a D1 error would.
     pub fail_kv: RefCell<Option<String>>,
+    /// `kv_set` of this key fails, as a D1 error would.
+    pub fail_kv_set: RefCell<Option<String>>,
 }
 
 impl MemEarningsStore {
@@ -253,6 +255,9 @@ impl EarningsStore for MemEarningsStore {
     }
     async fn kv_set(&self, key: &str, value: &str, _now: &str) -> Result<(), String> {
         self.calls.set(self.calls.get() + 1);
+        if self.fail_kv_set.borrow().as_deref() == Some(key) {
+            return Err(format!("d1: kv {key} failed"));
+        }
         self.kv.borrow_mut().insert(key.into(), value.into());
         Ok(())
     }
