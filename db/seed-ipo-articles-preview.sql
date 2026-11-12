@@ -23,10 +23,10 @@ INSERT INTO posts (run_key, content_type, template_id, trading_date, slug, facts
 INSERT INTO post_translations (post_id, lang, status, title, summary, body_md, cover_line1, cover_line2, updated_at)
 SELECT id, 'en', 'published',
   'Anthropic sets IPO price range at $70 to $78 a share',
-  'Anthropic''s amended S-1 filed Nov. 10, 2026 sets a price range of $70.00 to $78.00 a share for 825,000,000 shares of Class A common stock.',
+  'Anthropic filed an amended registration statement (Form S-1/A) on Nov 10, 2026 with a price range of $70.00 to $78.00 per share for 825,000,000 shares.',
   '# Anthropic sets IPO price range at $70 to $78 a share
 
-Anthropic''s amended S-1 filed Nov. 10, 2026 sets a price range of $70.00 to $78.00 a share for 825,000,000 shares of Class A common stock.
+Anthropic filed an amended registration statement (Form S-1/A) on Nov 10, 2026 with a price range of $70.00 to $78.00 per share for 825,000,000 shares.
 
 **Anthropic (ANT)** · Nasdaq Global Select Market · Form S-1/A filed Nov 10, 2026
 
@@ -45,11 +45,11 @@ Offering size is computed by PreBell from the cover: shares offered (including s
 
 ## What happened
 
-Anthropic filed an amended registration statement (Form S-1/A) on Nov. 10, 2026. Its cover sets a price range of $70.00 to $78.00 per share for 825,000,000 shares of Class A common stock.
+Anthropic filed an amended registration statement (Form S-1/A) with the SEC on Nov 10, 2026. The cover sets a price range of $70.00 to $78.00 per share for 825,000,000 shares.
 
 ## What the filing says
 
-Anthropic is selling 801,351,354 of the shares, and selling stockholders are selling 23,648,646. The underwriters have an option to purchase up to 123,750,000 additional shares. Anthropic has applied to list its Class A common stock on the Nasdaq Global Select Market under the symbol ANT.
+Anthropic is selling 801,351,354 shares and the selling stockholders are selling 23,648,646 shares. The underwriters have an option to purchase up to 123,750,000 shares more. At $70.00 a share, the 825,000,000 shares offered come to $57.75 billion; at $78.00 a share, the 825,000,000 shares offered come to $64.35 billion. These are PreBell''s gross figures before underwriting discounts, including any shares sold by selling stockholders and excluding the underwriters'' option; they are not the company''s proceeds. The filing names the Nasdaq Global Select Market as the exchange and ANT as the symbol.
 
 ## What has been reported
 
@@ -61,7 +61,7 @@ Anthropic is selling 801,351,354 of the shares, and selling stockholders are sel
 
 ## What comes next
 
-The range can still change in a later amendment. The offering price is set at pricing and stated in a final prospectus (Form 424B4), after which the shares begin trading.
+The range can still change in a later amendment. The offering price is set at pricing and stated in a final prospectus (Form 424B4 or 424B1), after which the shares begin trading.
 
 ## Sources
 
@@ -79,17 +79,17 @@ FROM posts WHERE run_key = 'ipo:anthropic:range_set:0001628280-26-072484';
 INSERT INTO post_translations (post_id, lang, status, title, summary, body_md, cover_line1, cover_line2, updated_at)
 SELECT id, 'zh', 'published',
   'Anthropic公布IPO价格区间：每股70至78美元',
-  'Anthropic于2026年11月10日提交S-1/A修订文件，将8.25亿股A类普通股的价格区间定为每股70.00至78.00美元。',
+  'Anthropic于2026年11月10日递交注册声明修订稿（S-1/A表格），价格区间为每股70.00至78.00美元，发行8.25亿股。',
   '# Anthropic公布IPO价格区间：每股70至78美元
 
-Anthropic于2026年11月10日提交S-1/A修订文件，将8.25亿股A类普通股的价格区间定为每股70.00至78.00美元。
+Anthropic于2026年11月10日递交注册声明修订稿（S-1/A表格），价格区间为每股70.00至78.00美元，发行8.25亿股。
 
 **Anthropic（ANT）** · Nasdaq Global Select Market · S-1/A 提交于2026年11月10日
 
 | 招股文件数据 | |
 |---|---:|
 | 每股价格区间 | 70.00–78.00美元 |
-| 发行股数 | 825,000,000股 |
+| 发行数量 | 825,000,000股 |
 | 公司发售 | 801,351,354股 |
 | 售股股东发售 | 23,648,646股 |
 | 承销商超额配售权 | 123,750,000股 |
@@ -101,11 +101,11 @@ Anthropic于2026年11月10日提交S-1/A修订文件，将8.25亿股A类普通�
 
 ## 发生了什么
 
-Anthropic于2026年11月10日提交了注册声明修订文件（S-1/A）。文件将价格区间定为每股70.00美元至78.00美元，发行8.25亿股A类普通股。
+Anthropic于2026年11月10日向美国证监会递交注册声明修订稿（S-1/A表格）。封面将价格区间定为每股70.00至78.00美元，发行8.25亿股。
 
 ## 文件披露了什么
 
-其中公司发售801,351,354股，售股股东发售23,648,646股。承销商有权额外购买至多123,750,000股。公司已申请在Nasdaq Global Select Market上市，股票代码为ANT。
+其中公司发售801,351,354股，售股股东发售23,648,646股。承销商有权额外购买至多123,750,000股。按每股70.00美元计算，8.25亿股的发行规模为577.5亿美元；按每股78.00美元计算，8.25亿股的发行规模为643.5亿美元。以上为PreBell按发行数量乘以价格算出的总额，未扣除承销折扣，含售股股东发售的部分（如有），不含承销商超额配售权，并非公司所得款项。文件载明的交易所为Nasdaq Global Select Market，股票代码为ANT。
 
 ## 已有报道
 
@@ -117,7 +117,7 @@ Anthropic于2026年11月10日提交了注册声明修订文件（S-1/A）。文�
 
 ## 下一步
 
-价格区间仍可能在之后的修订文件中调整。发行价在定价时确定，并在最终招股说明书（424B4表格）中载明，之后股票开始交易。
+价格区间仍可能在之后的修订文件中调整。发行价在定价时确定，并在最终招股说明书（424B4或424B1表格）中载明，之后股票开始交易。
 
 ## 来源
 

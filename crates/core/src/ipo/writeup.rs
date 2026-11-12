@@ -1,68 +1,46 @@
-//! One language's IPO write-up from a milestone's facts bundle
-//! (`milestone::IpoArticleFacts`). The model writes the title, the summary
-//! and two prose sections; code renders everything else: the figures table,
-//! the quoted news, the next step, the sources and the disclaimer.
+//! One language's IPO write-up, written entirely by code from a milestone's
+//! facts bundle (`milestone::IpoArticleFacts`). There is no model call: the
+//! title, the summary and both prose sections are sentence templates per
+//! milestone and language, filled only from the filing facts, the previous
+//! range, the first session and code's derived offering size (the lead's
+//! ruling after review, 2026-11-11, pending Rick).
 //!
-//! What keeps PreBell's own voice off valuation, the listing date, demand
-//! and opinion is a set of allow-shapes, with a word list only as a second
-//! line:
-//! 1. **The model never sees a news item.** Its input is the filing side of
-//!    the bundle (`model_input`); reported news reaches the page only through
-//!    the code-rendered "What has been reported" list, word for word and
-//!    attributed. The model may not write quotation marks or an outlet name.
-//! 2. **Every number is a filing figure** (cover facts, the previous range,
-//!    the first session), within the number checker's rounding, and every
-//!    year one of the filing dates'. Code's derived offering sizes are not
-//!    among them: only the table states those, each with its two inputs and
-//!    the definition under it (`OFFERING_SIZE_EN`), so the model can never
-//!    call one proceeds, what the company raises, or a valuation.
-//! 3. **Every date is a filing date** (`allowed_dates`), and a month is
-//!    written only inside such a date: no "in November", no weekday, no
-//!    "next week".
-//! 4. **Every sentence states a filing fact**: it holds a figure, an allowed
-//!    date, a form name, the symbol or the exchange (`anchored`). A sentence
-//!    of comment alone ("Demand looks strong.") has none.
-//! 5. **The headline states the milestone with its figure** (`check_title`).
+//! Every statement is therefore one the stored data proves: a figure with
+//! its own kind's words (the selling stockholders' shares only as theirs,
+//! the option only as the underwriters'), a price placed against the last
+//! range only as within, above or below it, and the offering size only with
+//! both inputs and what it is. Reported news reaches the page only through
+//! the "What has been reported" list, word for word and attributed.
 //!
-//! Then the word lists (`EN_REFUSED`, `ZH_REFUSED`) refuse valuation,
-//! proceeds and raising, demand, judgment, inference, prediction, advice,
-//! expectations and attribution words in the model's text. The English list
-//! is ASCII-only (`(?i-u)`): its Unicode build took about 65 ms in a debug
-//! test build, against the Free plan's 10 ms of CPU.
+//! `verify_page` is a cheap guard on the result: every number and date in
+//! the page outside the quoted news is one the bundle holds.
 
 use std::collections::HashSet;
 use std::sync::OnceLock;
 
 use chrono::{Datelike, NaiveDate};
 use regex::Regex;
-use serde_json::{json, Value};
 
-use super::milestone::{IpoArticleFacts, Milestone, QuotedItem};
-use super::news::OUTLETS;
+use super::milestone::{IpoArticleFacts, Milestone, Previous, QuotedItem};
 use super::FORMS;
-use crate::numbers::{check_allowed, extract, Allowed, Lang};
-use crate::premarket::draft::{
-    is_setext_underline, match_sections, one_line, reject_markup, sections_line, Draft,
-};
-use crate::providers::{LlmProvider, ProviderError};
+use crate::numbers::{check_allowed, Allowed, Lang};
+use crate::premarket::draft::{without_link_targets, Draft};
 
 pub const CONTENT_TYPE: &str = "ipo";
 pub const DISCLAIMER_EN: &str = "This IPO write-up is generated automatically from SEC filings and public news reports, for information only. It is not investment advice.";
 pub const DISCLAIMER_ZH: &str =
     "本文根据美国证监会文件和公开新闻报道自动生成，仅供参考，不构成投资建议。";
 
-const PROMPT_EN: &str = include_str!("../../prompts/ipo_v1_en.md");
-const PROMPT_ZH: &str = include_str!("../../prompts/ipo_v1_zh.md");
-const ATTEMPTS: usize = 2;
-/// Sentences one prose section may hold.
-const MAX_SENTENCES: usize = 4;
+/// What the derived offering size is, under the table wherever it appears.
+pub const OFFERING_SIZE_EN: &str = "Offering size is computed by PreBell from the cover: shares offered (including shares sold by selling stockholders, excluding the underwriters' option) × the price per share, gross, before underwriting discounts. It is not the company's proceeds and not a valuation.";
+pub const OFFERING_SIZE_ZH: &str = "发行规模由PreBell根据招股文件封面计算：发行股数（含售股股东发售的股份，不含承销商超额配售权）×每股价格，为扣除承销折扣前的总额，并非公司所得款项，也不是估值。";
 
 /// `posts.template_id`: `ipo-<milestone>`.
 pub fn template_id(m: Milestone) -> String {
     format!("ipo-{}", m.as_str())
 }
 
-/// The two sections the model writes, in order.
+/// The two prose sections, in order.
 pub fn headings(lang: Lang) -> [&'static str; 2] {
     match lang {
         Lang::En => ["What happened", "What the filing says"],
@@ -100,11 +78,25 @@ fn grouped(v: f64) -> String {
     out
 }
 
-/// A per-share price: "$70.00" / "70.00美元".
+/// A per-unit price: "$70.00" / "70.00美元".
 fn price(v: f64, lang: Lang) -> String {
     match lang {
         Lang::En => format!("${v:.2}"),
         Lang::Zh => format!("{v:.2}美元"),
+    }
+}
+
+/// A price without its currency word: "70.00" (the Chinese range's low end).
+fn bare(v: f64) -> String {
+    format!("{v:.2}")
+}
+
+/// A headline price: "70", or "70.50" when it has cents.
+fn price_short(v: f64) -> String {
+    if v.fract() == 0.0 {
+        format!("{v:.0}")
+    } else {
+        format!("{v:.2}")
     }
 }
 
@@ -116,22 +108,44 @@ fn range(lo: f64, hi: f64, lang: Lang) -> String {
     }
 }
 
-/// A dollar amount: "$57.75 billion" / "577.5亿美元".
+/// Whether `v` in `unit`s has at most `places` decimals.
+fn exact(v: f64, unit: f64, places: i32) -> bool {
+    let x = v / unit * 10f64.powi(places);
+    (x - x.round()).abs() < 1e-6
+}
+
+/// A dollar amount, never rounded: "$57.75 billion", "$53.625 billion",
+/// "$1,419,354,816" / "577.5亿美元", "1,419,354,816美元".
 fn money(v: f64, lang: Lang) -> String {
     match lang {
-        Lang::En if v >= 1e9 => format!("${} billion", trim_dec(v / 1e9, 2)),
-        Lang::En if v >= 1e6 => format!("${} million", trim_dec(v / 1e6, 1)),
+        Lang::En if v >= 1e9 && exact(v, 1e9, 3) => format!("${} billion", trim_dec(v / 1e9, 3)),
+        Lang::En if v >= 1e6 && exact(v, 1e6, 2) => {
+            let m = trim_dec(v / 1e6, 2);
+            let (int, frac) = m.split_once('.').map_or((m.as_str(), ""), |(a, b)| (a, b));
+            let int = grouped(int.parse().unwrap_or_default());
+            if frac.is_empty() {
+                format!("${int} million")
+            } else {
+                format!("${int}.{frac} million")
+            }
+        }
         Lang::En => format!("${}", grouped(v)),
-        Lang::Zh if v >= 1e8 => format!("{}亿美元", trim_dec(v / 1e8, 2)),
-        Lang::Zh if v >= 1e4 => format!("{}万美元", trim_dec(v / 1e4, 1)),
+        Lang::Zh if v >= 1e8 && exact(v, 1e8, 2) => format!("{}亿美元", trim_dec(v / 1e8, 2)),
+        Lang::Zh if v >= 1e4 && exact(v, 1e4, 2) => format!("{}万美元", trim_dec(v / 1e4, 2)),
         Lang::Zh => format!("{}美元", grouped(v)),
     }
 }
 
-fn shares(v: f64, lang: Lang) -> String {
-    match lang {
-        Lang::En => grouped(v),
-        Lang::Zh => format!("{}股", grouped(v)),
+/// A Chinese count: 亿 or 万 only when that takes at most two decimals
+/// (825,000,000 is 8.25亿, 22,000,000 is 2200万); otherwise every digit with
+/// separators (801,351,354).
+fn zh_count(v: f64) -> String {
+    if v >= 1e8 && exact(v, 1e8, 2) {
+        format!("{}亿", trim_dec(v / 1e8, 2))
+    } else if (1e4..1e8).contains(&v) && exact(v, 1e4, 2) {
+        format!("{}万", trim_dec(v / 1e4, 2))
+    } else {
+        grouped(v)
     }
 }
 
@@ -162,11 +176,115 @@ fn escape_md(s: &str) -> String {
     out
 }
 
+/// A URL as a Markdown link target: spaces, parentheses and angle brackets
+/// percent-encoded, so the link cannot end early.
+fn link_url(url: &str) -> String {
+    let mut out = String::with_capacity(url.len());
+    for c in url.chars() {
+        match c {
+            ' ' => out.push_str("%20"),
+            '(' => out.push_str("%28"),
+            ')' => out.push_str("%29"),
+            '<' => out.push_str("%3C"),
+            '>' => out.push_str("%3E"),
+            c if c.is_whitespace() => {}
+            c => out.push(c),
+        }
+    }
+    out
+}
+
 fn name_of(f: &IpoArticleFacts, lang: Lang) -> &str {
     match lang {
         Lang::Zh => f.name_zh.as_deref().unwrap_or(&f.name),
         Lang::En => &f.name,
     }
+}
+
+/// What is offered, in each language's words.
+struct Unit {
+    /// "shares" / "ADSs".
+    plural: &'static str,
+    /// "share" / "ADS".
+    one: &'static str,
+    /// "a share" / "an ADS".
+    a_one: &'static str,
+    /// "股" / "份美国存托股".
+    zh: &'static str,
+    /// "每股" / "每份美国存托股".
+    zh_each: &'static str,
+}
+
+fn unit(f: &IpoArticleFacts) -> Unit {
+    if f.security == "ads" {
+        Unit {
+            plural: "ADSs",
+            one: "ADS",
+            a_one: "an ADS",
+            zh: "份美国存托股",
+            zh_each: "每份美国存托股",
+        }
+    } else {
+        Unit {
+            plural: "shares",
+            one: "share",
+            a_one: "a share",
+            zh: "股",
+            zh_each: "每股",
+        }
+    }
+}
+
+/// "825,000,000 shares" / "8.25亿股".
+fn count(v: f64, f: &IpoArticleFacts, lang: Lang) -> String {
+    let u = unit(f);
+    match lang {
+        Lang::En => format!("{} {}", grouped(v), u.plural),
+        Lang::Zh => format!("{}{}", zh_count(v), u.zh),
+    }
+}
+
+/// The table's count cells: every digit in both languages.
+fn shares_cell(v: f64, f: &IpoArticleFacts, lang: Lang) -> String {
+    match lang {
+        Lang::En => grouped(v),
+        Lang::Zh => format!("{}{}", grouped(v), unit(f).zh),
+    }
+}
+
+/// A form with what it is: "an amended registration statement (Form
+/// S-1/A)" / "注册声明修订稿（S-1/A表格）".
+fn form_label(form: &str, lang: Lang) -> String {
+    let amended = form.ends_with("/A");
+    match lang {
+        Lang::En if form.starts_with("424") => format!("its final prospectus (Form {form})"),
+        Lang::En if form == "RW" => {
+            "a request to withdraw its registration statement (Form RW)".into()
+        }
+        Lang::En if amended => format!("an amended registration statement (Form {form})"),
+        Lang::En => format!("a registration statement (Form {form})"),
+        Lang::Zh if form.starts_with("424") => format!("最终招股说明书（{form}表格）"),
+        Lang::Zh if form == "RW" => "撤回注册声明的申请（RW表格）".into(),
+        Lang::Zh if amended => format!("注册声明修订稿（{form}表格）"),
+        Lang::Zh => format!("注册声明（{form}表格）"),
+    }
+}
+
+/// The cover's word for the other sellers: an F-1 says shareholders.
+fn sellers(f: &IpoArticleFacts) -> &'static str {
+    let form = f.filing.as_ref().map_or("", |x| x.form.as_str());
+    if form.starts_with("F-") {
+        "selling shareholders"
+    } else {
+        "selling stockholders"
+    }
+}
+
+fn capital(s: &str) -> String {
+    let mut c = s.chars();
+    c.next().map_or(String::new(), |f| {
+        f.to_uppercase().collect::<String>() + c.as_str()
+    })
 }
 
 /// The two lines on the post's flat tile, by code.
@@ -210,764 +328,744 @@ pub fn cover_lines(f: &IpoArticleFacts, lang: Lang) -> [String; 2] {
     [first, second]
 }
 
-// ---------------------------------------------------------------- input
+// ---------------------------------------------------------------- templates
 
-fn means(f: &IpoArticleFacts) -> &'static str {
-    match f.milestone {
-        Milestone::Filed => "The company filed its first public registration statement for the IPO.",
-        Milestone::RangeSet if f.first_range => "The company's registration statement states a price range for the shares for the first time: every earlier registration statement of this IPO was read and stated none.",
-        Milestone::RangeSet => "The company's registration statement states a price range for the shares. Not every earlier registration statement was read, so whether this is the first range is not known: do not call it the first.",
-        Milestone::RangeChanged => "A later amendment changed the price range or the number of shares from the previous range filing (`previous`).",
-        Milestone::Priced => "The company filed its final prospectus with the offering price.",
-        Milestone::Listed => "The shares completed their first regular trading session.",
-        Milestone::Withdrawn => "The company filed to withdraw its registration statement.",
-    }
+/// Sentences in one language, joined as a paragraph.
+fn para(lang: Lang, s: Vec<String>) -> String {
+    s.into_iter()
+        .filter(|x| !x.is_empty())
+        .collect::<Vec<_>>()
+        .join(pick(lang, " ", ""))
 }
 
-fn form_label(form: &str) -> &str {
-    FORMS
-        .iter()
-        .find(|(f, _, _)| *f == form)
-        .map_or(form, |(_, en, _)| en)
-}
-
-/// What the model is given: the filing side of the bundle only, never a
-/// news item (module docs, 1), and not code's derived offering sizes,
-/// which only the table states, with their inputs and definition.
-pub fn model_input(f: &IpoArticleFacts) -> Value {
-    let mut dates: Vec<String> = allowed_dates(f)
-        .into_iter()
-        .map(|d| d.to_string())
-        .collect();
-    dates.sort();
-    json!({
-        "company": f.name,
-        "company_zh": f.name_zh,
-        "symbol": f.symbol,
-        "exchange": f.exchange,
-        "milestone": f.milestone.as_str(),
-        "milestone_means": means(f),
-        "filing": f.filing.as_ref().map(|x| json!({
-            "form": x.form,
-            "form_label": form_label(&x.form),
-            "filing_date": x.filing_date,
-        })),
-        "cover_facts": f.cover.iter().map(|c| json!({
-            "kind": c.kind,
-            "value": c.value_num.map(Value::from).or_else(|| c.value_text.clone().map(Value::from)),
-            "quote": c.quote,
-        })).collect::<Vec<_>>(),
-        "previous": f.previous,
-        "first_session": f.session.as_ref().map(|s| json!({
-            "session_date": s.session_date,
-            "open": s.open,
-            "close": s.close,
-            "volume": s.volume,
-            "offering_price": s.ipo_price,
-            "change_from_offering_price_pct": s.change_pct,
-        })),
-        "filings": f.timeline.iter().map(|t| json!({
-            "form": t.form,
-            "filing_date": t.filing_date,
-        })).collect::<Vec<_>>(),
-        "dates_you_may_write": dates,
-    })
-}
-
-// ---------------------------------------------------------------- allowed
-
-/// The dates the model may write: the filings', the cover's own dates and
-/// the first session's.
-pub fn allowed_dates(f: &IpoArticleFacts) -> HashSet<NaiveDate> {
-    let mut out: HashSet<NaiveDate> = HashSet::new();
-    let mut add = |s: &str| {
-        if let Ok(d) = s.parse() {
-            out.insert(d);
+/// Who sells, as the cover splits it.
+fn split_sentence(f: &IpoArticleFacts, lang: Lang) -> String {
+    let n = name_of(f, lang);
+    let total = f.num("shares_offered");
+    match (f.num("shares_company"), f.num("shares_selling"), lang) {
+        (Some(c), Some(s), Lang::En) if s > 0.0 => format!(
+            "{n} is selling {} and the {} are selling {}.",
+            count(c, f, lang),
+            sellers(f),
+            count(s, f, lang)
+        ),
+        (Some(c), Some(s), Lang::Zh) if s > 0.0 => format!(
+            "其中公司发售{}，售股股东发售{}。",
+            count(c, f, lang),
+            count(s, f, lang)
+        ),
+        (Some(c), _, Lang::En) if Some(c) == total => {
+            format!("{n} is selling all {}.", count(c, f, lang))
         }
-    };
-    add(&f.as_of);
-    if let Some(x) = &f.filing {
-        add(&x.filing_date);
-    }
-    for k in ["cover_date", "prospectus_date", "trading_date"] {
-        if let Some(t) = f.text(k) {
-            add(t);
+        (Some(c), _, Lang::Zh) if Some(c) == total => {
+            format!("全部{}均由公司发售。", count(c, f, lang))
         }
+        (Some(c), _, Lang::En) => format!("{n} is selling {}.", count(c, f, lang)),
+        (Some(c), _, Lang::Zh) => format!("公司发售{}。", count(c, f, lang)),
+        (None, Some(s), Lang::En) => {
+            format!("{} are selling {}.", capital(sellers(f)), count(s, f, lang))
+        }
+        (None, Some(s), Lang::Zh) => format!("售股股东发售{}。", count(s, f, lang)),
+        _ => String::new(),
     }
-    if let Some(p) = &f.previous {
-        add(&p.filing_date);
-    }
-    if let Some(s) = &f.session {
-        add(&s.session_date);
-    }
-    for t in &f.timeline {
-        add(&t.filing_date);
-    }
-    out
 }
 
-/// Every figure the model may write: the cover's numbers, the previous
-/// range and the first session. News figures are not among them, nor
-/// code's derived offering sizes (the table states those, so the model can
-/// never call one proceeds or a valuation).
-pub fn allowed_numbers(f: &IpoArticleFacts) -> Vec<f64> {
-    let mut out: Vec<f64> = f.cover.iter().filter_map(|c| c.value_num).collect();
-    if let Some(p) = &f.previous {
-        out.extend(
-            [p.price_low, p.price_high, p.shares_offered]
-                .into_iter()
-                .flatten(),
-        );
+fn option_sentence(f: &IpoArticleFacts, lang: Lang) -> String {
+    match (f.num("option_shares"), lang) {
+        (Some(o), Lang::En) => format!(
+            "The underwriters have an option to purchase up to {} more.",
+            count(o, f, lang)
+        ),
+        (Some(o), Lang::Zh) => format!("承销商有权额外购买至多{}。", count(o, f, lang)),
+        (None, _) => String::new(),
     }
-    if let Some(s) = &f.session {
-        out.extend(
-            [s.open, Some(s.close), s.volume, s.ipo_price, s.change_pct]
-                .into_iter()
-                .flatten(),
-        );
+}
+
+/// The derived offering size with both inputs and what it is.
+fn size_sentences(f: &IpoArticleFacts, lang: Lang) -> Vec<String> {
+    if f.derived.is_empty() {
+        return vec![];
     }
-    out
-}
-
-const MONTHS: &str = r"(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|June?|July?|Aug(?:ust)?|Sept?(?:ember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)";
-
-fn re(p: &str) -> Regex {
-    Regex::new(p).expect("valid built-in regex")
-}
-
-/// EN "Nov. 10, 2026", "November 10", "10 November 2026"; ZH
-/// "2026年11月10日", "11月10日".
-fn date_re() -> &'static Regex {
-    static R: OnceLock<Regex> = OnceLock::new();
-    R.get_or_init(|| {
-        re(&format!(
-            r"\b(?P<m1>{MONTHS})\.?\s+(?P<d1>\d{{1,2}})(?:st|nd|rd|th)?\b(?:,?\s+(?P<y1>\d{{4}}))?|\b(?P<d2>\d{{1,2}})\s+(?P<m2>{MONTHS})\b(?:,?\s+(?P<y2>\d{{4}}))?|(?:(?P<y3>\d{{4}})\s*年\s*)?(?P<m3>\d{{1,2}})\s*月\s*(?P<d3>\d{{1,2}})\s*[日号]"
-        ))
-    })
-}
-
-fn month_number(m: &str) -> Option<u32> {
-    let m = m.to_ascii_lowercase();
-    [
-        "jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec",
-    ]
-    .iter()
-    .position(|p| m.starts_with(p))
-    .map(|i| i as u32 + 1)
-}
-
-/// Whether a written date is one of `allowed` (a date without a year is
-/// matched on month and day).
-fn date_ok(c: &regex::Captures, allowed: &HashSet<NaiveDate>) -> bool {
-    let get = |k: &str| c.name(k).map(|m| m.as_str());
-    let (m, d, y) = if let Some(m) = get("m1") {
-        (month_number(m), get("d1"), get("y1"))
-    } else if let Some(m) = get("m2") {
-        (month_number(m), get("d2"), get("y2"))
-    } else {
-        (get("m3").and_then(|m| m.parse().ok()), get("d3"), get("y3"))
-    };
-    let (Some(m), Some(d)) = (m, d.and_then(|d| d.parse::<u32>().ok())) else {
-        return false;
-    };
-    let y: Option<i32> = y.and_then(|y| y.parse().ok());
-    allowed
+    let u = unit(f);
+    let parts: Vec<String> = f
+        .derived
         .iter()
-        .any(|a| a.month() == m && a.day() == d && y.is_none_or(|y| y == a.year()))
-}
-
-/// Month names (EN) or "月" (ZH, not "个月") left after the allowed dates
-/// are taken out: a month without its day is a timing claim.
-fn bare_month_re() -> &'static Regex {
-    static R: OnceLock<Regex> = OnceLock::new();
-    R.get_or_init(|| {
-        re(r"\b(?:January|February|March|April|June|July|August|September|October|November|December|Jan|Feb|Mar|Apr|Jun|Jul|Aug|Sept?|Oct|Nov|Dec)\b|\bMay\s+\d|\d+\s*/\s*\d+\s*/\s*\d+|\b\d{4}-\d{2}-\d{2}\b|[^个]月|^月|\d+\s*号")
-    })
-}
-
-// ---------------------------------------------------------------- words
-
-/// English words the model's text may not hold (whole words, any case):
-/// valuation, demand, judgment, inference, prediction and timing, advice,
-/// expectations, attribution. A second line behind the allow-shapes.
-const EN_REFUSED: &str = r"(?i-u)\b(?:valu\w*|worth|rais\w*|proceeds|market\s+cap\w*|capitali[sz]ation|demand\w*|oversubscri\w*|appetite|enthusias\w*|eager\w*|frenz\w*|fervou?r|hype\w*|buzz\w*|hot|hottest|anticipat\w*|closely\s+watched|blockbuster|sought[- ]after|popular\w*|interest\s+(?:from|in|among)|strong\w*|weak\w*|robust|solid|impressive|attractive|cheap\w*|expensive|richly|bargain\w*|premium|discount\w*|bullish|bearish|optimis\w*|pessimis\w*|confiden\w*|risky|success\w*|landmark|historic\w*|record\w*|largest|biggest|ever|most|best|worst|huge|massive|giant|mega\w*|suggest\w*|signal\w*|indicat\w*|sign\s+of|reflect\w*|impl(?:y|ies|ied)|means?\s+that|shows?\s+that|underscor\w*|highlight\w*|points?\s+to|will|would|could|might|may|likely|unlikely|expect\w*|forecast\w*|predict\w*|project(?:s|ed|ion|ions)?|estimat\w*|poised|set\s+to|on\s+track|plans?\s+to|planning|aims?\s+to|intends?\s+to|soon|upcoming|coming|later|eventually|future|today|tomorrow|yesterday|tonight|this\s+(?:week|month|year)|next\s+(?:week|month|year)|monday|tuesday|wednesday|thursday|friday|saturday|sunday|should|ought|recommend\w*|advi[cs]\w*|opportunit\w*|buy\w*|consensus|beat\w*|miss\w*|exceed\w*|surpass\w*|outperform\w*|underperform\w*|according\s+to|report\w*|sources?|people\s+familiar|media|press|rumou?r\w*|analyst\w*|wall\s+street)\b";
-
-/// Chinese words refused in the model's text, as plain text.
-const ZH_REFUSED: &[&str] = &[
-    "估值",
-    "募资",
-    "募集",
-    "融资",
-    "所得款",
-    "净额",
-    "市值",
-    "价值",
-    "值得",
-    "身价",
-    "需求",
-    "认购",
-    "追捧",
-    "热捧",
-    "热门",
-    "火爆",
-    "热度",
-    "抢手",
-    "备受",
-    "瞩目",
-    "关注",
-    "期待",
-    "热情",
-    "狂热",
-    "强劲",
-    "疲软",
-    "稳健",
-    "亮眼",
-    "出色",
-    "强势",
-    "便宜",
-    "昂贵",
-    "溢价",
-    "折价",
-    "看涨",
-    "看跌",
-    "乐观",
-    "悲观",
-    "信心",
-    "成功",
-    "失败",
-    "历史性",
-    "创纪录",
-    "纪录",
-    "最大",
-    "之最",
-    "有史以来",
-    "史上",
-    "巨额",
-    "重磅",
-    "表明",
-    "显示出",
-    "意味着",
-    "反映",
-    "凸显",
-    "预示",
-    "暗示",
-    "标志着",
-    "将于",
-    "将会",
-    "将在",
-    "将以",
-    "将成为",
-    "将要",
-    "即将",
-    "会在",
-    "会于",
-    "会以",
-    "或会",
-    "可能",
-    "或将",
-    "有望",
-    "料将",
-    "预计",
-    "预期",
-    "估计",
-    "预测",
-    "计划于",
-    "计划在",
-    "打算",
-    "拟于",
-    "未来",
-    "今天",
-    "今日",
-    "明天",
-    "昨天",
-    "本周",
-    "下周",
-    "本月",
-    "下月",
-    "今年",
-    "明年",
-    "年内",
-    "年底",
-    "近期",
-    "近日",
-    "日内",
-    "星期",
-    "周一",
-    "周二",
-    "周三",
-    "周四",
-    "周五",
-    "周六",
-    "周日",
-    "建议",
-    "应该",
-    "应当",
-    "机会",
-    "买入",
-    "卖出",
-    "不妨",
-    "共识",
-    "超出",
-    "不及",
-    "好于",
-    "差于",
-    "据报道",
-    "报道",
-    "据悉",
-    "消息人士",
-    "知情人士",
-    "媒体",
-    "传闻",
-    "分析师",
-    "华尔街",
-];
-
-/// Cover terms that hold a refused word but say nothing of the kind.
-const EN_TERMS: &[&str] = &["underwriting discounts", "underwriting discount"];
-
-fn en_refused_re() -> &'static Regex {
-    static R: OnceLock<Regex> = OnceLock::new();
-    R.get_or_init(|| re(EN_REFUSED))
-}
-
-fn refused_word(text: &str) -> Option<String> {
-    let mut t = text.to_lowercase();
-    for term in EN_TERMS {
-        t = t.replace(term, " ");
-    }
-    if let Some(m) = en_refused_re().find(&t) {
-        return Some(m.as_str().to_string());
-    }
-    ZH_REFUSED
-        .iter()
-        .find(|w| text.contains(*w))
-        .map(|w| w.to_string())
-}
-
-/// Words that call something the first.
-fn first_re() -> &'static Regex {
-    static R: OnceLock<Regex> = OnceLock::new();
-    R.get_or_init(|| re(r"(?i-u:\bfirst\b)|首次|第一次|首度|第一份"))
-}
-
-const QUOTE_MARKS: &[char] = &['"', '“', '”', '「', '」', '『', '』', '«', '»', '„'];
-
-// ---------------------------------------------------------------- check
-
-/// The model's text with the allowed dates, the form names, the symbol, the
-/// exchange and the company's names replaced by placeholders, or the first
-/// date that is not allowed.
-fn masked(text: &str, f: &IpoArticleFacts) -> Result<String, String> {
-    let allowed = allowed_dates(f);
-    let mut bad = None;
-    let mut out = date_re()
-        .replace_all(text, |c: &regex::Captures| {
-            if date_ok(c, &allowed) {
-                " ⟨DATE⟩ ".to_string()
-            } else {
-                bad.get_or_insert_with(|| c[0].to_string());
-                c[0].to_string()
-            }
+        .map(|d| match lang {
+            Lang::En => format!(
+                "at {} {}, the {} offered come to {}",
+                price(d.price, lang),
+                u.a_one,
+                count(d.shares, f, lang),
+                money(d.value_usd, lang)
+            ),
+            Lang::Zh => format!(
+                "按{}{}计算，{}的发行规模为{}",
+                u.zh_each,
+                price(d.price, lang),
+                count(d.shares, f, lang),
+                money(d.value_usd, lang)
+            ),
         })
-        .into_owned();
-    if let Some(b) = bad {
-        return Err(format!(
-            "the date {b:?} is not a filing date; write only dates from dates_you_may_write"
-        ));
+        .collect();
+    match lang {
+        Lang::En => vec![
+            format!("{}.", capital(&parts.join("; "))),
+            format!(
+                "These are PreBell's gross figures before underwriting discounts, including any {} sold by {} and excluding the underwriters' option; they are not the company's proceeds.",
+                u.plural,
+                sellers(f)
+            ),
+        ],
+        Lang::Zh => vec![
+            format!("{}。", parts.join("；")),
+            "以上为PreBell按发行数量乘以价格算出的总额，未扣除承销折扣，含售股股东发售的部分（如有），不含承销商超额配售权，并非公司所得款项。".into(),
+        ],
     }
-    // Longest form first, so "S-1/A" is not read as "S-1" and "/A".
-    let mut forms: Vec<&str> = FORMS.iter().map(|(f, _, _)| *f).collect();
-    forms.sort_by_key(|f| std::cmp::Reverse(f.len()));
-    for form in forms {
-        out = replace_word(&out, form, " ⟨FORM⟩ ", true);
-    }
-    if let Some(x) = &f.exchange {
-        out = replace_word(&out, x, " ⟨EXCH⟩ ", false);
-    }
-    for name in ["Nasdaq", "NASDAQ", "New York Stock Exchange", "NYSE"] {
-        out = replace_word(&out, name, " ⟨EXCH⟩ ", true);
-    }
-    if let Some(s) = &f.symbol {
-        out = replace_word(&out, s, " ⟨SYM⟩ ", true);
-    }
-    for n in [Some(f.name.as_str()), f.name_zh.as_deref()]
-        .into_iter()
-        .flatten()
-    {
-        out = replace_word(&out, n, " ⟨NAME⟩ ", true);
-    }
-    Ok(out)
 }
 
-/// `word` replaced where no ASCII letter or digit touches it (`exact`: as
-/// written; else ASCII case-insensitive).
-fn replace_word(text: &str, word: &str, with: &str, exact: bool) -> String {
-    if word.is_empty() {
-        return text.to_string();
+fn exchange_sentence(f: &IpoArticleFacts, lang: Lang) -> String {
+    match (&f.exchange, &f.symbol, lang) {
+        (Some(x), Some(s), Lang::En) => {
+            format!("The filing names the {x} as the exchange and {s} as the symbol.")
+        }
+        (Some(x), Some(s), Lang::Zh) => format!("文件载明的交易所为{x}，股票代码为{s}。"),
+        (Some(x), None, Lang::En) => format!("The filing names the {x} as the exchange."),
+        (Some(x), None, Lang::Zh) => format!("文件载明的交易所为{x}。"),
+        (None, Some(s), Lang::En) => format!("The filing gives {s} as the symbol."),
+        (None, Some(s), Lang::Zh) => format!("文件载明的股票代码为{s}。"),
+        (None, None, _) => String::new(),
     }
-    let (hay, needle) = if exact {
-        (text.to_string(), word.to_string())
+}
+
+/// Who sells, the option, the size and the exchange: the offering terms.
+fn terms(f: &IpoArticleFacts, lang: Lang) -> String {
+    let mut s = vec![split_sentence(f, lang), option_sentence(f, lang)];
+    s.extend(size_sentences(f, lang));
+    s.push(exchange_sentence(f, lang));
+    para(lang, s)
+}
+
+/// "rose from $70.00 to $76.00" / "is unchanged at $70.00", for one end.
+fn moved(old: f64, new: f64, lang: Lang) -> String {
+    match lang {
+        Lang::En if new > old => format!("rose from {} to {}", price(old, lang), price(new, lang)),
+        Lang::En if new < old => format!("fell from {} to {}", price(old, lang), price(new, lang)),
+        Lang::En => format!("is unchanged at {}", price(new, lang)),
+        Lang::Zh if new > old => format!("由{}上调至{}", price(old, lang), price(new, lang)),
+        Lang::Zh if new < old => format!("由{}下调至{}", price(old, lang), price(new, lang)),
+        Lang::Zh => format!("维持{}不变", price(new, lang)),
+    }
+}
+
+/// Where a price sits against a range: only what two numbers prove.
+fn placement(p: f64, lo: f64, hi: f64) -> (&'static str, &'static str) {
+    if p < lo {
+        ("below", "低于")
+    } else if p > hi {
+        ("above", "高于")
     } else {
-        (text.to_ascii_lowercase(), word.to_ascii_lowercase())
-    };
-    let glued = |c: Option<char>| c.is_some_and(|c| c.is_ascii_alphanumeric());
-    let mut out = String::with_capacity(text.len());
-    let mut rest = 0;
-    for (i, _) in hay.match_indices(&needle) {
-        if i < rest
-            || glued(text[..i].chars().next_back())
-            || glued(text[i + word.len()..].chars().next())
-        {
-            continue;
-        }
-        out.push_str(&text[rest..i]);
-        out.push_str(with);
-        rest = i + word.len();
+        ("within", "处于")
     }
-    out.push_str(&text[rest..]);
-    out
 }
 
-/// Words a period may follow without ending a sentence.
-const ABBREVIATIONS: &[&str] = &[
-    "Inc", "Corp", "Co", "Ltd", "No", "vs", "Mr", "Ms", "Dr", "St", "U.S", "U.K", "L.P", "PBC",
-];
-
-/// The sentences of `text` (masked): split after "." "!" "?" and a space,
-/// unless the word before is an abbreviation or an initial; and after
-/// "。" "！" "？" "；" and line breaks.
-fn split_sentences(text: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    let mut cur = String::new();
-    let chars: Vec<char> = text.chars().collect();
-    for (i, &c) in chars.iter().enumerate() {
-        cur.push(c);
-        let next = chars.get(i + 1).copied();
-        let end = match c {
-            '。' | '！' | '？' | '；' | '\n' => true,
-            '.' | '!' | '?' => {
-                let spaced = next.is_none_or(char::is_whitespace);
-                let word: String = cur
-                    .trim_end_matches(['.', '!', '?'])
-                    .rsplit(|ch: char| ch.is_whitespace())
-                    .next()
-                    .unwrap_or("")
-                    .to_string();
-                let abbrev = c == '.'
-                    && (ABBREVIATIONS.contains(&word.as_str())
-                        || (word.chars().count() == 1
-                            && word.chars().all(|ch| ch.is_ascii_uppercase())));
-                spaced && !abbrev
-            }
-            _ => false,
-        };
-        if end {
-            if !cur.trim().is_empty() {
-                out.push(cur.trim().to_string());
-            }
-            cur.clear();
-        }
-    }
-    if !cur.trim().is_empty() {
-        out.push(cur.trim().to_string());
-    }
-    out
-}
-
-/// A sentence states a filing fact: a placeholder for an allowed date, a
-/// form, the symbol or the exchange, or a figure (anything but a bare count
-/// of 0-10; the number check decides whether it is allowed).
-fn anchored(sentence: &str, lang: Lang) -> bool {
-    ["⟨DATE⟩", "⟨FORM⟩", "⟨SYM⟩", "⟨EXCH⟩"]
-        .iter()
-        .any(|p| sentence.contains(p))
-        || extract(sentence, lang).iter().any(|n| {
-            n.is_percent
-                || n.raw.contains('$')
-                || n.multiplier != 1.0
-                || n.decimals > 0
-                || n.value.abs() > 10.0
+/// "for 825,000,000 shares" / "，发行8.25亿股".
+fn for_total(f: &IpoArticleFacts, lang: Lang) -> String {
+    f.num("shares_offered")
+        .map_or(String::new(), |t| match lang {
+            Lang::En => format!(" for {}", count(t, f, lang)),
+            Lang::Zh => format!("，发行{}", count(t, f, lang)),
         })
 }
 
-/// The years the model may write: the allowed dates'.
-fn allowed_years(f: &IpoArticleFacts) -> Vec<f64> {
-    let mut y: Vec<f64> = allowed_dates(f)
-        .iter()
-        .map(|d| f64::from(d.year()))
-        .collect();
-    y.sort_by(f64::total_cmp);
-    y.dedup();
-    y
+/// "Anthropic filed ... with the SEC on Nov 10, 2026."
+fn filed_sentence(n: &str, label: &str, on: &str, lang: Lang) -> String {
+    match lang {
+        Lang::En => format!("{n} filed {label} with the SEC on {on}."),
+        Lang::Zh => format!("{n}于{on}向美国证监会递交{label}。"),
+    }
 }
 
-fn check_numbers(masked_text: &str, f: &IpoArticleFacts, lang: Lang) -> Result<(), Vec<String>> {
-    let any = allowed_numbers(f);
-    let years = allowed_years(f);
-    check_allowed(
-        masked_text,
-        lang,
-        &Allowed {
-            any: &any,
-            years: &years,
-            ..Allowed::default()
+/// The range in a sentence: "a price range of $70.00 to $78.00 per share" /
+/// "每股70.00至78.00美元".
+fn range_words(lo: f64, hi: f64, u: &Unit, lang: Lang) -> String {
+    match lang {
+        Lang::En => format!(
+            "a price range of {} to {} per {}",
+            price(lo, lang),
+            price(hi, lang),
+            u.one
+        ),
+        Lang::Zh => format!("{}{}至{}", u.zh_each, bare(lo), price(hi, lang)),
+    }
+}
+
+struct Text {
+    title: String,
+    summary: String,
+    first: String,
+    second: String,
+}
+
+fn filed(f: &IpoArticleFacts, lang: Lang) -> Text {
+    let n = name_of(f, lang);
+    let (form, date) = filing_parts(f);
+    let on = day(&date, lang);
+    let label = form_label(&form, lang);
+    let drs: Vec<&str> = f
+        .timeline
+        .iter()
+        .filter(|t| t.form.starts_with("DRS") && t.filing_date < date)
+        .map(|t| t.filing_date.as_str())
+        .collect();
+    let follows = match (drs.iter().min(), lang) {
+        (Some(d), Lang::En) => format!(
+            "It follows {} confidential draft registration statements (Form DRS and DRS/A), the first submitted on {}.",
+            drs.len(),
+            day(d, lang)
+        ),
+        (Some(d), Lang::Zh) => format!(
+            "此前公司已保密提交{}份注册草案（DRS及DRS/A表格），首份提交于{}。",
+            drs.len(),
+            day(d, lang)
+        ),
+        (None, _) => String::new(),
+    };
+    let cover = match (f.num("shares_offered"), f.num("price_low"), lang) {
+        (Some(t), None, Lang::En) => {
+            format!("Its cover lists {} and no price range.", count(t, f, lang))
+        }
+        (Some(t), None, Lang::Zh) => {
+            format!("封面列明发行{}，尚未给出价格区间。", count(t, f, lang))
+        }
+        _ => String::new(),
+    };
+    let rest = terms(f, lang);
+    Text {
+        title: match lang {
+            Lang::En => format!("{n} files {form} for IPO"),
+            Lang::Zh => format!("{n}递交{form}申请IPO"),
         },
-    )
-}
-
-/// The figures the headline must hold, and the words one of which must
-/// name the step.
-fn title_needs(f: &IpoArticleFacts, lang: Lang) -> (Vec<f64>, &'static [&'static str], bool) {
-    let zh = lang == Lang::Zh;
-    let range = || {
-        f.num("price_low")
-            .into_iter()
-            .chain(f.num("price_high"))
-            .collect()
-    };
-    match f.milestone {
-        Milestone::Filed => (
-            vec![],
-            if zh {
-                &["提交", "递交", "申请"]
-            } else {
-                &["file", "filing"]
-            },
-            true,
-        ),
-        Milestone::RangeSet | Milestone::RangeChanged => {
-            (range(), if zh { &["区间"] } else { &["range"] }, false)
-        }
-        Milestone::Priced => (
-            f.num("price_final").into_iter().collect(),
-            if zh {
-                &["定价", "发行价"]
-            } else {
-                &["price", "priced", "pricing"]
-            },
-            false,
-        ),
-        Milestone::Listed => (
-            f.session.iter().map(|s| s.close).collect(),
-            if zh {
-                &["上市", "首日", "收盘", "交易"]
-            } else {
-                &[
-                    "trading",
-                    "debut",
-                    "close",
-                    "closed",
-                    "first day",
-                    "first session",
-                ]
-            },
-            false,
-        ),
-        Milestone::Withdrawn => (
-            vec![],
-            if zh {
-                &["撤回", "撤销"]
-            } else {
-                &["withdraw", "withdrew", "withdrawn", "withdrawal"]
-            },
-            false,
-        ),
-    }
-}
-
-/// The headline names the company and states the step with its figure.
-fn check_title(
-    title: &str,
-    masked_title: &str,
-    f: &IpoArticleFacts,
-    lang: Lang,
-) -> Result<(), String> {
-    let width: usize = title
-        .chars()
-        .map(|c| if c.is_ascii() { 1 } else { 2 })
-        .sum();
-    if width > 110 {
-        return Err(format!(
-            "the title is {width} columns wide; keep it to 110 (about 50 Chinese characters)"
-        ));
-    }
-    if !masked_title.contains("⟨NAME⟩") {
-        return Err("the title must name the company".into());
-    }
-    let (figures, words, form) = title_needs(f, lang);
-    let lower = title.to_lowercase();
-    if !words.iter().any(|w| lower.contains(w)) {
-        return Err(format!(
-            "the title must state the step ({}); use one of {words:?}",
-            f.milestone.as_str()
-        ));
-    }
-    if form && !masked_title.contains("⟨FORM⟩") {
-        return Err("the title must name the form filed (such as S-1)".into());
-    }
-    let nums = extract(masked_title, lang);
-    for v in figures {
-        if !nums
-            .iter()
-            .any(|n| crate::numbers::check(&n.raw, lang, &[v]).is_ok() && !n.is_percent)
-        {
-            return Err(format!(
-                "the title must state the step's figure {v} from the facts"
-            ));
-        }
-    }
-    Ok(())
-}
-
-enum Problem {
-    Llm(ProviderError),
-    Malformed(String),
-    Numbers(Vec<String>),
-}
-
-/// The model's text, every check of the module docs. `Ok` is the draft.
-fn check(v: &Value, f: &IpoArticleFacts, lang: Lang) -> Result<Draft, Problem> {
-    let title = one_line(v, "title").map_err(Problem::Malformed)?;
-    let summary = one_line(v, "summary").map_err(Problem::Malformed)?;
-    let items = v
-        .get("sections")
-        .and_then(Value::as_array)
-        .ok_or_else(|| Problem::Malformed("missing \"sections\" array".into()))?;
-    let got: Vec<(String, String)> = items
-        .iter()
-        .map(|s| {
-            let text = |k: &str| s.get(k).and_then(Value::as_str).unwrap_or("").to_string();
-            (
-                text("heading").trim().to_string(),
-                text("markdown").trim().to_string(),
+        summary: match lang {
+            Lang::En => format!(
+                "{n} filed {label} with the SEC on {on}, its first public filing for an initial public offering."
+            ),
+            Lang::Zh => format!(
+                "{n}于{on}向美国证监会递交{label}，这是其首次公开发行的首份公开注册文件。"
+            ),
+        },
+        first: para(lang, vec![filed_sentence(n, &label, &on, lang), follows, cover]),
+        second: if rest.is_empty() {
+            pick(
+                lang,
+                "The IPO page adds the offering terms from this cover once they are read.",
+                "封面上的发行条款读取后，会显示在IPO页面上。",
             )
-        })
-        .collect();
-    let want = headings(lang);
-    let sections = match_sections(got, &want, &want).map_err(Problem::Malformed)?;
-    let (summary_max, section_max) = match lang {
-        Lang::En => (280, 900),
-        Lang::Zh => (140, 450),
-    };
-    let limit = |what: &str, s: &str, max: usize| -> Result<(), Problem> {
-        let n = s.chars().count();
-        if n > max {
-            return Err(Problem::Malformed(format!(
-                "{what} is {n} characters; keep it to {max}"
-            )));
-        }
-        Ok(())
-    };
-    limit("summary", &summary, summary_max)?;
-    for (h, m) in &sections {
-        if m.is_empty() {
-            return Err(Problem::Malformed(format!("section {h:?} is empty")));
-        }
-        reject_markup(&format!("section {h:?}"), m).map_err(Problem::Malformed)?;
-        if m.lines()
-            .any(|l| l.trim_start().starts_with('#') || is_setext_underline(l))
-        {
-            return Err(Problem::Malformed(format!(
-                "section {h:?} contains a heading line"
-            )));
-        }
-        limit(&format!("section {h:?}"), m, section_max)?;
+            .to_string()
+        } else {
+            rest
+        },
     }
+}
 
-    let parts: Vec<(&str, &str)> = [("title", title.as_str()), ("summary", summary.as_str())]
-        .into_iter()
-        .chain(sections.iter().map(|(h, m)| (h.as_str(), m.as_str())))
-        .collect();
-    let outlets: Vec<&str> = OUTLETS
-        .iter()
-        .map(|(_, n)| *n)
-        .chain(f.items.iter().map(|i: &QuotedItem| i.outlet.as_str()))
-        .collect();
-    let mut all_masked = String::new();
-    for (what, text) in &parts {
-        if text.contains(QUOTE_MARKS) {
-            return Err(bad_s(format!(
-                "{what}: do not quote anything or use quotation marks"
-            )));
+fn ranged(f: &IpoArticleFacts, lang: Lang) -> Text {
+    let n = name_of(f, lang);
+    let u = unit(f);
+    let (form, date) = filing_parts(f);
+    let on = day(&date, lang);
+    let label = form_label(&form, lang);
+    let (lo, hi) = f
+        .num("price_low")
+        .zip(f.num("price_high"))
+        .unwrap_or_default();
+    let changed = f.milestone == Milestone::RangeChanged;
+    let prev: Option<&Previous> = f.previous.as_ref().filter(|_| changed);
+    let old = prev.and_then(|p| p.price_low.zip(p.price_high));
+    let range_moved = old.is_some_and(|o| o != (lo, hi));
+    let verb = match old {
+        Some((a, b)) if lo >= a && hi >= b && (lo, hi) != (a, b) => ("raises", "上调"),
+        Some((a, b)) if lo <= a && hi <= b && (lo, hi) != (a, b) => ("lowers", "下调"),
+        _ => ("changes", "调整"),
+    };
+    let total = f.num("shares_offered");
+    let title = match (changed, range_moved || total.is_none(), lang) {
+        (false, _, Lang::En) => format!(
+            "{n} sets IPO price range at ${} to ${} {}",
+            price_short(lo),
+            price_short(hi),
+            u.a_one
+        ),
+        (false, _, Lang::Zh) => format!(
+            "{n}公布IPO价格区间：{}{}至{}美元",
+            u.zh_each,
+            price_short(lo),
+            price_short(hi)
+        ),
+        (true, true, Lang::En) => format!(
+            "{n} {} IPO price range to ${} to ${} {}",
+            verb.0,
+            price_short(lo),
+            price_short(hi),
+            u.a_one
+        ),
+        (true, true, Lang::Zh) => format!(
+            "{n}{}IPO价格区间至{}{}至{}美元",
+            verb.1,
+            u.zh_each,
+            price_short(lo),
+            price_short(hi)
+        ),
+        (true, false, Lang::En) => format!(
+            "{n} changes IPO to {} at ${} to ${} {}",
+            count(total.unwrap_or_default(), f, lang),
+            price_short(lo),
+            price_short(hi),
+            u.a_one
+        ),
+        (true, false, Lang::Zh) => format!(
+            "{n}将IPO发行数量调整为{}，{}{}至{}美元",
+            count(total.unwrap_or_default(), f, lang),
+            u.zh_each,
+            price_short(lo),
+            price_short(hi)
+        ),
+    };
+    let words = range_words(lo, hi, &u, lang);
+    let for_shares = for_total(f, lang);
+    let summary = match (prev, old, lang) {
+        (Some(p), Some((a, b)), Lang::En) => format!(
+            "{n}'s {form} filed {on} sets {words}{for_shares}, against {} to {} in its {} filed {}.",
+            price(a, lang),
+            price(b, lang),
+            p.form,
+            day(&p.filing_date, lang)
+        ),
+        (Some(p), Some((a, b)), Lang::Zh) => format!(
+            "{n}于{on}递交{form}，价格区间为{words}{for_shares}；{}提交的{}所载区间为{}至{}。",
+            day(&p.filing_date, lang),
+            p.form,
+            bare(a),
+            price(b, lang)
+        ),
+        (_, _, Lang::En) => format!("{n} filed {label} on {on} with {words}{for_shares}."),
+        (_, _, Lang::Zh) => {
+            format!("{n}于{on}递交{label}，价格区间为{words}{for_shares}。")
         }
-        if let Some(o) = outlets
-            .iter()
-            .find(|o| replace_word(text, o, "", true) != *text)
-        {
-            return Err(bad_s(format!(
-                "{what}: do not name a news outlet ({o:?}); the page adds reported news itself"
-            )));
-        }
-        let m = masked(text, f).map_err(|e| bad_s(format!("{what}: {e}")))?;
-        if let Some(x) = bare_month_re().find(&m) {
-            return Err(bad_s(format!(
-                "{what}: write a date only as a full date from dates_you_may_write, never a month alone, a weekday or a numeric date (found {:?})",
-                x.as_str().trim()
-            )));
-        }
-        // "The first to state a range" only when the facts prove it.
-        if f.milestone == Milestone::RangeSet && !f.first_range {
-            // "首次公开发行" is the term for an IPO, not a claim.
-            let plain = ["首次公开发行", "首次公开募股", "首次公开招股"]
-                .iter()
-                .fold(m.clone(), |t, ipo| t.replace(ipo, "IPO"));
-            if let Some(x) = first_re().find(&plain) {
-                return Err(bad_s(format!(
-                    "{what}: do not call this range the first ({:?}): not every earlier registration statement was read",
-                    x.as_str()
-                )));
-            }
-        }
-        if let Some(w) = refused_word(&m) {
-            return Err(bad_s(format!(
-                "{what}: do not use {w:?}; state only what the filing says, without valuation, demand, opinion, prediction or timing"
-            )));
-        }
-        let sentences = split_sentences(&m);
-        if !["title", "summary"].contains(what) && sentences.len() > MAX_SENTENCES {
-            return Err(bad_s(format!(
-                "{what} has {} sentences; keep it to {MAX_SENTENCES}",
-                sentences.len()
-            )));
-        }
-        if let Some(s) = sentences.iter().find(|s| !anchored(s, lang)) {
-            return Err(bad_s(format!(
-                "{what}: every sentence must state a fact from the filing with a figure, a filing date, the form, the symbol or the exchange (not so: {s:?})"
-            )));
-        }
-        if *what == "title" {
-            check_title(text, &m, f, lang).map_err(Problem::Malformed)?;
-        }
-        all_masked.push_str(&m);
-        all_masked.push('\n');
+    };
+    let mut s1 = vec![filed_sentence(n, &label, &on, lang)];
+    if !changed && f.first_range {
+        s1.push(
+            pick(
+                lang,
+                "It is the first registration statement for this offering to state a price range.",
+                "这是本次发行中首份载明价格区间的注册声明。",
+            )
+            .to_string(),
+        );
     }
-    check_numbers(&all_masked, f, lang).map_err(|bad| {
-        let mut seen = HashSet::new();
-        Problem::Numbers(bad.into_iter().filter(|n| seen.insert(n.clone())).collect())
-    })?;
-    Ok(Draft {
-        lang,
+    s1.push(match lang {
+        Lang::En => format!("The cover sets {words}{for_shares}."),
+        Lang::Zh => format!("封面将价格区间定为{words}{for_shares}。"),
+    });
+    if let (Some(p), Some((a, b))) = (prev, old) {
+        s1.push(match lang {
+            Lang::En => format!(
+                "Against the {} filed {}, the low end {} and the high end {}.",
+                p.form,
+                day(&p.filing_date, lang),
+                moved(a, lo, lang),
+                moved(b, hi, lang)
+            ),
+            Lang::Zh => format!(
+                "与{}提交的{}相比，区间下限{}，上限{}。",
+                day(&p.filing_date, lang),
+                p.form,
+                moved(a, lo, lang),
+                moved(b, hi, lang)
+            ),
+        });
+    }
+    if let (Some(ps), Some(t)) = (prev.and_then(|p| p.shares_offered), total) {
+        s1.push(match (ps == t, lang) {
+            (true, Lang::En) => {
+                format!("The number offered is unchanged at {}.", count(t, f, lang))
+            }
+            (true, Lang::Zh) => format!("发行数量维持{}不变。", count(t, f, lang)),
+            (false, Lang::En) => format!(
+                "The number offered changed from {} to {}.",
+                count(ps, f, lang),
+                count(t, f, lang)
+            ),
+            (false, Lang::Zh) => format!(
+                "发行数量由{}调整为{}。",
+                count(ps, f, lang),
+                count(t, f, lang)
+            ),
+        });
+    }
+    Text {
         title,
         summary,
-        sections,
-    })
+        first: para(lang, s1),
+        second: terms(f, lang),
+    }
 }
 
-fn bad_s(s: String) -> Problem {
-    Problem::Malformed(s)
+fn priced(f: &IpoArticleFacts, lang: Lang) -> Text {
+    let n = name_of(f, lang);
+    let u = unit(f);
+    let (form, date) = filing_parts(f);
+    let on = day(&date, lang);
+    let label = form_label(&form, lang);
+    let p = f.num("price_final").unwrap_or_default();
+    let for_shares = for_total(f, lang);
+    let mut s1 = vec![filed_sentence(n, &label, &on, lang)];
+    if let Some(d) = f.text("prospectus_date") {
+        s1.push(match lang {
+            Lang::En => format!("The prospectus is dated {}.", day(d, lang)),
+            Lang::Zh => format!("招股说明书日期为{}。", day(d, lang)),
+        });
+    }
+    s1.push(match (f.num("shares_offered"), lang) {
+        (Some(t), Lang::En) => format!(
+            "It prices {} at {} per {}.",
+            count(t, f, lang),
+            price(p, lang),
+            u.one
+        ),
+        (Some(t), Lang::Zh) => format!(
+            "发行价为{}{}，发行{}。",
+            u.zh_each,
+            price(p, lang),
+            count(t, f, lang)
+        ),
+        (None, Lang::En) => format!(
+            "It sets the offering price at {} per {}.",
+            price(p, lang),
+            u.one
+        ),
+        (None, Lang::Zh) => format!("发行价为{}{}。", u.zh_each, price(p, lang)),
+    });
+    if let Some(pr) = &f.previous {
+        if let (Some(lo), Some(hi)) = (pr.price_low, pr.price_high) {
+            let (en, zh) = placement(p, lo, hi);
+            s1.push(match lang {
+                Lang::En => format!(
+                    "That price is {en} the range of {} to {} in the {} filed {}.",
+                    price(lo, lang),
+                    price(hi, lang),
+                    pr.form,
+                    day(&pr.filing_date, lang)
+                ),
+                Lang::Zh => format!(
+                    "该价格{zh}{}提交的{}所载区间{}至{}{}。",
+                    day(&pr.filing_date, lang),
+                    pr.form,
+                    bare(lo),
+                    price(hi, lang),
+                    if en == "within" { "之内" } else { "" }
+                ),
+            });
+        }
+    }
+    if let Some(d) = f.text("trading_date") {
+        s1.push(match lang {
+            Lang::En => format!(
+                "The prospectus gives {} as the first day of trading.",
+                day(d, lang)
+            ),
+            Lang::Zh => format!("招股说明书载明的首个交易日为{}。", day(d, lang)),
+        });
+    }
+    Text {
+        title: match lang {
+            Lang::En => format!("{n} prices IPO at ${} {}", price_short(p), u.a_one),
+            Lang::Zh => format!("{n}完成IPO定价：{}{}美元", u.zh_each, price_short(p)),
+        },
+        summary: match lang {
+            Lang::En => format!(
+                "{n}'s final prospectus (Form {form}) filed {on} sets the offering price at {} per {}{for_shares}.",
+                price(p, lang),
+                u.one
+            ),
+            Lang::Zh => format!(
+                "{n}于{on}递交最终招股说明书（{form}表格），发行价定为{}{}{for_shares}。",
+                u.zh_each,
+                price(p, lang)
+            ),
+        },
+        first: para(lang, s1),
+        second: terms(f, lang),
+    }
 }
 
-// ---------------------------------------------------------------- render
+fn listed(f: &IpoArticleFacts, lang: Lang) -> Text {
+    let n = name_of(f, lang);
+    let u = unit(f);
+    let (form, date) = filing_parts(f);
+    let on = day(&date, lang);
+    let s = f.session.as_ref();
+    let close = s.map_or(0.0, |s| s.close);
+    let when = s.map_or(String::new(), |s| day(&s.session_date, lang));
+    let sym = f.symbol.clone().unwrap_or_else(|| n.to_string());
+    let change = s.and_then(|s| s.ipo_price.zip(s.change_pct));
+    let vs = change.map_or(String::new(), |(ipo, c)| match lang {
+        Lang::En => format!(
+            ", {} {}% from the {} offering price",
+            if c < 0.0 { "down" } else { "up" },
+            trim_dec(c.abs(), 2),
+            price(ipo, lang)
+        ),
+        Lang::Zh => format!(
+            "，较{}的发行价{}{}%",
+            price(ipo, lang),
+            if c < 0.0 { "下跌" } else { "上涨" },
+            trim_dec(c.abs(), 2)
+        ),
+    });
+    let mut s1 = vec![match (&f.exchange, lang) {
+        (Some(x), Lang::En) => format!("{sym} began trading on the {x} on {when}."),
+        (Some(x), Lang::Zh) => format!("{sym}于{when}在{x}开始交易。"),
+        (None, Lang::En) => format!("{sym} began trading on {when}."),
+        (None, Lang::Zh) => format!("{sym}于{when}开始交易。"),
+    }];
+    if let Some(s) = s {
+        let mut bits: Vec<String> = Vec::new();
+        if let Some(o) = s.open {
+            bits.push(match lang {
+                Lang::En => format!("opened at {}", price(o, lang)),
+                Lang::Zh => format!("开盘价为{}", price(o, lang)),
+            });
+        }
+        bits.push(match lang {
+            Lang::En => format!("closed at {}", price(s.close, lang)),
+            Lang::Zh => format!("收盘价为{}", price(s.close, lang)),
+        });
+        if let Some(v) = s.volume {
+            bits.push(match lang {
+                Lang::En => format!("{} traded", count(v, f, lang)),
+                Lang::Zh => format!("成交{}", count(v, f, lang)),
+            });
+        }
+        s1.push(match lang {
+            Lang::En => format!("In that session the {} {}.", u.plural, en_list(&bits)),
+            Lang::Zh => format!("当日{}。", bits.join("，")),
+        });
+        if let Some((ipo, c)) = change {
+            s1.push(match lang {
+                Lang::En => format!(
+                    "The close of {} is {}% {} the offering price of {}.",
+                    price(s.close, lang),
+                    trim_dec(c.abs(), 2),
+                    if c < 0.0 { "below" } else { "above" },
+                    price(ipo, lang)
+                ),
+                Lang::Zh => format!(
+                    "收盘价{}较{}的发行价{}{}%。",
+                    price(s.close, lang),
+                    price(ipo, lang),
+                    if c < 0.0 { "低" } else { "高" },
+                    trim_dec(c.abs(), 2)
+                ),
+            });
+        }
+    }
+    let s2 = match (f.num("price_final"), f.num("price_low").zip(f.num("price_high"))) {
+        (Some(p), _) => {
+            let lead = match (f.num("shares_offered"), lang) {
+                (Some(t), Lang::En) => format!(
+                    "{n}'s final prospectus (Form {form}) filed {on} priced {} at {} per {}.",
+                    count(t, f, lang),
+                    price(p, lang),
+                    u.one
+                ),
+                (Some(t), Lang::Zh) => format!(
+                    "{n}于{on}递交的最终招股说明书（{form}表格）将{}的发行价定为{}{}。",
+                    count(t, f, lang),
+                    u.zh_each,
+                    price(p, lang)
+                ),
+                (None, Lang::En) => format!(
+                    "{n}'s final prospectus (Form {form}) filed {on} set the offering price at {} per {}.",
+                    price(p, lang),
+                    u.one
+                ),
+                (None, Lang::Zh) => format!(
+                    "{n}于{on}递交的最终招股说明书（{form}表格）将发行价定为{}{}。",
+                    u.zh_each,
+                    price(p, lang)
+                ),
+            };
+            para(lang, vec![lead, terms(f, lang)])
+        }
+        (None, Some((lo, hi))) => para(
+            lang,
+            vec![
+                match lang {
+                    Lang::En => format!(
+                        "No final prospectus had been read when this was written. The last registration statement read, Form {form} filed {on}, set {}.",
+                        range_words(lo, hi, &u, lang)
+                    ),
+                    Lang::Zh => format!(
+                        "撰写本文时尚未读取最终招股说明书。最近读取的注册声明为{on}提交的{form}，价格区间为{}。",
+                        range_words(lo, hi, &u, lang)
+                    ),
+                },
+                terms(f, lang),
+            ],
+        ),
+        (None, None) => pick(
+            lang,
+            "No offering terms from the filings were stored when this was written.",
+            "撰写本文时，尚未存储招股文件中的发行条款。",
+        )
+        .to_string(),
+    };
+    Text {
+        title: match lang {
+            Lang::En => format!("{n} closes first trading day at ${}", price_short(close)),
+            Lang::Zh => format!("{n}上市首日收于{}", price(close, lang)),
+        },
+        summary: match lang {
+            Lang::En => format!(
+                "{n} {} closed their first trading session on {when} at {}{vs}.",
+                u.plural,
+                price(close, lang)
+            ),
+            Lang::Zh => format!(
+                "{n}于{when}完成上市首个交易日，收于{}{vs}。",
+                price(close, lang)
+            ),
+        },
+        first: para(lang, s1),
+        second: s2,
+    }
+}
+
+/// "a, b and c".
+fn en_list(bits: &[String]) -> String {
+    match bits {
+        [] => String::new(),
+        [one] => one.clone(),
+        [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
+    }
+}
+
+fn withdrawn(f: &IpoArticleFacts, lang: Lang) -> Text {
+    let n = name_of(f, lang);
+    let u = unit(f);
+    let (_, date) = filing_parts(f);
+    let on = day(&date, lang);
+    let label = form_label("RW", lang);
+    let prev = f.previous.as_ref();
+    let first = para(
+        lang,
+        vec![
+            filed_sentence(n, &label, &on, lang),
+            prev.map_or(String::new(), |p| match lang {
+                Lang::En => format!(
+                    "The latest registration statement on file before it is the {} filed {}.",
+                    p.form,
+                    day(&p.filing_date, lang)
+                ),
+                Lang::Zh => format!(
+                    "此前最近的注册文件为{}提交的{}。",
+                    day(&p.filing_date, lang),
+                    p.form
+                ),
+            }),
+        ],
+    );
+    let second = match prev {
+        Some(p) => match (p.price_low.zip(p.price_high), p.shares_offered, lang) {
+            (Some((lo, hi)), Some(t), Lang::En) => format!(
+                "That filing set {} for {}.",
+                range_words(lo, hi, &u, lang),
+                count(t, f, lang)
+            ),
+            (Some((lo, hi)), Some(t), Lang::Zh) => format!(
+                "该文件的价格区间为{}，发行{}。",
+                range_words(lo, hi, &u, lang),
+                count(t, f, lang)
+            ),
+            (Some((lo, hi)), None, Lang::En) => {
+                format!("That filing set {}.", range_words(lo, hi, &u, lang))
+            }
+            (Some((lo, hi)), None, Lang::Zh) => {
+                format!("该文件的价格区间为{}。", range_words(lo, hi, &u, lang))
+            }
+            (None, Some(t), Lang::En) => format!("That filing listed {}.", count(t, f, lang)),
+            (None, Some(t), Lang::Zh) => format!("该文件列明发行{}。", count(t, f, lang)),
+            (None, None, _) => pick(
+                lang,
+                "No offering terms were stored from it.",
+                "未存储该文件的发行条款。",
+            )
+            .to_string(),
+        },
+        None => pick(
+            lang,
+            "No offering terms were stored for this offering.",
+            "未存储本次发行的条款。",
+        )
+        .to_string(),
+    };
+    Text {
+        title: match lang {
+            Lang::En => format!("{n} withdraws IPO registration"),
+            Lang::Zh => format!("{n}撤回IPO注册"),
+        },
+        summary: match lang {
+            Lang::En => format!(
+                "{n} filed Form RW with the SEC on {on} to withdraw its registration statement."
+            ),
+            Lang::Zh => format!("{n}于{on}向美国证监会递交RW表格，撤回注册声明。"),
+        },
+        first,
+        second,
+    }
+}
+
+fn filing_parts(f: &IpoArticleFacts) -> (String, String) {
+    f.filing
+        .as_ref()
+        .map(|x| (x.form.clone(), x.filing_date.clone()))
+        .unwrap_or_default()
+}
+
+/// The text of one language, by code: title, summary and both sections.
+pub fn write(f: &IpoArticleFacts, lang: Lang) -> Draft {
+    let t = match f.milestone {
+        Milestone::Filed => filed(f, lang),
+        Milestone::RangeSet | Milestone::RangeChanged => ranged(f, lang),
+        Milestone::Priced => priced(f, lang),
+        Milestone::Listed => listed(f, lang),
+        Milestone::Withdrawn => withdrawn(f, lang),
+    };
+    let [h1, h2] = headings(lang);
+    Draft {
+        lang,
+        title: t.title,
+        summary: t.summary,
+        sections: vec![(h1.into(), t.first), (h2.into(), t.second)],
+    }
+}
+
+// ---------------------------------------------------------------- page
 
 fn table(f: &IpoArticleFacts, lang: Lang) -> String {
     let mut rows: Vec<(String, String)> = Vec::new();
-    let l = |en: &str, zh: &str| pick_owned(lang, en, zh);
+    let u = unit(f);
+    let each = |en: &str, zh: &str| match lang {
+        Lang::En => format!("{en} per {}", u.one),
+        Lang::Zh => format!("{}{zh}", u.zh_each),
+    };
+    let l = |en: &str, zh: &str| match lang {
+        Lang::En => en.to_string(),
+        Lang::Zh => zh.to_string(),
+    };
     if let (Some(lo), Some(hi)) = (f.num("price_low"), f.num("price_high")) {
         if f.num("price_final").is_none() {
-            rows.push((
-                l("Price range per share", "每股价格区间"),
-                range(lo, hi, lang),
-            ));
+            rows.push((each("Price range", "价格区间"), range(lo, hi, lang)));
         }
     }
     if let Some(p) = &f.previous {
@@ -984,45 +1082,51 @@ fn table(f: &IpoArticleFacts, lang: Lang) -> String {
         }
         if let Some(s) = p.shares_offered {
             rows.push((
-                l("Previous shares offered", "此前发行股数"),
-                shares(s, lang),
+                l("Previously offered", "此前发行数量"),
+                shares_cell(s, f, lang),
             ));
         }
     }
     if let Some(p) = f.num("price_final") {
-        rows.push((l("Offering price per share", "每股发行价"), price(p, lang)));
+        rows.push((each("Offering price", "发行价"), price(p, lang)));
     }
-    let share_rows = [
-        ("shares_offered", "Shares offered", "发行股数"),
-        ("shares_company", "Sold by the company", "公司发售"),
-        (
-            "shares_selling",
-            "Sold by selling stockholders",
-            "售股股东发售",
-        ),
-    ];
-    for (k, en, zh) in share_rows {
+    let offered = match lang {
+        Lang::En => format!("{} offered", capital(u.plural)),
+        Lang::Zh => "发行数量".into(),
+    };
+    let sold_by = match lang {
+        Lang::En => format!("Sold by {}", sellers(f)),
+        Lang::Zh => "售股股东发售".into(),
+    };
+    for (k, label) in [
+        ("shares_offered", offered),
+        ("shares_company", l("Sold by the company", "公司发售")),
+        ("shares_selling", sold_by),
+    ] {
         if let Some(v) = f.num(k) {
-            rows.push((l(en, zh), shares(v, lang)));
+            rows.push((label, shares_cell(v, f, lang)));
         }
     }
     if let Some(v) = f.num("option_shares") {
         let cell = match lang {
-            Lang::En => format!("{} shares", grouped(v)),
-            Lang::Zh => shares(v, lang),
+            Lang::En => format!("{} {}", grouped(v), u.plural),
+            Lang::Zh => shares_cell(v, f, lang),
         };
         rows.push((l("Underwriters' option", "承销商超额配售权"), cell));
     }
     for d in &f.derived {
         let label = match lang {
             Lang::En => format!(
-                "Offering size at {p} ({} shares × {p})",
+                "Offering size at {p} ({} {} × {p})",
                 grouped(d.shares),
+                u.plural,
                 p = price(d.price, lang)
             ),
             Lang::Zh => format!(
-                "按每股{p}计算的发行规模（{}股×{p}）",
+                "按{}{p}计算的发行规模（{}{}×{p}）",
+                u.zh_each,
                 grouped(d.shares),
+                u.zh,
                 p = price(d.price, lang)
             ),
         };
@@ -1053,7 +1157,7 @@ fn table(f: &IpoArticleFacts, lang: Lang) -> String {
             price(s.close, lang),
         ));
         if let Some(v) = s.volume {
-            rows.push((l("Volume", "成交量"), shares(v, lang)));
+            rows.push((l("Volume", "成交量"), shares_cell(v, f, lang)));
         }
         if let Some(c) = s.change_pct {
             rows.push((
@@ -1076,20 +1180,29 @@ fn table(f: &IpoArticleFacts, lang: Lang) -> String {
     }
     out.push('\n');
     if !f.derived.is_empty() {
-        out.push_str(pick(lang, OFFERING_SIZE_EN, OFFERING_SIZE_ZH));
+        out.push_str(&offering_size_note(f, lang));
         out.push_str("\n\n");
     }
     out
 }
 
-/// What the derived offering size is, under the table wherever it appears.
-pub const OFFERING_SIZE_EN: &str = "Offering size is computed by PreBell from the cover: shares offered (including shares sold by selling stockholders, excluding the underwriters' option) × the price per share, gross, before underwriting discounts. It is not the company's proceeds and not a valuation.";
-pub const OFFERING_SIZE_ZH: &str = "发行规模由PreBell根据招股文件封面计算：发行股数（含售股股东发售的股份，不含承销商超额配售权）×每股价格，为扣除承销折扣前的总额，并非公司所得款项，也不是估值。";
-
-fn pick_owned(lang: Lang, en: &str, zh: &str) -> String {
-    match lang {
-        Lang::En => en.to_string(),
-        Lang::Zh => zh.to_string(),
+/// The definition under the table, in the cover's unit.
+pub fn offering_size_note(f: &IpoArticleFacts, lang: Lang) -> String {
+    match (lang, f.security == "ads") {
+        (Lang::En, true) => OFFERING_SIZE_EN
+            .replace(
+                "shares offered (including shares sold",
+                "ADSs offered (including ADSs sold",
+            )
+            .replace("the price per share", "the price per ADS"),
+        (Lang::Zh, true) => OFFERING_SIZE_ZH
+            .replace(
+                "发行股数（含售股股东发售的股份",
+                "发行的美国存托股数量（含售股股东发售的部分",
+            )
+            .replace("×每股价格", "×每份价格"),
+        (Lang::En, false) => OFFERING_SIZE_EN.to_string(),
+        (Lang::Zh, false) => OFFERING_SIZE_ZH.to_string(),
     }
 }
 
@@ -1099,19 +1212,18 @@ fn item_line(i: &QuotedItem, lang: Lang) -> String {
     let q = escape_md(&i.quote);
     let outlet = escape_md(&i.outlet);
     let when = day(&i.published_on, lang);
+    let url = link_url(&i.url);
     match (lang, i.speaker.as_deref()) {
         (Lang::En, Some(s)) => format!(
-            "- {}, in {outlet}, {when}: \"{q}\" ([article]({}))",
-            escape_md(s),
-            i.url
+            "- {}, in {outlet}, {when}: \"{q}\" ([article]({url}))",
+            escape_md(s)
         ),
-        (Lang::En, None) => format!("- {outlet}, {when}: \"{q}\" ([article]({}))", i.url),
+        (Lang::En, None) => format!("- {outlet}, {when}: \"{q}\" ([article]({url}))"),
         (Lang::Zh, Some(s)) => format!(
-            "- {}（{outlet}，{when}）：“{q}”（[原文]({})）",
-            escape_md(s),
-            i.url
+            "- {}（{outlet}，{when}）：“{q}”（[原文]({url})）",
+            escape_md(s)
         ),
-        (Lang::Zh, None) => format!("- {outlet}（{when}）报道：“{q}”（[原文]({})）", i.url),
+        (Lang::Zh, None) => format!("- {outlet}（{when}）报道：“{q}”（[原文]({url})）"),
     }
 }
 
@@ -1120,8 +1232,8 @@ fn next_step(m: Milestone, lang: Lang) -> &'static str {
     match (m, lang) {
         (Milestone::Filed, Lang::En) => "A price range is usually set in an amended registration statement. Pricing follows, with the offering price stated in a final prospectus, and then the first day of trading.",
         (Milestone::Filed, Lang::Zh) => "价格区间通常在修订后的注册声明中公布。之后是定价，发行价在最终招股说明书中载明，然后开始首日交易。",
-        (Milestone::RangeSet | Milestone::RangeChanged, Lang::En) => "The range can still change in a later amendment. The offering price is set at pricing and stated in a final prospectus (Form 424B4), after which the shares begin trading.",
-        (Milestone::RangeSet | Milestone::RangeChanged, Lang::Zh) => "价格区间仍可能在之后的修订文件中调整。发行价在定价时确定，并在最终招股说明书（424B4表格）中载明，之后股票开始交易。",
+        (Milestone::RangeSet | Milestone::RangeChanged, Lang::En) => "The range can still change in a later amendment. The offering price is set at pricing and stated in a final prospectus (Form 424B4 or 424B1), after which the shares begin trading.",
+        (Milestone::RangeSet | Milestone::RangeChanged, Lang::Zh) => "价格区间仍可能在之后的修订文件中调整。发行价在定价时确定，并在最终招股说明书（424B4或424B1表格）中载明，之后股票开始交易。",
         (Milestone::Priced, Lang::En) => "After pricing, the shares begin trading on the exchange. The IPO page adds the first session's close once it is in.",
         (Milestone::Priced, Lang::Zh) => "定价之后，股票在交易所开始交易。首个交易日收盘后，IPO页面会补充收盘数据。",
         (Milestone::Listed, Lang::En) => "The IPO page keeps the closes of the sessions that follow.",
@@ -1163,12 +1275,14 @@ fn sources(f: &IpoArticleFacts, lang: Lang) -> String {
     let mut out = String::new();
     let filing = |form: &str, date: &str, url: &str| match lang {
         Lang::En => format!(
-            "- [Form {form} filed {} (SEC EDGAR)]({url})\n",
-            day(date, lang)
+            "- [Form {form} filed {} (SEC EDGAR)]({})\n",
+            day(date, lang),
+            link_url(url)
         ),
         Lang::Zh => format!(
-            "- [{form}，提交于{}（SEC EDGAR）]({url})\n",
-            day(date, lang)
+            "- [{form}，提交于{}（SEC EDGAR）]({})\n",
+            day(date, lang),
+            link_url(url)
         ),
     };
     if let Some(x) = &f.filing {
@@ -1179,8 +1293,16 @@ fn sources(f: &IpoArticleFacts, lang: Lang) -> String {
     }
     if let Some(s) = &f.session {
         out.push_str(&match lang {
-            Lang::En => format!("- [{} on Yahoo Finance]({})\n", s.symbol, s.source_url),
-            Lang::Zh => format!("- [{}（Yahoo Finance）]({})\n", s.symbol, s.source_url),
+            Lang::En => format!(
+                "- [{} on Yahoo Finance]({})\n",
+                s.symbol,
+                link_url(&s.source_url)
+            ),
+            Lang::Zh => format!(
+                "- [{}（Yahoo Finance）]({})\n",
+                s.symbol,
+                link_url(&s.source_url)
+            ),
         });
     }
     // One line per article, though several items may quote it.
@@ -1191,15 +1313,18 @@ fn sources(f: &IpoArticleFacts, lang: Lang) -> String {
             "- [{}{sep}{}]({})\n",
             escape_md(&i.outlet),
             day(&i.published_on, lang),
-            i.url
+            link_url(&i.url)
         ));
     }
     out
 }
 
-/// The full article: title, summary, meta line, the figures table, the
-/// model's two sections, the quoted news, the next step, the sources and
-/// the disclaimer.
+const REPORTED: [&str; 2] = ["## What has been reported\n\n", "## 已有报道\n\n"];
+
+/// The full article: title, summary, meta line, the figures table, the two
+/// sections, the quoted news, the next step, the sources and the
+/// disclaimer (kept in the body; the site does not show it, Rick
+/// 2026-11-05).
 pub fn render_markdown(d: &Draft, f: &IpoArticleFacts) -> String {
     let lang = d.lang;
     let mut out = format!(
@@ -1213,11 +1338,7 @@ pub fn render_markdown(d: &Draft, f: &IpoArticleFacts) -> String {
         out.push_str(&format!("## {heading}\n\n{}\n\n", body.trim()));
     }
     if !f.items.is_empty() {
-        out.push_str(pick(
-            lang,
-            "## What has been reported\n\n",
-            "## 已有报道\n\n",
-        ));
+        out.push_str(pick(lang, REPORTED[0], REPORTED[1]));
         for i in &f.items {
             out.push_str(&item_line(i, lang));
             out.push('\n');
@@ -1272,86 +1393,219 @@ pub fn source_rows(f: &IpoArticleFacts) -> Vec<crate::facts::NewsReason> {
     out
 }
 
-// ---------------------------------------------------------------- write
+// ---------------------------------------------------------------- guard
 
-fn prompt(lang: Lang) -> &'static str {
-    pick(lang, PROMPT_EN, PROMPT_ZH)
-}
-
-fn retry_note(p: &Problem) -> String {
-    let line = match p {
-        Problem::Llm(e) => format!("The previous request failed: {e}"),
-        Problem::Malformed(m) => format!("Your reply was invalid: {m}"),
-        Problem::Numbers(n) => format!("These numbers are not in the facts: {}", n.join(", ")),
+/// The dates the page may hold: the filings', the cover's own, the first
+/// session's and the quoted items' publication days.
+pub fn allowed_dates(f: &IpoArticleFacts) -> HashSet<NaiveDate> {
+    let mut out: HashSet<NaiveDate> = HashSet::new();
+    let mut add = |s: &str| {
+        if let Ok(d) = s.parse() {
+            out.insert(d);
+        }
     };
-    format!("\n\nYour previous reply had problems. Fix them and reply again:\n- {line}\n")
-}
-
-fn errors(p: Problem) -> Vec<String> {
-    match p {
-        Problem::Llm(e) => vec![format!("llm: {e}")],
-        Problem::Malformed(m) => vec![format!("draft: {m}")],
-        Problem::Numbers(n) => n
-            .into_iter()
-            .map(|x| format!("number not in the facts: {x}"))
-            .collect(),
+    add(&f.as_of);
+    if let Some(x) = &f.filing {
+        add(&x.filing_date);
     }
-}
-
-/// Checks one reply; `Ok` is the draft and its rendered page.
-pub fn accept(v: &Value, f: &IpoArticleFacts, lang: Lang) -> Result<(Draft, String), Vec<String>> {
-    check(v, f, lang)
-        .map(|d| {
-            let md = render_markdown(&d, f);
-            (d, md)
-        })
-        .map_err(errors)
-}
-
-/// Drafts one language, retrying once with the problems appended. Returns
-/// the draft and its page, or the last attempt's errors.
-pub async fn write(
-    llm: &dyn LlmProvider,
-    f: &IpoArticleFacts,
-    lang: Lang,
-) -> Result<(Draft, String), Vec<String>> {
-    let input = serde_json::to_string_pretty(&model_input(f))
-        .map_err(|e| vec![format!("draft: facts json: {e}")])?;
-    let base = format!("{input}\n\n{}", sections_line(lang, &headings(lang)));
-    let mut user = base.clone();
-    let mut last = None;
-    for _ in 0..ATTEMPTS {
-        let r = llm
-            .complete_json(prompt(lang), &user)
-            .await
-            .map_err(Problem::Llm)
-            .and_then(|v| check(&v, f, lang));
-        match r {
-            Ok(d) => {
-                let md = render_markdown(&d, f);
-                return Ok((d, md));
-            }
-            Err(p) => {
-                user = format!("{base}{}", retry_note(&p));
-                last = Some(p);
-            }
+    for k in ["cover_date", "prospectus_date", "trading_date"] {
+        if let Some(t) = f.text(k) {
+            add(t);
         }
     }
-    Err(last.map(errors).unwrap_or_default())
+    if let Some(p) = &f.previous {
+        add(&p.filing_date);
+    }
+    if let Some(s) = &f.session {
+        add(&s.session_date);
+    }
+    for t in &f.timeline {
+        add(&t.filing_date);
+    }
+    for i in &f.items {
+        add(&i.published_on);
+    }
+    out
+}
+
+/// The figures the page may hold: the cover's, the previous range's, the
+/// first session's and code's derived offering sizes.
+pub fn allowed_numbers(f: &IpoArticleFacts) -> Vec<f64> {
+    let mut out: Vec<f64> = f.cover.iter().filter_map(|c| c.value_num).collect();
+    out.extend(f.derived.iter().map(|d| d.value_usd));
+    if let Some(p) = &f.previous {
+        out.extend(
+            [p.price_low, p.price_high, p.shares_offered]
+                .into_iter()
+                .flatten(),
+        );
+    }
+    if let Some(s) = &f.session {
+        out.extend(
+            [s.open, Some(s.close), s.volume, s.ipo_price, s.change_pct]
+                .into_iter()
+                .flatten(),
+        );
+    }
+    out
+}
+
+const MONTHS: &str = r"(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|June?|July?|Aug(?:ust)?|Sept?(?:ember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)";
+
+fn re(p: &str) -> Regex {
+    Regex::new(p).expect("valid built-in regex")
+}
+
+/// EN "Nov 10, 2026", "November 10"; ZH "2026年11月10日".
+fn date_re() -> &'static Regex {
+    static R: OnceLock<Regex> = OnceLock::new();
+    R.get_or_init(|| {
+        re(&format!(
+            r"(?-u:\b)(?P<m1>{MONTHS})\.?\s+(?P<d1>\d{{1,2}})(?-u:\b)(?:,?\s+(?P<y1>\d{{4}}))?|(?:(?P<y3>\d{{4}})\s*年\s*)?(?P<m3>\d{{1,2}})\s*月\s*(?P<d3>\d{{1,2}})\s*[日号]"
+        ))
+    })
+}
+
+fn month_number(m: &str) -> Option<u32> {
+    let m = m.to_ascii_lowercase();
+    [
+        "jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec",
+    ]
+    .iter()
+    .position(|p| m.starts_with(p))
+    .map(|i| i as u32 + 1)
+}
+
+fn date_ok(c: &regex::Captures, allowed: &HashSet<NaiveDate>) -> bool {
+    let get = |k: &str| c.name(k).map(|m| m.as_str());
+    let (m, d, y) = if let Some(m) = get("m1") {
+        (month_number(m), get("d1"), get("y1"))
+    } else {
+        (get("m3").and_then(|m| m.parse().ok()), get("d3"), get("y3"))
+    };
+    let (Some(m), Some(d)) = (m, d.and_then(|d| d.parse::<u32>().ok())) else {
+        return false;
+    };
+    let y: Option<i32> = y.and_then(|y| y.parse().ok());
+    allowed
+        .iter()
+        .any(|a| a.month() == m && a.day() == d && y.is_none_or(|y| y == a.year()))
+}
+
+/// `word` replaced where no ASCII letter or digit touches it.
+fn replace_word(text: &str, word: &str, with: &str) -> String {
+    if word.is_empty() {
+        return text.to_string();
+    }
+    let glued = |c: Option<char>| c.is_some_and(|c| c.is_ascii_alphanumeric());
+    let mut out = String::with_capacity(text.len());
+    let mut rest = 0;
+    for (i, _) in text.match_indices(word) {
+        if i < rest
+            || glued(text[..i].chars().next_back())
+            || glued(text[i + word.len()..].chars().next())
+        {
+            continue;
+        }
+        out.push_str(&text[rest..i]);
+        out.push_str(with);
+        rest = i + word.len();
+    }
+    out.push_str(&text[rest..]);
+    out
+}
+
+/// Every number and date in `md` outside the quoted news is one the bundle
+/// holds (names, symbols and form names, which hold digits, aside). A
+/// failure is a bug in a template, and nothing is published.
+pub fn verify_page(md: &str, f: &IpoArticleFacts, lang: Lang) -> Result<(), Vec<String>> {
+    let reported = pick(lang, REPORTED[0], REPORTED[1]);
+    let mut text = md.to_string();
+    if let Some(a) = text.find(reported) {
+        let body = a + reported.len();
+        let end = text[body..]
+            .find("\n## ")
+            .map_or(text.len(), |e| body + e + 1);
+        text.replace_range(a..end, "");
+    }
+    let mut text = without_link_targets(&text);
+    let allowed = allowed_dates(f);
+    let mut bad: Vec<String> = date_re()
+        .captures_iter(&text)
+        .filter(|c| !date_ok(c, &allowed))
+        .map(|c| format!("date not in the facts: {}", &c[0]))
+        .collect();
+    text = date_re().replace_all(&text, " ").into_owned();
+    let mut words: Vec<&str> = FORMS.iter().map(|(f, _, _)| *f).collect();
+    words.extend(f.symbol.as_deref());
+    words.push(f.name.as_str());
+    words.extend(f.name_zh.as_deref());
+    words.extend(f.exchange.as_deref());
+    words.sort_by_key(|w| std::cmp::Reverse(w.len()));
+    for w in words {
+        text = replace_word(&text, w, " ");
+    }
+    let years: Vec<f64> = allowed.iter().map(|d| f64::from(d.year())).collect();
+    if let Err(n) = check_allowed(
+        &text,
+        lang,
+        &Allowed {
+            any: &allowed_numbers(f),
+            years: &years,
+            ..Allowed::default()
+        },
+    ) {
+        bad.extend(
+            n.into_iter()
+                .map(|x| format!("number not in the facts: {x}")),
+        );
+    }
+    if bad.is_empty() {
+        Ok(())
+    } else {
+        Err(bad)
+    }
+}
+
+/// The write-up of one language and its page, checked by `verify_page`.
+pub fn render(f: &IpoArticleFacts, lang: Lang) -> Result<(Draft, String), Vec<String>> {
+    let d = write(f, lang);
+    let md = render_markdown(&d, f);
+    verify_page(&md, f, lang)?;
+    Ok((d, md))
 }
 
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+    use crate::ipo::cover::tests::cover_text;
+    use crate::ipo::cover::{
+        extract,
+        tests::{ARM, COREWEAVE, REDDIT, S1A},
+    };
     use crate::ipo::milestone::tests::{anthropic, real_state};
     use crate::ipo::milestone::{bundle, latest};
-    use async_trait::async_trait;
-    use std::cell::RefCell;
+    use crate::ipo::parse_list;
+    use crate::ipo::store::{FactRow, FilingRow, IpoState, ItemRow, TradingRow, WatchRow};
+    use crate::ipo::Tracked;
+
+    const INSTACART: &str = include_str!("../../tests/fixtures/edgar_ipo_424b4_instacart.htm");
+    const CIRCLE: &str = include_str!("../../tests/fixtures/edgar_ipo_424b4_circle.htm");
+    const BIRKENSTOCK: &str = include_str!("../../tests/fixtures/edgar_ipo_f1a_birkenstock.htm");
+
+    fn at() -> chrono::DateTime<chrono::Utc> {
+        "2026-11-11T22:00:00Z".parse().unwrap()
+    }
+
+    pub(crate) fn facts() -> IpoArticleFacts {
+        let st = real_state();
+        let r = latest(&st, "anthropic").unwrap();
+        bundle(&st, &anthropic(), &r, at())
+    }
 
     /// The local preview's write-up: the real state with the made-up news
     /// items of `db/seed-ipo-preview.sql` (FIXTURE rows there).
     pub(crate) fn preview_facts() -> IpoArticleFacts {
-        use crate::ipo::store::ItemRow;
         let mut st = real_state();
         let item = |kind: &str,
                     url: &str,
@@ -1382,107 +1636,39 @@ pub(crate) mod tests {
             item("view", "https://sampletimes.example/2026/11/09/anthropic-ipo-analysts", "Sample Times", "2026-11-09", "The office tools show how far they want to push into software that businesses already pay for", Some("Jane Doe, an analyst at Example Securities"), None, None),
         ];
         let r = latest(&st, "anthropic").unwrap();
-        bundle(
-            &st,
-            &anthropic(),
-            &r,
-            "2026-11-11T22:00:00Z".parse().unwrap(),
-        )
+        bundle(&st, &anthropic(), &r, at())
     }
 
-    /// `db/seed-ipo-articles-preview.sql` and its facts object are what the
-    /// generator renders from the preview state.
-    /// The dry-run example drafts from the seed's facts object without its
-    /// made-up items: that is the bundle the real stored state gives.
-    #[test]
-    fn the_dry_run_bundle_is_the_real_states() {
-        let json = include_str!(
-            "../../../../db/preview-facts/ipo/anthropic/range_set-0001628280-26-072484.json"
-        );
-        let mut stored: IpoArticleFacts = serde_json::from_str(json).unwrap();
-        stored.items.clear();
-        assert_eq!(stored, facts());
+    fn page(f: &IpoArticleFacts, lang: Lang) -> (Draft, String) {
+        render(f, lang).unwrap_or_else(|e| {
+            panic!(
+                "{lang:?} refused: {e:?}\n{}",
+                render_markdown(&write(f, lang), f)
+            )
+        })
     }
 
-    #[test]
-    fn the_preview_seed_is_the_rendered_write_up() {
-        let seed = include_str!("../../../../db/seed-ipo-articles-preview.sql");
-        let json = include_str!(
-            "../../../../db/preview-facts/ipo/anthropic/range_set-0001628280-26-072484.json"
-        );
-        let f = preview_facts();
-        let stored: IpoArticleFacts = serde_json::from_str(json).unwrap();
-        assert_eq!(stored, f);
-        let sql = |s: &str| format!("'{}'", s.replace('\'', "''"));
-        for lang in [Lang::En, Lang::Zh] {
-            let (d, md) = accept(&reply(lang), &f, lang).unwrap();
-            let [a, b] = cover_lines(&f, lang);
-            for part in [d.title, d.summary, md, a, b] {
-                assert!(seed.contains(&sql(&part)), "the seed lacks {part:?}");
-            }
-        }
-        for r in source_rows(&f) {
-            assert!(seed.contains(&format!(
-                "{}, {}, {}",
-                sql(&r.url),
-                sql(&r.title),
-                sql(&r.quote)
-            )));
-        }
-        assert!(seed.contains(&format!("'{}'", f.facts_key())));
+    fn section(d: &Draft, i: usize) -> &str {
+        &d.sections[i].1
     }
 
-    pub(crate) fn facts() -> IpoArticleFacts {
-        let st = real_state();
-        let r = latest(&st, "anthropic").unwrap();
-        bundle(
-            &st,
-            &anthropic(),
-            &r,
-            "2026-11-11T22:00:00Z".parse().unwrap(),
-        )
-    }
-
-    pub(crate) const EN_TITLE: &str = "Anthropic sets IPO price range at $70 to $78 a share";
-    pub(crate) const EN_SUMMARY: &str = "Anthropic's amended S-1 filed Nov. 10, 2026 sets a price range of $70.00 to $78.00 a share for 825,000,000 shares of Class A common stock.";
-    pub(crate) const EN_HAPPENED: &str = "Anthropic filed an amended registration statement (Form S-1/A) on Nov. 10, 2026. Its cover sets a price range of $70.00 to $78.00 per share for 825,000,000 shares of Class A common stock.";
-    pub(crate) const EN_TERMS: &str = "Anthropic is selling 801,351,354 of the shares, and selling stockholders are selling 23,648,646. The underwriters have an option to purchase up to 123,750,000 additional shares. Anthropic has applied to list its Class A common stock on the Nasdaq Global Select Market under the symbol ANT.";
-    pub(crate) const ZH_TITLE: &str = "Anthropic公布IPO价格区间：每股70至78美元";
-    pub(crate) const ZH_SUMMARY: &str = "Anthropic于2026年11月10日提交S-1/A修订文件，将8.25亿股A类普通股的价格区间定为每股70.00至78.00美元。";
-    pub(crate) const ZH_HAPPENED: &str = "Anthropic于2026年11月10日提交了注册声明修订文件（S-1/A）。文件将价格区间定为每股70.00美元至78.00美元，发行8.25亿股A类普通股。";
-    pub(crate) const ZH_TERMS: &str = "其中公司发售801,351,354股，售股股东发售23,648,646股。承销商有权额外购买至多123,750,000股。公司已申请在Nasdaq Global Select Market上市，股票代码为ANT。";
-
-    pub(crate) fn reply(lang: Lang) -> Value {
-        let [h1, h2] = headings(lang);
-        let (t, s, a, b) = match lang {
-            Lang::En => (EN_TITLE, EN_SUMMARY, EN_HAPPENED, EN_TERMS),
-            Lang::Zh => (ZH_TITLE, ZH_SUMMARY, ZH_HAPPENED, ZH_TERMS),
-        };
-        json!({"title": t, "summary": s, "sections": [
-            {"heading": h1, "markdown": a}, {"heading": h2, "markdown": b}]})
-    }
-
-    /// `reply` with one section's text replaced.
-    fn with_section(lang: Lang, i: usize, text: &str) -> Value {
-        let mut v = reply(lang);
-        v["sections"][i]["markdown"] = json!(text);
-        v
-    }
-
-    fn refused(v: &Value, lang: Lang) -> String {
-        match accept(v, &facts(), lang) {
-            Ok((_, md)) => panic!("accepted:\n{md}"),
-            Err(e) => e.join("; "),
-        }
-    }
+    pub(crate) const EN_HAPPENED: &str = "Anthropic filed an amended registration statement (Form S-1/A) with the SEC on Nov 10, 2026. The cover sets a price range of $70.00 to $78.00 per share for 825,000,000 shares.";
+    pub(crate) const EN_TERMS: &str = "Anthropic is selling 801,351,354 shares and the selling stockholders are selling 23,648,646 shares. The underwriters have an option to purchase up to 123,750,000 shares more. At $70.00 a share, the 825,000,000 shares offered come to $57.75 billion; at $78.00 a share, the 825,000,000 shares offered come to $64.35 billion. These are PreBell's gross figures before underwriting discounts, including any shares sold by selling stockholders and excluding the underwriters' option; they are not the company's proceeds. The filing names the Nasdaq Global Select Market as the exchange and ANT as the symbol.";
+    pub(crate) const ZH_HAPPENED: &str = "Anthropic于2026年11月10日向美国证监会递交注册声明修订稿（S-1/A表格）。封面将价格区间定为每股70.00至78.00美元，发行8.25亿股。";
+    pub(crate) const ZH_TERMS: &str = "其中公司发售801,351,354股，售股股东发售23,648,646股。承销商有权额外购买至多123,750,000股。按每股70.00美元计算，8.25亿股的发行规模为577.5亿美元；按每股78.00美元计算，8.25亿股的发行规模为643.5亿美元。以上为PreBell按发行数量乘以价格算出的总额，未扣除承销折扣，含售股股东发售的部分（如有），不含承销商超额配售权，并非公司所得款项。文件载明的交易所为Nasdaq Global Select Market，股票代码为ANT。";
 
     #[test]
-    fn the_real_range_set_drafts_pass_and_render_the_filing_table() {
+    fn the_real_range_set_is_written_by_code_in_both_languages() {
         let f = facts();
-        let (d, md) = accept(&reply(Lang::En), &f, Lang::En).unwrap();
-        assert_eq!(d.title, EN_TITLE);
+        let (d, md) = page(&f, Lang::En);
+        assert_eq!(
+            d.title,
+            "Anthropic sets IPO price range at $70 to $78 a share"
+        );
+        assert_eq!(d.summary, "Anthropic filed an amended registration statement (Form S-1/A) on Nov 10, 2026 with a price range of $70.00 to $78.00 per share for 825,000,000 shares.");
+        assert_eq!(section(&d, 0), EN_HAPPENED);
+        assert_eq!(section(&d, 1), EN_TERMS);
         for want in [
-            "# Anthropic sets IPO price range at $70 to $78 a share\n",
             "**Anthropic (ANT)** · Nasdaq Global Select Market · Form S-1/A filed Nov 10, 2026",
             "| Price range per share | $70.00–$78.00 |",
             "| Shares offered | 825,000,000 |",
@@ -1492,29 +1678,26 @@ pub(crate) mod tests {
             "| Offering size at $70.00 (825,000,000 shares × $70.00) | $57.75 billion |",
             "| Offering size at $78.00 (825,000,000 shares × $78.00) | $64.35 billion |",
             OFFERING_SIZE_EN,
-            "| Exchange and symbol | Nasdaq Global Select Market: ANT |",
-            "## What happened\n\n",
-            "## What the filing says\n\n",
-            "## What comes next\n\nThe range can still change",
-            "- [Form S-1/A filed Nov 10, 2026 (SEC EDGAR)](https://www.sec.gov/Archives/edgar/data/2130357/000162828026072484/0001628280-26-072484-index.htm)",
+            "(Form 424B4 or 424B1)",
             DISCLAIMER_EN,
         ] {
             assert!(md.contains(want), "missing {want:?} in\n{md}");
         }
-        // No news stored: no reported section.
+        // The earlier covers were never read: no claim to be the first range.
+        assert!(!md.contains("first registration statement"));
         assert!(!md.contains("What has been reported"));
-        let (_, zh) = accept(&reply(Lang::Zh), &f, Lang::Zh).unwrap();
+        let (z, zmd) = page(&f, Lang::Zh);
+        assert_eq!(z.title, "Anthropic公布IPO价格区间：每股70至78美元");
+        assert_eq!(z.summary, "Anthropic于2026年11月10日递交注册声明修订稿（S-1/A表格），价格区间为每股70.00至78.00美元，发行8.25亿股。");
+        assert_eq!(section(&z, 0), ZH_HAPPENED);
+        assert_eq!(section(&z, 1), ZH_TERMS);
         for want in [
-            "**Anthropic（ANT）** · Nasdaq Global Select Market · S-1/A 提交于2026年11月10日",
             "| 每股价格区间 | 70.00–78.00美元 |",
             "| 按每股70.00美元计算的发行规模（825,000,000股×70.00美元） | 577.5亿美元 |",
-            "| 按每股78.00美元计算的发行规模（825,000,000股×78.00美元） | 643.5亿美元 |",
             OFFERING_SIZE_ZH,
-            "## 发生了什么\n\n",
-            "## 下一步\n\n",
             DISCLAIMER_ZH,
         ] {
-            assert!(zh.contains(want), "missing {want:?} in\n{zh}");
+            assert!(zmd.contains(want), "missing {want:?} in\n{zmd}");
         }
         assert_eq!(
             cover_lines(&f, Lang::En),
@@ -1523,74 +1706,323 @@ pub(crate) mod tests {
                 "Price range $70.00–$78.00".into()
             ]
         );
-        assert_eq!(cover_lines(&f, Lang::Zh)[1], "价格区间 70.00–78.00美元");
+        // With every earlier cover read and rangeless, it is the first.
+        let mut first = f.clone();
+        first.first_range = true;
+        assert!(section(&write(&first, Lang::En), 0).contains(
+            "It is the first registration statement for this offering to state a price range."
+        ));
     }
 
     #[test]
-    fn the_offering_size_is_codes_with_its_inputs_and_never_the_models() {
-        let f = facts();
-        // Anthropic's cover: 825,000,000 x $70.00 and x $78.00.
-        let d: Vec<_> = f
-            .derived
-            .iter()
-            .map(|d| (d.shares, d.price, d.value_usd))
-            .collect();
-        assert_eq!(d, [(825e6, 70.0, 57.75e9), (825e6, 78.0, 64.35e9)]);
-        assert!(!serde_json::to_string(&model_input(&f))
-            .unwrap()
-            .contains("57750000000"));
-        // The model may not state it at all, so it cannot call it proceeds,
-        // what the company raises, or a valuation.
-        for (lang, text, why) in [
-            (
-                Lang::En,
-                "At $70.00, the S-1/A offering comes to $57.75 billion.",
-                "$57.75 billion",
-            ),
-            (
-                Lang::En,
-                "At $70.00 a share, Anthropic will raise $57.75 billion from the S-1/A offering.",
-                "do not use",
-            ),
-            (
-                Lang::En,
-                "Proceeds to the company at $78.00 under the S-1/A are $64.35 billion.",
-                "do not use",
-            ),
-            (
-                Lang::En,
-                "The S-1/A range of $70.00 to $78.00 raises money for Anthropic.",
-                "do not use",
-            ),
-            (
-                Lang::En,
-                "At $78.00, the S-1/A offering values Anthropic at $64.35 billion.",
-                "do not use",
-            ),
-            (
-                Lang::Zh,
-                "按每股70.00美元计算，S-1/A发行总额为577.5亿美元。",
-                "577.5亿",
-            ),
-            (
-                Lang::Zh,
-                "按每股78.00美元计算，Anthropic通过S-1/A募资643.5亿美元。",
-                "do not use",
-            ),
-            (
-                Lang::Zh,
-                "按S-1/A每股70.00美元计算，公司所得款项为577.5亿美元。",
-                "do not use",
-            ),
+    fn chinese_counts_use_yi_or_wan_only_with_two_decimals() {
+        for (v, want) in [
+            (825e6, "8.25亿"),
+            (801_351_354.0, "801,351,354"),
+            (123_750_000.0, "123,750,000"),
+            (22e6, "2200万"),
+            (36_590_000.0, "3659万"),
+            (910_000.0, "91万"),
+            (23_648_646.0, "23,648,646"),
+            (32_258_064.0, "32,258,064"),
+            (9_550.0, "9,550"),
         ] {
-            let e = refused(&with_section(lang, 0, text), lang);
-            assert!(e.contains(why), "{text}: {e}");
+            assert_eq!(zh_count(v), want, "{v}");
+        }
+    }
+
+    /// A state holding one real cover, read, as the facts source.
+    fn one_cover(
+        slug: &str,
+        cik: u64,
+        name: &str,
+        html: &str,
+        form: &str,
+        date: &str,
+    ) -> (IpoState, Tracked) {
+        let t = parse_list(&format!("{slug}\t{cik}\t{name}\t-\t-\n")).unwrap()[0].clone();
+        let acc = format!("{cik:010}-25-000001");
+        let facts: Vec<FactRow> = extract(&cover_text(html), form)
+            .into_iter()
+            .map(|c| FactRow {
+                accession: acc.clone(),
+                kind: c.kind.into(),
+                slug: slug.into(),
+                value_num: c.num,
+                value_text: c.text,
+                quote: c.quote,
+            })
+            .collect();
+        let text = |k: &str| {
+            facts
+                .iter()
+                .find(|f| f.kind == k)
+                .and_then(|f| f.value_text.clone())
+        };
+        let st = IpoState {
+            watch: vec![WatchRow {
+                slug: slug.into(),
+                cik: cik as i64,
+                name: name.into(),
+                status: "x".into(),
+                exchange: text("exchange"),
+                symbol: text("symbol"),
+                ..Default::default()
+            }],
+            filings: vec![FilingRow {
+                accession: acc.clone(),
+                slug: slug.into(),
+                form: form.into(),
+                filing_date: date.into(),
+                index_url: format!(
+                    "https://www.sec.gov/Archives/edgar/data/{cik}/x/{acc}-index.htm"
+                ),
+                read_state: "read".into(),
+                ..Default::default()
+            }],
+            facts,
+            ..Default::default()
+        };
+        (st, t)
+    }
+
+    fn both(st: &IpoState, t: &Tracked) -> (IpoArticleFacts, String, String) {
+        let r = latest(st, &t.slug).expect("a milestone");
+        let f = bundle(st, t, &r, at());
+        let en = page(&f, Lang::En).1;
+        let zh = page(&f, Lang::Zh).1;
+        (f, en, zh)
+    }
+
+    type Case = (
+        &'static str,
+        &'static str,
+        &'static str,
+        &'static [&'static str],
+        &'static [&'static str],
+    );
+
+    #[test]
+    fn each_real_final_prospectus_is_written_from_its_own_cover() {
+        // (cover, name, date, English sentences, Chinese sentences)
+        let cases: [Case; 5] = [
+            (REDDIT, "Reddit", "2024-03-21", &[
+                "# Reddit prices IPO at $34 a share",
+                "It prices 22,000,000 shares at $34.00 per share.",
+                "Reddit is selling 15,276,527 shares and the selling stockholders are selling 6,723,473 shares.",
+                "The underwriters have an option to purchase up to 3,300,000 shares more.",
+                "At $34.00 a share, the 22,000,000 shares offered come to $748 million.",
+                "The filing names the New York Stock Exchange as the exchange and RDDT as the symbol.",
+            ], &["# Reddit完成IPO定价：每股34美元", "其中公司发售15,276,527股，售股股东发售6,723,473股。", "承销商有权额外购买至多330万股。", "发行价为每股34.00美元，发行2200万股。"]),
+            (ARM, "Arm", "2023-09-14", &[
+                "# Arm prices IPO at $51 an ADS",
+                "It prices 95,500,000 ADSs at $51.00 per ADS.",
+                "The underwriters have an option to purchase up to 7,000,000 ADSs more.",
+                "At $51.00 an ADS, the 95,500,000 ADSs offered come to $4,870.5 million.",
+                "| ADSs offered | 95,500,000 |",
+                "Offering size is computed by PreBell from the cover: ADSs offered (including ADSs sold",
+            ], &["发行价为每份美国存托股51.00美元，发行9550万份美国存托股。", "承销商有权额外购买至多700万份美国存托股。"]),
+            (COREWEAVE, "CoreWeave", "2025-03-28", &[
+                "CoreWeave is selling 36,590,000 shares and the selling stockholders are selling 910,000 shares.",
+                "The filing names the Nasdaq Stock Market as the exchange and CRWV as the symbol.",
+            ], &["其中公司发售3659万股，售股股东发售91万股。"]),
+            (INSTACART, "Instacart", "2023-09-19", &[
+                "Instacart is selling 14,100,000 shares and the selling stockholders are selling 7,900,000 shares.",
+                "The prospectus is dated Sep 18, 2023.",
+            ], &["其中公司发售1410万股，售股股东发售790万股。", "招股说明书日期为2023年9月18日。"]),
+            (CIRCLE, "Circle", "2025-06-05", &[
+                "Circle is selling 14,800,000 shares and the selling stockholders are selling 19,200,000 shares.",
+                "It prices 34,000,000 shares at $31.00 per share.",
+            ], &["发行价为每股31.00美元，发行3400万股。"]),
+        ];
+        for (i, (html, name, date, en_want, zh_want)) in cases.iter().enumerate() {
+            let slug = name.to_lowercase();
+            let (st, t) = one_cover(&slug, 9_000_000 + i as u64, name, html, "424B4", date);
+            let (f, en, zh) = both(&st, &t);
+            assert_eq!(f.milestone, Milestone::Priced, "{name}");
+            for w in en_want.iter() {
+                assert!(en.contains(w), "{name}: missing {w:?} in\n{en}");
+            }
+            for w in zh_want.iter() {
+                assert!(zh.contains(w), "{name}: missing {w:?} in\n{zh}");
+            }
+        }
+        // CoreWeave's cover has no option: no option sentence.
+        let (st, t) = one_cover(
+            "coreweave",
+            9_100_000,
+            "CoreWeave",
+            COREWEAVE,
+            "424B4",
+            "2025-03-28",
+        );
+        let (_, en, zh) = both(&st, &t);
+        assert!(
+            !en.contains("option to purchase") && !zh.contains("额外购买"),
+            "{en}"
+        );
+        // Arm's ADSs: never "shares" in the text.
+        let (st, t) = one_cover("arm", 9_100_001, "Arm", ARM, "424B4", "2023-09-14");
+        let (f, en, _) = both(&st, &t);
+        assert_eq!(f.security, "ads");
+        let body = en.split("## What comes next").next().unwrap();
+        assert!(
+            !body.contains(" shares ") && !body.contains("per share"),
+            "{body}"
+        );
+    }
+
+    #[test]
+    fn birkenstocks_real_f1a_reads_as_a_foreign_filer_range() {
+        let (mut st, t) = one_cover(
+            "birkenstock",
+            1_977_102,
+            "Birkenstock",
+            BIRKENSTOCK,
+            "F-1/A",
+            "2023-10-04",
+        );
+        // Its F-1 was filed first and not read.
+        st.filings.push(FilingRow {
+            accession: "0001977102-23-000001".into(),
+            slug: "birkenstock".into(),
+            form: "F-1".into(),
+            filing_date: "2023-09-12".into(),
+            index_url:
+                "https://www.sec.gov/Archives/edgar/data/1977102/x/0001977102-23-000001-index.htm"
+                    .into(),
+            read_state: "none".into(),
+            ..Default::default()
+        });
+        let (f, en, zh) = both(&st, &t);
+        assert_eq!(f.milestone, Milestone::RangeSet);
+        for w in [
+            "# Birkenstock sets IPO price range at $44 to $49 a share",
+            "Birkenstock filed an amended registration statement (Form F-1/A) with the SEC on Oct 4, 2023.",
+            "The cover sets a price range of $44.00 to $49.00 per share for 32,258,064 shares.",
+            "Birkenstock is selling 10,752,688 shares and the selling shareholders are selling 21,505,376 shares.",
+            "| Sold by selling shareholders | 21,505,376 |",
+            "including any shares sold by selling shareholders",
+        ] {
+            assert!(en.contains(w), "missing {w:?} in\n{en}");
+        }
+        assert!(!en.contains("first registration statement"));
+        for w in [
+            "每股44.00至49.00美元，发行32,258,064股",
+            "其中公司发售10,752,688股，售股股东发售21,505,376股。",
+        ] {
+            assert!(zh.contains(w), "missing {w:?} in\n{zh}");
         }
     }
 
     #[test]
-    fn the_listed_table_carries_the_offering_price_and_size_from_the_final_prospectus() {
-        use crate::ipo::store::{FactRow, FilingRow, TradingRow};
+    fn anthropics_real_cover_extracted_gives_the_same_page() {
+        let (st, t) = one_cover(
+            "anthropic",
+            2130357,
+            "Anthropic",
+            S1A,
+            "S-1/A",
+            "2026-11-10",
+        );
+        let (_, en, _) = both(&st, &t);
+        assert!(en.contains(EN_TERMS), "{en}");
+    }
+
+    fn with_amendment(st: &mut IpoState, acc: &str, date: &str, lo: f64, hi: f64, shares: f64) {
+        st.filings.push(FilingRow {
+            accession: acc.into(),
+            slug: "anthropic".into(),
+            form: "S-1/A".into(),
+            filing_date: date.into(),
+            index_url: format!("https://www.sec.gov/Archives/edgar/data/2130357/x/{acc}-index.htm"),
+            read_state: "read".into(),
+            ..Default::default()
+        });
+        for (k, n, tx) in [
+            ("price_low", Some(lo), None),
+            ("price_high", Some(hi), None),
+            ("shares_offered", Some(shares), None),
+            ("exchange", None, Some("Nasdaq Global Select Market")),
+            ("symbol", None, Some("ANT")),
+        ] {
+            st.facts.push(FactRow {
+                accession: acc.into(),
+                kind: k.into(),
+                slug: "anthropic".into(),
+                value_num: n,
+                value_text: tx.map(Into::into),
+                quote: "q".into(),
+            });
+        }
+    }
+
+    #[test]
+    fn a_changed_range_states_old_and_new_and_which_end_moved() {
+        let mut st = real_state();
+        with_amendment(
+            &mut st,
+            "0001628280-26-080003",
+            "2026-11-14",
+            76.0,
+            80.0,
+            825e6,
+        );
+        let r = latest(&st, "anthropic").unwrap();
+        let f = bundle(&st, &anthropic(), &r, at());
+        let (d, md) = page(&f, Lang::En);
+        assert_eq!(
+            d.title,
+            "Anthropic raises IPO price range to $76 to $80 a share"
+        );
+        assert!(section(&d, 0).contains("Against the S-1/A filed Nov 10, 2026, the low end rose from $70.00 to $76.00 and the high end rose from $78.00 to $80.00. The number offered is unchanged at 825,000,000 shares."), "{md}");
+        assert!(
+            d.summary
+                .contains("against $70.00 to $78.00 in its S-1/A filed Nov 10, 2026"),
+            "{}",
+            d.summary
+        );
+        let (z, _) = page(&f, Lang::Zh);
+        assert!(section(&z, 0).contains("与2026年11月10日提交的S-1/A相比，区间下限由70.00美元上调至76.00美元，上限由78.00美元上调至80.00美元。"), "{}", section(&z, 0));
+        // A wider range, and a smaller deal.
+        let mut st = real_state();
+        with_amendment(
+            &mut st,
+            "0001628280-26-080004",
+            "2026-11-14",
+            68.0,
+            80.0,
+            800e6,
+        );
+        let r = latest(&st, "anthropic").unwrap();
+        let (d, _) = page(&bundle(&st, &anthropic(), &r, at()), Lang::En);
+        assert!(
+            d.title
+                .starts_with("Anthropic changes IPO price range to $68 to $80"),
+            "{}",
+            d.title
+        );
+        assert!(section(&d, 0).contains("the low end fell from $70.00 to $68.00 and the high end rose from $78.00 to $80.00. The number offered changed from 825,000,000 shares to 800,000,000 shares."), "{}", section(&d, 0));
+        // A partial amendment (no exchange or symbol) never becomes the
+        // facts source, so it is no milestone.
+        let mut st = real_state();
+        with_amendment(
+            &mut st,
+            "0001628280-26-080005",
+            "2026-11-14",
+            76.0,
+            80.0,
+            825e6,
+        );
+        st.facts
+            .retain(|x| !(x.accession == "0001628280-26-080005" && x.kind == "symbol"));
+        assert_eq!(
+            latest(&st, "anthropic").unwrap().milestone,
+            Milestone::RangeSet
+        );
+    }
+
+    fn priced_at(p: f64) -> IpoArticleFacts {
         let mut st = real_state();
         let fin = "0001628280-26-090001";
         st.filings.push(FilingRow {
@@ -1598,7 +2030,68 @@ pub(crate) mod tests {
             slug: "anthropic".into(),
             form: "424B4".into(),
             filing_date: "2026-11-18".into(),
-            index_url: "https://www.sec.gov/Archives/edgar/data/2130357/000162828026090001/0001628280-26-090001-index.htm".into(),
+            index_url:
+                "https://www.sec.gov/Archives/edgar/data/2130357/x/0001628280-26-090001-index.htm"
+                    .into(),
+            read_state: "read".into(),
+            ..Default::default()
+        });
+        for (k, v) in [("price_final", p), ("shares_offered", 825e6)] {
+            st.facts.push(FactRow {
+                accession: fin.into(),
+                kind: k.into(),
+                slug: "anthropic".into(),
+                value_num: Some(v),
+                value_text: None,
+                quote: "q".into(),
+            });
+        }
+        let r = latest(&st, "anthropic").unwrap();
+        bundle(&st, &anthropic(), &r, at())
+    }
+
+    #[test]
+    fn a_price_is_placed_only_within_above_or_below_the_last_range() {
+        for (p, en, zh) in [
+            (74.0, "within", "处于"),
+            (70.0, "within", "处于"),
+            (78.0, "within", "处于"),
+            (80.0, "above", "高于"),
+            (65.0, "below", "低于"),
+        ] {
+            let f = priced_at(p);
+            let (d, _) = page(&f, Lang::En);
+            assert!(section(&d, 0).contains(&format!("That price is {en} the range of $70.00 to $78.00 in the S-1/A filed Nov 10, 2026.")), "{}", section(&d, 0));
+            let (z, _) = page(&f, Lang::Zh);
+            assert!(
+                section(&z, 0).contains(&format!(
+                    "该价格{zh}2026年11月10日提交的S-1/A所载区间70.00至78.00美元"
+                )),
+                "{}",
+                section(&z, 0)
+            );
+        }
+        let (d, md) = page(&priced_at(80.0), Lang::En);
+        assert_eq!(d.title, "Anthropic prices IPO at $80 a share");
+        assert!(
+            md.contains("| Offering price per share | $80.00 |")
+                && md.contains(
+                    "At $80.00 a share, the 825,000,000 shares offered come to $66 billion."
+                ),
+            "{md}"
+        );
+    }
+
+    #[test]
+    fn a_listing_states_the_session_with_both_inputs_of_the_change() {
+        let mut st = real_state();
+        let fin = "0001628280-26-090001";
+        st.filings.push(FilingRow {
+            accession: fin.into(),
+            slug: "anthropic".into(),
+            form: "424B4".into(),
+            filing_date: "2026-11-18".into(),
+            index_url: "https://www.sec.gov/x-index.htm".into(),
             read_state: "read".into(),
             ..Default::default()
         });
@@ -1616,418 +2109,170 @@ pub(crate) mod tests {
             slug: "anthropic".into(),
             session_date: "2026-11-19".into(),
             symbol: "ANT".into(),
-            open: None,
+            open: Some(95.0),
             close: 101.5,
             volume: Some(120_000_000),
             ipo_price: Some(80.0),
             change_pct: Some(26.88),
             source_url: "https://finance.yahoo.com/quote/ANT".into(),
-            fetched_at: "2026-11-19T21:30:00Z".into(),
+            fetched_at: "x".into(),
+        });
+        st.watch[0].date_source = Some("trading".into());
+        st.watch[0].date_status = Some("confirmed".into());
+        st.watch[0].first_trade_date = Some("2026-11-19".into());
+        let r = latest(&st, "anthropic").unwrap();
+        assert!(r.confirmed);
+        let f = bundle(&st, &anthropic(), &r, at());
+        let (d, md) = page(&f, Lang::En);
+        assert_eq!(d.title, "Anthropic closes first trading day at $101.50");
+        assert_eq!(d.summary, "Anthropic shares closed their first trading session on Nov 19, 2026 at $101.50, up 26.88% from the $80.00 offering price.");
+        assert_eq!(section(&d, 0), "ANT began trading on the Nasdaq Global Select Market on Nov 19, 2026. In that session the shares opened at $95.00, closed at $101.50 and 120,000,000 shares traded. The close of $101.50 is 26.88% above the offering price of $80.00.");
+        assert!(
+            md.contains("The close of $101.50 is 26.88% above the offering price of $80.00."),
+            "{md}"
+        );
+        assert!(section(&d, 1).starts_with("Anthropic's final prospectus (Form 424B4) filed Nov 18, 2026 priced 825,000,000 shares at $80.00 per share."), "{}", section(&d, 1));
+        let (z, _) = page(&f, Lang::Zh);
+        assert_eq!(z.summary, "Anthropic于2026年11月19日完成上市首个交易日，收于101.50美元，较80.00美元的发行价上涨26.88%。");
+        assert!(
+            section(&z, 0).contains("当日开盘价为95.00美元，收盘价为101.50美元，成交1.2亿股。"),
+            "{}",
+            section(&z, 0)
+        );
+    }
+
+    #[test]
+    fn a_filing_and_a_withdrawal_state_the_filing_and_its_date() {
+        let mut st = real_state();
+        st.filings.retain(|f| f.form != "S-1/A");
+        st.facts.clear();
+        let r = latest(&st, "anthropic").unwrap();
+        assert_eq!(r.milestone, Milestone::Filed);
+        let f = bundle(&st, &anthropic(), &r, at());
+        let (d, _) = page(&f, Lang::En);
+        assert_eq!(d.title, "Anthropic files S-1 for IPO");
+        assert_eq!(section(&d, 0), "Anthropic filed a registration statement (Form S-1) with the SEC on Oct 26, 2026. It follows 6 confidential draft registration statements (Form DRS and DRS/A), the first submitted on Jun 1, 2026.");
+        page(&f, Lang::Zh);
+
+        let mut st = real_state();
+        st.filings.push(FilingRow {
+            accession: "0001628280-26-095555".into(),
+            slug: "anthropic".into(),
+            form: "RW".into(),
+            filing_date: "2026-11-20".into(),
+            index_url: "https://www.sec.gov/x-index.htm".into(),
+            read_state: "none".into(),
+            ..Default::default()
         });
         let r = latest(&st, "anthropic").unwrap();
-        assert_eq!(r.milestone, Milestone::Listed);
-        let f = bundle(
-            &st,
-            &anthropic(),
-            &r,
-            "2026-11-19T22:00:00Z".parse().unwrap(),
-        );
-        // The priced write-up was passed over: the listed one still says
-        // what the offering was priced at, and its size at that price.
-        let md = table(&f, Lang::En);
-        for want in [
-            "| Offering price per share | $80.00 |",
-            "| Offering size at $80.00 (825,000,000 shares × $80.00) | $66 billion |",
-            "| Close, Nov 19, 2026 | $101.50 |",
-            "| Change from the offering price | +26.88% |",
-            OFFERING_SIZE_EN,
-        ] {
-            assert!(md.contains(want), "missing {want:?} in\n{md}");
-        }
-        assert!(!md.contains("Price range per share"), "{md}");
-        let zh = table(&f, Lang::Zh);
-        assert!(
-            zh.contains("| 每股发行价 | 80.00美元 |")
-                && zh.contains("660亿美元")
-                && zh.contains(OFFERING_SIZE_ZH),
-            "{zh}"
-        );
-        assert_eq!(cover_lines(&f, Lang::En)[1], "First day close $101.50");
-    }
-
-    #[test]
-    fn the_prompts_state_the_sentence_rule_the_first_range_and_share_counts() {
-        for want in [
-            "Every sentence must carry a filing fact. Before you write, know this rule:",
-            "A connective or summary sentence without one is rejected. Fold such a thought into the neighbouring sentence that has the figure instead.",
-            "\"It states a price range.\" is rejected; write \"The S-1/A sets a price range of $70.00 to $78.00 a share.\"",
-            "Do not restate a figure only to satisfy the rule",
-            "Call a price range the first only when `milestone_means` says it is.",
-        ] {
-            assert!(PROMPT_EN.contains(want), "{want}");
-        }
-        for want in [
-            "动笔前先记住这条规则",
-            "没有这些内容的过渡句或总结句会被退回。请把这层意思并入相邻、带有数字的那句话。",
-            "不要为了满足这条规则而重复写一个数字",
-            "只有 `milestone_means` 说明这是首次公布价格区间时，才可以说\"首次\"。",
-            "换算成\"亿\"\"万\"后最多两位小数时，才用\"亿\"\"万\"（825000000股写作8.25亿股）；否则写出完整数字并加千位分隔符（801351354股写作801,351,354股，123750000股写作123,750,000股）",
-        ] {
-            assert!(PROMPT_ZH.contains(want), "{want}");
-        }
-        // Anthropic's earlier covers were not read: the model is told so.
-        let means = model_input(&facts())["milestone_means"]
-            .as_str()
-            .unwrap()
-            .to_string();
-        assert!(means.contains("do not call it the first"), "{means}");
-    }
-
-    /// The live dry run of 2026-11-11: one sentence refused, the retry padded.
-    #[test]
-    fn the_dry_runs_sentences_are_checked_as_intended() {
-        let real = facts();
-        let mut proven = facts();
-        proven.first_range = true;
-        let check = |f: &IpoArticleFacts, text: &str| {
-            accept(&with_section(Lang::En, 0, text), f, Lang::En)
-                .map(|_| ())
-                .map_err(|e| e.join("; "))
-        };
-        // Refused as written: no figure (and, here, an unproven "first").
-        let e = check(&proven, "Anthropic filed an S-1/A on Nov. 10, 2026. It states a price range for the first time.").unwrap_err();
-        assert!(e.contains("every sentence must state a fact"), "{e}");
-        assert!(check(&real, "Anthropic filed an S-1/A on Nov. 10, 2026. It states a price range for the first time.").is_err());
-        // The fold the prompt asks for passes where the facts prove "first".
-        let folded = "The filing, the first to state a range, sets it at $70.00 to $78.00 a share.";
-        assert_eq!(check(&proven, folded), Ok(()));
-        // Anthropic's facts do not prove it: "first" is refused, the plain fold passes.
-        let e = check(&real, folded).unwrap_err();
-        assert!(e.contains("do not call this range the first"), "{e}");
-        let e = check(&real, "This is the first filing in the history that states a price range of $70.00 to $78.00.").unwrap_err();
-        assert!(e.contains("first"), "{e}");
+        assert_eq!(r.milestone, Milestone::Withdrawn);
+        let f = bundle(&st, &anthropic(), &r, at());
+        let (d, _) = page(&f, Lang::En);
+        assert_eq!(d.title, "Anthropic withdraws IPO registration");
+        assert_eq!(d.summary, "Anthropic filed Form RW with the SEC on Nov 20, 2026 to withdraw its registration statement.");
         assert_eq!(
-            check(
-                &real,
-                "The S-1/A sets a price range of $70.00 to $78.00 a share."
-            ),
-            Ok(())
+            section(&d, 1),
+            "That filing set a price range of $70.00 to $78.00 per share for 825,000,000 shares."
         );
-        // "首次公开发行" is the name of an IPO, not a claim.
-        let zh = with_section(
-            Lang::Zh,
-            0,
-            "Anthropic于2026年11月10日为首次公开发行提交S-1/A，价格区间为每股70.00至78.00美元。",
-        );
-        assert!(accept(&zh, &real, Lang::Zh).is_ok());
-        let zh = with_section(
-            Lang::Zh,
-            0,
-            "S-1/A首次载明价格区间，为每股70.00至78.00美元。",
-        );
-        assert!(accept(&zh, &real, Lang::Zh).is_err());
-        // The number checker takes both ways of writing a share count; the
-        // prompt asks for the readable one.
-        for text in [
-            "S-1/A载明公司发售8.01351354亿股，售股股东发售2364.8646万股。",
-            "S-1/A载明公司发售801,351,354股，售股股东发售23,648,646股。",
-        ] {
+        let (z, _) = page(&f, Lang::Zh);
+        assert_eq!(z.title, "Anthropic撤回IPO注册");
+    }
+
+    #[test]
+    fn every_number_and_date_outside_the_quotes_comes_from_the_bundle() {
+        let f = preview_facts();
+        for lang in [Lang::En, Lang::Zh] {
+            let md = page(&f, lang).1;
+            assert!(verify_page(&md, &f, lang).is_ok());
+            // The quoted news may hold its own figures and dates.
+            assert!(md.contains("$1.4 trillion") || lang == Lang::Zh);
+            let planted = md.replacen("825,000,000", "826,000,000", 1);
+            assert!(verify_page(&planted, &f, lang).unwrap_err()[0].contains("826,000,000"));
+            let day = pick(lang, "Nov 10, 2026", "2026年11月10日");
+            let other = pick(lang, "Nov 16, 2026", "2026年11月16日");
+            let planted = md.replacen(day, other, 1);
             assert!(
-                accept(&with_section(Lang::Zh, 1, text), &real, Lang::Zh).is_ok(),
-                "{text}"
+                verify_page(&planted, &f, lang).unwrap_err()[0].contains("date"),
+                "{lang:?}"
             );
         }
     }
 
     #[test]
-    fn a_figure_not_in_the_filing_is_refused() {
-        // A valuation-sized number, with no refused word around it.
-        let e = refused(
-            &with_section(
-                Lang::En,
-                0,
-                "At $78.00 a share, the offering comes to $1.4 trillion.",
-            ),
-            Lang::En,
-        );
-        assert!(e.contains("$1.4 trillion"), "{e}");
-        // A share the model computed itself.
-        let e = refused(
-            &with_section(
-                Lang::En,
-                1,
-                "Anthropic sells 97% of the 825,000,000 shares.",
-            ),
-            Lang::En,
-        );
-        assert!(e.contains("97%"), "{e}");
-        let e = refused(
-            &with_section(Lang::Zh, 0, "按每股78.00美元计算，公司整体为1.4万亿美元。"),
-            Lang::Zh,
-        );
-        assert!(e.contains("1.4万亿"), "{e}");
-    }
-
-    #[test]
-    fn every_sentence_must_state_a_filing_fact() {
-        for (lang, text) in [
-            (Lang::En, "Anthropic filed Form S-1/A on Nov. 10, 2026. Investors are lining up for the shares."),
-            (Lang::En, "The S-1/A sets a range of $70.00 to $78.00. It is a big moment for the company."),
-            (Lang::Zh, "Anthropic于2026年11月10日提交S-1/A。投资者踊跃参与。"),
-        ] {
-            let e = refused(&with_section(lang, 0, text), lang);
-            assert!(e.contains("every sentence must state a fact"), "{text}: {e}");
-        }
-    }
-
-    #[test]
-    fn a_date_or_timing_not_from_the_filings_is_refused() {
-        for (lang, text) in [
-            (
-                Lang::En,
-                "Trading begins on Nov. 19, 2026 under the symbol ANT.",
-            ),
-            (
-                Lang::En,
-                "The S-1/A sets a range of $70.00 to $78.00 for a listing in November.",
-            ),
-            (
-                Lang::En,
-                "The S-1/A of 11/10/2026 sets a range of $70.00 to $78.00.",
-            ),
-            (
-                Lang::Zh,
-                "股票于2026年11月19日在Nasdaq Global Select Market开始交易。",
-            ),
-            (
-                Lang::Zh,
-                "S-1/A将价格区间定为每股70.00至78.00美元，11月挂牌。",
-            ),
-            (
-                Lang::Zh,
-                "S-1/A将价格区间定为每股70.00至78.00美元，19号开始交易。",
-            ),
-        ] {
-            let e = refused(&with_section(lang, 0, text), lang);
-            assert!(e.contains("date"), "{text}: {e}");
-        }
-        // A weekday is a timing word.
-        let e = refused(
-            &with_section(
-                Lang::En,
-                0,
-                "The S-1/A sets a range of $70.00 to $78.00; trading starts Thursday.",
-            ),
-            Lang::En,
-        );
-        assert!(e.contains("thursday"), "{e}");
-    }
-
-    #[test]
-    fn news_never_enters_the_models_text() {
-        for (lang, text) in [
-            (
-                Lang::En,
-                "Reuters says the S-1/A range of $70.00 to $78.00 is final.",
-            ),
-            (
-                Lang::En,
-                "The S-1/A lists the symbol \"ANT\" for the Nasdaq Global Select Market.",
-            ),
-            (
-                Lang::Zh,
-                "据彭博，S-1/A将价格区间定为每股70.00至78.00美元。"
-                    .replace("彭博", "Bloomberg")
-                    .as_str(),
-            ),
-            (Lang::Zh, "S-1/A载明股票代码为“ANT”。"),
-        ] {
-            let e = refused(&with_section(lang, 0, text), lang);
-            assert!(
-                e.contains("outlet") || e.contains("quotation"),
-                "{text}: {e}"
-            );
-        }
-    }
-
-    #[test]
-    fn valuation_demand_opinion_and_prediction_words_are_refused() {
-        for (lang, text) in [
-            (
-                Lang::En,
-                "The S-1/A range of $70.00 to $78.00 values the company richly.",
-            ),
-            (
-                Lang::En,
-                "The S-1/A range of $70.00 to $78.00 reflects strong demand.",
-            ),
-            (
-                Lang::En,
-                "The 825,000,000 shares will trade on the Nasdaq Global Select Market.",
-            ),
-            (
-                Lang::En,
-                "The S-1/A range of $70.00 to $78.00 makes this the largest IPO.",
-            ),
-            (
-                Lang::En,
-                "Investors should consider the S-1/A range of $70.00 to $78.00.",
-            ),
-            (
-                Lang::En,
-                "The S-1/A range of $70.00 to $78.00 is above expectations.",
-            ),
-            (
-                Lang::En,
-                "The S-1/A range of $70.00 to $78.00 was reported earlier.",
-            ),
-            (
-                Lang::Zh,
-                "S-1/A的价格区间为每股70.00至78.00美元，认购火爆。",
-            ),
-            (
-                Lang::Zh,
-                "8.25亿股将于Nasdaq Global Select Market挂牌交易。",
-            ),
-            (Lang::Zh, "每股70.00至78.00美元的区间意味着估值很高。"),
-            (
-                Lang::Zh,
-                "S-1/A的区间为每股70.00至78.00美元，值得投资者关注。",
-            ),
-        ] {
-            let e = refused(&with_section(lang, 0, text), lang);
-            assert!(e.contains("do not use"), "{text}: {e}");
-        }
-        // The cover's own term is not a discount claim.
-        let ok = with_section(Lang::En, 1, &format!("{EN_TERMS} The underwriters may purchase the 123,750,000 shares at the offering price less the underwriting discount.").replace(" may purchase", " have an option to purchase"));
-        assert!(accept(&ok, &facts(), Lang::En).is_ok());
-    }
-
-    #[test]
-    fn the_title_states_the_step_with_its_figures() {
-        let mut v = reply(Lang::En);
-        v["title"] = json!("Anthropic files an amended S-1/A");
-        assert!(refused(&v, Lang::En).contains("title must state the step"));
-        v["title"] = json!("Anthropic sets an IPO price range in its S-1/A");
-        assert!(refused(&v, Lang::En).contains("figure"));
-        v["title"] = json!("IPO price range set at $70 to $78 a share");
-        assert!(refused(&v, Lang::En).contains("name the company"));
-        let mut z = reply(Lang::Zh);
-        z["title"] = json!("Anthropic公布IPO价格区间：每股70美元起");
-        assert!(refused(&z, Lang::Zh).contains("figure"));
-    }
-
-    #[test]
-    fn quoted_items_render_word_for_word_and_never_reach_the_model() {
-        let mut f = facts();
-        f.items = vec![
-            QuotedItem {
-                kind: "valuation".into(),
-                outlet: "Reuters".into(),
-                url: "https://www.reuters.com/markets/2026-11-10/anthropic-ipo".into(),
-                published_on: "2026-11-10".into(),
-                quote: "At the top of the price range, Anthropic would be valued at about $1.4 trillion, the people said.".into(),
-                speaker: None,
-                value_usd: Some(1.4e12),
-                value_date: None,
-            },
-            QuotedItem {
-                kind: "view".into(),
-                outlet: "Sample Times".into(),
-                url: "https://sampletimes.example/a".into(),
-                published_on: "2026-11-09".into(),
-                quote: "The office tools show how far they want to push".into(),
-                speaker: Some("Jane Doe, an analyst at Example Securities".into()),
-                value_usd: None,
-                value_date: None,
-            },
-        ];
-        let input = serde_json::to_string(&model_input(&f)).unwrap();
+    fn quoted_items_render_word_for_word_with_safe_links() {
+        let mut f = preview_facts();
+        f.items[0].url = "https://www.reuters.com/a (b)/c".into();
+        let (_, md) = page(&f, Lang::En);
         assert!(
-            !input.contains("1.4 trillion")
-                && !input.contains("Reuters")
-                && !input.contains("office tools"),
-            "{input}"
+            md.contains("([article](https://www.reuters.com/a%20%28b%29/c))"),
+            "{md}"
         );
-        let (_, md) = accept(&reply(Lang::En), &f, Lang::En).unwrap();
-        assert!(md.contains("## What has been reported\n\n- Reuters, Nov 10, 2026: \"At the top of the price range, Anthropic would be valued at about $1.4 trillion, the people said.\" ([article](https://www.reuters.com/markets/2026-11-10/anthropic-ipo))"), "{md}");
-        assert!(md.contains("- Jane Doe, an analyst at Example Securities, in Sample Times, Nov 9, 2026: \"The office tools show how far they want to push\""), "{md}");
-        assert!(md.contains(
-            "- [Reuters, Nov 10, 2026](https://www.reuters.com/markets/2026-11-10/anthropic-ipo)"
-        ));
-        let (_, zh) = accept(&reply(Lang::Zh), &f, Lang::Zh).unwrap();
-        assert!(zh.contains("## 已有报道\n\n- Reuters（2026年11月10日）报道：“At the top of the price range, Anthropic would be valued at about $1.4 trillion, the people said.”（[原文](https://www.reuters.com/markets/2026-11-10/anthropic-ipo)）"), "{zh}");
-        // The model may still not write the outlet's figure itself.
-        let e = refused(
-            &with_section(
-                Lang::En,
-                0,
-                "At $78.00, the S-1/A range comes to $1.4 trillion.",
-            ),
-            Lang::En,
-        );
-        assert!(e.contains("1.4"), "{e}");
-        let rows = source_rows(&f);
-        assert_eq!(rows.len(), 3);
-        assert_eq!(rows[1].quote, f.items[0].quote);
+        assert!(md.contains("- Jane Doe, an analyst at Example Securities, in Sample Times, Nov 9, 2026: \"The office tools show how far they want to push into software that businesses already pay for\""));
+        let (_, zh) = page(&f, Lang::Zh);
+        assert!(zh.contains("- Example News（2026年11月10日）报道：“At the top of the range the offering would value Anthropic at roughly $1.4 trillion, the people said.”"), "{zh}");
+        let rows = source_rows(&preview_facts());
+        assert_eq!(rows.len(), 6);
     }
 
     #[test]
-    fn sentences_split_on_ends_not_on_decimals_or_abbreviations() {
-        assert_eq!(
-            split_sentences(
-                "Anthropic, PBC. sells at $70.00 a share. U.S. listing on ⟨EXCH⟩. Then 2"
-            ),
-            [
-                "Anthropic, PBC. sells at $70.00 a share.",
-                "U.S. listing on ⟨EXCH⟩.",
-                "Then 2"
-            ]
-        );
-        assert_eq!(split_sentences("甲。乙；丙"), ["甲。", "乙；", "丙"]);
+    fn a_reported_date_is_not_quoted_once_a_filing_or_trading_date_exists() {
+        let mut st = real_state();
+        st.items = preview_facts()
+            .items
+            .iter()
+            .map(|i| ItemRow {
+                slug: "anthropic".into(),
+                kind: i.kind.clone(),
+                url: i.url.clone(),
+                outlet: i.outlet.clone(),
+                published_on: i.published_on.clone(),
+                quote: i.quote.clone(),
+                speaker: i.speaker.clone(),
+                value_usd: i.value_usd,
+                value_date: i.value_date.clone(),
+                found_at: "2026-11-11T15:00:00Z".into(),
+                ..Default::default()
+            })
+            .collect();
+        let r = latest(&st, "anthropic").unwrap();
+        assert!(bundle(&st, &anthropic(), &r, at())
+            .items
+            .iter()
+            .any(|i| i.kind == "expected_date"));
+        st.watch[0].date_source = Some("filing".into());
+        assert!(!bundle(&st, &anthropic(), &r, at())
+            .items
+            .iter()
+            .any(|i| i.kind == "expected_date"));
     }
 
-    struct FakeLlm {
-        replies: RefCell<Vec<Value>>,
-        prompts: RefCell<Vec<String>>,
-    }
-    #[async_trait(?Send)]
-    impl LlmProvider for FakeLlm {
-        async fn complete_json(&self, _: &str, user: &str) -> Result<Value, ProviderError> {
-            self.prompts.borrow_mut().push(user.into());
-            let mut r = self.replies.borrow_mut();
-            assert!(!r.is_empty(), "unexpected extra LLM call");
-            Ok(r.remove(0))
+    /// `db/seed-ipo-articles-preview.sql` and its facts object are what the
+    /// generator renders from the preview state.
+    #[test]
+    fn the_preview_seed_is_the_rendered_write_up() {
+        let seed = include_str!("../../../../db/seed-ipo-articles-preview.sql");
+        let json = include_str!(
+            "../../../../db/preview-facts/ipo/anthropic/range_set-0001628280-26-072484.json"
+        );
+        let f = preview_facts();
+        let stored: IpoArticleFacts = serde_json::from_str(json).unwrap();
+        assert_eq!(stored, f);
+        let sql = |s: &str| format!("'{}'", s.replace('\'', "''"));
+        for lang in [Lang::En, Lang::Zh] {
+            let (d, md) = page(&f, lang);
+            let [a, b] = cover_lines(&f, lang);
+            for part in [d.title, d.summary, md, a, b] {
+                assert!(seed.contains(&sql(&part)), "the seed lacks {part:?}");
+            }
         }
-    }
-
-    #[tokio::test]
-    async fn a_refused_draft_is_retried_once_with_the_reason() {
-        let bad = with_section(
-            Lang::En,
-            0,
-            "The S-1/A range of $70.00 to $78.00 reflects strong demand.",
-        );
-        let l = FakeLlm {
-            replies: RefCell::new(vec![bad.clone(), reply(Lang::En)]),
-            prompts: RefCell::new(vec![]),
-        };
-        assert!(write(&l, &facts(), Lang::En).await.is_ok());
-        let p = l.prompts.borrow().clone();
-        assert!(
-            p[1].contains("Your reply was invalid") && p[1].contains("reflects"),
-            "{}",
-            p[1]
-        );
-        assert!(
-            p[0].contains("\"dates_you_may_write\"")
-                && p[0].contains("Write exactly these sections")
-        );
-        let l = FakeLlm {
-            replies: RefCell::new(vec![bad.clone(), bad]),
-            prompts: RefCell::new(vec![]),
-        };
-        let e = write(&l, &facts(), Lang::En).await.unwrap_err();
-        assert!(e[0].starts_with("draft: "), "{e:?}");
+        for r in source_rows(&f) {
+            assert!(seed.contains(&format!(
+                "{}, {}, {}",
+                sql(&r.url),
+                sql(&r.title),
+                sql(&r.quote)
+            )));
+        }
+        assert!(seed.contains(&format!("'{}'", f.facts_key())));
     }
 }

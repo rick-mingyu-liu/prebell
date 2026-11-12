@@ -442,25 +442,8 @@ impl JobRunner for Runner<'_> {
                         false,
                     ));
                 }
-                // A config error marks the hour first, so polls do not
-                // queue the message again every 5 minutes.
-                let llm = match self.llm(&[]) {
-                    Ok(l) => l,
-                    Err(e) => {
-                        ipo::article::mark_idle(store, t).await?;
-                        return Err(e);
-                    }
-                };
-                match ipo::article::article_tick(
-                    t,
-                    ipo::tracked(),
-                    store,
-                    store,
-                    store,
-                    llm.as_ref(),
-                )
-                .await
-                {
+                // Written by code: no model, no provider config.
+                match ipo::article::article_tick(t, ipo::tracked(), store, store, store).await {
                     // No share card: an IPO write-up has no cover image.
                     Ok(o) => Ok((format!("{o:?}"), false)),
                     // Before migration 0009: the hour is already marked.
