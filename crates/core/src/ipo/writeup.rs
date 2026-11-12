@@ -212,10 +212,11 @@ pub fn cover_lines(f: &IpoArticleFacts, lang: Lang) -> [String; 2] {
 
 // ---------------------------------------------------------------- input
 
-fn means(m: Milestone) -> &'static str {
-    match m {
+fn means(f: &IpoArticleFacts) -> &'static str {
+    match f.milestone {
         Milestone::Filed => "The company filed its first public registration statement for the IPO.",
-        Milestone::RangeSet => "The company's registration statement states a price range for the shares for the first time.",
+        Milestone::RangeSet if f.first_range => "The company's registration statement states a price range for the shares for the first time: every earlier registration statement of this IPO was read and stated none.",
+        Milestone::RangeSet => "The company's registration statement states a price range for the shares. Not every earlier registration statement was read, so whether this is the first range is not known: do not call it the first.",
         Milestone::RangeChanged => "A later amendment changed the price range or the number of shares from the previous range filing (`previous`).",
         Milestone::Priced => "The company filed its final prospectus with the offering price.",
         Milestone::Listed => "The shares completed their first regular trading session.",
@@ -245,7 +246,7 @@ pub fn model_input(f: &IpoArticleFacts) -> Value {
         "symbol": f.symbol,
         "exchange": f.exchange,
         "milestone": f.milestone.as_str(),
-        "milestone_means": means(f.milestone),
+        "milestone_means": means(f),
         "filing": f.filing.as_ref().map(|x| json!({
             "form": x.form,
             "form_label": form_label(&x.form),
@@ -541,6 +542,12 @@ fn refused_word(text: &str) -> Option<String> {
         .iter()
         .find(|w| text.contains(*w))
         .map(|w| w.to_string())
+}
+
+/// Words that call something the first.
+fn first_re() -> &'static Regex {
+    static R: OnceLock<Regex> = OnceLock::new();
+    R.get_or_init(|| re(r"(?i-u:\bfirst\b)|首次|第一次|首度|第一份"))
 }
 
 const QUOTE_MARKS: &[char] = &['"', '“', '”', '「', '」', '『', '』', '«', '»', '„'];
@@ -897,6 +904,19 @@ fn check(v: &Value, f: &IpoArticleFacts, lang: Lang) -> Result<Draft, Problem> {
                 "{what}: write a date only as a full date from dates_you_may_write, never a month alone, a weekday or a numeric date (found {:?})",
                 x.as_str().trim()
             )));
+        }
+        // "The first to state a range" only when the facts prove it.
+        if f.milestone == Milestone::RangeSet && !f.first_range {
+            // "首次公开发行" is the term for an IPO, not a claim.
+            let plain = ["首次公开发行", "首次公开募股", "首次公开招股"]
+                .iter()
+                .fold(m.clone(), |t, ipo| t.replace(ipo, "IPO"));
+            if let Some(x) = first_re().find(&plain) {
+                return Err(bad_s(format!(
+                    "{what}: do not call this range the first ({:?}): not every earlier registration statement was read",
+                    x.as_str()
+                )));
+            }
         }
         if let Some(w) = refused_word(&m) {
             return Err(bad_s(format!(
@@ -1633,6 +1653,90 @@ pub(crate) mod tests {
             "{zh}"
         );
         assert_eq!(cover_lines(&f, Lang::En)[1], "First day close $101.50");
+    }
+
+    #[test]
+    fn the_prompts_state_the_sentence_rule_the_first_range_and_share_counts() {
+        for want in [
+            "Every sentence must carry a filing fact. Before you write, know this rule:",
+            "A connective or summary sentence without one is rejected. Fold such a thought into the neighbouring sentence that has the figure instead.",
+            "\"It states a price range.\" is rejected; write \"The S-1/A sets a price range of $70.00 to $78.00 a share.\"",
+            "Do not restate a figure only to satisfy the rule",
+            "Call a price range the first only when `milestone_means` says it is.",
+        ] {
+            assert!(PROMPT_EN.contains(want), "{want}");
+        }
+        for want in [
+            "动笔前先记住这条规则",
+            "没有这些内容的过渡句或总结句会被退回。请把这层意思并入相邻、带有数字的那句话。",
+            "不要为了满足这条规则而重复写一个数字",
+            "只有 `milestone_means` 说明这是首次公布价格区间时，才可以说\"首次\"。",
+            "换算成\"亿\"\"万\"后最多两位小数时，才用\"亿\"\"万\"（825000000股写作8.25亿股）；否则写出完整数字并加千位分隔符（801351354股写作801,351,354股，123750000股写作123,750,000股）",
+        ] {
+            assert!(PROMPT_ZH.contains(want), "{want}");
+        }
+        // Anthropic's earlier covers were not read: the model is told so.
+        let means = model_input(&facts())["milestone_means"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert!(means.contains("do not call it the first"), "{means}");
+    }
+
+    /// The live dry run of 2026-11-11: one sentence refused, the retry padded.
+    #[test]
+    fn the_dry_runs_sentences_are_checked_as_intended() {
+        let real = facts();
+        let mut proven = facts();
+        proven.first_range = true;
+        let check = |f: &IpoArticleFacts, text: &str| {
+            accept(&with_section(Lang::En, 0, text), f, Lang::En)
+                .map(|_| ())
+                .map_err(|e| e.join("; "))
+        };
+        // Refused as written: no figure (and, here, an unproven "first").
+        let e = check(&proven, "Anthropic filed an S-1/A on Nov. 10, 2026. It states a price range for the first time.").unwrap_err();
+        assert!(e.contains("every sentence must state a fact"), "{e}");
+        assert!(check(&real, "Anthropic filed an S-1/A on Nov. 10, 2026. It states a price range for the first time.").is_err());
+        // The fold the prompt asks for passes where the facts prove "first".
+        let folded = "The filing, the first to state a range, sets it at $70.00 to $78.00 a share.";
+        assert_eq!(check(&proven, folded), Ok(()));
+        // Anthropic's facts do not prove it: "first" is refused, the plain fold passes.
+        let e = check(&real, folded).unwrap_err();
+        assert!(e.contains("do not call this range the first"), "{e}");
+        let e = check(&real, "This is the first filing in the history that states a price range of $70.00 to $78.00.").unwrap_err();
+        assert!(e.contains("first"), "{e}");
+        assert_eq!(
+            check(
+                &real,
+                "The S-1/A sets a price range of $70.00 to $78.00 a share."
+            ),
+            Ok(())
+        );
+        // "首次公开发行" is the name of an IPO, not a claim.
+        let zh = with_section(
+            Lang::Zh,
+            0,
+            "Anthropic于2026年11月10日为首次公开发行提交S-1/A，价格区间为每股70.00至78.00美元。",
+        );
+        assert!(accept(&zh, &real, Lang::Zh).is_ok());
+        let zh = with_section(
+            Lang::Zh,
+            0,
+            "S-1/A首次载明价格区间，为每股70.00至78.00美元。",
+        );
+        assert!(accept(&zh, &real, Lang::Zh).is_err());
+        // The number checker takes both ways of writing a share count; the
+        // prompt asks for the readable one.
+        for text in [
+            "S-1/A载明公司发售8.01351354亿股，售股股东发售2364.8646万股。",
+            "S-1/A载明公司发售801,351,354股，售股股东发售23,648,646股。",
+        ] {
+            assert!(
+                accept(&with_section(Lang::Zh, 1, text), &real, Lang::Zh).is_ok(),
+                "{text}"
+            );
+        }
     }
 
     #[test]

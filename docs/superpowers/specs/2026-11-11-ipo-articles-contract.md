@@ -143,6 +143,7 @@ JSON, written once before the post. Every field is present; a field without data
 | `filing` | object or null | The filing whose cover facts are in `cover`: `accession`, `form`, `filing_date`, `index_url`, `doc_url` (string or null). For `listed` the IPO's facts source at the time; for `withdrawn` the `RW`. |
 | `cover` | list | `ipo_facts` rows of `filing`: `kind`, `value_num` (number or null), `value_text` (string or null), `quote` (the cover's sentence). Kinds as in the IPO watch contract. |
 | `previous` | object or null | `range_changed` only: the previous range milestone's `accession`, `form`, `filing_date`, `index_url`, `price_low`, `price_high`, `shares_offered` (numbers or null). |
+| `first_range` | boolean | `range_set` only: true when every earlier registration statement of the IPO was read and none stated a range, so this is provably the first range; false otherwise (Anthropic: false, its S-1 and first S-1/A were never read). The write-up calls the range the first only when true. |
 | `derived` | list | The only figures PreBell computes, by code (the model is never given them and may not write them): `kind` (`offering_at_low`, `offering_at_high`, `offering_at_price`), `value_usd`, its two inputs `shares` (the cover's `shares_offered`: sold by the company and by selling stockholders, excluding the underwriters' option) and `price` (the range's low or high end, or the offering price once priced), and `definition` (the sentence below). Nothing else is ever multiplied, never shares outstanding. Show it only with both inputs and as the gross offering size: never as the company's proceeds, what it raises, or a valuation. `definition`: "Gross offering size at this price: shares offered on the cover (sold by the company and by selling stockholders, excluding the underwriters' option) x the price per share, before underwriting discounts. Not the company's proceeds and not a valuation." |
 | `session` | object or null | `listed` only: the first session's `session_date`, `symbol`, `open` (number or null), `close`, `volume` (number or null), `ipo_price` (number or null), `change_pct` (number or null), `source_url`, as stored in `ipo_trading`. |
 | `timeline` | list | The IPO's filings, newest first: `accession`, `form`, `filing_date`, `index_url`. |
@@ -177,6 +178,7 @@ Example (Anthropic, `range_set`, the real cover facts of the S-1/A of 2026-11-10
     {"kind": "shares_offered", "value_num": 825000000.0, "value_text": null, "quote": "Class A Common Stock 825,000,000 Shares"}
   ],
   "previous": null,
+  "first_range": false,
   "derived": [
     {"kind": "offering_at_low", "value_usd": 57750000000.0, "shares": 825000000.0, "price": 70.0, "definition": "Gross offering size at this price: ..."},
     {"kind": "offering_at_high", "value_usd": 64350000000.0, "shares": 825000000.0, "price": 78.0, "definition": "Gross offering size at this price: ..."}

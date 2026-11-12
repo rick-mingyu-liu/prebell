@@ -277,6 +277,13 @@ pub struct IpoArticleFacts {
     pub filing: Option<FilingRef>,
     pub cover: Vec<CoverFact>,
     pub previous: Option<Previous>,
+    /// `range_set` only: every earlier registration statement of the IPO
+    /// was read and none stated a range, so this cover is provably the
+    /// first with one. False when an earlier cover was not read (Anthropic's
+    /// S-1 of 2026-10-26 and S-1/A of 2026-11-02 were not): then the
+    /// write-up may not call the range the first.
+    #[serde(default)]
+    pub first_range: bool,
     pub derived: Vec<Derived>,
     pub session: Option<Session>,
     pub timeline: Vec<TimelineEntry>,
@@ -424,6 +431,13 @@ pub fn bundle(st: &IpoState, t: &Tracked, r: &Reached, now: DateTime<Utc>) -> Ip
 
     let all = st.filings_of(&t.slug);
     let mut timeline: Vec<&FilingRow> = considered(&all, first_session(st, &t.slug));
+    let first_range = r.milestone == Milestone::RangeSet
+        && r.filing.as_ref().is_some_and(|f| {
+            timeline
+                .iter()
+                .filter(|x| is_registration(&x.form) && order(x) < order(f))
+                .all(|x| x.read_state == "read")
+        });
     timeline.sort_by(|a, b| order(b).cmp(&order(a)));
     let mut items: Vec<&ItemRow> = st.items_of(&t.slug);
     items.sort_by(|a, b| (&b.published_on, &b.found_at).cmp(&(&a.published_on, &a.found_at)));
@@ -443,6 +457,7 @@ pub fn bundle(st: &IpoState, t: &Tracked, r: &Reached, now: DateTime<Utc>) -> Ip
         filing: r.filing.as_ref().map(filing_ref),
         cover,
         previous,
+        first_range,
         derived,
         session,
         timeline: timeline
@@ -595,6 +610,13 @@ pub(crate) mod tests {
         assert_eq!(b.timeline.len(), 9);
         assert_eq!(b.timeline[0].accession, ACC);
         assert!(b.items.is_empty() && b.previous.is_none() && b.session.is_none());
+        // The S-1 and the first S-1/A were not read: not provably the first range.
+        assert!(!b.first_range);
+        let mut all_read = st.clone();
+        for f in &mut all_read.filings {
+            f.read_state = "read".into();
+        }
+        assert!(bundle(&all_read, &anthropic(), &r, utc("2026-11-11T22:00:00Z")).first_range);
         assert_eq!(
             b.facts_key(),
             "ipo/anthropic/range_set-0001628280-26-072484.json"

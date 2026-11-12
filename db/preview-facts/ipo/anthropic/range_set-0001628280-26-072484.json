@@ -74,6 +74,7 @@
     }
   ],
   "previous": null,
+  "first_range": false,
   "derived": [
     {
       "kind": "offering_at_low",
