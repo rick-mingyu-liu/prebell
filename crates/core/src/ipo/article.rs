@@ -93,6 +93,13 @@ pub async fn follow_up(
     Ok(due.then_some(EarningsStep::IpoArticle))
 }
 
+/// Marks the pass done for `IDLE_MINUTES` without reading anything: for a
+/// config error, so polls do not queue the message every 5 minutes.
+pub async fn mark_idle(es: &dyn EarningsStore, now: DateTime<Utc>) -> Result<(), String> {
+    let next = now + Duration::minutes(IDLE_MINUTES);
+    es.kv_set(KV_NEXT, &iso(next), &iso(now)).await
+}
+
 /// What one message did, per run key.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct ArticleOutcome {

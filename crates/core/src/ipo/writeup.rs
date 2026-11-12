@@ -1010,7 +1010,7 @@ fn table(f: &IpoArticleFacts, lang: Lang) -> String {
     if let (Some(x), Some(s)) = (&f.exchange, &f.symbol) {
         rows.push((
             l("Exchange and symbol", "交易所与代码"),
-            format!("{}: {s}", escape_md(x)),
+            format!("{}{}{s}", escape_md(x), pick(lang, ": ", "：")),
         ));
     }
     if let Some(s) = &f.session {
@@ -1154,9 +1154,12 @@ fn sources(f: &IpoArticleFacts, lang: Lang) -> String {
             Lang::Zh => format!("- [{}（Yahoo Finance）]({})\n", s.symbol, s.source_url),
         });
     }
-    for i in &f.items {
+    // One line per article, though several items may quote it.
+    let mut seen = HashSet::new();
+    for i in f.items.iter().filter(|i| seen.insert(i.url.as_str())) {
+        let sep = pick(lang, ", ", "，");
         out.push_str(&format!(
-            "- [{}, {}]({})\n",
+            "- [{}{sep}{}]({})\n",
             escape_md(&i.outlet),
             day(&i.published_on, lang),
             i.url
@@ -1315,6 +1318,78 @@ pub(crate) mod tests {
     use crate::ipo::milestone::{bundle, latest};
     use async_trait::async_trait;
     use std::cell::RefCell;
+
+    /// The local preview's write-up: the real state with the made-up news
+    /// items of `db/seed-ipo-preview.sql` (FIXTURE rows there).
+    pub(crate) fn preview_facts() -> IpoArticleFacts {
+        use crate::ipo::store::ItemRow;
+        let mut st = real_state();
+        let item = |kind: &str,
+                    url: &str,
+                    outlet: &str,
+                    on: &str,
+                    quote: &str,
+                    speaker: Option<&str>,
+                    usd: Option<f64>,
+                    date: Option<&str>| ItemRow {
+            slug: "anthropic".into(),
+            kind: kind.into(),
+            url: url.into(),
+            outlet: outlet.into(),
+            published_on: on.into(),
+            quote: quote.into(),
+            statement_en: None,
+            statement_zh: None,
+            speaker: speaker.map(Into::into),
+            value_usd: usd,
+            value_date: date.map(Into::into),
+            found_at: "2026-11-11T15:00:00Z".into(),
+        };
+        st.items = vec![
+            item("valuation", "https://sampletimes.example/2026/10/12/anthropic-valuation", "Sample Times", "2026-10-12", "Bankers have pitched a valuation of about $2 trillion for the listing, according to people familiar with the talks.", None, Some(2e12), None),
+            item("valuation", "https://news.example/2026/11/10/anthropic-ipo-pricing", "Example News", "2026-11-10", "At the top of the range the offering would value Anthropic at roughly $1.4 trillion, the people said.", None, Some(1.4e12), None),
+            item("expected_date", "https://news.example/2026/11/10/anthropic-ipo-pricing", "Example News", "2026-11-10", "Anthropic is expected to begin trading on the Nasdaq on Nov. 16 after pricing its shares on Nov. 13, the people said.", None, None, Some("2026-11-16")),
+            item("company_move", "https://sampletimes.example/2026/11/04/anthropic-office-apps", "Sample Times", "2026-11-04", "Anthropic on Tuesday released AI versions of word-processing and presentation software for business customers.", None, None, None),
+            item("view", "https://sampletimes.example/2026/11/09/anthropic-ipo-analysts", "Sample Times", "2026-11-09", "The office tools show how far they want to push into software that businesses already pay for", Some("Jane Doe, an analyst at Example Securities"), None, None),
+        ];
+        let r = latest(&st, "anthropic").unwrap();
+        bundle(
+            &st,
+            &anthropic(),
+            &r,
+            "2026-11-11T22:00:00Z".parse().unwrap(),
+        )
+    }
+
+    /// `db/seed-ipo-articles-preview.sql` and its facts object are what the
+    /// generator renders from the preview state.
+    #[test]
+    fn the_preview_seed_is_the_rendered_write_up() {
+        let seed = include_str!("../../../../db/seed-ipo-articles-preview.sql");
+        let json = include_str!(
+            "../../../../db/preview-facts/ipo/anthropic/range_set-0001628280-26-072484.json"
+        );
+        let f = preview_facts();
+        let stored: IpoArticleFacts = serde_json::from_str(json).unwrap();
+        assert_eq!(stored, f);
+        let sql = |s: &str| format!("'{}'", s.replace('\'', "''"));
+        for lang in [Lang::En, Lang::Zh] {
+            let (d, md) = accept(&reply(lang), &f, lang).unwrap();
+            let [a, b] = cover_lines(&f, lang);
+            for part in [d.title, d.summary, md, a, b] {
+                assert!(seed.contains(&sql(&part)), "the seed lacks {part:?}");
+            }
+        }
+        for r in source_rows(&f) {
+            assert!(seed.contains(&format!(
+                "{}, {}, {}",
+                sql(&r.url),
+                sql(&r.title),
+                sql(&r.quote)
+            )));
+        }
+        assert!(seed.contains(&format!("'{}'", f.facts_key())));
+    }
 
     pub(crate) fn facts() -> IpoArticleFacts {
         let st = real_state();
