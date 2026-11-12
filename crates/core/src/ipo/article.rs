@@ -766,7 +766,7 @@ mod tests {
         let mut en = reply(Lang::En);
         en["title"] = json!("Anthropic prices its IPO at $80.00 a share");
         en["summary"] = json!("Anthropic's final prospectus (Form 424B4) filed Nov. 18, 2026 sets the offering price at $80.00 a share.");
-        en["sections"][0]["markdown"] = json!("Anthropic filed its final prospectus (Form 424B4) on Nov. 18, 2026. It prices 825,000,000 shares at $80.00 each, which come to $66 billion.");
+        en["sections"][0]["markdown"] = json!("Anthropic filed its final prospectus (Form 424B4) on Nov. 18, 2026. It prices 825,000,000 shares at $80.00 each.");
         en["sections"][1]["markdown"] =
             json!("The 424B4 lists the Nasdaq Global Select Market and the symbol ANT.");
         let mut zh = reply(Lang::Zh);
@@ -774,9 +774,8 @@ mod tests {
         zh["summary"] = json!(
             "Anthropic于2026年11月18日提交最终招股说明书（424B4），发行价定为每股80.00美元。"
         );
-        zh["sections"][0]["markdown"] = json!(
-            "Anthropic于2026年11月18日提交424B4。8.25亿股的发行价为每股80.00美元，合计660亿美元。"
-        );
+        zh["sections"][0]["markdown"] =
+            json!("Anthropic于2026年11月18日提交424B4。8.25亿股的发行价为每股80.00美元。");
         zh["sections"][1]["markdown"] =
             json!("424B4载明的交易所为Nasdaq Global Select Market，股票代码为ANT。");
         let l = llm(vec![en, zh]);

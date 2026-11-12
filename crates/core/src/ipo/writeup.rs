@@ -11,8 +11,11 @@
 //!    the code-rendered "What has been reported" list, word for word and
 //!    attributed. The model may not write quotation marks or an outlet name.
 //! 2. **Every number is a filing figure** (cover facts, the previous range,
-//!    the first session, and code's derived offering sizes), within the
-//!    number checker's rounding, and every year one of the filing dates'.
+//!    the first session), within the number checker's rounding, and every
+//!    year one of the filing dates'. Code's derived offering sizes are not
+//!    among them: only the table states those, each with its two inputs and
+//!    the definition under it (`OFFERING_SIZE_EN`), so the model can never
+//!    call one proceeds, what the company raises, or a valuation.
 //! 3. **Every date is a filing date** (`allowed_dates`), and a month is
 //!    written only inside such a date: no "in November", no weekday, no
 //!    "next week".
@@ -22,8 +25,10 @@
 //! 5. **The headline states the milestone with its figure** (`check_title`).
 //!
 //! Then the word lists (`EN_REFUSED`, `ZH_REFUSED`) refuse valuation,
-//! demand, judgment, inference, prediction, advice, expectations and
-//! attribution words in the model's text.
+//! proceeds and raising, demand, judgment, inference, prediction, advice,
+//! expectations and attribution words in the model's text. The English list
+//! is ASCII-only (`(?i-u)`): its Unicode build took about 65 ms in a debug
+//! test build, against the Free plan's 10 ms of CPU.
 
 use std::collections::HashSet;
 use std::sync::OnceLock;
@@ -226,19 +231,9 @@ fn form_label(form: &str) -> &str {
 }
 
 /// What the model is given: the filing side of the bundle only, never a
-/// news item (module docs, 1).
+/// news item (module docs, 1), and not code's derived offering sizes,
+/// which only the table states, with their inputs and definition.
 pub fn model_input(f: &IpoArticleFacts) -> Value {
-    let derived: Vec<Value> = f
-        .derived
-        .iter()
-        .map(|d| {
-            json!({
-                "kind": d.kind,
-                "value_usd": d.value_usd,
-                "computed_as": format!("{} shares offered × ${:.2} per share", grouped(d.shares), d.price),
-            })
-        })
-        .collect();
     let mut dates: Vec<String> = allowed_dates(f)
         .into_iter()
         .map(|d| d.to_string())
@@ -262,7 +257,6 @@ pub fn model_input(f: &IpoArticleFacts) -> Value {
             "quote": c.quote,
         })).collect::<Vec<_>>(),
         "previous": f.previous,
-        "derived": derived,
         "first_session": f.session.as_ref().map(|s| json!({
             "session_date": s.session_date,
             "open": s.open,
@@ -312,11 +306,11 @@ pub fn allowed_dates(f: &IpoArticleFacts) -> HashSet<NaiveDate> {
 }
 
 /// Every figure the model may write: the cover's numbers, the previous
-/// range, the first session and code's derived figures. News figures are
-/// not among them.
+/// range and the first session. News figures are not among them, nor
+/// code's derived offering sizes (the table states those, so the model can
+/// never call one proceeds or a valuation).
 pub fn allowed_numbers(f: &IpoArticleFacts) -> Vec<f64> {
     let mut out: Vec<f64> = f.cover.iter().filter_map(|c| c.value_num).collect();
-    out.extend(f.derived.iter().map(|d| d.value_usd));
     if let Some(p) = &f.previous {
         out.extend(
             [p.price_low, p.price_high, p.shares_offered]
@@ -395,11 +389,16 @@ fn bare_month_re() -> &'static Regex {
 /// English words the model's text may not hold (whole words, any case):
 /// valuation, demand, judgment, inference, prediction and timing, advice,
 /// expectations, attribution. A second line behind the allow-shapes.
-const EN_REFUSED: &str = r"(?i)\b(?:valu\w*|worth|market\s+cap\w*|capitali[sz]ation|demand\w*|oversubscri\w*|appetite|enthusias\w*|eager\w*|frenz\w*|fervou?r|hype\w*|buzz\w*|hot|hottest|anticipat\w*|closely\s+watched|blockbuster|sought[- ]after|popular\w*|interest\s+(?:from|in|among)|strong\w*|weak\w*|robust|solid|impressive|attractive|cheap\w*|expensive|richly|bargain\w*|premium|discount\w*|bullish|bearish|optimis\w*|pessimis\w*|confiden\w*|risky|success\w*|landmark|historic\w*|record\w*|largest|biggest|ever|most|best|worst|huge|massive|giant|mega\w*|suggest\w*|signal\w*|indicat\w*|sign\s+of|reflect\w*|impl(?:y|ies|ied)|means?\s+that|shows?\s+that|underscor\w*|highlight\w*|points?\s+to|will|would|could|might|may|likely|unlikely|expect\w*|forecast\w*|predict\w*|project(?:s|ed|ion|ions)?|estimat\w*|poised|set\s+to|on\s+track|plans?\s+to|planning|aims?\s+to|intends?\s+to|soon|upcoming|coming|later|eventually|future|today|tomorrow|yesterday|tonight|this\s+(?:week|month|year)|next\s+(?:week|month|year)|monday|tuesday|wednesday|thursday|friday|saturday|sunday|should|ought|recommend\w*|advi[cs]\w*|opportunit\w*|buy\w*|consensus|beat\w*|miss\w*|exceed\w*|surpass\w*|outperform\w*|underperform\w*|according\s+to|report\w*|sources?|people\s+familiar|media|press|rumou?r\w*|analyst\w*|wall\s+street)\b";
+const EN_REFUSED: &str = r"(?i-u)\b(?:valu\w*|worth|rais\w*|proceeds|market\s+cap\w*|capitali[sz]ation|demand\w*|oversubscri\w*|appetite|enthusias\w*|eager\w*|frenz\w*|fervou?r|hype\w*|buzz\w*|hot|hottest|anticipat\w*|closely\s+watched|blockbuster|sought[- ]after|popular\w*|interest\s+(?:from|in|among)|strong\w*|weak\w*|robust|solid|impressive|attractive|cheap\w*|expensive|richly|bargain\w*|premium|discount\w*|bullish|bearish|optimis\w*|pessimis\w*|confiden\w*|risky|success\w*|landmark|historic\w*|record\w*|largest|biggest|ever|most|best|worst|huge|massive|giant|mega\w*|suggest\w*|signal\w*|indicat\w*|sign\s+of|reflect\w*|impl(?:y|ies|ied)|means?\s+that|shows?\s+that|underscor\w*|highlight\w*|points?\s+to|will|would|could|might|may|likely|unlikely|expect\w*|forecast\w*|predict\w*|project(?:s|ed|ion|ions)?|estimat\w*|poised|set\s+to|on\s+track|plans?\s+to|planning|aims?\s+to|intends?\s+to|soon|upcoming|coming|later|eventually|future|today|tomorrow|yesterday|tonight|this\s+(?:week|month|year)|next\s+(?:week|month|year)|monday|tuesday|wednesday|thursday|friday|saturday|sunday|should|ought|recommend\w*|advi[cs]\w*|opportunit\w*|buy\w*|consensus|beat\w*|miss\w*|exceed\w*|surpass\w*|outperform\w*|underperform\w*|according\s+to|report\w*|sources?|people\s+familiar|media|press|rumou?r\w*|analyst\w*|wall\s+street)\b";
 
 /// Chinese words refused in the model's text, as plain text.
 const ZH_REFUSED: &[&str] = &[
     "估值",
+    "募资",
+    "募集",
+    "融资",
+    "所得款",
+    "净额",
     "市值",
     "价值",
     "值得",
@@ -997,12 +996,14 @@ fn table(f: &IpoArticleFacts, lang: Lang) -> String {
     for d in &f.derived {
         let label = match lang {
             Lang::En => format!(
-                "Offering at {} (derived: shares offered × price)",
-                price(d.price, lang)
+                "Offering size at {p} ({} shares × {p})",
+                grouped(d.shares),
+                p = price(d.price, lang)
             ),
             Lang::Zh => format!(
-                "按每股{}计算的发行总额（由发行股数×价格推算）",
-                price(d.price, lang)
+                "按每股{p}计算的发行规模（{}股×{p}）",
+                grouped(d.shares),
+                p = price(d.price, lang)
             ),
         };
         rows.push((label, money(d.value_usd, lang)));
@@ -1054,8 +1055,16 @@ fn table(f: &IpoArticleFacts, lang: Lang) -> String {
         out.push_str(&format!("| {k} | {v} |\n"));
     }
     out.push('\n');
+    if !f.derived.is_empty() {
+        out.push_str(pick(lang, OFFERING_SIZE_EN, OFFERING_SIZE_ZH));
+        out.push_str("\n\n");
+    }
     out
 }
+
+/// What the derived offering size is, under the table wherever it appears.
+pub const OFFERING_SIZE_EN: &str = "Offering size is computed by PreBell from the cover: shares offered (including shares sold by selling stockholders, excluding the underwriters' option) × the price per share, gross, before underwriting discounts. It is not the company's proceeds and not a valuation.";
+pub const OFFERING_SIZE_ZH: &str = "发行规模由PreBell根据招股文件封面计算：发行股数（含售股股东发售的股份，不含承销商超额配售权）×每股价格，为扣除承销折扣前的总额，并非公司所得款项，也不是估值。";
 
 fn pick_owned(lang: Lang, en: &str, zh: &str) -> String {
     match lang {
@@ -1404,11 +1413,11 @@ pub(crate) mod tests {
 
     pub(crate) const EN_TITLE: &str = "Anthropic sets IPO price range at $70 to $78 a share";
     pub(crate) const EN_SUMMARY: &str = "Anthropic's amended S-1 filed Nov. 10, 2026 sets a price range of $70.00 to $78.00 a share for 825,000,000 shares of Class A common stock.";
-    pub(crate) const EN_HAPPENED: &str = "Anthropic filed an amended registration statement (Form S-1/A) on Nov. 10, 2026. Its cover sets a price range of $70.00 to $78.00 per share for 825,000,000 shares of Class A common stock. At $70.00 a share, the shares offered come to $57.75 billion, and at $78.00 they come to $64.35 billion.";
+    pub(crate) const EN_HAPPENED: &str = "Anthropic filed an amended registration statement (Form S-1/A) on Nov. 10, 2026. Its cover sets a price range of $70.00 to $78.00 per share for 825,000,000 shares of Class A common stock.";
     pub(crate) const EN_TERMS: &str = "Anthropic is selling 801,351,354 of the shares, and selling stockholders are selling 23,648,646. The underwriters have an option to purchase up to 123,750,000 additional shares. Anthropic has applied to list its Class A common stock on the Nasdaq Global Select Market under the symbol ANT.";
     pub(crate) const ZH_TITLE: &str = "Anthropic公布IPO价格区间：每股70至78美元";
     pub(crate) const ZH_SUMMARY: &str = "Anthropic于2026年11月10日提交S-1/A修订文件，将8.25亿股A类普通股的价格区间定为每股70.00至78.00美元。";
-    pub(crate) const ZH_HAPPENED: &str = "Anthropic于2026年11月10日提交了注册声明修订文件（S-1/A）。文件将价格区间定为每股70.00美元至78.00美元，发行8.25亿股A类普通股。按每股70.00美元计算，发行总额为577.5亿美元；按每股78.00美元计算，为643.5亿美元。";
+    pub(crate) const ZH_HAPPENED: &str = "Anthropic于2026年11月10日提交了注册声明修订文件（S-1/A）。文件将价格区间定为每股70.00美元至78.00美元，发行8.25亿股A类普通股。";
     pub(crate) const ZH_TERMS: &str = "其中公司发售801,351,354股，售股股东发售23,648,646股。承销商有权额外购买至多123,750,000股。公司已申请在Nasdaq Global Select Market上市，股票代码为ANT。";
 
     pub(crate) fn reply(lang: Lang) -> Value {
@@ -1448,8 +1457,9 @@ pub(crate) mod tests {
             "| Sold by the company | 801,351,354 |",
             "| Sold by selling stockholders | 23,648,646 |",
             "| Underwriters' option | 123,750,000 shares |",
-            "| Offering at $70.00 (derived: shares offered × price) | $57.75 billion |",
-            "| Offering at $78.00 (derived: shares offered × price) | $64.35 billion |",
+            "| Offering size at $70.00 (825,000,000 shares × $70.00) | $57.75 billion |",
+            "| Offering size at $78.00 (825,000,000 shares × $78.00) | $64.35 billion |",
+            OFFERING_SIZE_EN,
             "| Exchange and symbol | Nasdaq Global Select Market: ANT |",
             "## What happened\n\n",
             "## What the filing says\n\n",
@@ -1465,7 +1475,9 @@ pub(crate) mod tests {
         for want in [
             "**Anthropic（ANT）** · Nasdaq Global Select Market · S-1/A 提交于2026年11月10日",
             "| 每股价格区间 | 70.00–78.00美元 |",
-            "| 按每股70.00美元计算的发行总额（由发行股数×价格推算） | 577.5亿美元 |",
+            "| 按每股70.00美元计算的发行规模（825,000,000股×70.00美元） | 577.5亿美元 |",
+            "| 按每股78.00美元计算的发行规模（825,000,000股×78.00美元） | 643.5亿美元 |",
+            OFFERING_SIZE_ZH,
             "## 发生了什么\n\n",
             "## 下一步\n\n",
             DISCLAIMER_ZH,
@@ -1480,6 +1492,68 @@ pub(crate) mod tests {
             ]
         );
         assert_eq!(cover_lines(&f, Lang::Zh)[1], "价格区间 70.00–78.00美元");
+    }
+
+    #[test]
+    fn the_offering_size_is_codes_with_its_inputs_and_never_the_models() {
+        let f = facts();
+        // Anthropic's cover: 825,000,000 x $70.00 and x $78.00.
+        let d: Vec<_> = f
+            .derived
+            .iter()
+            .map(|d| (d.shares, d.price, d.value_usd))
+            .collect();
+        assert_eq!(d, [(825e6, 70.0, 57.75e9), (825e6, 78.0, 64.35e9)]);
+        assert!(!serde_json::to_string(&model_input(&f))
+            .unwrap()
+            .contains("57750000000"));
+        // The model may not state it at all, so it cannot call it proceeds,
+        // what the company raises, or a valuation.
+        for (lang, text, why) in [
+            (
+                Lang::En,
+                "At $70.00, the S-1/A offering comes to $57.75 billion.",
+                "$57.75 billion",
+            ),
+            (
+                Lang::En,
+                "At $70.00 a share, Anthropic will raise $57.75 billion from the S-1/A offering.",
+                "do not use",
+            ),
+            (
+                Lang::En,
+                "Proceeds to the company at $78.00 under the S-1/A are $64.35 billion.",
+                "do not use",
+            ),
+            (
+                Lang::En,
+                "The S-1/A range of $70.00 to $78.00 raises money for Anthropic.",
+                "do not use",
+            ),
+            (
+                Lang::En,
+                "At $78.00, the S-1/A offering values Anthropic at $64.35 billion.",
+                "do not use",
+            ),
+            (
+                Lang::Zh,
+                "按每股70.00美元计算，S-1/A发行总额为577.5亿美元。",
+                "577.5亿",
+            ),
+            (
+                Lang::Zh,
+                "按每股78.00美元计算，Anthropic通过S-1/A募资643.5亿美元。",
+                "do not use",
+            ),
+            (
+                Lang::Zh,
+                "按S-1/A每股70.00美元计算，公司所得款项为577.5亿美元。",
+                "do not use",
+            ),
+        ] {
+            let e = refused(&with_section(lang, 0, text), lang);
+            assert!(e.contains(why), "{text}: {e}");
+        }
     }
 
     #[test]

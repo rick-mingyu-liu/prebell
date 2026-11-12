@@ -407,6 +407,46 @@ The list for v1, with the reasons, is in `docs/decisions.md` (2026-11-11, "IPO w
 - No opening price after listing (the recap's quote read has none). A new listing's first-day close is stored only if Yahoo's v7 quote gives a previous close for it; if day one has no close, no session is called the first day.
 - Items are deduplicated by URL, so an article updated in place keeps its first stored version; the sweeps' monthly counter can be off by one if two sweeps start at the same moment.
 
+## IPO write-ups
+
+A short write-up in English and Chinese each time a tracked IPO's filings prove a step: `filed`, `range_set`, `range_changed`, `priced`, `listed`, `withdrawn`. An ordinary post (`content_type = 'ipo'`) in the recent list and the archive, linked from the IPO page. Design `docs/superpowers/specs/2026-11-11-ipo-articles-design.md`; what the site reads, `docs/superpowers/specs/2026-11-11-ipo-articles-contract.md`; the rules, `docs/decisions.md` (2026-11-11, "IPO write-ups at filing milestones" and "the derived offering size"). Code: `crates/core/src/ipo/milestone.rs` (what proves a step, the facts bundle), `writeup.rs` (the model's part, its checks and the page), `article.rs` (the message), prompts `crates/core/prompts/ipo_v1_{en,zh}.md`.
+
+### What runs, and when
+
+- **`ipo:article`** (earnings-build queue, serial with the earnings builds): queued by an earnings poll, 06:00-22:00 ET on trading days, once kv `ipo_article_next` is reached (an hour after an idle pass; 5 minutes after a pass that left a retry). One D1 state read, then per tracked IPO its latest milestone and its run (`runs.run_key` = `ipo:<slug>:<milestone>:<key>`). At most one build per message: 2 model calls (English, then Chinese), up to 4 with one retry each; one R2 write (the facts object); about 10 D1 queries. No EDGAR, Yahoo or Tavily request. Well under the 50-subrequest limit.
+- **Once only**: a run that is `published`, `skipped` or `failed` is never built again. Only the latest milestone an IPO has reached is written; one it has moved past is never written later.
+- **Never in one language only**: both drafts must pass their checks; then the post row, and both translations with the sources in one D1 batch. A refused draft publishes nothing and is retried every 5 minutes; after 3 builds and 6 hours the run is `failed`.
+- **The first live run**: Anthropic's `range_set` (the S-1/A of 2026-11-10, run key `ipo:anthropic:range_set:0001628280-26-072484`, slug `anthropic-ipo-price-range-2026-11-10`), at the first poll after deploy, with no news items stored yet (so no "What has been reported" section). A test builds it from the real cover facts.
+- CPU: the draft checks' own regexes compile in about 8 ms in a debug test build, a fraction of that in release; the number checker they share with the earnings write-ups costs the same as there.
+
+See a write-up's state: `cd crates/generator && pnpm exec wrangler d1 execute prebell --remote --command "SELECT run_key, status, attempts, last_error, updated_at FROM runs WHERE content_type = 'ipo' ORDER BY updated_at DESC"`; the next pass: `SELECT value FROM kv WHERE key = 'ipo_article_next'`.
+
+### The switch
+
+`IPO_ARTICLES_ENABLED = "true"` in `crates/generator/wrangler.toml` `[vars]`, on (Rick, 2026-11-11). Only exactly `"true"` is on, and only while `IPO_WATCH_ENABLED` is on too. Off: polls queue no `ipo:article` (and read nothing for it), a stray message logs `disabled (...); skipped`; published write-ups stay. To turn it off, delete the line, commit and deploy the generator.
+
+### Alerts
+
+- `<run_key>` (warn): the milestone was first found more than 7 ET days after its filing or session and is skipped, never published late.
+- `<run_key>:<ET date>` (warn, once a day): a draft was refused or the model failed; the run retries every 5 minutes. `runs.last_error` has each language's reasons.
+- `<run_key>` (error): the run gave up after 3 builds and 6 hours. Read `last_error`; a recurring check failure may need the prompt or a check adjusted.
+- `config:ipo:<date>` (error, shared with IPO watch): a bad LLM config or a store error. The hour is marked first.
+
+### Costs
+
+About 2 model calls a milestone, about five milestones an IPO: with roughly 3,000 input and 600 output tokens a call (estimated from the prompt and the facts, not measured), about $0.01 a call at Sonnet 5.5's $2 / $10 per million, so about $0.02-0.04 a milestone and $0.10-0.20 an IPO. The worst case is a draft refused all day: a build every 5 minutes for 6 hours, up to 4 calls each, about $3 for that milestone. No Tavily searches.
+
+### Preview and deploy
+
+Local preview: after `db/seed-ipo-preview.sql`, `cd crates/generator && pnpm exec wrangler d1 execute prebell --local --file ../../db/seed-ipo-articles-preview.sql`, then `bash db/load-preview-facts.sh` for the facts object. The filing facts are real; the prose is a sample reply and the quoted items are the made-up ones of the IPO seed. No migration. Deploy is the generator's usual `pnpm exec wrangler deploy` (owner only) with the site's support for `content_type = 'ipo'`.
+
+### Known limits
+
+- A step the stored data does not prove gets no write-up: a cover that could not be read, a 424B4 read only after the first session (no `priced` write-up then), or a listing whose first-day close Yahoo did not give.
+- The checks refuse a draft for any refused word, even in a harmless sense ("most", "will", 将于); the prompt names them, and a refused draft is retried with the reason.
+- The model's description stays thin by design: it may state only filing figures, filing dates and the cover's terms. Anything about the business or the market is left out.
+- Quotes are as stored by the news sweep; in Chinese they stay in English.
+
 ## Logos
 
 Company logos (the white tag on earnings-check covers and the company cards on the earnings calendar) and partner logos are static files in `apps/web/public/logos/`, served as Workers static assets. Pages never fetch a logo from a third party. `apps/web/scripts/build-logos.mjs` (`pnpm logos` in `apps/web`) builds every file, the manifest `apps/web/src/lib/logos.generated.ts` (`COMPANY_LOGOS` ticker -> path with a `?v=` content hash, because `/logos/*` is served immutable for a year; `PARTNER_LOGOS` the same for partner marks; `COMPANY_LOGO_SIZES` ticker -> natural CSS size; read through `companyLogo()` and `companyLogoInfo()` in `src/lib/logos.ts`) and `apps/web/public/logos/LICENSES.md`. Never edit those by hand. It covers every row of `watchlist.tsv` (both tiers), so a rerun picks up new rows. Cards are wide, so a horizontal wordmark is preferred. For each ticker the script takes the first of:
