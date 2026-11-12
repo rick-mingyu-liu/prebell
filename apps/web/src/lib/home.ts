@@ -2,6 +2,7 @@
 
 import { addDays, listLatestEarnings, listRecentBriefs, stripDay, type StripDay } from "./earnings";
 import { loadFacts, type FactsView, type R2Like } from "./facts";
+import { listHomeIpos, type HomeIpo } from "./ipo";
 import { getLatestPost, type D1Like, type Lang, type PostHead, type PostListItem } from "./posts";
 
 /** Earnings checks shown as covers; later ones fall into the recent list. */
@@ -20,6 +21,8 @@ export interface HomeData {
   recent: PostListItem[];
   /** The next calendar day with reports, from today for a premarket lead and from the day after a recap's date. */
   reporting: StripDay | null;
+  /** Active tracked IPOs (not withdrawn, at most 30 days past listing); empty without any or before migration 0009. */
+  ipos: HomeIpo[];
 }
 
 /** The more recently published of the two briefs; the premarket on a tie. */
@@ -41,7 +44,8 @@ function reportingFrom(lead: PostHead | null, today: string): string {
 const newestFirst = (a: PostListItem, b: PostListItem) => (b.publishedAt ?? "").localeCompare(a.publishedAt ?? "");
 
 /**
- * Everything the front page shows, in six small D1 reads and at most one R2 read: the lead's facts.
+ * Everything the front page shows, in seven small D1 reads (six, plus one for the IPO section) and at most one R2
+ * read: the lead's facts.
  * `today` is the ET date the reporting block counts from; `onError` hears a facts read that failed.
  */
 export async function loadHome(
@@ -53,12 +57,13 @@ export async function loadHome(
 ): Promise<HomeData> {
   // Briefs and earnings checks are listed separately, so a busy earnings
   // season never pushes the briefs off the front page.
-  const [premarket, recap, briefs, checks] = await Promise.all([
+  const [premarket, recap, briefs, checks, ipos] = await Promise.all([
     getLatestPost(db, lang, "premarket"),
     getLatestPost(db, lang, "recap"),
     // One extra: the list may include the lead, which recent leaves out.
     listRecentBriefs(db, lang, RECENT_SHOWN + 1),
     listLatestEarnings(db, lang, EARNINGS_SHOWN + RECENT_SHOWN),
+    listHomeIpos(db, lang, today),
   ]);
   const lead = pickLead(premarket, recap);
   const kind = lead?.contentType === "recap" ? "recap" : "premarket";
@@ -69,5 +74,5 @@ export async function loadHome(
   const recent = [...briefs.filter((p) => p.slug !== lead?.slug), ...checks.slice(EARNINGS_SHOWN)]
     .sort(newestFirst)
     .slice(0, RECENT_SHOWN);
-  return { lead, leadFacts, earnings: checks.slice(0, EARNINGS_SHOWN), recent, reporting };
+  return { lead, leadFacts, earnings: checks.slice(0, EARNINGS_SHOWN), recent, reporting, ipos };
 }

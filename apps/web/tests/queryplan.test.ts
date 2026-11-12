@@ -2,7 +2,7 @@ import Database from "better-sqlite3";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
-import { listIpoSlugs, listIposBetween, listIpoWatch, loadIpo } from "../src/lib/ipo";
+import { listHomeIpos, listIpoSlugs, listIposBetween, listIpoWatch, loadIpo } from "../src/lib/ipo";
 import { prepareCall, type ToolContext } from "../src/lib/mcptools";
 import { getLatestPost, type D1Like } from "../src/lib/posts";
 import { migrations } from "./d1";
@@ -103,7 +103,7 @@ describe.each([false, true])("IPO query plans (ANALYZE: %s)", (analyze) => {
   it("an IPO page reads each table by its key or index, never a whole table", async () => {
     const { db, plans } = planning(database(analyze, IPO_SEED));
     await loadIpo(db, "anthropic", "en");
-    expect(plans).toHaveLength(5);
+    expect(plans).toHaveLength(6);
     const plan = (table: string) => plans.find((p) => new RegExp(`FROM ${table}\\b`).test(p.sql))!.plan;
     expect(plans[0].plan).toMatch(/SEARCH ipo_watch USING INDEX sqlite_autoindex_ipo_watch_1 \(slug=\?\)/);
     expect(plan("ipo_facts")).toMatch(/SEARCH f USING INDEX sqlite_autoindex_ipo_facts_1 \(accession=\?\)/);
@@ -111,7 +111,23 @@ describe.each([false, true])("IPO query plans (ANALYZE: %s)", (analyze) => {
     expect(plan("ipo_filings")).toMatch(/SEARCH ipo_filings USING INDEX idx_ipo_filings_slug \(slug=\?\)/);
     expect(plan("ipo_items")).toMatch(/SEARCH ipo_items USING INDEX idx_ipo_items_slug \(slug=\? AND kind=\?\)/);
     expect(plan("ipo_trading")).toMatch(/SEARCH ipo_trading USING (COVERING )?INDEX sqlite_autoindex_ipo_trading_1 \(slug=\?/);
-    for (const p of plans) expect(p.plan, p.sql).not.toMatch(/SCAN (ipo_\w+|f|g)\b/);
+    // The write-ups: a range on posts' unique run_key, then each one's translation by its primary key.
+    expect(plan("posts")).toMatch(/SEARCH p USING INDEX sqlite_autoindex_posts_\d \(run_key>\? AND run_key<\?\)/);
+    for (const p of plans) expect(p.plan, p.sql).not.toMatch(/SCAN (ipo_\w+|f|g|p|t|posts|post_translations)\b/);
+  });
+
+  it("the home page's IPO section is one read: the hand-kept watch list, every detail by key or index", async () => {
+    const { db, plans } = planning(database(analyze, IPO_SEED));
+    await listHomeIpos(db, "en", "2026-11-11");
+    expect(plans).toHaveLength(1);
+    const plan = plans[0].plan;
+    expect(plan).toMatch(/SEARCH ipo_trading USING COVERING INDEX sqlite_autoindex_ipo_trading_1 \(slug=\?\)/);
+    expect(plan).toMatch(/SEARCH g USING INDEX sqlite_autoindex_ipo_filings_1 \(accession=\?\)/);
+    expect(plan).toMatch(/SEARCH ipo_facts USING INDEX sqlite_autoindex_ipo_facts_1 \(accession=\? AND kind=\?\)/);
+    expect(plan).toMatch(/SEARCH ipo_items USING INDEX idx_ipo_items_slug \(slug=\? AND kind=\?\)/);
+    expect(plan).toMatch(/SEARCH p USING INDEX sqlite_autoindex_posts_\d \(run_key>\? AND run_key<\?\)/);
+    // Only the watch list itself is read whole: the hand-kept list of tracked IPOs, capped at 20 rows.
+    expect(plan.match(/SCAN \w+/g) ?? []).toEqual(["SCAN ipo_watch"]);
   });
 
   it("the sitemap's IPO read is capped", async () => {

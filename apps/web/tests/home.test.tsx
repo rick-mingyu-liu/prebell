@@ -71,6 +71,7 @@ const data = (over: Partial<HomeData> = {}): HomeData => ({
   earnings: [item()],
   recent: [recap],
   reporting,
+  ipos: [],
   ...over,
 });
 

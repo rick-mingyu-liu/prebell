@@ -83,7 +83,7 @@ describe("loadHome", () => {
   it("makes no R2 read without a post or without a facts key", async () => {
     const none = fakeR2();
     const empty = await loadHome(memoryD1(""), none.bucket, "en", TODAY);
-    expect(empty).toEqual({ lead: null, leadFacts: null, earnings: [], recent: [], reporting: null });
+    expect(empty).toEqual({ lead: null, leadFacts: null, earnings: [], recent: [], reporting: null, ipos: [] });
     expect(none.gets).toEqual([]);
 
     const keyless = fakeR2();

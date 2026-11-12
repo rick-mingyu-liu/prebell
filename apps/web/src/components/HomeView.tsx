@@ -1,13 +1,15 @@
 import Link from "next/link";
 import Cover from "./Cover";
+import { DateLine } from "./IpoView";
 import MoversTable from "./MoversTable";
 import PartnersStrip from "./PartnersStrip";
 import PendingNotice from "./PendingNotice";
 import SignupForm from "./SignupForm";
 import type { Locale } from "../i18n/routing";
 import type { CalendarEntry } from "../lib/earnings";
-import { fmtPct } from "../lib/format";
+import { dirOf, fmtPct, fmtPrice } from "../lib/format";
 import type { HomeData } from "../lib/home";
+import { fmtSharePrice, fmtValuation, type HomeIpo } from "../lib/ipo";
 import { pendingTitle, typeLabel } from "../lib/labels";
 import type { ThemeView } from "../lib/facts";
 import type { PostListItem } from "../lib/posts";
@@ -138,13 +140,103 @@ function Theme({ theme, href, locale, t }: { theme: ThemeView; href: string; loc
 }
 
 /**
+ * One active IPO in the home section: its status as the kicker, the name linking to its IPO page, symbol and
+ * exchange, the price with the filing it came from, the first trading day worded as the IPO page words it, the newest
+ * reported valuation with its outlet, after listing the latest close and its change from the IPO price (both inputs
+ * shown, Yahoo named), the newest write-up, and the link to the IPO page.
+ */
+function HomeIpoItem({ ipo, locale, t }: { ipo: HomeIpo; locale: Locale; t: T }) {
+  const page = `/${locale}/ipo/${ipo.slug}`;
+  const meta = [ipo.symbol, ipo.exchange].filter((s): s is string => s !== null);
+  const s = ipo.latest;
+  const sep = locale === "zh" ? "，" : ", ";
+  return (
+    <article className="front-ipo-item">
+      <p className="kicker">{t(`ipo.status.${ipo.status}`)}</p>
+      <h3 className="story-title">
+        <Link href={page}>{ipo.name}</Link>
+      </h3>
+      {meta.length > 0 && <p className="front-ipo-meta">{meta.join(" · ")}</p>}
+      <dl className="front-ipo-facts">
+        {ipo.price && ipo.priceFiling && (
+          <>
+            <dt>{t("final" in ipo.price ? "ipo.offering.priceFinal" : "ipo.offering.priceRange")}</dt>
+            <dd>
+              <b>
+                {"final" in ipo.price
+                  ? t("ipo.offering.price", { price: fmtSharePrice(ipo.price.final) })
+                  : t("ipo.offering.range", { low: fmtSharePrice(ipo.price.low), high: fmtSharePrice(ipo.price.high) })}
+              </b>{" "}
+              <span className="muted">
+                {t("ipo.home.from", { form: ipo.priceFiling.form, date: formatDate(ipo.priceFiling.filingDate, locale) })}
+              </span>
+            </dd>
+          </>
+        )}
+        {ipo.valuation && (
+          <>
+            <dt>{t("ipo.home.valuation")}</dt>
+            <dd>
+              <b>{fmtValuation(ipo.valuation.usd, locale)}</b>
+              {sep}
+              {t("ipo.home.reportedBy", { outlet: ipo.valuation.outlet, date: formatDate(ipo.valuation.publishedOn, locale) })}
+              {ipo.valuation.url && (
+                <>
+                  {" "}
+                  <a href={ipo.valuation.url} rel="nofollow noopener noreferrer" aria-label={t("ipo.article")}>
+                    ↗
+                  </a>
+                </>
+              )}
+            </dd>
+          </>
+        )}
+        {s && (
+          <>
+            <dt>{t("ipo.home.lastClose")}</dt>
+            <dd>
+              <b className="num">{t("ipo.trading.money", { n: fmtPrice(s.close) })}</b>
+              {sep}
+              <time dateTime={s.sessionDate}>{formatDate(s.sessionDate, locale)}</time>
+              {s.changePct !== null && s.ipoPrice !== null && (
+                <>
+                  {" · "}
+                  <span className={`num ${dirOf(s.changePct)}`}>{fmtPct(s.changePct)}</span>
+                  {locale === "zh" ? "" : " "}
+                  <span className="muted">
+                    {locale === "zh" ? "（" : "("}
+                    {t("ipo.trading.changeInputs", { close: fmtPrice(s.close), ipo: fmtPrice(s.ipoPrice) })}
+                    {locale === "zh" ? "）" : ")"}
+                  </span>
+                </>
+              )}{" "}
+              <span className="muted">{t("ipo.trading.source", { source: "Yahoo Finance" })}</span>
+            </dd>
+          </>
+        )}
+      </dl>
+      <DateLine date={ipo.date} locale={locale} t={t} compact />
+      {ipo.writeup && (
+        <p className="front-ipo-writeup">
+          <span className="muted">{t("ipo.home.writeup")}</span>{" "}
+          <Link href={`/${locale}/p/${ipo.writeup.slug}`}>{ipo.writeup.title}</Link>
+        </p>
+      )}
+      <Link className="more" href={page}>
+        {t("ipo.home.page")} →
+      </Link>
+    </article>
+  );
+}
+
+/**
  * The front page: on the left the lead story, the earnings-check covers and the recent list; on the right
  * a ruled column of top movers and who reports next. Below 721px it stacks lead, movers, earnings, recent,
  * reporting (CSS order). The weekly-digest signup (only when `signup`, i.e. the Buttondown key is set)
  * and the partner strip close the page. No client JS beyond those two islands.
  */
 export default function HomeView({ data, locale, signup }: { data: HomeData; locale: Locale; signup: boolean }) {
-  const { lead, leadFacts, earnings, recent, reporting } = data;
+  const { lead, leadFacts, earnings, recent, reporting, ipos } = data;
   const t = translator(locale);
   const movers = leadFacts
     ? [...leadFacts.gainers.slice(0, MOVERS_PER_SIDE), ...leadFacts.losers.slice(0, MOVERS_PER_SIDE)]
@@ -204,6 +296,16 @@ export default function HomeView({ data, locale, signup }: { data: HomeData; loc
         )}
 
         <aside className="front-side">
+          {ipos.length > 0 && (
+            <section className="front-ipo" aria-labelledby="front-ipo">
+              <h2 className="section-title" id="front-ipo">
+                {t("ipo.watchTitle")}
+              </h2>
+              {ipos.map((i) => (
+                <HomeIpoItem key={i.slug} ipo={i} locale={locale} t={t} />
+              ))}
+            </section>
+          )}
           {lead && (
             <section className="front-movers">
               <h2 className="section-title">{t("home.topMovers")}</h2>

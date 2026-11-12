@@ -9,6 +9,7 @@ import PostBody from "./PostBody";
 import SignupForm from "./SignupForm";
 import type { Locale } from "../i18n/routing";
 import { briefKind, type BriefData } from "../lib/brief";
+import { writeupIpoSlug } from "../lib/ipo";
 import { pendingTitle, typeLabel } from "../lib/labels";
 import type { PostListItem } from "../lib/posts";
 import { formatDate, formatDayShort, formatEt, formatEtTime, formatMonthDay } from "../lib/time";
@@ -56,6 +57,8 @@ export default function BriefView({ data, locale, signup }: BriefViewProps) {
       <MoversTable movers={movers} locale={locale} variant="table" showPrice priceLabel={facts?.kind === "recap" ? "close" : "last"} />
     </section>
   );
+  // An IPO write-up links to its IPO page, named by its facts key (`ipo/<ipo_slug>/...`).
+  const ipoSlug = post.contentType === "ipo" ? writeupIpoSlug(post.factsKey) : null;
   const neighbour = (p: PostListItem) => `${typeLabel(t, p.contentType)} · ${formatDayShort(p.tradingDate, locale)}`;
 
   return (
@@ -84,7 +87,15 @@ export default function BriefView({ data, locale, signup }: BriefViewProps) {
           {!pending && post.revisedAt && (
             <time dateTime={post.revisedAt}>{t("post.updated", { time: formatEtTime(post.revisedAt, locale) })}</time>
           )}
-          <span className="checked">{kind ? t("brief.checked") : t("earnings.checkedFiling")}</span>
+          {/* An IPO write-up also quotes news reports, so it does not claim every figure is from the filing. */}
+          <span className="checked">{kind || post.contentType === "ipo" ? t("brief.checked") : t("earnings.checkedFiling")}</span>
+        </p>
+      )}
+      {ipoSlug && (
+        <p className="story-ipo">
+          <Link className="more" href={`/${locale}/ipo/${ipoSlug}`}>
+            {t("ipo.writeupLink")} →
+          </Link>
         </p>
       )}
       {/* A pending translation may carry stale lines; show the graphic and the tag only. */}
