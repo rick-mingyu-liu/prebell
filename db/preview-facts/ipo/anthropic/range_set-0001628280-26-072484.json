@@ -74,6 +74,8 @@
     }
   ],
   "previous": null,
+  "first_range": false,
+  "security": "shares",
   "derived": [
     {
       "kind": "offering_at_low",

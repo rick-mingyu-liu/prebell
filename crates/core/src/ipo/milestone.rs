@@ -11,7 +11,7 @@
 use chrono::{DateTime, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
 
-use super::resolve::{considered, current, first_session, status};
+use super::resolve::{considered, first_session, sources, status};
 use super::store::{FactRow, FilingRow, IpoState, ItemRow, TradingRow};
 use super::{is_final, is_registration, iso, ymd, Tracked};
 
@@ -66,8 +66,14 @@ pub struct Reached {
     /// The filing whose cover facts the write-up states: the proving filing,
     /// or for `listed` the IPO's facts source at the time.
     pub filing: Option<FilingRow>,
-    /// `range_changed`: the previous range milestone's filing.
+    /// `range_changed`: the previous range milestone's filing; `priced`: the
+    /// last range milestone's (to place the price against its range);
+    /// `withdrawn`: the facts source the withdrawal ends.
     pub previous: Option<FilingRow>,
+    /// `listed`: the stored session is the first trading day the filings
+    /// point to (`ipo_watch.date_source = 'trading'`). Until then the
+    /// write-up waits; every other milestone is confirmed.
+    pub confirmed: bool,
 }
 
 impl Reached {
@@ -99,12 +105,15 @@ fn proven(m: Milestone, f: &FilingRow, previous: Option<&FilingRow>) -> Option<R
         as_of: date(&f.filing_date)?,
         filing: Some(f.clone()),
         previous: previous.cloned(),
+        confirmed: true,
     })
 }
 
 /// Every milestone `slug` has reached, in stage order (contract,
-/// "Milestones"). Only filings that are part of the IPO count, and a cover
-/// counts only once it was read.
+/// "Milestones"). Only filings that are part of the IPO count. A range or a
+/// price counts only from a cover that became the facts source (complete by
+/// the replacement rule, `resolve::sources`), so a write-up never disagrees
+/// with the IPO page.
 pub fn reached(st: &IpoState, slug: &str) -> Vec<Reached> {
     let all = st.filings_of(slug);
     let first = first_session(st, slug);
@@ -121,15 +130,13 @@ pub fn reached(st: &IpoState, slug: &str) -> Vec<Reached> {
         out.extend(proven(Milestone::Filed, f, None));
     }
 
-    // Read covers with a range: the first sets it; a later one is a
+    // Facts sources with a range: the first sets it; a later one is a
     // milestone only when its range or share count differs from the last
     // range milestone's (an amendment that changes nothing is none). A cover
     // that does not state the shares never counts as a share change.
+    let srcs = sources(st, &fs);
     let mut last: Option<(&FilingRow, f64, f64, Option<f64>)> = None;
-    for f in fs
-        .iter()
-        .filter(|f| f.read_state == "read" && is_registration(&f.form))
-    {
+    for f in srcs.iter().copied().filter(|f| is_registration(&f.form)) {
         let (Some(lo), Some(hi)) = (
             num(st, &f.accession, "price_low"),
             num(st, &f.accession, "price_high"),
@@ -150,25 +157,28 @@ pub fn reached(st: &IpoState, slug: &str) -> Vec<Reached> {
         last = Some((f, lo, hi, shares.or(last.and_then(|l| l.3))));
     }
 
-    if let Some(f) = fs.iter().find(|f| {
-        f.read_state == "read"
-            && is_final(&f.form)
-            && num(st, &f.accession, "price_final").is_some()
-    }) {
-        out.extend(proven(Milestone::Priced, f, None));
+    // A final prospectus that became the source has its price and shares.
+    if let Some(f) = srcs.iter().copied().find(|f| is_final(&f.form)) {
+        out.extend(proven(Milestone::Priced, f, last.map(|l| l.0)));
     }
 
     if let Some(d) = first {
+        let day = ymd(d);
+        let confirmed = st.row(slug).is_some_and(|w| {
+            w.date_source.as_deref() == Some("trading")
+                && w.first_trade_date.as_deref() == Some(&day)
+        });
         out.push(Reached {
             milestone: Milestone::Listed,
-            key: ymd(d),
+            key: day,
             as_of: d,
-            filing: current(st, &fs).cloned(),
+            filing: srcs.last().map(|f| (*f).clone()),
             previous: None,
+            confirmed,
         });
-    } else if status(&fs, current(st, &fs), st, false) == Some("withdrawn") {
+    } else if status(&fs, srcs.last().copied(), st, false) == Some("withdrawn") {
         if let Some(rw) = fs.iter().rev().find(|f| f.form == "RW") {
-            out.extend(proven(Milestone::Withdrawn, rw, None));
+            out.extend(proven(Milestone::Withdrawn, rw, srcs.last().copied()));
         }
     }
     out
@@ -277,6 +287,17 @@ pub struct IpoArticleFacts {
     pub filing: Option<FilingRef>,
     pub cover: Vec<CoverFact>,
     pub previous: Option<Previous>,
+    /// `range_set` only: every earlier registration statement of the IPO
+    /// was read and none stated a range, so this cover is provably the
+    /// first with one. False when an earlier cover was not read (Anthropic's
+    /// S-1 of 2026-10-26 and S-1/A of 2026-11-02 were not): then the
+    /// write-up may not call the range the first.
+    #[serde(default)]
+    pub first_range: bool,
+    /// What is offered: `shares`, or `ads` when the cover's own sentences
+    /// call it American depositary shares (Arm's 424B4).
+    #[serde(default = "shares_word")]
+    pub security: String,
     pub derived: Vec<Derived>,
     pub session: Option<Session>,
     pub timeline: Vec<TimelineEntry>,
@@ -361,6 +382,18 @@ fn quoted(i: &ItemRow) -> QuotedItem {
     }
 }
 
+fn shares_word() -> String {
+    "shares".into()
+}
+
+/// A cover sentence about American depositary shares.
+fn is_ads(quote: &str) -> bool {
+    quote.contains("American Depositary")
+        || quote
+            .split(|c: char| !c.is_ascii_alphanumeric())
+            .any(|w| w == "ADS" || w == "ADSs")
+}
+
 /// The bundle for `r`, gathered by code from the stored state.
 pub fn bundle(st: &IpoState, t: &Tracked, r: &Reached, now: DateTime<Utc>) -> IpoArticleFacts {
     let cover = r
@@ -424,9 +457,37 @@ pub fn bundle(st: &IpoState, t: &Tracked, r: &Reached, now: DateTime<Utc>) -> Ip
 
     let all = st.filings_of(&t.slug);
     let mut timeline: Vec<&FilingRow> = considered(&all, first_session(st, &t.slug));
+    let first_range = r.milestone == Milestone::RangeSet
+        && r.filing.as_ref().is_some_and(|f| {
+            timeline
+                .iter()
+                .filter(|x| is_registration(&x.form) && order(x) < order(f))
+                .all(|x| x.read_state == "read")
+        });
     timeline.sort_by(|a, b| order(b).cmp(&order(a)));
-    let mut items: Vec<&ItemRow> = st.items_of(&t.slug);
+    // A reported date is not quoted once a filing or the first session
+    // gives the date.
+    let dated = st
+        .row(&t.slug)
+        .is_some_and(|w| matches!(w.date_source.as_deref(), Some("filing" | "trading")));
+    let mut items: Vec<&ItemRow> = st
+        .items_of(&t.slug)
+        .into_iter()
+        .filter(|i| !(dated && i.kind == "expected_date"))
+        .collect();
     items.sort_by(|a, b| (&b.published_on, &b.found_at).cmp(&(&a.published_on, &a.found_at)));
+    let quotes = cover.iter().map(|c| c.quote.as_str()).chain(
+        r.previous
+            .iter()
+            .flat_map(|p| st.facts_of(&p.accession))
+            .map(|c| c.quote.as_str()),
+    );
+    let security = if quotes.into_iter().any(is_ads) {
+        "ads"
+    } else {
+        "shares"
+    }
+    .to_string();
 
     IpoArticleFacts {
         schema: SCHEMA.into(),
@@ -443,6 +504,8 @@ pub fn bundle(st: &IpoState, t: &Tracked, r: &Reached, now: DateTime<Utc>) -> Ip
         filing: r.filing.as_ref().map(filing_ref),
         cover,
         previous,
+        first_range,
+        security,
         derived,
         session,
         timeline: timeline
@@ -595,6 +658,13 @@ pub(crate) mod tests {
         assert_eq!(b.timeline.len(), 9);
         assert_eq!(b.timeline[0].accession, ACC);
         assert!(b.items.is_empty() && b.previous.is_none() && b.session.is_none());
+        // The S-1 and the first S-1/A were not read: not provably the first range.
+        assert!(!b.first_range);
+        let mut all_read = st.clone();
+        for f in &mut all_read.filings {
+            f.read_state = "read".into();
+        }
+        assert!(bundle(&all_read, &anthropic(), &r, utc("2026-11-11T22:00:00Z")).first_range);
         assert_eq!(
             b.facts_key(),
             "ipo/anthropic/range_set-0001628280-26-072484.json"

@@ -67,8 +67,8 @@ pub enum EarningsStep {
     IpoSweep,
     /// `ipo:article`, queued by a poll while `IPO_ARTICLES_ENABLED` and
     /// `IPO_WATCH_ENABLED` are on and `ipo_article_next` is reached: at most
-    /// one IPO write-up build (`ipo::article`). On the serial build queue,
-    /// like an earnings build, for its model calls.
+    /// one IPO write-up build (`ipo::article`, written by code). On the
+    /// serial build queue, like an earnings build, so two never run at once.
     IpoArticle,
 }
 

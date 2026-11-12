@@ -12,24 +12,26 @@
 //! latest milestone (`milestone::latest`). The run key
 //! `ipo:<ipo_slug>:<milestone>:<key>` makes it once only: a run that is
 //! `published`, `skipped` or `failed` is never built again. At most one
-//! build per message (two model calls, up to four with the retries).
+//! build per message. The text is written by code (`writeup`): no model
+//! call, so a build is a few D1 queries and one R2 write.
 //!
-//! **Never half published.** Both languages are drafted and checked
-//! before anything is written. Then the facts go to R2, the post row is
-//! written without text (invisible: the site shows a post only by a
-//! published translation), and both translations and the sources land in
-//! one D1 batch (`revise_post`, one transaction). A store failure before
-//! that batch leaves nothing visible and the next pass writes into the same
-//! post (`upsert_post` keeps one per run key); one after it finds the text
-//! live and only closes the run.
+//! **Never half published.** Both languages are rendered and checked
+//! (`writeup::verify_page`) before anything is written. Then the facts go
+//! to R2, the post row is written without text (invisible: the site shows
+//! a post only by a published translation), and both translations and the
+//! sources land in one D1 batch (`revise_post`, one transaction). A store
+//! failure before that batch leaves nothing visible and the next pass
+//! writes into the same post (`upsert_post` keeps one per run key); one
+//! after it finds the text live and only closes the run.
 //!
-//! **Late or failing.** A milestone found more than `LATE_DAYS` after its
-//! filing or session is `skipped` with a warn alert, never published late.
-//! A draft that fails its checks twice (each language gets one retry with
-//! the reason) leaves the run `pending` with one warn alert a day, and is
-//! tried again every `RETRY_MINUTES`, as an earnings build is; after
-//! `MIN_ATTEMPTS` builds and `DEADLINE_HOURS` it is `failed` with an error
-//! alert.
+//! **Late, unconfirmed or failing.** A milestone found more than
+//! `LATE_DAYS` after its filing or session is `skipped` with a warn alert,
+//! never published late. `listed` waits until the stored session is the
+//! filings' first trading day (`Reached::confirmed`); one never confirmed
+//! is skipped by the same rule. A build that fails (a store or R2 error, or
+//! a page the guard refuses) is retried after 5, 15, 30 and 60 minutes; the
+//! fifth failed build marks the run `failed` with an error alert, so a
+//! milestone costs at most `MAX_BUILDS` builds over about two hours.
 
 use chrono::{DateTime, Duration, Utc};
 
@@ -42,7 +44,6 @@ use crate::earnings::store::EarningsStore;
 use crate::jobs::alert_once_today;
 use crate::numbers::Lang;
 use crate::premarket::draft::Draft;
-use crate::providers::LlmProvider;
 use crate::schedule::EarningsStep;
 use crate::store::{PostRow, RunRow, Store, TranslationRow};
 
@@ -50,13 +51,12 @@ use crate::store::{PostRow, RunRow, Store, TranslationRow};
 pub const KV_NEXT: &str = "ipo_article_next";
 /// A pass with nothing to retry looks again this much later.
 pub const IDLE_MINUTES: i64 = 60;
-/// Pause between builds of a run whose draft was refused.
-pub const RETRY_MINUTES: i64 = 5;
+/// Pauses after the 1st, 2nd, 3rd and later failed builds.
+pub const BACKOFF_MINUTES: [i64; 4] = [5, 15, 30, 60];
+/// Builds a run gets before it is `failed`.
+pub const MAX_BUILDS: i64 = 5;
 /// A `building` run younger than this is in flight.
 const LEASE_MINUTES: i64 = 15;
-/// A run gives up after this long, and never before `MIN_ATTEMPTS` builds.
-const DEADLINE_HOURS: i64 = 6;
-const MIN_ATTEMPTS: i64 = 3;
 /// A milestone older than this (ET days from its filing or session) when
 /// first found is skipped.
 pub const LATE_DAYS: i64 = 7;
@@ -93,13 +93,6 @@ pub async fn follow_up(
     Ok(due.then_some(EarningsStep::IpoArticle))
 }
 
-/// Marks the pass done for `IDLE_MINUTES` without reading anything: for a
-/// config error, so polls do not queue the message every 5 minutes.
-pub async fn mark_idle(es: &dyn EarningsStore, now: DateTime<Utc>) -> Result<(), String> {
-    let next = now + Duration::minutes(IDLE_MINUTES);
-    es.kv_set(KV_NEXT, &iso(next), &iso(now)).await
-}
-
 /// What one message did, per run key.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct ArticleOutcome {
@@ -125,14 +118,23 @@ fn leased(r: &RunRow, now: DateTime<Utc>) -> bool {
     r.status == "building" && since(&r.updated_at, now) < Duration::minutes(LEASE_MINUTES)
 }
 
-fn waiting(r: &RunRow, now: DateTime<Utc>) -> bool {
-    r.status == "pending"
-        && r.attempts > 0
-        && since(&r.updated_at, now) < Duration::minutes(RETRY_MINUTES)
+/// The pause after `attempts` failed builds.
+fn backoff(attempts: i64) -> Duration {
+    let i = usize::try_from(attempts.max(1) - 1).unwrap_or(0);
+    Duration::minutes(BACKOFF_MINUTES[i.min(BACKOFF_MINUTES.len() - 1)])
 }
 
-fn past_deadline(r: &RunRow, now: DateTime<Utc>) -> bool {
-    r.attempts >= MIN_ATTEMPTS && since(&r.created_at, now) >= Duration::hours(DEADLINE_HOURS)
+/// When a failed run may be built again.
+fn retry_at(r: &RunRow) -> Option<DateTime<Utc>> {
+    parse_iso(&r.updated_at).map(|t| t + backoff(r.attempts))
+}
+
+fn waiting(r: &RunRow, now: DateTime<Utc>) -> bool {
+    r.status == "pending" && r.attempts > 0 && retry_at(r).is_some_and(|t| now < t)
+}
+
+fn spent(r: &RunRow) -> bool {
+    r.attempts >= MAX_BUILDS
 }
 
 fn late(r: &Reached, now: DateTime<Utc>) -> i64 {
@@ -150,7 +152,6 @@ pub async fn article_tick(
     ipo: &dyn IpoStore,
     es: &dyn EarningsStore,
     store: &dyn Store,
-    llm: &dyn LlmProvider,
 ) -> Result<ArticleOutcome, String> {
     // Marked first, so a pass that fails is not queued by every poll.
     let idle = now + Duration::minutes(IDLE_MINUTES);
@@ -158,7 +159,7 @@ pub async fn article_tick(
     let st = ipo.ipo_state().await?;
     let mut out = ArticleOutcome::default();
     let mut next = idle;
-    let soon = now + Duration::minutes(RETRY_MINUTES);
+    let soon = now + backoff(1);
     let mut built = false;
     for t in list {
         let Some(r) = latest(&st, &t.slug) else {
@@ -171,15 +172,19 @@ pub async fn article_tick(
                 continue
             }
             None if late(&r, now) > LATE_DAYS => skip_late(now, store, t, &r).await?,
+            // The stored session is not yet the filings' first trading day.
+            None if !r.confirmed => "waiting for the first trading day to be confirmed".into(),
             Some(run) if leased(&run, now) => {
-                next = next.min(soon);
+                if let Some(t) = parse_iso(&run.updated_at) {
+                    next = next.min(t + Duration::minutes(LEASE_MINUTES));
+                }
                 "in flight".to_string()
             }
             Some(run) if waiting(&run, now) => {
-                next = next.min(soon);
+                next = next.min(retry_at(&run).unwrap_or(soon));
                 "waiting to retry".to_string()
             }
-            Some(run) if past_deadline(&run, now) => {
+            Some(run) if spent(&run) => {
                 let err = run
                     .last_error
                     .clone()
@@ -192,9 +197,9 @@ pub async fn article_tick(
             }
             run => {
                 built = true;
-                let b = build(now, &st, es, store, llm, t, &r, run).await?;
-                if b.retry {
-                    next = next.min(soon);
+                let b = build(now, &st, es, store, t, &r, run).await?;
+                if let Some(at) = b.retry {
+                    next = next.min(at);
                 }
                 out.published |= b.published;
                 b.what
@@ -229,11 +234,18 @@ async fn skip_late(
     r: &Reached,
 ) -> Result<String, String> {
     let key = r.run_key(&t.slug);
-    let err = format!(
-        "found {} days after {}, more than {LATE_DAYS}: not published late",
-        late(r, now),
-        super::ymd(r.as_of)
-    );
+    let err = if r.confirmed {
+        format!(
+            "found {} days after {}, more than {LATE_DAYS}: not published late",
+            late(r, now),
+            super::ymd(r.as_of)
+        )
+    } else {
+        format!(
+            "the session of {} was never confirmed as the first trading day within {LATE_DAYS} days",
+            super::ymd(r.as_of)
+        )
+    };
     let mut row = new_run(&key, r, now);
     row.status = "skipped".into();
     row.last_error = Some(err.clone());
@@ -272,7 +284,8 @@ async fn give_up(
 
 struct Built {
     what: String,
-    retry: bool,
+    /// When to come back for a failed build.
+    retry: Option<DateTime<Utc>>,
     published: bool,
 }
 
@@ -322,13 +335,11 @@ fn translation(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn build(
     now: DateTime<Utc>,
     st: &IpoState,
     es: &dyn EarningsStore,
     store: &dyn Store,
-    llm: &dyn LlmProvider,
     t: &Tracked,
     r: &Reached,
     run: Option<RunRow>,
@@ -351,7 +362,7 @@ async fn build(
             store.upsert_run(&row).await?;
             return Ok(Built {
                 what: "published (run closed)".into(),
-                retry: false,
+                retry: None,
                 published: false,
             });
         }
@@ -363,12 +374,8 @@ async fn build(
     store.upsert_run(&row).await?;
 
     let f = bundle(st, t, r, now);
-    let en = writeup::write(llm, &f, Lang::En).await;
-    // No Chinese call when the English draft already failed.
-    let zh = match &en {
-        Ok(_) => writeup::write(llm, &f, Lang::Zh).await,
-        Err(_) => Err(vec!["not drafted after the English draft failed".into()]),
-    };
+    let en = writeup::render(&f, Lang::En);
+    let zh = writeup::render(&f, Lang::Zh);
     let ((en, en_md), (zh, zh_md)) = match (en, zh) {
         (Ok(a), Ok(b)) => (a, b),
         (en, zh) => {
@@ -391,7 +398,7 @@ async fn build(
     {
         return Ok(Built {
             what: "finished elsewhere".into(),
-            retry: false,
+            retry: None,
             published: false,
         });
     }
@@ -425,7 +432,7 @@ async fn build(
     store.upsert_run(&row).await?;
     Ok(Built {
         what: format!("published {}", post.slug),
-        retry: false,
+        retry: None,
         published: true,
     })
 }
@@ -438,11 +445,11 @@ async fn not_ready(
     mut row: RunRow,
     err: String,
 ) -> Result<Built, String> {
-    if past_deadline(&row, now) {
+    if spent(&row) {
         let what = give_up(now, store, t, r, row, err).await?;
         return Ok(Built {
             what,
-            retry: false,
+            retry: None,
             published: false,
         });
     }
@@ -450,14 +457,17 @@ async fn not_ready(
     row.last_error = Some(err.clone());
     row.updated_at = iso(now);
     store.upsert_run(&row).await?;
+    let at = retry_at(&row);
     let msg = format!(
-        "IPO write-up for {} not published yet (retrying every {RETRY_MINUTES} minutes): {err}",
-        label(t, r)
+        "IPO write-up for {} not published yet (build {} of {MAX_BUILDS}, retried after {} minutes): {err}",
+        label(t, r),
+        row.attempts,
+        backoff(row.attempts).num_minutes()
     );
     alert_once_today(now, &row.run_key, "warn", &msg, store).await?;
     Ok(Built {
         what: format!("retrying: {err}"),
-        retry: true,
+        retry: at,
         published: false,
     })
 }
@@ -466,15 +476,11 @@ async fn not_ready(
 mod tests {
     use super::*;
     use crate::earnings::store::MemEarningsStore;
-    use crate::ipo::milestone::tests::{anthropic, real_state, ACC};
+    use crate::ipo::milestone::tests::{anthropic, real_state};
     use crate::ipo::milestone::IpoArticleFacts;
-    use crate::ipo::store::{FactRow, FilingRow, MemIpoStore};
-    use crate::ipo::writeup::tests::reply;
-    use crate::providers::ProviderError;
+    use crate::ipo::store::{FactRow, FilingRow, MemIpoStore, TradingRow};
     use crate::store::MemStore;
-    use async_trait::async_trait;
     use serde_json::{json, Value};
-    use std::cell::{Cell, RefCell};
     use std::rc::Rc;
 
     const RUN: &str = "ipo:anthropic:range_set:0001628280-26-072484";
@@ -482,32 +488,6 @@ mod tests {
 
     fn utc(s: &str) -> DateTime<Utc> {
         s.parse().unwrap()
-    }
-
-    /// Replies in order; counts calls.
-    struct FakeLlm {
-        replies: RefCell<Vec<Result<Value, ProviderError>>>,
-        calls: Cell<usize>,
-    }
-    #[async_trait(?Send)]
-    impl LlmProvider for FakeLlm {
-        async fn complete_json(&self, _: &str, _: &str) -> Result<Value, ProviderError> {
-            self.calls.set(self.calls.get() + 1);
-            let mut r = self.replies.borrow_mut();
-            assert!(!r.is_empty(), "unexpected extra LLM call");
-            r.remove(0)
-        }
-    }
-    fn llm(replies: Vec<Value>) -> FakeLlm {
-        FakeLlm {
-            replies: RefCell::new(replies.into_iter().map(Ok).collect()),
-            calls: Cell::new(0),
-        }
-    }
-    fn bad(lang: Lang) -> Value {
-        let mut v = reply(lang);
-        v["sections"][0]["markdown"] = json!("It reflects strong demand at $70.00.");
-        v
     }
 
     struct World {
@@ -526,17 +506,11 @@ mod tests {
         }
     }
     impl World {
-        async fn tick(&self, now: &str, l: &FakeLlm) -> ArticleOutcome {
-            article_tick(
-                utc(now),
-                &[anthropic()],
-                &self.ipo,
-                &self.es,
-                &*self.base,
-                l,
-            )
-            .await
-            .unwrap()
+        async fn try_tick(&self, now: &str) -> Result<ArticleOutcome, String> {
+            article_tick(utc(now), &[anthropic()], &self.ipo, &self.es, &*self.base).await
+        }
+        async fn tick(&self, now: &str) -> ArticleOutcome {
+            self.try_tick(now).await.unwrap()
         }
         fn visible(&self, lang: &str) -> usize {
             self.base
@@ -546,16 +520,63 @@ mod tests {
                 .filter(|((_, l), t)| l == lang && t.status == "published")
                 .count()
         }
-        fn run(&self) -> RunRow {
-            self.base.runs.borrow().get(RUN).cloned().expect("run")
+        fn run(&self, key: &str) -> RunRow {
+            self.base.runs.borrow().get(key).cloned().expect("run")
+        }
+        fn add_final(&self) {
+            let fin = "0001628280-26-090001";
+            let mut st = self.ipo.state.borrow_mut();
+            st.filings.push(FilingRow {
+                accession: fin.into(),
+                slug: "anthropic".into(),
+                form: "424B4".into(),
+                filing_date: "2026-11-18".into(),
+                index_url: "https://www.sec.gov/Archives/edgar/data/2130357/000162828026090001/0001628280-26-090001-index.htm".into(),
+                read_state: "read".into(),
+                ..Default::default()
+            });
+            for (k, v) in [("price_final", 80.0), ("shares_offered", 825e6)] {
+                st.facts.push(FactRow {
+                    accession: fin.into(),
+                    kind: k.into(),
+                    slug: "anthropic".into(),
+                    value_num: Some(v),
+                    value_text: None,
+                    quote: "q".into(),
+                });
+            }
+        }
+        fn add_session(&self, day: &str, confirmed: bool) {
+            let mut st = self.ipo.state.borrow_mut();
+            st.trading.push(TradingRow {
+                slug: "anthropic".into(),
+                session_date: day.into(),
+                symbol: "ANT".into(),
+                open: Some(95.0),
+                close: 101.5,
+                volume: Some(120_000_000),
+                ipo_price: Some(80.0),
+                change_pct: Some(26.88),
+                source_url: "https://finance.yahoo.com/quote/ANT".into(),
+                fetched_at: format!("{day}T21:30:00Z"),
+            });
+            let w = &mut st.watch[0];
+            if confirmed {
+                w.first_trade_date = Some(day.into());
+                w.date_status = Some("confirmed".into());
+                w.date_source = Some("trading".into());
+            } else {
+                w.first_trade_date = Some("2026-11-19".into());
+                w.date_status = Some("expected".into());
+                w.date_source = Some("filing".into());
+            }
         }
     }
 
     #[tokio::test]
     async fn the_real_state_publishes_one_range_set_write_up_in_both_languages() {
         let w = world();
-        let l = llm(vec![reply(Lang::En), reply(Lang::Zh)]);
-        let out = w.tick(NOW, &l).await;
+        let out = w.tick(NOW).await;
         assert_eq!(
             out.runs,
             [(
@@ -564,7 +585,6 @@ mod tests {
             )]
         );
         assert!(out.published);
-        assert_eq!(l.calls.get(), 2);
         let posts = w.base.posts.borrow().clone();
         assert_eq!(posts.len(), 1);
         let p = &posts[0];
@@ -599,8 +619,10 @@ mod tests {
         assert!(en
             .body_md
             .starts_with("# Anthropic sets IPO price range at $70 to $78 a share\n"));
+        assert!(zh
+            .body_md
+            .starts_with("# Anthropic公布IPO价格区间：每股70至78美元\n"));
         assert_eq!(en.cover_line2.as_deref(), Some("Price range $70.00–$78.00"));
-        drop(tr);
         let json =
             w.base.facts.borrow()["ipo/anthropic/range_set-0001628280-26-072484.json"].clone();
         let f: IpoArticleFacts = serde_json::from_str(&json).unwrap();
@@ -610,176 +632,118 @@ mod tests {
         );
         let v: Value = serde_json::from_str(&json).unwrap();
         assert_eq!(v["milestone"], "range_set");
-        assert_eq!(v["previous"], Value::Null);
         assert_eq!(v["items"], json!([]));
         assert_eq!(w.base.sources.borrow()[&1].len(), 1);
-        assert_eq!(w.run().status, "published");
+        assert_eq!(w.run(RUN).status, "published");
         assert_eq!(out.next, "2026-11-11T23:00:00Z");
 
-        // Published once: later passes make no call and no post.
-        let l = llm(vec![]);
-        let out = w.tick("2026-11-12T15:00:00Z", &l).await;
+        // Published once: later passes write nothing.
+        let out = w.tick("2026-11-12T15:00:00Z").await;
         assert!(out.runs.is_empty() && !out.published);
         assert_eq!(w.base.posts.borrow().len(), 1);
-    }
-
-    #[tokio::test]
-    async fn a_refused_chinese_draft_publishes_nothing_until_both_pass() {
-        let w = world();
-        let l = llm(vec![reply(Lang::En), bad(Lang::Zh), bad(Lang::Zh)]);
-        let out = w.tick(NOW, &l).await;
-        assert!(
-            out.runs[0].1.starts_with("retrying: zh: draft: "),
-            "{out:?}"
-        );
-        assert_eq!((w.visible("en"), w.visible("zh")), (0, 0));
-        assert!(w.base.posts.borrow().is_empty());
-        let r = w.run();
-        assert_eq!((r.status.as_str(), r.attempts), ("pending", 1));
-        assert_eq!(out.next, "2026-11-11T22:05:00Z");
-        assert_eq!(w.base.alerts.borrow().len(), 1);
-        assert_eq!(w.base.alerts.borrow()[0].1, "warn");
-        // Before the pause is over, nothing is called.
-        let none = llm(vec![]);
-        let out = w.tick("2026-11-11T22:03:00Z", &none).await;
-        assert_eq!(out.runs[0].1, "waiting to retry");
-        // Then both pass, and both go live together.
-        let l = llm(vec![reply(Lang::En), reply(Lang::Zh)]);
-        let out = w.tick("2026-11-11T22:06:00Z", &l).await;
-        assert!(out.published, "{out:?}");
-        assert_eq!((w.visible("en"), w.visible("zh")), (1, 1));
-        assert_eq!(w.run().attempts, 2);
-        // One warn alert a day, not one per attempt.
-        assert_eq!(w.base.alerts.borrow().len(), 1);
     }
 
     #[tokio::test]
     async fn a_failed_batch_leaves_nothing_visible_and_the_retry_writes_one_post() {
         let w = world();
         w.base.fail_revise_post.set(true);
-        let l = llm(vec![reply(Lang::En), reply(Lang::Zh)]);
-        let e = article_tick(utc(NOW), &[anthropic()], &w.ipo, &w.es, &*w.base, &l).await;
-        assert!(e.is_err());
+        assert!(w.try_tick(NOW).await.is_err());
         assert_eq!((w.visible("en"), w.visible("zh")), (0, 0));
         assert_eq!(w.base.posts.borrow().len(), 1);
         // A redelivered message while the build's lease runs: nothing.
         w.base.fail_revise_post.set(false);
-        let none = llm(vec![]);
-        let out = w.tick("2026-11-11T22:01:00Z", &none).await;
+        let out = w.tick("2026-11-11T22:01:00Z").await;
         assert_eq!(out.runs[0].1, "in flight");
+        assert_eq!(out.next, "2026-11-11T22:15:00Z");
         // After the lease: built again into the same post.
-        let l = llm(vec![reply(Lang::En), reply(Lang::Zh)]);
-        let out = w.tick("2026-11-11T22:20:00Z", &l).await;
+        let out = w.tick("2026-11-11T22:20:00Z").await;
         assert!(out.published);
         assert_eq!(w.base.posts.borrow().len(), 1);
         assert_eq!((w.visible("en"), w.visible("zh")), (1, 1));
+        assert_eq!(w.run(RUN).attempts, 2);
+    }
+
+    #[tokio::test]
+    async fn a_build_that_keeps_failing_stops_after_five() {
+        let w = world();
+        w.base.fail_revise_post.set(true);
+        // Each failed build holds its lease for 15 minutes.
+        for (i, at) in [
+            "2026-11-11T22:00:00Z",
+            "2026-11-11T22:16:00Z",
+            "2026-11-11T22:32:00Z",
+            "2026-11-11T22:48:00Z",
+            "2026-11-11T23:04:00Z",
+        ]
+        .iter()
+        .enumerate()
+        {
+            assert!(w.try_tick(at).await.is_err(), "build {}", i + 1);
+            assert_eq!(w.run(RUN).attempts, i as i64 + 1);
+        }
+        let out = w.tick("2026-11-11T23:20:00Z").await;
+        assert!(out.runs[0].1.starts_with("failed: "), "{out:?}");
+        assert_eq!(w.run(RUN).status, "failed");
+        let alerts = w.base.alerts.borrow().clone();
+        assert_eq!((alerts[0].0.as_str(), alerts[0].1.as_str()), (RUN, "error"));
+        // Failed is final.
+        assert!(w.tick("2026-11-12T15:00:00Z").await.runs.is_empty());
+        assert_eq!((w.visible("en"), w.visible("zh")), (0, 0));
+    }
+
+    #[test]
+    fn failed_builds_back_off() {
+        let mins: Vec<i64> = (1..=6).map(|n| backoff(n).num_minutes()).collect();
+        assert_eq!(mins, [5, 15, 30, 60, 60, 60]);
+        let mut r = RunRow {
+            run_key: RUN.into(),
+            content_type: "ipo".into(),
+            trading_date: "2026-11-10".into(),
+            status: "pending".into(),
+            attempts: 2,
+            last_error: Some("x".into()),
+            created_at: "2026-11-11T22:00:00Z".into(),
+            updated_at: "2026-11-11T22:10:00Z".into(),
+        };
+        assert!(waiting(&r, utc("2026-11-11T22:24:00Z")));
+        assert!(!waiting(&r, utc("2026-11-11T22:25:00Z")));
+        r.attempts = MAX_BUILDS;
+        assert!(spent(&r));
     }
 
     #[tokio::test]
     async fn text_already_live_only_closes_the_run() {
         let w = world();
-        let l = llm(vec![reply(Lang::En), reply(Lang::Zh)]);
-        w.tick(NOW, &l).await;
-        // As if the run write after the batch had failed.
-        let mut r = w.run();
+        w.tick(NOW).await;
+        let mut r = w.run(RUN);
         r.status = "building".into();
-        r.updated_at = "2026-11-11T22:00:00Z".into();
         w.base.runs.borrow_mut().insert(RUN.into(), r);
-        let none = llm(vec![]);
-        let out = w.tick("2026-11-11T22:30:00Z", &none).await;
+        let out = w.tick("2026-11-11T22:30:00Z").await;
         assert_eq!(out.runs[0].1, "published (run closed)");
-        assert_eq!(w.run().status, "published");
-        assert_eq!(none.calls.get(), 0);
+        assert_eq!(w.run(RUN).status, "published");
     }
 
     #[tokio::test]
     async fn a_milestone_found_late_is_skipped_with_a_warning() {
         let w = world();
-        let none = llm(vec![]);
-        let out = w.tick("2026-11-18T22:00:00Z", &none).await;
+        let out = w.tick("2026-11-18T22:00:00Z").await;
         assert!(
             out.runs[0]
                 .1
                 .starts_with("skipped: found 8 days after 2026-11-10"),
             "{out:?}"
         );
-        assert_eq!(w.run().status, "skipped");
+        assert_eq!(w.run(RUN).status, "skipped");
         assert_eq!(w.base.alerts.borrow()[0].1, "warn");
-        // Seven days is still on time.
         let w = world();
-        let l = llm(vec![reply(Lang::En), reply(Lang::Zh)]);
-        assert!(w.tick("2026-11-17T22:00:00Z", &l).await.published);
-    }
-
-    #[tokio::test]
-    async fn a_run_that_keeps_failing_gives_up_after_the_deadline() {
-        let w = world();
-        w.base.runs.borrow_mut().insert(
-            RUN.into(),
-            RunRow {
-                run_key: RUN.into(),
-                content_type: "ipo".into(),
-                trading_date: "2026-11-10".into(),
-                status: "pending".into(),
-                attempts: 2,
-                last_error: Some("zh: draft: x".into()),
-                created_at: "2026-11-11T14:00:00Z".into(),
-                updated_at: "2026-11-11T21:00:00Z".into(),
-            },
-        );
-        let l = llm(vec![bad(Lang::En), bad(Lang::En)]);
-        let out = w.tick(NOW, &l).await;
-        assert!(out.runs[0].1.starts_with("failed: en: "), "{out:?}");
-        assert_eq!(w.run().status, "failed");
-        let alerts = w.base.alerts.borrow();
-        assert_eq!((alerts[0].0.as_str(), alerts[0].1.as_str()), (RUN, "error"));
-        assert!(w.base.posts.borrow().is_empty());
+        assert!(w.tick("2026-11-17T22:00:00Z").await.published);
     }
 
     #[tokio::test]
     async fn a_newer_milestone_gets_its_own_write_up_and_the_older_one_none() {
         let w = world();
-        // The 424B4 arrives before any write-up: range_set is passed over.
-        let fin = "0001628280-26-090001";
-        {
-            let mut st = w.ipo.state.borrow_mut();
-            st.filings.push(FilingRow {
-                accession: fin.into(),
-                slug: "anthropic".into(),
-                form: "424B4".into(),
-                filing_date: "2026-11-18".into(),
-                index_url: "https://www.sec.gov/Archives/edgar/data/2130357/000162828026090001/0001628280-26-090001-index.htm".into(),
-                read_state: "read".into(),
-                ..Default::default()
-            });
-            for (k, v) in [("price_final", 80.0), ("shares_offered", 825e6)] {
-                st.facts.push(FactRow {
-                    accession: fin.into(),
-                    kind: k.into(),
-                    slug: "anthropic".into(),
-                    value_num: Some(v),
-                    value_text: None,
-                    quote: "q".into(),
-                });
-            }
-        }
-        let mut en = reply(Lang::En);
-        en["title"] = json!("Anthropic prices its IPO at $80.00 a share");
-        en["summary"] = json!("Anthropic's final prospectus (Form 424B4) filed Nov. 18, 2026 sets the offering price at $80.00 a share.");
-        en["sections"][0]["markdown"] = json!("Anthropic filed its final prospectus (Form 424B4) on Nov. 18, 2026. It prices 825,000,000 shares at $80.00 each.");
-        en["sections"][1]["markdown"] =
-            json!("The 424B4 lists the Nasdaq Global Select Market and the symbol ANT.");
-        let mut zh = reply(Lang::Zh);
-        zh["title"] = json!("Anthropic完成IPO定价：每股80.00美元");
-        zh["summary"] = json!(
-            "Anthropic于2026年11月18日提交最终招股说明书（424B4），发行价定为每股80.00美元。"
-        );
-        zh["sections"][0]["markdown"] =
-            json!("Anthropic于2026年11月18日提交424B4。8.25亿股的发行价为每股80.00美元。");
-        zh["sections"][1]["markdown"] =
-            json!("424B4载明的交易所为Nasdaq Global Select Market，股票代码为ANT。");
-        let l = llm(vec![en, zh]);
-        let out = w.tick("2026-11-18T22:00:00Z", &l).await;
+        w.add_final();
+        let out = w.tick("2026-11-18T22:00:00Z").await;
         assert_eq!(
             out.runs,
             [(
@@ -789,12 +753,57 @@ mod tests {
             "{out:?}"
         );
         assert!(w.base.runs.borrow().get(RUN).is_none());
-        let p = w.base.posts.borrow()[0].clone();
-        assert_eq!(p.template_id, "ipo-priced");
-        assert!(!w.base.translations.borrow()[&(1, "en".to_string())]
+        assert_eq!(w.base.posts.borrow()[0].template_id, "ipo-priced");
+        let en = w.base.translations.borrow()[&(1, "en".to_string())]
             .body_md
-            .contains("Price range per share"));
-        let _ = ACC;
+            .clone();
+        assert!(
+            en.starts_with("# Anthropic prices IPO at $80 a share\n"),
+            "{en}"
+        );
+        assert!(en.contains("That price is above the range of $70.00 to $78.00 in the S-1/A filed Nov 10, 2026."), "{en}");
+    }
+
+    #[tokio::test]
+    async fn listed_waits_until_the_session_is_the_confirmed_first_day() {
+        let w = world();
+        w.add_final();
+        w.tick("2026-11-18T22:00:00Z").await;
+        // Day one missed: the stored session is not the filings' day.
+        w.add_session("2026-11-20", false);
+        let out = w.tick("2026-11-20T22:00:00Z").await;
+        assert_eq!(
+            out.runs,
+            [(
+                "ipo:anthropic:listed:2026-11-20".to_string(),
+                "waiting for the first trading day to be confirmed".into()
+            )]
+        );
+        assert!(w
+            .base
+            .runs
+            .borrow()
+            .get("ipo:anthropic:listed:2026-11-20")
+            .is_none());
+        // Never confirmed: skipped after 7 days, with a warning.
+        let out = w.tick("2026-11-30T15:00:00Z").await;
+        assert!(out.runs[0].1.contains("never confirmed"), "{out:?}");
+        assert_eq!(w.run("ipo:anthropic:listed:2026-11-20").status, "skipped");
+
+        // Confirmed: written.
+        let w = world();
+        w.add_final();
+        w.tick("2026-11-18T22:00:00Z").await;
+        w.add_session("2026-11-19", true);
+        let out = w.tick("2026-11-19T22:00:00Z").await;
+        assert!(out.published, "{out:?}");
+        let en = w.base.translations.borrow()[&(2, "en".to_string())]
+            .body_md
+            .clone();
+        assert!(
+            en.starts_with("# Anthropic closes first trading day at $101.50\n"),
+            "{en}"
+        );
     }
 
     #[tokio::test]
@@ -811,7 +820,6 @@ mod tests {
             assert_eq!(follow_up(a, b, &list, &w.es, at).await.unwrap(), None);
         }
         assert_eq!(follow_up(on, on, &[], &w.es, at).await.unwrap(), None);
-        // A Saturday, and outside the polling window.
         assert_eq!(
             follow_up(on, on, &list, &w.es, utc("2026-11-14T15:00:00Z"))
                 .await
