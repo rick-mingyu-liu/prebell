@@ -650,16 +650,18 @@ fn title_party_re() -> &'static Regex {
 ///
 /// `ticker` is the symbol from the company's filing, given only when the
 /// article's headline names the company: a sentence that does not name it
-/// but holds the ticker ("Shares are expected to start trading on the
-/// Nasdaq on November 19 under the symbol "ANT."", Reuters 2026-11-10) is
-/// read with "Shares" or "The stock" as the company's shares
-/// (`ticker_subject`), under every check above.
+/// but gives the ticker as the listing's own symbol ("Shares are expected
+/// to start trading on the Nasdaq on November 19 under the symbol "ANT."",
+/// Reuters 2026-11-10) is read with "Shares" or "The stock" as the
+/// company's shares (`ticker_subject`), under every check above, and the
+/// symbol phrase must sit after the date with no other name there
+/// (`gives_symbol`).
 pub fn is_trading_date(quote: &str, d: NaiveDate, t: &Tracked, ticker: Option<&str>) -> bool {
     let marked = mark_company(&normalize(&visible(quote)), t);
     sentences(&marked).iter().any(|s| {
-        let s = match ticker {
-            Some(sym) if !s.contains(CO) && has_ticker(s, sym) => ticker_subject(s),
-            _ => s.clone(),
+        let (s, by_ticker) = match ticker {
+            Some(sym) if !s.contains(CO) && gives_symbol(s, sym) => (ticker_subject(s), Some(sym)),
+            _ => (s.clone(), None),
         };
         !s.ends_with('?')
             && !change_re().is_match(&s)
@@ -677,23 +679,42 @@ pub fn is_trading_date(quote: &str, d: NaiveDate, t: &Tracked, ticker: Option<&s
                     let title_ok = c.name("title").is_none_or(|m| {
                         !title_party_re().is_match(&m.as_str().replace("Investor Relations", ""))
                     });
-                    tail_ok && date_ok && title_ok
+                    // "…, the day Acme's stock begins trading under the
+                    // symbol "ANT."": the symbol is another listing's.
+                    let ticker_ok = by_ticker.is_none_or(|sym| {
+                        c.name("tail").is_some_and(|m| {
+                            gives_symbol(m.as_str(), sym) && names_only(m.as_str(), sym)
+                        })
+                    });
+                    tail_ok && date_ok && title_ok && ticker_ok
                 })
             })
     })
 }
 
-/// `symbol` occurs in `text` as written (case-sensitive), with no letter
-/// or digit right before or after it: "ANT" is in "symbol "ANT."" but not
-/// in "ANTHROPIC" or "want".
-pub fn has_ticker(text: &str, symbol: &str) -> bool {
-    let text = normalize(&visible(text));
-    !symbol.is_empty()
-        && text.match_indices(symbol).any(|(i, _)| {
-            let before = text[..i].chars().next_back();
-            let after = text[i + symbol.len()..].chars().next();
-            !before.is_some_and(char::is_alphanumeric) && !after.is_some_and(char::is_alphanumeric)
-        })
+/// `text` gives `symbol` as the listing's own: "under the symbol X",
+/// "under the ticker (symbol) X" (quoted or not), "(Nasdaq: X)" or
+/// "(NYSE: X)". The symbol is matched as written (case-sensitive) and
+/// whole: "ANT" is in "under the symbol "ANT."" but not in "ANTHROPIC",
+/// "ant" or "ANTX". A bare mention ("a day after ANT's debut") is not one.
+pub fn gives_symbol(text: &str, symbol: &str) -> bool {
+    if symbol.is_empty() {
+        return false;
+    }
+    let sym = regex::escape(symbol);
+    let phrase = format!(
+        r#"(?:(?i:under\s+the\s+(?:ticker\s+symbol|stock\s+symbol|symbol|ticker))\s+"?{sym}(?:[^A-Za-z0-9]|$)|\((?i:Nasdaq|NYSE(?:\s+American)?)\s*:\s*{sym}\))"#
+    );
+    Regex::new(&phrase).is_ok_and(|r| r.is_match(&normalize(&visible(text))))
+}
+
+/// `tail` names no one but the listing: every word with an uppercase letter
+/// is in `ALLOWED_CAPS` or is `symbol`.
+fn names_only(tail: &str, symbol: &str) -> bool {
+    tail.split(|c: char| c.is_whitespace() || matches!(c, ',' | '(' | ')' | '"' | ';' | '$' | ':'))
+        .map(|w| w.trim_end_matches("'s").trim_end_matches(['.', '\'']))
+        .filter(|w| w.chars().any(|c| c.is_uppercase()))
+        .all(|w| w == symbol || ALLOWED_CAPS.contains(&w))
 }
 
 /// A sentence opening with "Shares", "The shares", "Its stock" (not
@@ -866,11 +887,12 @@ pub fn check_item(
         row.speaker = Some(speaker);
         return Ok(row);
     }
-    // A listing date may name the company by the ticker from its filing
-    // instead, in an article whose headline names it (decisions.md,
-    // 2026-11-11, "ticker match"). No stored symbol: no such path.
+    // A listing date may name the company by the ticker from its filing,
+    // given as the listing's symbol, in an article whose headline names it
+    // (decisions.md, 2026-11-11, "filed ticker"). No stored symbol: no such
+    // path.
     let ticker = symbol.filter(|_| p.kind == "expected_date" && names_company(&hit.title, t));
-    if !names_company(&quote, t) && !ticker.is_some_and(|s| has_ticker(&quote, s)) {
+    if !names_company(&quote, t) && !ticker.is_some_and(|s| gives_symbol(&quote, s)) {
         return Err(Reject::CompanyNotNamed);
     }
     match p.kind.as_str() {
@@ -2324,7 +2346,8 @@ mod tests {
         for q in [
             "Shares are no longer expected to start trading on the Nasdaq on November 19 under the symbol \"ANT.\"",
             "Shares are expected to start trading on the Nasdaq on November 19 under the symbol \"ANT\" unless markets fall.",
-            "Shares of Acme are expected to start trading on the Nasdaq on November 19, a day after \"ANT.\"",
+            // The symbol phrase attached to another company's shares.
+            "Shares are expected to start trading on the Nasdaq on November 19, the day Acme's stock begins trading under the symbol \"ANT.\"",
             "Shares are expected to start trading on the Nasdaq on November 19 under the symbol \"ANT\"?",
         ] {
             assert_eq!(
@@ -2341,6 +2364,31 @@ mod tests {
             ),
             Err(Reject::DateNotInQuote)
         );
+        // A bare mention of the ticker is not the listing's symbol.
+        for q in [
+            "Shares are expected to start trading on Nov. 20, a day after ANT's debut.",
+            "Shares are expected to start trading on Nov. 20 alongside ANT.",
+            "Shares of Acme are expected to start trading on the Nasdaq on Nov. 20, a day after \"ANT.\"",
+        ] {
+            let h = [headed(A_URL, REUTERS_HEAD, q)];
+            let p = Proposed {
+                date: Some("2026-11-20".into()),
+                ..on_19(A_URL, q)
+            };
+            assert_eq!(
+                check_item(&p, &h, &anthropic(), Some("ANT"), utc(NOW)),
+                Err(Reject::CompanyNotNamed),
+                "{q}"
+            );
+        }
+        // The exchange form after the date.
+        let r = ck_ticker(
+            "Shares are expected to start trading on Nov. 19 (Nasdaq: ANT).",
+            REUTERS_HEAD,
+            Some("ANT"),
+        )
+        .unwrap();
+        assert_eq!(r.value_date.as_deref(), Some("2026-11-19"));
         // Valuations keep the name-in-sentence rule.
         let v = "Shares under the symbol \"ANT\" would value it at $1.4 trillion.";
         let h = [headed(A_URL, REUTERS_HEAD, v)];
@@ -2358,20 +2406,28 @@ mod tests {
     }
 
     #[test]
-    fn the_ticker_is_a_whole_token_as_written() {
+    fn the_ticker_counts_only_as_the_listings_own_symbol() {
         for (text, found) in [
             ("under the symbol \"ANT.\"", true),
             ("under the symbol \u{201c}ANT\u{201d}", true),
+            ("under the ticker ANT", true),
+            ("under the ticker symbol \"ANT\"", true),
             ("(Nasdaq: ANT)", true),
-            ("ANT", true),
-            ("ANTHROPIC shares", false),
+            ("(NASDAQ: ANT)", true),
+            ("(NYSE: ANT)", true),
+            ("ANT", false),
+            ("a day after ANT's debut", false),
+            ("alongside ANT", false),
+            ("ANT's shares", false),
+            ("under the symbol \"ANTHROPIC\"", false),
             ("investors want more", false),
             ("under the symbol \"ant\"", false),
             ("under the symbol \"ANTX\"", false),
+            ("(Nasdaq: ANTX)", false),
         ] {
-            assert_eq!(has_ticker(text, "ANT"), found, "{text}");
+            assert_eq!(gives_symbol(text, "ANT"), found, "{text}");
         }
-        assert!(!has_ticker("ANT", ""));
+        assert!(!gives_symbol("under the symbol ANT", ""));
     }
 
     #[tokio::test]
