@@ -676,9 +676,12 @@ fn ranged(f: &IpoArticleFacts, lang: Lang) -> Text {
             .to_string(),
         );
     }
-    s1.push(match lang {
-        Lang::En => format!("The cover states {words}{for_shares}."),
-        Lang::Zh => format!("封面载明的价格区间为{words}{for_shares}。"),
+    // "Sets" / "定为" only when the range is provably the first.
+    s1.push(match (lang, !changed && f.first_range) {
+        (Lang::En, true) => format!("The cover sets {words}{for_shares}."),
+        (Lang::En, false) => format!("The cover states {words}{for_shares}."),
+        (Lang::Zh, true) => format!("封面将价格区间定为{words}{for_shares}。"),
+        (Lang::Zh, false) => format!("封面载明的价格区间为{words}{for_shares}。"),
     });
     if let (Some(p), Some((a, b))) = (prev, old) {
         s1.push(match lang {
@@ -1739,12 +1742,11 @@ pub(crate) mod tests {
             "Anthropic sets IPO price range at $70 to $78 a share"
         );
         assert!(section(&d, 0).contains(
-            "It is the first registration statement for this offering to state a price range."
+            "It is the first registration statement for this offering to state a price range. The cover sets a price range of $70.00 to $78.00 per share for 825,000,000 shares."
         ));
-        assert_eq!(
-            write(&first, Lang::Zh).title,
-            "Anthropic公布IPO价格区间：每股70至78美元"
-        );
+        let z = write(&first, Lang::Zh);
+        assert_eq!(z.title, "Anthropic公布IPO价格区间：每股70至78美元");
+        assert!(section(&z, 0).contains("封面将价格区间定为每股70.00至78.00美元，发行8.25亿股。"));
     }
 
     #[test]
