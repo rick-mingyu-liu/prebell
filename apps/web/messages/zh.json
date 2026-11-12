@@ -208,7 +208,8 @@
   "types": {
     "premarket": "盘前简报",
     "recap": "收盘回顾",
-    "earnings": "财报速评"
+    "earnings": "财报速评",
+    "ipo": "IPO"
   },
   "earnings": {
     "calendarTitle": "市场日历",
@@ -407,6 +408,20 @@
       "source": "来源：{source}"
     },
     "disclaimer": "本页根据美国证监会文件和公开新闻报道自动生成，仅供参考，不构成投资建议。",
-    "asReported": "上市前的估值、日期和公司动态均为所列来源的报道，可能有误。"
+    "asReported": "上市前的估值、日期和公司动态均为所列来源的报道，可能有误。",
+    "home": {
+      "from": "{form}，{date}提交",
+      "valuation": "媒体报道的估值",
+      "reportedBy": "据 {outlet} {date}报道",
+      "lastClose": "最新收盘价",
+      "writeup": "最新文章：",
+      "page": "申报文件、数字及来源",
+      "articleBy": "原文：{outlet}",
+      "more": "日历上还有 {count} 只追踪中的 IPO →"
+    },
+    "writeups": {
+      "heading": "相关文章"
+    },
+    "writeupLink": "IPO 追踪：每份申报文件与每个数字的来源"
   }
 }

@@ -161,6 +161,28 @@ html:lang(zh-Hans) .front-slots dt { letter-spacing: 0.02em; }
 .front-slots a { font-weight: 600; text-decoration: none; }
 .front-slots a:hover, .front-slots a:focus-visible { text-decoration: underline; }
 .front + .signup { margin-top: 2.5rem; }
+/* The IPO section: the side column's first section, each IPO a short entry under its status kicker; the facts as
+   label and value lines, the date line as on the IPO page. On a phone it follows the lead, before the movers. */
+.front-ipo-item { padding: 0.15rem 0 0.9rem; }
+.front-ipo-item + .front-ipo-item { padding-top: 0.9rem; border-top: 1px solid var(--rule); }
+.front-ipo-item .kicker { margin: 0 0 0.15rem; font-size: 11px; }
+.front-ipo-item .story-title { margin: 0; font-size: 24px; line-height: 1.15; }
+.front-ipo-meta { margin: 0.15rem 0 0.5rem; color: var(--muted); font-size: 13.5px; }
+.front-ipo-facts { margin: 0 0 0.5rem; font-size: 14px; line-height: 1.5; }
+.front-ipo-facts dt { margin-top: 0.35rem; font-size: 12px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); }
+html:lang(zh-Hans) .front-ipo-facts dt { letter-spacing: 0.02em; }
+.front-ipo-facts dt:first-child { margin-top: 0; }
+.front-ipo-facts dd { margin: 0; overflow-wrap: anywhere; }
+.front-ipo-facts dd a { text-decoration: none; font-weight: 600; }
+.front-ipo-item .ipo-date { margin: 0 0 0.5rem; }
+.front-ipo-item .ipo-date > p, .front-ipo-item p.ipo-date { font-size: 14px; line-height: 1.5; }
+.front-ipo-writeup { margin: 0 0 0.4rem; font-size: 14px; line-height: 1.45; }
+.front-ipo-writeup a { font-family: var(--serif); font-size: 16px; font-weight: 700; text-decoration: none; }
+.front-ipo-writeup a:hover, .front-ipo-writeup a:focus-visible { text-decoration: underline; }
+.story-ipo { margin: -0.5rem 0 1rem; }
+.front-ipo-quote { margin: 0.2rem 0 0; padding-left: 0.6rem; border-left: 2px solid var(--rule); color: var(--muted); font-size: 13px; line-height: 1.45; overflow-wrap: anywhere; }
+.front-ipo-item .ipo-date + .front-ipo-quote { margin: -0.3rem 0 0.5rem; }
+.front-ipo-more { display: inline-block; margin: 0.25rem 0 0.5rem; }
 
 /* Movers: ruled rows (name, grey ticker, the move; the reason in grey under them) or a ruled table.
    No logos, no pills; "No clear news" in grey italics. */
@@ -535,9 +557,9 @@ h3.cal-slot .num { margin-left: auto; color: var(--ink); font-variant-caps: norm
   /* Front page: one column; the side column's sections join the grid so movers follow the lead. */
   .front { grid-template-columns: minmax(0, 1fr); grid-template-rows: none; }
   .front-side { display: contents; }
-  .front-lead, .front-earnings, .front-recent, .front-movers, .front-themes, .front-reporting { grid-column: 1; grid-row: auto; min-width: 0; }
+  .front-lead, .front-earnings, .front-recent, .front-ipo, .front-movers, .front-themes, .front-reporting { grid-column: 1; grid-row: auto; min-width: 0; }
   .front-lead { order: 1; }
-  .front-movers, .front-themes { order: 2; }
+  .front-ipo, .front-movers, .front-themes { order: 2; }
   .front-earnings { order: 3; }
   .front-recent { order: 4; }
   .front-reporting { order: 5; }

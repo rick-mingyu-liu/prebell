@@ -153,19 +153,25 @@ pub fn missing_to_replace(
 
 /// The facts source among `filings` (module docs).
 pub fn current<'a>(st: &IpoState, filings: &[&'a FilingRow]) -> Option<&'a FilingRow> {
+    sources(st, filings).last().copied()
+}
+
+/// Every filing that became the facts source, oldest first: the covers the
+/// IPO page has shown, each complete by the replacement rule.
+pub fn sources<'a>(st: &IpoState, filings: &[&'a FilingRow]) -> Vec<&'a FilingRow> {
     let mut read: Vec<&FilingRow> = filings
         .iter()
         .copied()
         .filter(|f| f.read_state == "read" && (is_registration(&f.form) || is_final(&f.form)))
         .collect();
     read.sort_by(|a, b| order(a).cmp(&order(b)));
-    let mut cur: Option<&FilingRow> = None;
+    let mut out: Vec<&FilingRow> = Vec::new();
     for f in read {
-        if missing_to_replace(st, f, cur).is_empty() {
-            cur = Some(f);
+        if missing_to_replace(st, f, out.last().copied()).is_empty() {
+            out.push(f);
         }
     }
-    cur
+    out
 }
 
 /// The status from the forms on file and the closes (contract, "Status").

@@ -263,6 +263,20 @@ impl JobRunner for Runner<'_> {
                     Ok(steps) => o.follow_ups.extend(steps),
                     Err(e) => console_warn!("ipo: {e}"),
                 }
+                // IPO write-ups only while IPO_ARTICLES_ENABLED is exactly
+                // "true" too.
+                match ipo::article::follow_up(
+                    text(env, "IPO_ARTICLES_ENABLED").as_deref(),
+                    text(env, "IPO_WATCH_ENABLED").as_deref(),
+                    ipo::tracked(),
+                    store,
+                    t,
+                )
+                .await
+                {
+                    Ok(step) => o.follow_ups.extend(step),
+                    Err(e) => console_warn!("ipo article: {e}"),
+                }
                 for next in &o.follow_ups {
                     // Builds go to their own queue, the calendar to this one.
                     let sent = match env.queue(queue_for(next.job())) {
@@ -411,6 +425,28 @@ impl JobRunner for Runner<'_> {
                         Ok((format!("{o:?}"), false))
                     }
                     // Before migration 0009: the slot is already marked.
+                    Err(e) if ipo::missing_table(&e) => Ok((
+                        "ipo: tables missing (apply migration 0009); skipped".into(),
+                        false,
+                    )),
+                    Err(e) => Err(e),
+                }
+            }
+            EarningsStep::IpoArticle => {
+                let on = ipo::article::enabled(text(env, "IPO_ARTICLES_ENABLED").as_deref())
+                    && ipo::enabled(text(env, "IPO_WATCH_ENABLED").as_deref());
+                if !on {
+                    return Ok((
+                        "disabled (IPO_ARTICLES_ENABLED or IPO_WATCH_ENABLED is not true); skipped"
+                            .into(),
+                        false,
+                    ));
+                }
+                // Written by code: no model, no provider config.
+                match ipo::article::article_tick(t, ipo::tracked(), store, store, store).await {
+                    // No share card: an IPO write-up has no cover image.
+                    Ok(o) => Ok((format!("{o:?}"), false)),
+                    // Before migration 0009: the hour is already marked.
                     Err(e) if ipo::missing_table(&e) => Ok((
                         "ipo: tables missing (apply migration 0009); skipped".into(),
                         false,

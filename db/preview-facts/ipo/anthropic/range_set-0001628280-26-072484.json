@@ -1,0 +1,205 @@
+{
+  "schema": "ipo-article/v1",
+  "ipo_slug": "anthropic",
+  "milestone": "range_set",
+  "key": "0001628280-26-072484",
+  "run_key": "ipo:anthropic:range_set:0001628280-26-072484",
+  "name": "Anthropic",
+  "name_zh": null,
+  "cik": 2130357,
+  "symbol": "ANT",
+  "exchange": "Nasdaq Global Select Market",
+  "as_of": "2026-11-10",
+  "filing": {
+    "accession": "0001628280-26-072484",
+    "form": "S-1/A",
+    "filing_date": "2026-11-10",
+    "index_url": "https://www.sec.gov/Archives/edgar/data/2130357/000162828026072484/0001628280-26-072484-index.htm",
+    "doc_url": "https://www.sec.gov/Archives/edgar/data/2130357/000162828026072484/anthropicpbc-sx1ax2.htm"
+  },
+  "cover": [
+    {
+      "kind": "cover_date",
+      "value_num": null,
+      "value_text": "2026-11-10",
+      "quote": "Subject to Completion. Dated November 10, 2026."
+    },
+    {
+      "kind": "shares_offered",
+      "value_num": 825000000.0,
+      "value_text": null,
+      "quote": "Class A Common Stock 825,000,000 Shares"
+    },
+    {
+      "kind": "shares_company",
+      "value_num": 801351354.0,
+      "value_text": null,
+      "quote": "We are selling 801,351,354 shares of Class A common stock and the selling stockholders identified in this prospectus are selling an additional 23,648,646 shares of Class A common stock."
+    },
+    {
+      "kind": "shares_selling",
+      "value_num": 23648646.0,
+      "value_text": null,
+      "quote": "We are selling 801,351,354 shares of Class A common stock and the selling stockholders identified in this prospectus are selling an additional 23,648,646 shares of Class A common stock."
+    },
+    {
+      "kind": "price_low",
+      "value_num": 70.0,
+      "value_text": null,
+      "quote": "It is currently estimated that the initial public offering price per share will be between $70.00 and $78.00."
+    },
+    {
+      "kind": "price_high",
+      "value_num": 78.0,
+      "value_text": null,
+      "quote": "It is currently estimated that the initial public offering price per share will be between $70.00 and $78.00."
+    },
+    {
+      "kind": "exchange",
+      "value_num": null,
+      "value_text": "Nasdaq Global Select Market",
+      "quote": "We have applied to list our Class A common stock on the Nasdaq Global Select Market under the symbol “ANT.”"
+    },
+    {
+      "kind": "symbol",
+      "value_num": null,
+      "value_text": "ANT",
+      "quote": "We have applied to list our Class A common stock on the Nasdaq Global Select Market under the symbol “ANT.”"
+    },
+    {
+      "kind": "option_shares",
+      "value_num": 123750000.0,
+      "value_text": null,
+      "quote": "To the extent that the underwriters sell more than 825,000,000 shares of Class A common stock, the underwriters have the option to purchase up to an additional 123,750,000 shares of Class A common stock from Anthropic, PBC at the initial public offering price less the underwriting discount."
+    }
+  ],
+  "previous": null,
+  "first_range": false,
+  "security": "shares",
+  "derived": [
+    {
+      "kind": "offering_at_low",
+      "value_usd": 57750000000.0,
+      "shares": 825000000.0,
+      "price": 70.0,
+      "definition": "Gross offering size at this price: shares offered on the cover (sold by the company and by selling stockholders, excluding the underwriters' option) x the price per share, before underwriting discounts. Not the company's proceeds and not a valuation."
+    },
+    {
+      "kind": "offering_at_high",
+      "value_usd": 64350000000.0,
+      "shares": 825000000.0,
+      "price": 78.0,
+      "definition": "Gross offering size at this price: shares offered on the cover (sold by the company and by selling stockholders, excluding the underwriters' option) x the price per share, before underwriting discounts. Not the company's proceeds and not a valuation."
+    }
+  ],
+  "session": null,
+  "timeline": [
+    {
+      "accession": "0001628280-26-072484",
+      "form": "S-1/A",
+      "filing_date": "2026-11-10",
+      "index_url": "https://www.sec.gov/Archives/edgar/data/2130357/000162828026072484/0001628280-26-072484-index.htm"
+    },
+    {
+      "accession": "0001628280-26-068676",
+      "form": "S-1/A",
+      "filing_date": "2026-11-02",
+      "index_url": "https://www.sec.gov/Archives/edgar/data/2130357/000162828026068676/0001628280-26-068676-index.htm"
+    },
+    {
+      "accession": "0001628280-26-067168",
+      "form": "S-1",
+      "filing_date": "2026-10-26",
+      "index_url": "https://www.sec.gov/Archives/edgar/data/2130357/000162828026067168/0001628280-26-067168-index.htm"
+    },
+    {
+      "accession": "0002130357-26-000014",
+      "form": "DRS/A",
+      "filing_date": "2026-10-09",
+      "index_url": "https://www.sec.gov/Archives/edgar/data/2130357/000213035726000014/0002130357-26-000014-index.htm"
+    },
+    {
+      "accession": "0002130357-26-000009",
+      "form": "DRS/A",
+      "filing_date": "2026-10-01",
+      "index_url": "https://www.sec.gov/Archives/edgar/data/2130357/000213035726000009/0002130357-26-000009-index.htm"
+    },
+    {
+      "accession": "0001628279-26-001111",
+      "form": "DRS/A",
+      "filing_date": "2026-09-04",
+      "index_url": "https://www.sec.gov/Archives/edgar/data/2130357/000162827926001111/0001628279-26-001111-index.htm"
+    },
+    {
+      "accession": "0001628279-26-000993",
+      "form": "DRS/A",
+      "filing_date": "2026-08-10",
+      "index_url": "https://www.sec.gov/Archives/edgar/data/2130357/000162827926000993/0001628279-26-000993-index.htm"
+    },
+    {
+      "accession": "0001628279-26-000861",
+      "form": "DRS/A",
+      "filing_date": "2026-07-13",
+      "index_url": "https://www.sec.gov/Archives/edgar/data/2130357/000162827926000861/0001628279-26-000861-index.htm"
+    },
+    {
+      "accession": "0002130357-26-000005",
+      "form": "DRS",
+      "filing_date": "2026-06-01",
+      "index_url": "https://www.sec.gov/Archives/edgar/data/2130357/000213035726000005/0002130357-26-000005-index.htm"
+    }
+  ],
+  "items": [
+    {
+      "kind": "valuation",
+      "outlet": "Example News",
+      "url": "https://news.example/2026/11/10/anthropic-ipo-pricing",
+      "published_on": "2026-11-10",
+      "quote": "At the top of the range the offering would value Anthropic at roughly $1.4 trillion, the people said.",
+      "speaker": null,
+      "value_usd": 1400000000000.0,
+      "value_date": null
+    },
+    {
+      "kind": "expected_date",
+      "outlet": "Example News",
+      "url": "https://news.example/2026/11/10/anthropic-ipo-pricing",
+      "published_on": "2026-11-10",
+      "quote": "Anthropic is expected to begin trading on the Nasdaq on Nov. 16 after pricing its shares on Nov. 13, the people said.",
+      "speaker": null,
+      "value_usd": null,
+      "value_date": "2026-11-16"
+    },
+    {
+      "kind": "view",
+      "outlet": "Sample Times",
+      "url": "https://sampletimes.example/2026/11/09/anthropic-ipo-analysts",
+      "published_on": "2026-11-09",
+      "quote": "The office tools show how far they want to push into software that businesses already pay for",
+      "speaker": "Jane Doe, an analyst at Example Securities",
+      "value_usd": null,
+      "value_date": null
+    },
+    {
+      "kind": "company_move",
+      "outlet": "Sample Times",
+      "url": "https://sampletimes.example/2026/11/04/anthropic-office-apps",
+      "published_on": "2026-11-04",
+      "quote": "Anthropic on Tuesday released AI versions of word-processing and presentation software for business customers.",
+      "speaker": null,
+      "value_usd": null,
+      "value_date": null
+    },
+    {
+      "kind": "valuation",
+      "outlet": "Sample Times",
+      "url": "https://sampletimes.example/2026/10/12/anthropic-valuation",
+      "published_on": "2026-10-12",
+      "quote": "Bankers have pitched a valuation of about $2 trillion for the listing, according to people familiar with the talks.",
+      "speaker": null,
+      "value_usd": 2000000000000.0,
+      "value_date": null
+    }
+  ],
+  "generated_at": "2026-11-11T22:00:00Z"
+}

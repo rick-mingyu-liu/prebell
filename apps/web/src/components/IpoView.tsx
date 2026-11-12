@@ -52,6 +52,24 @@ export default function IpoView({ ipo, locale }: { ipo: IpoPage; locale: Locale 
       {/* A withdrawn IPO has no expected date. */}
       {ipo.status !== "withdrawn" && <DateLine date={ipo.date} locale={locale} t={t} />}
 
+      {ipo.writeups.length > 0 && (
+        <>
+          <h2 id="writeups">{t("ipo.writeups.heading")}</h2>
+          <ul className="date-list ipo-writeups">
+            {ipo.writeups.map((w) => (
+              <li key={w.slug} className="date-row">
+                <span>
+                  <time dateTime={w.tradingDate}>{day(w.tradingDate)}</time>{" "}
+                  <Link className="ipo-writeup-link" href={`/${locale}/p/${w.slug}`}>
+                    {w.title}
+                  </Link>
+                </span>
+              </li>
+            ))}
+          </ul>
+        </>
+      )}
+
       <h2 id="offering">{t("ipo.offering.heading")}</h2>
       <Offering ipo={ipo} locale={locale} t={t} />
 
@@ -148,8 +166,11 @@ export default function IpoView({ ipo, locale }: { ipo: IpoPage; locale: Locale 
   );
 }
 
-/** The first trading day with who says so, the unconfirmed or confirmed mark, the source link and its sentence. */
-function DateLine({ date, locale, t }: { date: IpoDate | null; locale: Locale; t: T }) {
+/**
+ * The first trading day with who says so, the unconfirmed or confirmed mark, the source link and its sentence. The
+ * home page's section uses it too (`compact`: without the source's words), so both say the date the same way.
+ */
+export function DateLine({ date, locale, t, compact = false }: { date: IpoDate | null; locale: Locale; t: T; compact?: boolean }) {
   if (!date) return <p className="ipo-date">{t("ipo.date.notSet")}</p>;
   const when = formatDayShort(date.date, locale) + (locale === "en" ? `, ${date.date.slice(0, 4)}` : "");
   const vars = {
@@ -186,7 +207,7 @@ function DateLine({ date, locale, t }: { date: IpoDate | null; locale: Locale; t
           </>
         )}
       </p>
-      {date.quote && <Quote quote={date.quote} summary={t("ipo.sourceWords")} />}
+      {date.quote && !compact && <Quote quote={date.quote} summary={t("ipo.sourceWords")} />}
     </div>
   );
 }

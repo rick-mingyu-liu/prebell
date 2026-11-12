@@ -9,7 +9,7 @@ export interface BriefData {
   /** Premarket and recap facts; null (no facts, or an earnings check) renders the full markdown. */
   facts: FactsView | null;
   adjacent: AdjacentPosts;
-  /** An earnings check's charts; empty for briefs. */
+  /** An earnings check's charts; empty for briefs and IPO write-ups. */
   charts: PostChart[];
 }
 
@@ -20,7 +20,7 @@ export function briefKind(contentType: string): FactsView["kind"] | null {
 
 /**
  * Everything a post page shows besides the post, in parallel: for a brief, one R2 read for its
- * facts and one D1 read for its neighbours; for a published earnings check, its charts.
+ * facts and one D1 read for its neighbours; for a published earnings check, its charts; nothing for an IPO write-up.
  */
 export async function loadBrief(
   db: D1Like,
@@ -33,7 +33,7 @@ export async function loadBrief(
   const [facts, adjacent, charts] = await Promise.all([
     kind ? loadFacts(bucket, post.factsKey, kind, onError) : null,
     kind ? getAdjacentPosts(db, lang, post) : { prev: null, next: null },
-    !kind && post.status === "published" ? getPostCharts(db, post.slug, lang) : [],
+    post.contentType === "earnings" && post.status === "published" ? getPostCharts(db, post.slug, lang) : [],
   ]);
   return { post, facts, adjacent, charts };
 }

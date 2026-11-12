@@ -208,7 +208,8 @@
   "types": {
     "premarket": "Premarket brief",
     "recap": "After-close recap",
-    "earnings": "Earnings check"
+    "earnings": "Earnings check",
+    "ipo": "IPO"
   },
   "earnings": {
     "calendarTitle": "Market calendar",
@@ -420,6 +421,20 @@
       "source": "Source: {source}"
     },
     "disclaimer": "This page is generated automatically from SEC filings and public news reports for information only. It is not investment advice.",
-    "asReported": "Valuations, dates and company news before listing are as reported by the named sources and may be wrong."
+    "asReported": "Valuations, dates and company news before listing are as reported by the named sources and may be wrong.",
+    "home": {
+      "from": "{form}, filed {date}",
+      "valuation": "Reported valuation",
+      "reportedBy": "as reported by {outlet} on {date}",
+      "lastClose": "Last close",
+      "writeup": "Latest write-up:",
+      "page": "Filings, figures and sources",
+      "articleBy": "Article: {outlet}",
+      "more": "{count, plural, one {# more tracked IPO} other {# more tracked IPOs}} on the calendar →"
+    },
+    "writeups": {
+      "heading": "Write-ups"
+    },
+    "writeupLink": "IPO watch: every filing and figure with its source"
   }
 }

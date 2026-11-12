@@ -5,7 +5,7 @@ import { COVER_KEY } from "./covers";
 export type Lang = "en" | "zh";
 
 /** Content types the site lists and filters by; `posts.content_type` values. */
-export const CONTENT_TYPES = ["premarket", "recap", "earnings"] as const;
+export const CONTENT_TYPES = ["premarket", "recap", "earnings", "ipo"] as const;
 export type ContentType = (typeof CONTENT_TYPES)[number];
 
 /** A known content type from a query parameter, or null. */

@@ -152,6 +152,8 @@ export interface IpoPage extends IpoSummary {
    */
   trading: { first: IpoSession | null; latest: IpoSession | null; firstIsDayOne: boolean } | null;
   updatedAt: string | null;
+  /** PreBell's write-ups about this IPO published in the page's language, newest first. */
+  writeups: IpoWriteup[];
 }
 
 /** The URL segment the generator writes. */
@@ -470,7 +472,7 @@ export async function loadIpo(db: D1Like, slug: string, lang: Lang, today: strin
   const base = row ? summary(row, lang, today) : null;
   if (!row || !base) return null;
 
-  const [facts, filings, items, sessions] = await Promise.all([
+  const [facts, filings, items, sessions, writeups] = await Promise.all([
     db
       .prepare(
         `SELECT f.kind, f.slug, f.value_num, f.value_text, f.quote, f.accession, g.form, g.filing_date, g.index_url
@@ -504,6 +506,7 @@ export async function loadIpo(db: D1Like, slug: string, lang: Lang, today: strin
       )
       .bind(slug, slug, slug)
       .all<TradingRow>(),
+    listIpoWriteups(db, slug, lang),
   ]);
 
   // Facts of another IPO's filing (a wrong facts_accession) are not this IPO's.
@@ -530,6 +533,7 @@ export async function loadIpo(db: D1Like, slug: string, lang: Lang, today: strin
         ? { first, latest, firstIsDayOne: first !== null && base.date?.source === "trading" && base.date.date === first.sessionDate }
         : null,
     updatedAt: text(row.updated_at),
+    writeups,
   };
 }
 
@@ -597,4 +601,175 @@ export function fmtValuation(usd: number, lang: Lang): string | null {
     n = SCALED.format(usd / units[i][0]);
   }
   return lang === "zh" ? `${n}${units[i][1]}` : `$${n} ${units[i][1]}`;
+}
+
+/** A write-up post about an IPO (`content_type = 'ipo'`, run key `ipo:<ipo_slug>:<milestone>:<key>`). */
+export interface IpoWriteup {
+  slug: string;
+  title: string;
+  /** The filing (or session) date the write-up is about. */
+  tradingDate: string;
+}
+
+/** One active IPO as the home page's section shows it. */
+export interface HomeIpo extends IpoSummary {
+  exchange: string | null;
+  /** The offering's price, from the current cover facts, with the filing they came from; null without a filing row. */
+  price: { low: number; high: number } | { final: number } | null;
+  /** The filing the price came from. */
+  priceFiling: IpoFiling | null;
+  /** The newest stored valuation with a printable figure, attributed, with the article's sentence it came from. */
+  valuation: { usd: number; outlet: string; publishedOn: string; url: string | null; quote: string } | null;
+  /** The latest stored session after listing, with the change computed as the IPO page computes it. */
+  latest: IpoSession | null;
+  /** The newest write-up published in the page's language. */
+  writeup: IpoWriteup | null;
+}
+
+/**
+ * The home section's active rule is the news sweep's, `news::active` in crates/core/src/ipo/news.rs (compare the two
+ * there): not withdrawn; after listing, no more than `ACTIVE_DAYS_AFTER_LISTING` (30) days past the first stored
+ * session; before listing, a filing within `ACTIVE_DAYS_WITHOUT_FILING` (60) days, so a postponed deal leaves the
+ * front page. The IPO page and the calendar do not use it.
+ */
+export const HOME_DAYS_AFTER_LISTING = 30;
+export const HOME_DAYS_WITHOUT_FILING = 60;
+
+/** At most this many IPOs show in the home section, soonest first; the rest are a link to the calendar. */
+export const HOME_IPOS_SHOWN = 3;
+
+const POST_SLUG = /^[a-z0-9][a-z0-9-]*$/;
+
+/** A JSON object produced by SQLite's json_object, or null. */
+function jsonObj(v: unknown): Record<string, unknown> | null {
+  if (typeof v !== "string") return null;
+  try {
+    const o = JSON.parse(v) as unknown;
+    return o && typeof o === "object" && !Array.isArray(o) ? (o as Record<string, unknown>) : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The home page's IPOs: every tracked IPO that is active by the news sweep's rule (above), in one D1 read. Each row carries,
+ * through scalar subqueries on the primary keys and indexes of migration 0009 and posts' run_key: the price from
+ * its current cover facts and that filing, the newest valuation, the latest session, and the newest write-up in
+ * `lang` (found by run-key range). Empty, never an error, before migration 0009 or with no IPO tracked.
+ */
+export async function listHomeIpos(db: D1Like, lang: Lang, today: string): Promise<HomeIpo[]> {
+  let rows: (WatchRow & Record<string, unknown>)[];
+  try {
+    ({ results: rows } = await db
+      .prepare(
+        `SELECT ${SUMMARY_COLUMNS}, exchange,
+           (SELECT MAX(filing_date) FROM ipo_filings WHERE ipo_filings.slug = ipo_watch.slug) AS last_filing,
+           (SELECT json_object('form', g.form, 'filing_date', g.filing_date, 'index_url', g.index_url, 'accession', g.accession)
+              FROM ipo_filings g WHERE g.accession = ipo_watch.facts_accession AND g.slug = ipo_watch.slug) AS price_filing,
+           (SELECT value_num FROM ipo_facts WHERE accession = ipo_watch.facts_accession AND kind = 'price_low' AND slug = ipo_watch.slug) AS price_low,
+           (SELECT value_num FROM ipo_facts WHERE accession = ipo_watch.facts_accession AND kind = 'price_high' AND slug = ipo_watch.slug) AS price_high,
+           (SELECT value_num FROM ipo_facts WHERE accession = ipo_watch.facts_accession AND kind = 'price_final' AND slug = ipo_watch.slug) AS price_final,
+           (SELECT json_object('usd', value_usd, 'outlet', outlet, 'published_on', published_on, 'url', url, 'quote', quote)
+              FROM ipo_items WHERE ipo_items.slug = ipo_watch.slug AND kind = 'valuation'
+                AND value_usd >= ${VALUATION_MIN} AND value_usd <= ${VALUATION_MAX} AND trim(outlet) <> '' AND trim(quote) <> ''
+              ORDER BY published_on DESC, found_at DESC LIMIT 1) AS valuation,
+           (SELECT json_object('session_date', session_date, 'close', close, 'ipo_price', ipo_price, 'source_url', source_url)
+              FROM ipo_trading WHERE ipo_trading.slug = ipo_watch.slug ORDER BY session_date DESC LIMIT 1) AS latest,
+           (SELECT json_object('slug', p.slug, 'title', t.title, 'trading_date', p.trading_date)
+              FROM posts p CROSS JOIN post_translations t ON t.post_id = p.id AND t.lang = ? AND t.status = 'published'
+              WHERE p.run_key >= 'ipo:' || ipo_watch.slug || ':' AND p.run_key < 'ipo:' || ipo_watch.slug || ';'
+                AND p.content_type = 'ipo'
+              ORDER BY p.trading_date DESC, p.published_at DESC, p.id DESC LIMIT 1) AS writeup
+         FROM ipo_watch
+         WHERE status <> 'withdrawn'
+           -- Active (news::active): by the first stored session once there is one, else by the newest filing. So the
+           -- LIMIT counts active IPOs only, and an IPO listed long ago costs no subqueries.
+           AND COALESCE(
+             (SELECT MIN(session_date) FROM ipo_trading WHERE ipo_trading.slug = ipo_watch.slug) >= ?,
+             (SELECT MAX(filing_date) FROM ipo_filings WHERE ipo_filings.slug = ipo_watch.slug) >= ?,
+             0)
+         ORDER BY first_trade_date IS NULL, first_trade_date, name LIMIT 20`,
+      )
+      .bind(lang, addDays(today, -HOME_DAYS_AFTER_LISTING), addDays(today, -HOME_DAYS_WITHOUT_FILING))
+      .all<WatchRow & Record<string, unknown>>());
+  } catch {
+    return [];
+  }
+  const listedSince = addDays(today, -HOME_DAYS_AFTER_LISTING);
+  const filedSince = addDays(today, -HOME_DAYS_WITHOUT_FILING);
+  const out = rows.flatMap((r): HomeIpo[] => {
+    const base = summary(r, lang, today);
+    if (!base || base.status === "withdrawn") return [];
+    // Active, as `news::active` (the query applies it too; this is the second gate).
+    const first = dateOf(r.first_session);
+    if (first ? first < listedSince : !(dateOf(r.last_filing) && dateOf(r.last_filing)! >= filedSince)) return [];
+
+    const filingRow = jsonObj(r.price_filing);
+    const priceFiling = filingRow
+      ? filingOf({ accession: filingRow.accession, form: filingRow.form, filing_date: filingRow.filing_date, index_url: filingRow.index_url })
+      : null;
+    const low = positive(r.price_low);
+    const high = positive(r.price_high);
+    const final = positive(r.price_final);
+    // A price is shown only with the filing it came from, and a range only whole.
+    const price = !priceFiling ? null : final !== null ? { final } : low !== null && high !== null && low <= high ? { low, high } : null;
+
+    const v = jsonObj(r.valuation);
+    const usd = typeof v?.usd === "number" ? v.usd : null;
+    const outlet = text(v?.outlet);
+    const publishedOn = dateOf(v?.published_on);
+    const quote = text(v?.quote);
+    // No figure from news without its sentence: a valuation without its quote is not shown.
+    const valuation =
+      usd !== null && fmtValuation(usd, lang) !== null && outlet && publishedOn && quote
+        ? { usd, outlet, publishedOn, url: httpsUrl(v?.url), quote }
+        : null;
+
+    const s = jsonObj(r.latest);
+    const latest = s ? sessionOf({ session_date: s.session_date, open: null, close: s.close, volume: null, ipo_price: s.ipo_price, source_url: s.source_url }) : null;
+
+    const w = jsonObj(r.writeup);
+    const wSlug = typeof w?.slug === "string" && POST_SLUG.test(w.slug) ? w.slug : null;
+    const wTitle = text(w?.title);
+    const wDate = dateOf(w?.trading_date);
+    const writeup = wSlug && wTitle && wDate ? { slug: wSlug, title: wTitle, tradingDate: wDate } : null;
+
+    return [{ ...base, exchange: text(r.exchange), price, priceFiling: price ? priceFiling : null, valuation, latest, writeup }];
+  });
+  // Soonest first: dated IPOs by date (a passed reported date reads "date not set" and moves down), then by name.
+  const key = (i: HomeIpo) => (i.date ? `0${i.date.date}` : "1");
+  return out.sort((a, b) => (key(a) < key(b) ? -1 : key(a) > key(b) ? 1 : a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+}
+
+/**
+ * An IPO's write-ups published in `lang`, newest first (at most 12), by run-key range on posts' unique run_key
+ * index: `ipo:<slug>:` up to `ipo:<slug>;`.
+ */
+export async function listIpoWriteups(db: D1Like, slug: string, lang: Lang): Promise<IpoWriteup[]> {
+  if (!isIpoSlug(slug)) return [];
+  try {
+    const { results } = await db
+      .prepare(
+        `SELECT p.slug, t.title, p.trading_date FROM posts p
+         CROSS JOIN post_translations t ON t.post_id = p.id AND t.lang = ? AND t.status = 'published'
+         WHERE p.run_key >= ? AND p.run_key < ? AND p.content_type = 'ipo'
+         ORDER BY p.trading_date DESC, p.published_at DESC, p.id DESC LIMIT 12`,
+      )
+      .bind(lang, `ipo:${slug}:`, `ipo:${slug};`)
+      .all<{ slug: unknown; title: unknown; trading_date: unknown }>();
+    return results.flatMap((r) => {
+      const s = typeof r.slug === "string" && POST_SLUG.test(r.slug) ? r.slug : null;
+      const title = text(r.title);
+      const tradingDate = dateOf(r.trading_date);
+      return s && title && tradingDate ? [{ slug: s, title, tradingDate }] : [];
+    });
+  } catch {
+    return [];
+  }
+}
+
+/** The IPO a write-up is about, from its facts key `ipo/<ipo_slug>/<milestone>-<key>.json`, or null. */
+export function writeupIpoSlug(factsKey: string | null): string | null {
+  const m = factsKey ? /^ipo\/([a-z0-9-]+)\/[a-z_]+-[A-Za-z0-9-]+\.json$/.exec(factsKey) : null;
+  return m && isIpoSlug(m[1]) ? m[1] : null;
 }

@@ -114,7 +114,7 @@ Read the current facts with `SELECT kind, value_num, value_text, quote FROM ipo_
 | `prospectus_date` | `value_text` | final prospectus only: the pricing date |
 | `trading_date` | `value_text` | only when a filing states the first trading day |
 
-There is no deal-size dollar figure in v1: the fee exhibit's "maximum aggregate offering price" includes the underwriters' option and is a fee-calculation number, not the deal size, and PreBell never multiplies shares by price. The page shows shares and the price range (or final price).
+There is no deal-size dollar figure in these tables: the fee exhibit's "maximum aggregate offering price" includes the underwriters' option and is a fee-calculation number, not the deal size, so it is never stored. The page shows shares and the price range (or final price). The one figure PreBell computes is in the IPO write-ups only (`2026-11-11-ipo-articles-contract.md`, `derived`; decisions 2026-11-11, "derived offering size"): the gross offering size, the cover's shares offered (sold by the company and by selling stockholders, excluding the underwriters' option) × the range's low or high price or the offering price, before underwriting discounts, always shown with both inputs and never called the company's proceeds or a valuation. Nothing else is multiplied, never shares outstanding.
 
 ### `ipo_items`: as reported
 

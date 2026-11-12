@@ -92,3 +92,8 @@ DIGEST_MODE = "draft"
 # sweeps (Tavily and the LLM) and no extra symbols in the recap; the site keeps
 # showing what is stored. To turn it off, delete this line and deploy.
 IPO_WATCH_ENABLED = "true"
+# IPO write-ups at filing milestones (docs/runbook.md "IPO write-ups"): on, Rick
+# 2026-11-11. Only exactly "true" is on, and only with IPO_WATCH_ENABLED on too.
+# Off means no ipo:article messages (the write-ups are written by code); published
+# write-ups stay. To turn it off, delete this line and deploy.
+IPO_ARTICLES_ENABLED = "true"

@@ -539,11 +539,11 @@ describe("IPO page", () => {
     expect(zh).toMatchObject({ title: "北风机器人 IPO", alternates: { canonical: "/zh/ipo/northwind-robotics" }, openGraph: { locale: "zh_CN" } });
   });
 
-  it("reads D1 five times and R2 never", async () => {
+  it("reads D1 six times (the sixth lists its write-ups) and R2 never", async () => {
     const db = memoryD1(SEED);
     const prepare = vi.spyOn(db, "prepare");
     await loadIpo(db, "anthropic", "en");
-    expect(prepare).toHaveBeenCalledTimes(5);
+    expect(prepare).toHaveBeenCalledTimes(6);
   });
 });
 
