@@ -210,14 +210,22 @@ pub struct Previous {
     pub shares_offered: Option<f64>,
 }
 
-/// A figure computed by code: shares offered × a price.
+/// What a `Derived` figure is, carried with it in the facts.
+pub const DERIVED_DEFINITION: &str = "Gross offering size at this price: shares offered on the cover (sold by the company and by selling stockholders, excluding the underwriters' option) x the price per share, before underwriting discounts. Not the company's proceeds and not a valuation.";
+
+/// A figure computed by code: the cover's shares offered × a price (the
+/// range's low or high end, or the offering price). Nothing else is ever
+/// multiplied: never shares outstanding.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Derived {
     /// `offering_at_low`, `offering_at_high` or `offering_at_price`.
     pub kind: String,
     pub value_usd: f64,
+    /// The inputs: `shares_offered` and the price.
     pub shares: f64,
     pub price: f64,
+    /// `DERIVED_DEFINITION`.
+    pub definition: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -384,6 +392,7 @@ pub fn bundle(st: &IpoState, t: &Tracked, r: &Reached, now: DateTime<Utc>) -> Ip
                     value_usd: shares * p,
                     shares,
                     price: p,
+                    definition: DERIVED_DEFINITION.into(),
                 });
             }
         };

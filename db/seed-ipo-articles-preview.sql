@@ -37,13 +37,15 @@ Anthropic''s amended S-1 filed Nov. 10, 2026 sets a price range of $70.00 to $78
 | Sold by the company | 801,351,354 |
 | Sold by selling stockholders | 23,648,646 |
 | Underwriters'' option | 123,750,000 shares |
-| Offering at $70.00 (derived: shares offered × price) | $57.75 billion |
-| Offering at $78.00 (derived: shares offered × price) | $64.35 billion |
+| Offering size at $70.00 (825,000,000 shares × $70.00) | $57.75 billion |
+| Offering size at $78.00 (825,000,000 shares × $78.00) | $64.35 billion |
 | Exchange and symbol | Nasdaq Global Select Market: ANT |
+
+Offering size is computed by PreBell from the cover: shares offered (including shares sold by selling stockholders, excluding the underwriters'' option) × the price per share, gross, before underwriting discounts. It is not the company''s proceeds and not a valuation.
 
 ## What happened
 
-Anthropic filed an amended registration statement (Form S-1/A) on Nov. 10, 2026. Its cover sets a price range of $70.00 to $78.00 per share for 825,000,000 shares of Class A common stock. At $70.00 a share, the shares offered come to $57.75 billion, and at $78.00 they come to $64.35 billion.
+Anthropic filed an amended registration statement (Form S-1/A) on Nov. 10, 2026. Its cover sets a price range of $70.00 to $78.00 per share for 825,000,000 shares of Class A common stock.
 
 ## What the filing says
 
@@ -91,13 +93,15 @@ Anthropic于2026年11月10日提交S-1/A修订文件，将8.25亿股A类普通�
 | 公司发售 | 801,351,354股 |
 | 售股股东发售 | 23,648,646股 |
 | 承销商超额配售权 | 123,750,000股 |
-| 按每股70.00美元计算的发行总额（由发行股数×价格推算） | 577.5亿美元 |
-| 按每股78.00美元计算的发行总额（由发行股数×价格推算） | 643.5亿美元 |
+| 按每股70.00美元计算的发行规模（825,000,000股×70.00美元） | 577.5亿美元 |
+| 按每股78.00美元计算的发行规模（825,000,000股×78.00美元） | 643.5亿美元 |
 | 交易所与代码 | Nasdaq Global Select Market：ANT |
+
+发行规模由PreBell根据招股文件封面计算：发行股数（含售股股东发售的股份，不含承销商超额配售权）×每股价格，为扣除承销折扣前的总额，并非公司所得款项，也不是估值。
 
 ## 发生了什么
 
-Anthropic于2026年11月10日提交了注册声明修订文件（S-1/A）。文件将价格区间定为每股70.00美元至78.00美元，发行8.25亿股A类普通股。按每股70.00美元计算，发行总额为577.5亿美元；按每股78.00美元计算，为643.5亿美元。
+Anthropic于2026年11月10日提交了注册声明修订文件（S-1/A）。文件将价格区间定为每股70.00美元至78.00美元，发行8.25亿股A类普通股。
 
 ## 文件披露了什么
 

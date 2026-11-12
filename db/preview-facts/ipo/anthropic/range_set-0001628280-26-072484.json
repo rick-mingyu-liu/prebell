@@ -79,13 +79,15 @@
       "kind": "offering_at_low",
       "value_usd": 57750000000.0,
       "shares": 825000000.0,
-      "price": 70.0
+      "price": 70.0,
+      "definition": "Gross offering size at this price: shares offered on the cover (sold by the company and by selling stockholders, excluding the underwriters' option) x the price per share, before underwriting discounts. Not the company's proceeds and not a valuation."
     },
     {
       "kind": "offering_at_high",
       "value_usd": 64350000000.0,
       "shares": 825000000.0,
-      "price": 78.0
+      "price": 78.0,
+      "definition": "Gross offering size at this price: shares offered on the cover (sold by the company and by selling stockholders, excluding the underwriters' option) x the price per share, before underwriting discounts. Not the company's proceeds and not a valuation."
     }
   ],
   "session": null,

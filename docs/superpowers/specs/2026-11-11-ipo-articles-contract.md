@@ -1,6 +1,6 @@
 # IPO write-ups: the data contract
 
-Date: 2026-11-11. Design: `2026-11-11-ipo-articles-design.md`. IPO tables: `2026-11-11-ipo-watch-contract.md`. Seed for local preview: `db/seed-ipo-articles-preview.sql` (one published `range_set` write-up for Anthropic in both languages; apply after `db/seed-ipo-preview.sql`), with its facts object at `db/preview-facts/ipo/anthropic/range_set-0001628280-26-072484.json` (loaded into local R2 by `db/load-preview-facts.sh`).
+Date: 2026-11-11 (revised the same day: the derived offering size's inputs and definition, and the model never writing it). Design: `2026-11-11-ipo-articles-design.md`. IPO tables: `2026-11-11-ipo-watch-contract.md`. Seed for local preview: `db/seed-ipo-articles-preview.sql` (one published `range_set` write-up for Anthropic in both languages; apply after `db/seed-ipo-preview.sql`), with its facts object at `db/preview-facts/ipo/anthropic/range_set-0001628280-26-072484.json` (loaded into local R2 by `db/load-preview-facts.sh`).
 
 This is what the site (`apps/web`) reads for the IPO write-ups. The generator is the only writer. No migration: a write-up is an ordinary post (`runs`, `posts`, `post_translations`, `sources`, and one facts object in R2). If this contract has to change, the builder says so in a message first.
 
@@ -90,8 +90,11 @@ Markdown like the earnings write-up. The model writes only the title, the summar
 | Sold by the company | 801,351,354 |
 | Sold by selling stockholders | 23,648,646 |
 | Underwriters' option | 123,750,000 shares |
-| Offering at $70.00 (derived: shares offered × price) | $57.75 billion |
-| Offering at $78.00 (derived: shares offered × price) | $64.35 billion |
+| Offering size at $70.00 (825,000,000 shares × $70.00) | $57.75 billion |
+| Offering size at $78.00 (825,000,000 shares × $78.00) | $64.35 billion |
+| Exchange and symbol | Nasdaq Global Select Market: ANT |
+
+Offering size is computed by PreBell from the cover: shares offered (including shares sold by selling stockholders, excluding the underwriters' option) × the price per share, gross, before underwriting discounts. It is not the company's proceeds and not a valuation.
 
 ## What happened
 
@@ -118,7 +121,7 @@ Markdown like the earnings write-up. The model writes only the title, the summar
 This IPO write-up is generated automatically from SEC filings and public news reports, for information only. It is not investment advice.
 ```
 
-Chinese headings: `发生了什么`, `文件披露了什么`, `已有报道`, `下一步`, `来源`; table header `招股文件数据`. The "What has been reported" section is left out when no item is stored. Table rows are shown only for facts the filing has; the derived rows only when the filing has the shares and the price.
+Chinese headings: `发生了什么`, `文件披露了什么`, `已有报道`, `下一步`, `来源`; table header `招股文件数据`; offering-size rows like `按每股70.00美元计算的发行规模（825,000,000股×70.00美元）`, with the definition under the table. The "What has been reported" section is left out when no item is stored. Table rows are shown only for facts the filing has; the derived rows only when the filing has the shares and the price.
 
 ## The facts object (R2, `facts_r2_key`)
 
@@ -140,7 +143,7 @@ JSON, written once before the post. Every field is present; a field without data
 | `filing` | object or null | The filing whose cover facts are in `cover`: `accession`, `form`, `filing_date`, `index_url`, `doc_url` (string or null). For `listed` the IPO's facts source at the time; for `withdrawn` the `RW`. |
 | `cover` | list | `ipo_facts` rows of `filing`: `kind`, `value_num` (number or null), `value_text` (string or null), `quote` (the cover's sentence). Kinds as in the IPO watch contract. |
 | `previous` | object or null | `range_changed` only: the previous range milestone's `accession`, `form`, `filing_date`, `index_url`, `price_low`, `price_high`, `shares_offered` (numbers or null). |
-| `derived` | list | Figures computed by code, never by the model: `kind` (`offering_at_low`, `offering_at_high`, `offering_at_price`), `value_usd`, `shares`, `price`. Gross: shares offered (selling stockholders included, the underwriters' option excluded) × price. |
+| `derived` | list | The only figures PreBell computes, by code (the model is never given them and may not write them): `kind` (`offering_at_low`, `offering_at_high`, `offering_at_price`), `value_usd`, its two inputs `shares` (the cover's `shares_offered`: sold by the company and by selling stockholders, excluding the underwriters' option) and `price` (the range's low or high end, or the offering price once priced), and `definition` (the sentence below). Nothing else is ever multiplied, never shares outstanding. Show it only with both inputs and as the gross offering size: never as the company's proceeds, what it raises, or a valuation. `definition`: "Gross offering size at this price: shares offered on the cover (sold by the company and by selling stockholders, excluding the underwriters' option) x the price per share, before underwriting discounts. Not the company's proceeds and not a valuation." |
 | `session` | object or null | `listed` only: the first session's `session_date`, `symbol`, `open` (number or null), `close`, `volume` (number or null), `ipo_price` (number or null), `change_pct` (number or null), `source_url`, as stored in `ipo_trading`. |
 | `timeline` | list | The IPO's filings, newest first: `accession`, `form`, `filing_date`, `index_url`. |
 | `items` | list | The news items quoted in the article, in the order shown (newest first, at most 6): `kind`, `outlet`, `url`, `published_on`, `quote`, `speaker` (string or null), `value_usd` (number or null), `value_date` (string or null). |
@@ -175,8 +178,8 @@ Example (Anthropic, `range_set`, the real cover facts of the S-1/A of 2026-11-10
   ],
   "previous": null,
   "derived": [
-    {"kind": "offering_at_low", "value_usd": 57750000000.0, "shares": 825000000.0, "price": 70.0},
-    {"kind": "offering_at_high", "value_usd": 64350000000.0, "shares": 825000000.0, "price": 78.0}
+    {"kind": "offering_at_low", "value_usd": 57750000000.0, "shares": 825000000.0, "price": 70.0, "definition": "Gross offering size at this price: ..."},
+    {"kind": "offering_at_high", "value_usd": 64350000000.0, "shares": 825000000.0, "price": 78.0, "definition": "Gross offering size at this price: ..."}
   ],
   "session": null,
   "timeline": [
@@ -187,7 +190,7 @@ Example (Anthropic, `range_set`, the real cover facts of the S-1/A of 2026-11-10
 }
 ```
 
-(The example shortens `cover` to three of its nine rows and `timeline` to one of its nine; the stored object has them all, in the order `ipo_facts` and `ipo_filings` give.)
+(The example shortens `cover` to three of its nine rows, `timeline` to one of its nine and each `definition` to its first words; the stored object has them all, in the order `ipo_facts` and `ipo_filings` give.)
 
 ## Text the site must treat as untrusted
 
