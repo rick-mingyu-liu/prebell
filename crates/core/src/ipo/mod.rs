@@ -8,12 +8,15 @@
 //! No new cron: an earnings poll asks for the `ipo:check` and `ipo:sweep`
 //! messages (`follow_ups`), only while `IPO_WATCH_ENABLED` is exactly `true`.
 
+pub mod article;
 pub mod check;
 pub mod cover;
+pub mod milestone;
 pub mod news;
 pub mod resolve;
 pub mod store;
 pub mod trading;
+pub mod writeup;
 
 use std::collections::BTreeMap;
 use std::sync::OnceLock;
