@@ -626,8 +626,14 @@ export interface HomeIpo extends IpoSummary {
   writeup: IpoWriteup | null;
 }
 
-/** How long an IPO stays on the home page after its first stored session (the news sweep's rule). */
+/**
+ * The home section's active rule is the news sweep's, `news::active` in crates/core/src/ipo/news.rs (compare the two
+ * there): not withdrawn; after listing, no more than `ACTIVE_DAYS_AFTER_LISTING` (30) days past the first stored
+ * session; before listing, a filing within `ACTIVE_DAYS_WITHOUT_FILING` (60) days, so a postponed deal leaves the
+ * front page. The IPO page and the calendar do not use it.
+ */
 export const HOME_DAYS_AFTER_LISTING = 30;
+export const HOME_DAYS_WITHOUT_FILING = 60;
 
 const POST_SLUG = /^[a-z0-9][a-z0-9-]*$/;
 
@@ -643,8 +649,7 @@ function jsonObj(v: unknown): Record<string, unknown> | null {
 }
 
 /**
- * The home page's IPOs: every tracked IPO that is active (not withdrawn, and no more than 30 days past its first
- * stored session, or past its first trading day when no session is stored), in one D1 read. Each row carries,
+ * The home page's IPOs: every tracked IPO that is active by the news sweep's rule (above), in one D1 read. Each row carries,
  * through scalar subqueries on the primary keys and indexes of migration 0009 and posts' run_key: the price from
  * its current cover facts and that filing, the newest valuation, the latest session, and the newest write-up in
  * `lang` (found by run-key range). Empty, never an error, before migration 0009 or with no IPO tracked.
@@ -655,6 +660,7 @@ export async function listHomeIpos(db: D1Like, lang: Lang, today: string): Promi
     ({ results: rows } = await db
       .prepare(
         `SELECT ${SUMMARY_COLUMNS}, exchange,
+           (SELECT MAX(filing_date) FROM ipo_filings WHERE ipo_filings.slug = ipo_watch.slug) AS last_filing,
            (SELECT json_object('form', g.form, 'filing_date', g.filing_date, 'index_url', g.index_url, 'accession', g.accession)
               FROM ipo_filings g WHERE g.accession = ipo_watch.facts_accession AND g.slug = ipo_watch.slug) AS price_filing,
            (SELECT value_num FROM ipo_facts WHERE accession = ipo_watch.facts_accession AND kind = 'price_low' AND slug = ipo_watch.slug) AS price_low,
@@ -669,7 +675,7 @@ export async function listHomeIpos(db: D1Like, lang: Lang, today: string): Promi
               FROM posts p CROSS JOIN post_translations t ON t.post_id = p.id AND t.lang = ? AND t.status = 'published'
               WHERE p.run_key >= 'ipo:' || ipo_watch.slug || ':' AND p.run_key < 'ipo:' || ipo_watch.slug || ';'
                 AND p.content_type = 'ipo'
-              ORDER BY p.trading_date DESC, p.published_at DESC LIMIT 1) AS writeup
+              ORDER BY p.trading_date DESC, p.published_at DESC, p.id DESC LIMIT 1) AS writeup
          FROM ipo_watch WHERE status <> 'withdrawn'
          ORDER BY first_trade_date IS NULL, first_trade_date, name LIMIT 20`,
       )
@@ -678,13 +684,14 @@ export async function listHomeIpos(db: D1Like, lang: Lang, today: string): Promi
   } catch {
     return [];
   }
-  const since = addDays(today, -HOME_DAYS_AFTER_LISTING);
+  const listedSince = addDays(today, -HOME_DAYS_AFTER_LISTING);
+  const filedSince = addDays(today, -HOME_DAYS_WITHOUT_FILING);
   return rows.flatMap((r) => {
     const base = summary(r, lang, today);
     if (!base || base.status === "withdrawn") return [];
-    // Active: no more than 30 days past the first stored session (or the first trading day before one is stored).
-    const first = dateOf(r.first_session) ?? (base.status === "listed" ? dateOf(r.first_trade_date) : null);
-    if (first && first < since) return [];
+    // Active, as `news::active`: by the first stored session once there is one, else by the newest filing.
+    const first = dateOf(r.first_session);
+    if (first ? first < listedSince : !(dateOf(r.last_filing) && dateOf(r.last_filing)! >= filedSince)) return [];
 
     const filingRow = jsonObj(r.price_filing);
     const priceFiling = filingRow
@@ -730,7 +737,7 @@ export async function listIpoWriteups(db: D1Like, slug: string, lang: Lang): Pro
         `SELECT p.slug, t.title, p.trading_date FROM posts p
          CROSS JOIN post_translations t ON t.post_id = p.id AND t.lang = ? AND t.status = 'published'
          WHERE p.run_key >= ? AND p.run_key < ? AND p.content_type = 'ipo'
-         ORDER BY p.trading_date DESC, p.published_at DESC LIMIT 12`,
+         ORDER BY p.trading_date DESC, p.published_at DESC, p.id DESC LIMIT 12`,
       )
       .bind(lang, `ipo:${slug}:`, `ipo:${slug};`)
       .all<{ slug: unknown; title: unknown; trading_date: unknown }>();

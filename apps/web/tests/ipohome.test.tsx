@@ -106,6 +106,24 @@ describe("listHomeIpos", () => {
     expect(await slugs("2026-12-06")).toEqual(["anthropic"]);
   });
 
+  it("before listing, leaves out an IPO with no filing in 60 days (a postponed deal), as the news sweep does", async () => {
+    // Harbor Bio's only filing is Nov 9, 2026: on the home page through Jan 8, 2027 (60 days), gone from Jan 9.
+    const db = memoryD1(SEED);
+    const has = async (slug: string, today: string) => (await listHomeIpos(db, "en", today)).some((i) => i.slug === slug);
+    expect(await has("harbor-bio", "2027-01-08")).toBe(true);
+    expect(await has("harbor-bio", "2027-01-09")).toBe(false);
+    // A newer filing keeps it: Anthropic's newest is Nov 10.
+    expect(await has("anthropic", "2027-01-09")).toBe(true);
+    expect(await has("anthropic", "2027-01-10")).toBe(false);
+    // No filing at all: not active.
+    const none = memoryD1(`${SEED}\nDELETE FROM ipo_filings WHERE slug = 'harbor-bio';`);
+    expect((await listHomeIpos(none, "en", TODAY)).some((i) => i.slug === "harbor-bio")).toBe(false);
+    // After listing the 30-day rule decides, however old the filings: Northwind's first session Nov 5.
+    expect(await has("northwind-robotics", "2026-12-05")).toBe(true);
+    // Only the home section: the IPO page still loads a postponed deal.
+    expect(await loadIpo(db, "harbor-bio", "en", "2027-03-01")).not.toBeNull();
+  });
+
   it("shows no price without the filing it came from, and no half range", async () => {
     const noFiling = memoryD1(`${PRODUCTION}\nDELETE FROM ipo_filings WHERE accession = '0001628280-26-072484';`);
     expect((await listHomeIpos(noFiling, "en", TODAY))[0]).toMatchObject({ price: null, priceFiling: null });
@@ -304,7 +322,8 @@ describe("IPO write-ups as posts", () => {
           ? '<p class="story-ipo"><a class="more" href="/en/ipo/anthropic">IPO watch: every filing and figure with its source →</a></p>'
           : '<p class="story-ipo"><a class="more" href="/zh/ipo/anthropic">IPO 追踪：每份申报文件与每个数字的来源 →</a></p>',
       );
-      expect(out).toContain(locale === "en" ? "✓ Numbers checked against source data" : "数字");
+      // The briefs' own line, word for word in each language.
+      expect(out).toContain(`<span class="checked">${locale === "en" ? "✓ Numbers checked against source data" : "✓ 数字已与源数据核对"}</span>`);
       expect(out).not.toContain("Every figure traced to the filing");
     }
   });
@@ -312,6 +331,9 @@ describe("IPO write-ups as posts", () => {
   it("names its IPO by the facts key, and nothing for any other key", () => {
     expect(writeupIpoSlug("ipo/anthropic/range_set-0001628280-26-072484.json")).toBe("anthropic");
     expect(writeupIpoSlug("ipo/anthropic/listed-2026-11-16.json")).toBe("anthropic");
+    // Every milestone of the contract (adc0898): accession keys, and the session date for listed.
+    for (const m of ["filed", "range_set", "range_changed", "priced", "withdrawn"])
+      expect(writeupIpoSlug(`ipo/anthropic/${m}-0001628280-26-072484.json`), m).toBe("anthropic");
     for (const bad of [null, "premarket/2026-11-11.json", "ipo/../x.json", "ipo/Anthropic/x-1.json", "ipo/anthropic/x.json"])
       expect(writeupIpoSlug(bad), String(bad)).toBeNull();
   });
