@@ -428,7 +428,9 @@
       "reportedBy": "as reported by {outlet} on {date}",
       "lastClose": "Last close",
       "writeup": "Latest write-up:",
-      "page": "Filings, figures and sources"
+      "page": "Filings, figures and sources",
+      "articleBy": "Article: {outlet}",
+      "more": "{count, plural, one {# more tracked IPO} other {# more tracked IPOs}} on the calendar →"
     },
     "writeups": {
       "heading": "Write-ups"

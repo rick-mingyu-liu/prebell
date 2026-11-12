@@ -82,7 +82,13 @@ describe("listHomeIpos", () => {
     const db = memoryD1(`${SEED}\n${FILED}\n${RANGE_SET}`);
     const [a] = (await listHomeIpos(db, "en", TODAY)).filter((i) => i.slug === "anthropic");
     expect(a.date).toMatchObject({ date: "2026-11-16", status: "reported", sourceName: "Example News" });
-    expect(a.valuation).toEqual({ usd: 1.4e12, outlet: "Example News", publishedOn: "2026-11-10", url: "https://news.example/2026/11/10/anthropic-ipo-pricing" });
+    expect(a.valuation).toEqual({
+      usd: 1.4e12,
+      outlet: "Example News",
+      publishedOn: "2026-11-10",
+      url: "https://news.example/2026/11/10/anthropic-ipo-pricing",
+      quote: "At the top of the range the offering would value Anthropic at roughly $1.4 trillion, the people said.",
+    });
     expect(a.writeup).toEqual({ slug: "anthropic-ipo-range-set-2026-11-10", title: "Anthropic sets IPO range at $70 to $78 a share", tradingDate: "2026-11-10" });
     // The older write-up has no Chinese text; the Chinese page's newest is still the range one.
     const [z] = (await listHomeIpos(db, "zh", TODAY)).filter((i) => i.slug === "anthropic");
@@ -180,7 +186,7 @@ describe("the home section", () => {
     expect(textOf(s)).toBe(
       "IPO watch" +
         "Price range set" +
-        "Anthropic" +
+        "Anthropic, Price range set" +
         "ANT · Nasdaq Global Select Market" +
         "Price range$70.00 to $78.00 per share S-1/A, filed Nov 10, 2026" +
         "First trading day: date not set." +
@@ -192,7 +198,7 @@ describe("the home section", () => {
     expect(zh).toBe(
       "IPO 追踪" +
         "已定发行价区间" +
-        "Anthropic" +
+        "Anthropic，已定发行价区间" +
         "ANT · Nasdaq Global Select Market" +
         "发行价区间每股70.00至78.00美元 S-1/A，2026年11月10日提交" +
         "首个交易日：日期未定。" +
@@ -357,5 +363,115 @@ describe("the IPO page lists its write-ups", () => {
     expect(out).toContain('<a class="ipo-writeup-link" href="/en/p/anthropic-ipo-range-set-2026-11-10">');
     const none = (await loadIpo(memoryD1(SEED), "anthropic", "en", TODAY))!;
     expect(renderToStaticMarkup(<IpoView ipo={none} locale="en" />)).not.toContain('id="writeups"');
+  });
+});
+
+describe("review fixes: the home section", () => {
+  /** A listed IPO whose first session was long ago: never active again. */
+  const oldListed = (n: number) => {
+    const slug = `old-${n}`;
+    const date = `2025-0${1 + (n % 9)}-1${n % 10}`;
+    return `INSERT INTO ipo_watch (slug, cik, name, name_zh, status, exchange, symbol, facts_accession, first_trade_date,
+        date_status, date_source, date_source_name, date_source_url, date_quote, date_as_of, checked_at, updated_at) VALUES
+        ('${slug}', ${n}, 'Old ${n}', NULL, 'listed', NULL, 'OLD${n}', NULL, '${date}', 'confirmed', 'trading', 'Yahoo Finance',
+         'https://finance.yahoo.com/quote/OLD${n}', NULL, '${date}', 'x', 'x');
+      INSERT INTO ipo_trading (slug, session_date, symbol, open, close, volume, ipo_price, change_pct, source_url, fetched_at)
+        VALUES ('${slug}', '${date}', 'OLD${n}', NULL, 10, 1, 9, NULL, 'https://finance.yahoo.com/quote/OLD${n}', 'x');`;
+  };
+
+  it("the LIMIT counts active IPOs only: 21 old listings never push out an active one", async () => {
+    const olds = Array.from({ length: 21 }, (_, i) => oldListed(i + 1)).join("\n");
+    const db = memoryD1(`${PRODUCTION}\n${olds}`);
+    const prepare = vi.spyOn(db, "prepare");
+    expect((await listHomeIpos(db, "en", TODAY)).map((i) => i.slug)).toEqual(["anthropic"]);
+    // The active rule is in the statement itself, with its two cutoffs bound.
+    const sql = prepare.mock.calls[0][0];
+    expect(sql).toMatch(/MIN\(session_date\) FROM ipo_trading[\s\S]*>= \?/);
+    expect(sql).toMatch(/MAX\(filing_date\) FROM ipo_filings[\s\S]*>= \?/);
+  });
+
+  it("picks the newest valuation it can print: an unprintable newer one does not hide an older one", async () => {
+    const db = memoryD1(`${SEED}
+      INSERT INTO ipo_items (slug, kind, url, outlet, published_on, quote, statement_en, statement_zh, speaker, value_usd, value_date, found_at)
+        VALUES ('anthropic', 'valuation', 'https://news.example/newer', 'Newer Wire', '2026-11-11', 'A valuation without a figure.', NULL, NULL, NULL, NULL, NULL, 'x'),
+               ('anthropic', 'valuation', 'https://news.example/absurd', 'Absurd Wire', '2026-11-11', 'An absurd one.', NULL, NULL, NULL, 1e21, NULL, 'x');`);
+    const a = (await listHomeIpos(db, "en", TODAY)).find((i) => i.slug === "anthropic")!;
+    expect(a.valuation).toMatchObject({ usd: 1.4e12, outlet: "Example News", publishedOn: "2026-11-10" });
+  });
+
+  it("prints the valuation's and the reported date's sentences in full under them, word for word", async () => {
+    const db = memoryD1(`${SEED}\nDELETE FROM ipo_watch WHERE slug <> 'anthropic';`);
+    for (const locale of ["en", "zh"] as const) {
+      const out = section(home(await listHomeIpos(db, locale, TODAY), locale));
+      expect(out).toContain(
+        '<blockquote class="front-ipo-quote">“At the top of the range the offering would value Anthropic at roughly $1.4 trillion, the people said.”</blockquote>',
+      );
+      expect(out).toContain(
+        '<blockquote class="front-ipo-quote">“Anthropic is expected to begin trading on the Nasdaq on Nov. 16 after pricing its shares on Nov. 13, the people said.”</blockquote>',
+      );
+    }
+    // A valuation stored without its sentence is not shown at all.
+    const bare = memoryD1(`${SEED}\nUPDATE ipo_items SET quote = ' ' WHERE kind = 'valuation';\nDELETE FROM ipo_watch WHERE slug <> 'anthropic';`);
+    expect((await listHomeIpos(bare, "en", TODAY))[0].valuation).toBeNull();
+    // A filing date (not news) has no news sentence to show.
+    const priced = memoryD1(`${SEED}\nDELETE FROM ipo_watch WHERE slug <> 'northwind-robotics';`);
+    expect(section(home(await listHomeIpos(priced, "en", TODAY)))).not.toContain("front-ipo-quote");
+  });
+
+  it("names the outlet in the valuation link's accessible name, and the status in the heading", async () => {
+    const db = memoryD1(`${SEED}\nDELETE FROM ipo_watch WHERE slug <> 'anthropic';`);
+    const en = section(home(await listHomeIpos(db, "en", TODAY)));
+    expect(en).toContain('aria-label="Article: Example News">↗</a>');
+    expect(en).toContain('<p class="kicker" aria-hidden="true">Price range set</p>');
+    expect(en).toContain('<h3 class="story-title"><a href="/en/ipo/anthropic">Anthropic</a><span class="sr-only">, Price range set</span></h3>');
+    const zh = section(home(await listHomeIpos(db, "zh", TODAY), "zh"));
+    expect(zh).toContain('aria-label="原文：Example News">↗</a>');
+  });
+
+  it("shows at most three IPOs, soonest first, and links the calendar for the rest", async () => {
+    const extra = [1, 2].map((n) =>
+      `INSERT INTO ipo_watch (slug, cik, name, name_zh, status, exchange, symbol, facts_accession, first_trade_date,
+         date_status, date_source, date_source_name, date_source_url, date_quote, date_as_of, checked_at, updated_at) VALUES
+         ('new-${n}', ${100 + n}, 'New ${n}', NULL, 'filed', NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, 'x', 'x');
+       INSERT INTO ipo_filings (accession, slug, form, filing_date, index_url, doc_url, read_state, attempts, first_seen_at)
+         VALUES ('acc-new-${n}', 'new-${n}', 'S-1', '2026-11-0${n}', 'https://www.sec.gov/x-${n}-index.htm', NULL, 'none', 0, 'x');`,
+    );
+    const db = memoryD1(`${SEED}\n${extra.join("\n")}`);
+    const ipos = await listHomeIpos(db, "en", TODAY);
+    // Dated first by date (Northwind Nov 5, Anthropic Nov 16), then the undated by name.
+    expect(ipos.map((i) => i.slug)).toEqual(["northwind-robotics", "anthropic", "harbor-bio", "new-1", "new-2"]);
+    const en = section(home(ipos));
+    expect(en.match(/class="front-ipo-item"/g)).toHaveLength(3);
+    expect(en).not.toContain("/en/ipo/new-1");
+    expect(en).toContain('<a class="more front-ipo-more" href="/en/earnings">2 more tracked IPOs on the calendar →</a>');
+    expect(section(home(ipos.slice(0, 4)))).toContain(">1 more tracked IPO on the calendar →</a>");
+    expect(section(home(ipos, "zh"))).toContain('<a class="more front-ipo-more" href="/zh/earnings">日历上还有 2 只追踪中的 IPO →</a>');
+    expect(section(home(ipos.slice(0, 3)))).not.toContain("front-ipo-more");
+  });
+});
+
+describe("review fixes: the run-key range", () => {
+  it("keeps arm and arm-holdings apart, on the home page and the IPO page", async () => {
+    const post = (id: number, ipo: string, slug: string, title: string) => `
+      INSERT INTO runs VALUES ('ipo:${ipo}:range_set:acc-${id}','ipo','2026-11-10','published',1,NULL,'2026-11-10T16:00:00Z','2026-11-10T16:00:00Z');
+      INSERT INTO posts (id, run_key, content_type, template_id, trading_date, slug, facts_r2_key, published_at)
+        VALUES (${id},'ipo:${ipo}:range_set:acc-${id}','ipo','ipo-range_set','2026-11-10','${slug}','ipo/${ipo}/range_set-acc-${id}.json','2026-11-10T16:00:00Z');
+      INSERT INTO post_translations (post_id, lang, status, title, summary, body_md, updated_at) VALUES (${id},'en','published','${title}','s','# t','x');`;
+    const watch = (slug: string, name: string) => `
+      INSERT INTO ipo_watch (slug, cik, name, name_zh, status, exchange, symbol, facts_accession, first_trade_date,
+        date_status, date_source, date_source_name, date_source_url, date_quote, date_as_of, checked_at, updated_at) VALUES
+        ('${slug}', 1, '${name}', NULL, 'filed', NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, 'x', 'x');
+      INSERT INTO ipo_filings (accession, slug, form, filing_date, index_url, doc_url, read_state, attempts, first_seen_at)
+        VALUES ('f-${slug}', '${slug}', 'S-1', '2026-11-01', 'https://www.sec.gov/f-${slug}-index.htm', NULL, 'none', 0, 'x');`;
+    const db = memoryD1(
+      `${watch("arm", "Arm")}${watch("arm-holdings", "Arm Holdings")}${watch("arma", "Arma")}` +
+        `${post(1, "arm", "arm-ipo-price-range-2026-11-10", "Arm write-up")}` +
+        `${post(2, "arm-holdings", "arm-holdings-ipo-price-range-2026-11-10", "Arm Holdings write-up")}`,
+    );
+    expect((await listIpoWriteups(db, "arm", "en")).map((w) => w.title)).toEqual(["Arm write-up"]);
+    expect((await listIpoWriteups(db, "arm-holdings", "en")).map((w) => w.title)).toEqual(["Arm Holdings write-up"]);
+    expect(await listIpoWriteups(db, "arma", "en")).toEqual([]);
+    const home = Object.fromEntries((await listHomeIpos(db, "en", TODAY)).map((i) => [i.slug, i.writeup?.title ?? null]));
+    expect(home).toEqual({ arm: "Arm write-up", "arm-holdings": "Arm Holdings write-up", arma: null });
   });
 });

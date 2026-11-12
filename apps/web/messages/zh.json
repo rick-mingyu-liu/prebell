@@ -415,7 +415,9 @@
       "reportedBy": "据 {outlet} {date}报道",
       "lastClose": "最新收盘价",
       "writeup": "最新文章：",
-      "page": "申报文件、数字及来源"
+      "page": "申报文件、数字及来源",
+      "articleBy": "原文：{outlet}",
+      "more": "日历上还有 {count} 只追踪中的 IPO →"
     },
     "writeups": {
       "heading": "相关文章"

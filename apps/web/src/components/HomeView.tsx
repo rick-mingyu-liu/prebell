@@ -9,7 +9,7 @@ import type { Locale } from "../i18n/routing";
 import type { CalendarEntry } from "../lib/earnings";
 import { dirOf, fmtPct, fmtPrice } from "../lib/format";
 import type { HomeData } from "../lib/home";
-import { fmtSharePrice, fmtValuation, type HomeIpo } from "../lib/ipo";
+import { fmtSharePrice, fmtValuation, HOME_IPOS_SHOWN, type HomeIpo } from "../lib/ipo";
 import { pendingTitle, typeLabel } from "../lib/labels";
 import type { ThemeView } from "../lib/facts";
 import type { PostListItem } from "../lib/posts";
@@ -152,9 +152,16 @@ function HomeIpoItem({ ipo, locale, t }: { ipo: HomeIpo; locale: Locale; t: T })
   const sep = locale === "zh" ? "，" : ", ";
   return (
     <article className="front-ipo-item">
-      <p className="kicker">{t(`ipo.status.${ipo.status}`)}</p>
+      {/* The status is read with the name, in the heading; the kicker above it is the visual copy. */}
+      <p className="kicker" aria-hidden="true">
+        {t(`ipo.status.${ipo.status}`)}
+      </p>
       <h3 className="story-title">
         <Link href={page}>{ipo.name}</Link>
+        <span className="sr-only">
+          {locale === "zh" ? "，" : ", "}
+          {t(`ipo.status.${ipo.status}`)}
+        </span>
       </h3>
       {meta.length > 0 && <p className="front-ipo-meta">{meta.join(" · ")}</p>}
       <dl className="front-ipo-facts">
@@ -183,11 +190,17 @@ function HomeIpoItem({ ipo, locale, t }: { ipo: HomeIpo; locale: Locale; t: T })
               {ipo.valuation.url && (
                 <>
                   {" "}
-                  <a href={ipo.valuation.url} rel="nofollow noopener noreferrer" aria-label={t("ipo.article")}>
+                  <a
+                    href={ipo.valuation.url}
+                    rel="nofollow noopener noreferrer"
+                    aria-label={t("ipo.home.articleBy", { outlet: ipo.valuation.outlet })}
+                  >
                     ↗
                   </a>
                 </>
               )}
+              {/* The article's own sentence, word for word: any hedge in it ("about", "roughly") stays with the figure. */}
+              <blockquote className="front-ipo-quote">“{ipo.valuation.quote}”</blockquote>
             </dd>
           </>
         )}
@@ -216,6 +229,8 @@ function HomeIpoItem({ ipo, locale, t }: { ipo: HomeIpo; locale: Locale; t: T })
         )}
       </dl>
       <DateLine date={ipo.date} locale={locale} t={t} compact />
+      {/* A date from a news report shows the report's sentence too, as the valuation does. */}
+      {ipo.date?.source === "news" && ipo.date.quote && <blockquote className="front-ipo-quote">“{ipo.date.quote}”</blockquote>}
       {ipo.writeup && (
         <p className="front-ipo-writeup">
           <span className="muted">{t("ipo.home.writeup")}</span>{" "}
@@ -301,9 +316,14 @@ export default function HomeView({ data, locale, signup }: { data: HomeData; loc
               <h2 className="section-title" id="front-ipo">
                 {t("ipo.watchTitle")}
               </h2>
-              {ipos.map((i) => (
+              {ipos.slice(0, HOME_IPOS_SHOWN).map((i) => (
                 <HomeIpoItem key={i.slug} ipo={i} locale={locale} t={t} />
               ))}
+              {ipos.length > HOME_IPOS_SHOWN && (
+                <Link className="more front-ipo-more" href={`/${locale}/earnings`}>
+                  {t("ipo.home.more", { count: ipos.length - HOME_IPOS_SHOWN })}
+                </Link>
+              )}
             </section>
           )}
           {lead && (

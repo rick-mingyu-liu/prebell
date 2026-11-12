@@ -618,8 +618,8 @@ export interface HomeIpo extends IpoSummary {
   price: { low: number; high: number } | { final: number } | null;
   /** The filing the price came from. */
   priceFiling: IpoFiling | null;
-  /** The newest stored valuation with a printable figure, attributed. */
-  valuation: { usd: number; outlet: string; publishedOn: string; url: string | null } | null;
+  /** The newest stored valuation with a printable figure, attributed, with the article's sentence it came from. */
+  valuation: { usd: number; outlet: string; publishedOn: string; url: string | null; quote: string } | null;
   /** The latest stored session after listing, with the change computed as the IPO page computes it. */
   latest: IpoSession | null;
   /** The newest write-up published in the page's language. */
@@ -634,6 +634,9 @@ export interface HomeIpo extends IpoSummary {
  */
 export const HOME_DAYS_AFTER_LISTING = 30;
 export const HOME_DAYS_WITHOUT_FILING = 60;
+
+/** At most this many IPOs show in the home section, soonest first; the rest are a link to the calendar. */
+export const HOME_IPOS_SHOWN = 3;
 
 const POST_SLUG = /^[a-z0-9][a-z0-9-]*$/;
 
@@ -666,8 +669,9 @@ export async function listHomeIpos(db: D1Like, lang: Lang, today: string): Promi
            (SELECT value_num FROM ipo_facts WHERE accession = ipo_watch.facts_accession AND kind = 'price_low' AND slug = ipo_watch.slug) AS price_low,
            (SELECT value_num FROM ipo_facts WHERE accession = ipo_watch.facts_accession AND kind = 'price_high' AND slug = ipo_watch.slug) AS price_high,
            (SELECT value_num FROM ipo_facts WHERE accession = ipo_watch.facts_accession AND kind = 'price_final' AND slug = ipo_watch.slug) AS price_final,
-           (SELECT json_object('usd', value_usd, 'outlet', outlet, 'published_on', published_on, 'url', url)
+           (SELECT json_object('usd', value_usd, 'outlet', outlet, 'published_on', published_on, 'url', url, 'quote', quote)
               FROM ipo_items WHERE ipo_items.slug = ipo_watch.slug AND kind = 'valuation'
+                AND value_usd >= ${VALUATION_MIN} AND value_usd <= ${VALUATION_MAX} AND trim(outlet) <> '' AND trim(quote) <> ''
               ORDER BY published_on DESC, found_at DESC LIMIT 1) AS valuation,
            (SELECT json_object('session_date', session_date, 'close', close, 'ipo_price', ipo_price, 'source_url', source_url)
               FROM ipo_trading WHERE ipo_trading.slug = ipo_watch.slug ORDER BY session_date DESC LIMIT 1) AS latest,
@@ -676,20 +680,27 @@ export async function listHomeIpos(db: D1Like, lang: Lang, today: string): Promi
               WHERE p.run_key >= 'ipo:' || ipo_watch.slug || ':' AND p.run_key < 'ipo:' || ipo_watch.slug || ';'
                 AND p.content_type = 'ipo'
               ORDER BY p.trading_date DESC, p.published_at DESC, p.id DESC LIMIT 1) AS writeup
-         FROM ipo_watch WHERE status <> 'withdrawn'
+         FROM ipo_watch
+         WHERE status <> 'withdrawn'
+           -- Active (news::active): by the first stored session once there is one, else by the newest filing. So the
+           -- LIMIT counts active IPOs only, and an IPO listed long ago costs no subqueries.
+           AND COALESCE(
+             (SELECT MIN(session_date) FROM ipo_trading WHERE ipo_trading.slug = ipo_watch.slug) >= ?,
+             (SELECT MAX(filing_date) FROM ipo_filings WHERE ipo_filings.slug = ipo_watch.slug) >= ?,
+             0)
          ORDER BY first_trade_date IS NULL, first_trade_date, name LIMIT 20`,
       )
-      .bind(lang)
+      .bind(lang, addDays(today, -HOME_DAYS_AFTER_LISTING), addDays(today, -HOME_DAYS_WITHOUT_FILING))
       .all<WatchRow & Record<string, unknown>>());
   } catch {
     return [];
   }
   const listedSince = addDays(today, -HOME_DAYS_AFTER_LISTING);
   const filedSince = addDays(today, -HOME_DAYS_WITHOUT_FILING);
-  return rows.flatMap((r) => {
+  const out = rows.flatMap((r): HomeIpo[] => {
     const base = summary(r, lang, today);
     if (!base || base.status === "withdrawn") return [];
-    // Active, as `news::active`: by the first stored session once there is one, else by the newest filing.
+    // Active, as `news::active` (the query applies it too; this is the second gate).
     const first = dateOf(r.first_session);
     if (first ? first < listedSince : !(dateOf(r.last_filing) && dateOf(r.last_filing)! >= filedSince)) return [];
 
@@ -707,9 +718,11 @@ export async function listHomeIpos(db: D1Like, lang: Lang, today: string): Promi
     const usd = typeof v?.usd === "number" ? v.usd : null;
     const outlet = text(v?.outlet);
     const publishedOn = dateOf(v?.published_on);
+    const quote = text(v?.quote);
+    // No figure from news without its sentence: a valuation without its quote is not shown.
     const valuation =
-      usd !== null && fmtValuation(usd, lang) !== null && outlet && publishedOn
-        ? { usd, outlet, publishedOn, url: httpsUrl(v?.url) }
+      usd !== null && fmtValuation(usd, lang) !== null && outlet && publishedOn && quote
+        ? { usd, outlet, publishedOn, url: httpsUrl(v?.url), quote }
         : null;
 
     const s = jsonObj(r.latest);
@@ -723,6 +736,9 @@ export async function listHomeIpos(db: D1Like, lang: Lang, today: string): Promi
 
     return [{ ...base, exchange: text(r.exchange), price, priceFiling: price ? priceFiling : null, valuation, latest, writeup }];
   });
+  // Soonest first: dated IPOs by date (a passed reported date reads "date not set" and moves down), then by name.
+  const key = (i: HomeIpo) => (i.date ? `0${i.date.date}` : "1");
+  return out.sort((a, b) => (key(a) < key(b) ? -1 : key(a) > key(b) ? 1 : a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
 }
 
 /**

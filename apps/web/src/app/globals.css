@@ -180,6 +180,9 @@ html:lang(zh-Hans) .front-ipo-facts dt { letter-spacing: 0.02em; }
 .front-ipo-writeup a { font-family: var(--serif); font-size: 16px; font-weight: 700; text-decoration: none; }
 .front-ipo-writeup a:hover, .front-ipo-writeup a:focus-visible { text-decoration: underline; }
 .story-ipo { margin: -0.5rem 0 1rem; }
+.front-ipo-quote { margin: 0.2rem 0 0; padding-left: 0.6rem; border-left: 2px solid var(--rule); color: var(--muted); font-size: 13px; line-height: 1.45; overflow-wrap: anywhere; }
+.front-ipo-item .ipo-date + .front-ipo-quote { margin: -0.3rem 0 0.5rem; }
+.front-ipo-more { display: inline-block; margin: 0.25rem 0 0.5rem; }
 
 /* Movers: ruled rows (name, grey ticker, the move; the reason in grey under them) or a ruled table.
    No logos, no pills; "No clear news" in grey italics. */
