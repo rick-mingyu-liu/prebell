@@ -133,9 +133,14 @@ Anthropic于2026年11月10日提交了注册声明修订文件（S-1/A）。文�
 FROM posts WHERE run_key = 'ipo:anthropic:range_set:0001628280-26-072484';
 
 INSERT INTO sources (post_id, url, title, quote)
-SELECT id, 'https://www.sec.gov/Archives/edgar/data/2130357/000162828026072484/0001628280-26-072484-index.htm', 'Anthropic S-1/A filed 2026-11-10', '' FROM posts WHERE run_key = 'ipo:anthropic:range_set:0001628280-26-072484'
-UNION ALL SELECT id, 'https://news.example/2026/11/10/anthropic-ipo-pricing', 'Example News', 'At the top of the range the offering would value Anthropic at roughly $1.4 trillion, the people said.' FROM posts WHERE run_key = 'ipo:anthropic:range_set:0001628280-26-072484'
-UNION ALL SELECT id, 'https://news.example/2026/11/10/anthropic-ipo-pricing', 'Example News', 'Anthropic is expected to begin trading on the Nasdaq on Nov. 16 after pricing its shares on Nov. 13, the people said.' FROM posts WHERE run_key = 'ipo:anthropic:range_set:0001628280-26-072484'
-UNION ALL SELECT id, 'https://sampletimes.example/2026/11/09/anthropic-ipo-analysts', 'Sample Times', 'The office tools show how far they want to push into software that businesses already pay for' FROM posts WHERE run_key = 'ipo:anthropic:range_set:0001628280-26-072484'
-UNION ALL SELECT id, 'https://sampletimes.example/2026/11/04/anthropic-office-apps', 'Sample Times', 'Anthropic on Tuesday released AI versions of word-processing and presentation software for business customers.' FROM posts WHERE run_key = 'ipo:anthropic:range_set:0001628280-26-072484'
-UNION ALL SELECT id, 'https://sampletimes.example/2026/10/12/anthropic-valuation', 'Sample Times', 'Bankers have pitched a valuation of about $2 trillion for the listing, according to people familiar with the talks.' FROM posts WHERE run_key = 'ipo:anthropic:range_set:0001628280-26-072484';
+SELECT id, 'https://www.sec.gov/Archives/edgar/data/2130357/000162828026072484/0001628280-26-072484-index.htm', 'Anthropic S-1/A filed 2026-11-10', '' FROM posts WHERE run_key = 'ipo:anthropic:range_set:0001628280-26-072484';
+INSERT INTO sources (post_id, url, title, quote)
+SELECT id, 'https://news.example/2026/11/10/anthropic-ipo-pricing', 'Example News', 'At the top of the range the offering would value Anthropic at roughly $1.4 trillion, the people said.' FROM posts WHERE run_key = 'ipo:anthropic:range_set:0001628280-26-072484';
+INSERT INTO sources (post_id, url, title, quote)
+SELECT id, 'https://news.example/2026/11/10/anthropic-ipo-pricing', 'Example News', 'Anthropic is expected to begin trading on the Nasdaq on Nov. 16 after pricing its shares on Nov. 13, the people said.' FROM posts WHERE run_key = 'ipo:anthropic:range_set:0001628280-26-072484';
+INSERT INTO sources (post_id, url, title, quote)
+SELECT id, 'https://sampletimes.example/2026/11/09/anthropic-ipo-analysts', 'Sample Times', 'The office tools show how far they want to push into software that businesses already pay for' FROM posts WHERE run_key = 'ipo:anthropic:range_set:0001628280-26-072484';
+INSERT INTO sources (post_id, url, title, quote)
+SELECT id, 'https://sampletimes.example/2026/11/04/anthropic-office-apps', 'Sample Times', 'Anthropic on Tuesday released AI versions of word-processing and presentation software for business customers.' FROM posts WHERE run_key = 'ipo:anthropic:range_set:0001628280-26-072484';
+INSERT INTO sources (post_id, url, title, quote)
+SELECT id, 'https://sampletimes.example/2026/10/12/anthropic-valuation', 'Sample Times', 'Bankers have pitched a valuation of about $2 trillion for the listing, according to people familiar with the talks.' FROM posts WHERE run_key = 'ipo:anthropic:range_set:0001628280-26-072484';
