@@ -163,16 +163,22 @@ impl<H: Http> NewsSearch for Tavily<H> {
 
     /// `search_since` keeping only results with the full article text
     /// (`raw_content`), never the snippet: IPO items are checked against
-    /// the article itself.
+    /// the article itself. `domains` becomes `include_domains` (Tavily's
+    /// default mode, `restrict`: only those sites; at most 300 domains), so
+    /// the results are not spent on sites the caller would drop.
     async fn search_full(
         &self,
         query: &str,
         max: usize,
         since: DateTime<Utc>,
+        domains: &[&str],
     ) -> Result<Vec<SearchHit>, ProviderError> {
         let mut b = body(query, max);
         let day = et(since).date_naive() - Days::new(1);
         b["start_date"] = json!(day.format("%Y-%m-%d").to_string());
+        if !domains.is_empty() {
+            b["include_domains"] = json!(domains);
+        }
         self.post(&b, true).await
     }
 }
@@ -361,12 +367,42 @@ mod tests {
     #[tokio::test]
     async fn search_full_drops_results_without_the_article_text() {
         // The fixture's second result has only a snippet.
-        let hits = tavily(200, FIX)
-            .search_full("q", 5, "2026-10-29T01:20:00Z".parse().unwrap())
+        let t = tavily(200, FIX);
+        let hits = t
+            .search_full("q", 5, "2026-10-29T01:20:00Z".parse().unwrap(), &[])
             .await
             .unwrap();
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].content, "Full article text A with more detail.");
+        assert!(t.http.seen.borrow()[0].2.get("include_domains").is_none());
+    }
+
+    #[tokio::test]
+    async fn search_full_asks_only_for_the_given_sites() {
+        let t = tavily(200, FIX);
+        t.search_full(
+            "q",
+            7,
+            "2026-10-29T01:20:00Z".parse().unwrap(),
+            &["reuters.com", "cnbc.com"],
+        )
+        .await
+        .unwrap();
+        let body = &t.http.seen.borrow()[0].2;
+        assert_eq!(body["include_domains"], json!(["reuters.com", "cnbc.com"]));
+        assert_eq!(body["max_results"], 7);
+        // The briefs' searches never send a site list.
+        let t = tavily(200, FIX);
+        t.search("q", 3).await.unwrap();
+        t.search_since("q", 3, "2026-10-29T01:20:00Z".parse().unwrap())
+            .await
+            .unwrap();
+        assert!(t
+            .http
+            .seen
+            .borrow()
+            .iter()
+            .all(|(_, _, b)| b.get("include_domains").is_none()));
     }
 
     #[tokio::test]

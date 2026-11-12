@@ -56,6 +56,9 @@ use crate::store::Store;
 pub const MONTHLY_SEARCH_CAP: u32 = 30;
 /// Articles read per sweep.
 pub const HITS: usize = 5;
+/// Results asked for beyond `HITS`, so a duplicate does not cost a slot
+/// (a basic Tavily search is one credit whatever the count).
+pub const SEARCH_EXTRA: usize = 2;
 /// How far back an article may be.
 pub const LOOKBACK_DAYS: i64 = 14;
 /// Items considered per sweep.
@@ -171,6 +174,40 @@ const EXCLUDED_SEGMENTS: [&str; 14] = [
     "brandvoice",
 ];
 
+/// The allowlisted hosts, for the search's `include_domains`: built from
+/// `OUTLETS`, so the request filter and the gate (`outlet_for`) never drift.
+pub fn outlet_hosts() -> Vec<&'static str> {
+    OUTLETS.iter().map(|(host, _)| *host).collect()
+}
+
+/// Lowercase letters and digits of `s`, for comparing two hits.
+fn squash(s: &str) -> String {
+    s.chars()
+        .filter(|c| c.is_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
+/// `hits` without a second copy of an article (the same story under two
+/// URLs): the same title, or the same first 300 characters of text,
+/// ignoring case, spaces and punctuation. The first copy stays.
+pub fn distinct(hits: Vec<SearchHit>) -> Vec<SearchHit> {
+    let mut seen: Vec<(String, String)> = Vec::new();
+    let mut out = Vec::new();
+    for h in hits {
+        let title = squash(&h.title);
+        let head: String = squash(&h.content).chars().take(300).collect();
+        let dup = seen
+            .iter()
+            .any(|(t, c)| (!title.is_empty() && *t == title) || (!head.is_empty() && *c == head));
+        if !dup {
+            seen.push((title, head));
+            out.push(h);
+        }
+    }
+    out
+}
+
 /// The outlet of an https article URL on an allowlisted host.
 pub fn outlet_for(url: &str) -> Option<&'static str> {
     let rest = url.strip_prefix("https://")?;
@@ -198,6 +235,20 @@ fn re(p: &str) -> Regex {
 /// The marker the company's names are replaced with before the templates
 /// run, so a template reads `@CO` wherever the quote names the company.
 const CO: &str = "@CO";
+
+/// `text` without zero-width characters, which some sites put inside a
+/// sentence ("on \u{200b}the Nasdaq", Reuters 2026-11-10): the shapes then
+/// read the words as written. The quote itself is verified as stored.
+pub fn visible(text: &str) -> String {
+    text.chars()
+        .filter(|c| {
+            !matches!(
+                c,
+                '\u{200b}' | '\u{200c}' | '\u{200d}' | '\u{2060}' | '\u{feff}'
+            )
+        })
+        .collect()
+}
 
 /// `text` with each of the company's names (case-insensitive, whole words,
 /// longest first) replaced by `CO`.
@@ -425,7 +476,7 @@ fn years_re() -> &'static Regex {
 /// word, a trailing "if" or "unless", or (outside the aside) a past-time
 /// word in its clause; a "would" shape needs the offering in the sentence.
 pub fn valuation_figures(quote: &str, t: &Tracked, year: i32) -> Vec<f64> {
-    let marked = mark_company(&normalize(quote), t);
+    let marked = mark_company(&normalize(&visible(quote)), t);
     let mut out = Vec::new();
     for s in sentences(&marked) {
         let future_year = years_re()
@@ -597,7 +648,7 @@ fn title_party_re() -> &'static Regex {
 /// conditional or past (`tail_re`), and no negation or change word in the
 /// sentence (`CHANGE_WORDS`).
 pub fn is_trading_date(quote: &str, d: NaiveDate, t: &Tracked) -> bool {
-    let marked = mark_company(&normalize(quote), t);
+    let marked = mark_company(&normalize(&visible(quote)), t);
     sentences(&marked).iter().any(|s| {
         !s.ends_with('?')
             && !change_re().is_match(s)
@@ -844,12 +895,22 @@ pub fn over_caps(items: &[&ItemRow]) -> Vec<(String, String, String)> {
     out
 }
 
-#[derive(Debug, Clone, Default, PartialEq)]
+/// kv key prefix: the latest sweep's outcome per IPO (`ipo_sweep_last:<slug>`,
+/// JSON of `SweepRecord`), so a sweep that kept nothing says why.
+pub const KV_SWEEP_LAST: &str = "ipo_sweep_last";
+
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize)]
 pub struct SweepOutcome {
     pub slug: String,
     pub slot: String,
     /// Why nothing was searched, when nothing was.
     pub skipped: Option<String>,
+    /// Results the search returned.
+    pub found: usize,
+    /// Results dropped as the same article under another URL.
+    pub duplicates: usize,
+    /// Articles sent to the model: dated, recent, with text, from an
+    /// allowlisted outlet, no duplicates.
     pub hits: usize,
     pub proposed: usize,
     /// `kind url` of each new item kept.
@@ -942,12 +1003,51 @@ pub async fn sweep_tick(
     };
     out.slug = t.slug.clone();
     out.slot = slot;
+    let r = sweep_one(now, &t, list, ipo, es, store, ns, llm, &mut out).await;
+    // Recorded whatever happened, a store error included (the record itself
+    // failing is not worth failing the message for).
+    let record = SweepRecord {
+        at: iso(now),
+        outcome: out.clone(),
+        error: r.as_ref().err().cloned(),
+    };
+    if let Ok(json) = serde_json::to_string(&record) {
+        let _ = es
+            .kv_set(&format!("{KV_SWEEP_LAST}:{}", t.slug), &json, &iso(now))
+            .await;
+    }
+    r.map(|_| out)
+}
+
+/// What `KV_SWEEP_LAST` holds for an IPO.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct SweepRecord {
+    pub at: String,
+    #[serde(flatten)]
+    pub outcome: SweepOutcome,
+    /// A store error that ended the sweep, if any.
+    pub error: Option<String>,
+}
+
+/// The sweep of one claimed IPO, filling `out` as it goes.
+#[allow(clippy::too_many_arguments)]
+async fn sweep_one(
+    now: DateTime<Utc>,
+    t: &Tracked,
+    list: &[Tracked],
+    ipo: &dyn IpoStore,
+    es: &dyn EarningsStore,
+    store: &dyn Store,
+    ns: &dyn NewsSearch,
+    llm: &dyn LlmProvider,
+    out: &mut SweepOutcome,
+) -> Result<(), String> {
     let mut st = ipo.ipo_state().await?;
     let today = et(now).date_naive();
     if !active(&st, &t.slug, today) {
         out.skipped =
             Some("inactive (withdrawn, listed over 30 days, or no filing in 60 days)".into());
-        return Ok(out);
+        return Ok(());
     }
     if !take_search(es, now).await? {
         let msg = format!(
@@ -955,12 +1055,17 @@ pub async fn sweep_tick(
         );
         alert_once_today(now, "ipo-search-cap", "warn", &msg, store).await?;
         out.skipped = Some("monthly search cap".into());
-        return Ok(out);
+        return Ok(());
     }
     let since = now - Duration::days(LOOKBACK_DAYS);
     let sweep_key = format!("ipo-sweep:{}", t.slug);
     let mut hits = match ns
-        .search_full(&format!("{} IPO", t.name), HITS, since)
+        .search_full(
+            &format!("{} IPO", t.name),
+            HITS + SEARCH_EXTRA,
+            since,
+            &outlet_hosts(),
+        )
         .await
     {
         Ok(h) => h,
@@ -968,18 +1073,23 @@ pub async fn sweep_tick(
             out.errors.push(format!("search: {e}"));
             let msg = format!("IPO watch: the news search for {} failed: {e}", t.slug);
             alert_once_today(now, &sweep_key, "warn", &msg, store).await?;
-            return Ok(out);
+            return Ok(());
         }
     };
+    out.found = hits.len();
     hits.retain(|h| {
         h.published.is_some_and(|p| p >= since && p <= now)
             && !h.content.trim().is_empty()
             && outlet_for(&h.url).is_some()
     });
+    let before = hits.len();
+    let hits = distinct(hits);
+    out.duplicates = before - hits.len();
+    let mut hits = hits;
     hits.truncate(HITS);
     out.hits = hits.len();
     if hits.is_empty() {
-        return Ok(out);
+        return Ok(());
     }
     let header = format!("Company: {}\n{}", t.name, as_of(now));
     let v = match llm
@@ -991,7 +1101,7 @@ pub async fn sweep_tick(
             out.errors.push(format!("llm: {e}"));
             let msg = format!("IPO watch: the news extraction for {} failed: {e}", t.slug);
             alert_once_today(now, &sweep_key, "warn", &msg, store).await?;
-            return Ok(out);
+            return Ok(());
         }
     };
     let proposed: Vec<Proposed> = v
@@ -1017,7 +1127,7 @@ pub async fn sweep_tick(
         }
     }
     if new.is_empty() {
-        return Ok(out);
+        return Ok(());
     }
     let mut w = IpoWrite {
         items: new,
@@ -1034,7 +1144,7 @@ pub async fn sweep_tick(
     st.apply(&w);
     w.watch = changed_rows(now, list, &st);
     ipo.ipo_write(&w).await?;
-    Ok(out)
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1079,7 +1189,7 @@ mod tests {
     fn hit(url: &str, content: &str, published: Option<&str>) -> SearchHit {
         SearchHit {
             url: url.into(),
-            title: "t".into(),
+            title: format!("title of {url}"),
             content: content.into(),
             published: published.map(utc),
         }
@@ -1328,6 +1438,11 @@ mod tests {
         ] {
             assert!(td(q, "2026-11-16"), "{q}");
         }
+        // A zero-width character inside the sentence, as in Reuters' copy.
+        assert!(td(
+            "Anthropic is expected to start trading on \u{200b}the Nasdaq on November 19.",
+            "2026-11-19"
+        ));
         // The pricing day in the same sentence is never the trading day.
         assert!(!td(
             "Anthropic is expected to begin trading on the Nasdaq on Nov. 16 after pricing its shares on Nov. 13.",
@@ -1675,6 +1790,8 @@ mod tests {
         hits: Result<Vec<SearchHit>, ProviderError>,
         calls: Cell<usize>,
         queries: RefCell<Vec<String>>,
+        /// The last request's result count and site list.
+        asked: RefCell<(usize, Vec<String>)>,
     }
     #[async_trait(?Send)]
     impl NewsSearch for FakeNs {
@@ -1684,11 +1801,13 @@ mod tests {
         async fn search_full(
             &self,
             q: &str,
-            _: usize,
+            max: usize,
             _: DateTime<Utc>,
+            domains: &[&str],
         ) -> Result<Vec<SearchHit>, ProviderError> {
             self.calls.set(self.calls.get() + 1);
             self.queries.borrow_mut().push(q.into());
+            *self.asked.borrow_mut() = (max, domains.iter().map(|d| d.to_string()).collect());
             self.hits.clone()
         }
     }
@@ -1708,6 +1827,7 @@ mod tests {
             hits: Ok(h),
             calls: Cell::new(0),
             queries: RefCell::new(vec![]),
+            asked: RefCell::new((0, vec![])),
         }
     }
     fn to_json(p: &Proposed) -> Value {
@@ -1814,6 +1934,142 @@ mod tests {
         assert_eq!(ipo.state.borrow().items.len(), 4);
     }
 
+    fn last_record(es: &MemEarningsStore) -> Value {
+        let raw = es
+            .kv
+            .borrow()
+            .get(&format!("{KV_SWEEP_LAST}:anthropic"))
+            .cloned()
+            .expect("a recorded outcome");
+        serde_json::from_str(&raw).unwrap()
+    }
+
+    #[tokio::test]
+    async fn the_search_asks_for_the_allowlist_and_drops_duplicate_articles() {
+        let ipo = MemIpoStore::default();
+        with_filing(&ipo);
+        let (es, store) = (MemEarningsStore::default(), MemStore::default());
+        // The same story under two URLs, as WSJ served it on 2026-11-10.
+        let copy = "Anthropic to Seek $1.3 Trillion Valuation in IPO. The AI company set terms for its offering.";
+        let wsj = |url: &str| SearchHit {
+            url: url.into(),
+            title: "Anthropic to Seek $1.3 Trillion Valuation in IPO - WSJ".into(),
+            content: copy.into(),
+            published: Some(utc("2026-11-10T16:57:00Z")),
+        };
+        let mut h = hits();
+        h.push(wsj(
+            "https://www.wsj.com/finance/stocks/anthropic-ipo-valuation-8337b669",
+        ));
+        h.push(wsj("https://www.wsj.com/finance/stocks/anthropic-to-seek-1-3-trillion-valuation-in-ipo-8337b669"));
+        let n = ns(h);
+        let l = llm(vec![]);
+        let out = sweep_tick(utc(NOW), &list(), &ipo, &es, &store, &n, &l)
+            .await
+            .unwrap();
+        let (max, domains) = n.asked.borrow().clone();
+        assert_eq!(max, HITS + SEARCH_EXTRA);
+        assert_eq!(domains, outlet_hosts());
+        assert_eq!(domains.len(), OUTLETS.len());
+        // 6 found; the blog is off the list and one WSJ copy is a duplicate.
+        assert_eq!((out.found, out.duplicates, out.hits), (6, 1, 4));
+        let distinct_urls: Vec<String> = distinct(vec![
+            wsj("https://www.wsj.com/a"),
+            wsj("https://www.wsj.com/b"),
+        ])
+        .into_iter()
+        .map(|h| h.url)
+        .collect();
+        assert_eq!(distinct_urls, ["https://www.wsj.com/a"]);
+    }
+
+    #[tokio::test]
+    async fn every_sweep_records_its_outcome_in_kv() {
+        let ipo = MemIpoStore::default();
+        with_filing(&ipo);
+        let (es, store) = (MemEarningsStore::default(), MemStore::default());
+        let l = llm(vec![
+            valuation(),
+            Proposed {
+                value_usd: Some(6e10),
+                ..valuation()
+            },
+        ]);
+        sweep_tick(utc(NOW), &list(), &ipo, &es, &store, &ns(hits()), &l)
+            .await
+            .unwrap();
+        let r = last_record(&es);
+        assert_eq!(r["at"], "2026-11-11T21:30:00Z");
+        assert_eq!(r["slot"], "2026-11-11:pm");
+        assert_eq!(
+            (
+                r["found"].as_u64(),
+                r["hits"].as_u64(),
+                r["proposed"].as_u64()
+            ),
+            (Some(4), Some(3), Some(2))
+        );
+        assert_eq!(r["kept"], json!([format!("valuation {A_URL}")]));
+        assert_eq!(
+            r["rejected"],
+            json!([format!("NotTheCompanysValuation {A_URL}")])
+        );
+        assert_eq!(r["error"], Value::Null);
+        // A failed search is recorded with its error, a skip with its reason.
+        let failing = FakeNs {
+            hits: Err(ProviderError::Http(432)),
+            calls: Cell::new(0),
+            queries: RefCell::new(vec![]),
+            asked: RefCell::new((0, vec![])),
+        };
+        sweep_tick(
+            utc("2026-11-12T21:30:00Z"),
+            &list(),
+            &ipo,
+            &es,
+            &store,
+            &failing,
+            &l,
+        )
+        .await
+        .unwrap();
+        let r = last_record(&es);
+        assert_eq!(r["slot"], "2026-11-12:pm");
+        assert_eq!(r["errors"], json!(["search: http status 432"]));
+        es.kv_set(KV_SEARCHES, &format!("2026-11 {MONTHLY_SEARCH_CAP}"), "x")
+            .await
+            .unwrap();
+        sweep_tick(
+            utc("2026-11-13T21:30:00Z"),
+            &list(),
+            &ipo,
+            &es,
+            &store,
+            &ns(hits()),
+            &l,
+        )
+        .await
+        .unwrap();
+        assert_eq!(last_record(&es)["skipped"], "monthly search cap");
+        // A store error is recorded too, and still fails the message.
+        let broken = MemIpoStore {
+            fail: Some("no such table: ipo_watch".into()),
+            ..Default::default()
+        };
+        assert!(sweep_tick(
+            utc("2026-11-16T21:30:00Z"),
+            &list(),
+            &broken,
+            &es,
+            &store,
+            &ns(hits()),
+            &l
+        )
+        .await
+        .is_err());
+        assert_eq!(last_record(&es)["error"], "no such table: ipo_watch");
+    }
+
     #[tokio::test]
     async fn the_monthly_cap_stops_searches_with_one_alert() {
         let ipo = MemIpoStore::default();
@@ -1854,6 +2110,7 @@ mod tests {
             hits: Err(ProviderError::Http(432)),
             calls: Cell::new(0),
             queries: RefCell::new(vec![]),
+            asked: RefCell::new((0, vec![])),
         };
         let l = llm(vec![]);
         let out = sweep_tick(utc(NOW), &list(), &ipo, &es, &store, &failing, &l)
