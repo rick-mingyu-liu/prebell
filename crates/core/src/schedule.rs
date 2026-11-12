@@ -65,6 +65,11 @@ pub enum EarningsStep {
     /// its checked items (`ipo::news`). It needs no EDGAR, so it goes to
     /// the jobs queue and never holds up a poll.
     IpoSweep,
+    /// `ipo:article`, queued by a poll while `IPO_ARTICLES_ENABLED` and
+    /// `IPO_WATCH_ENABLED` are on and `ipo_article_next` is reached: at most
+    /// one IPO write-up build (`ipo::article`). On the serial build queue,
+    /// like an earnings build, for its model calls.
+    IpoArticle,
 }
 
 impl EarningsStep {
@@ -79,6 +84,7 @@ impl EarningsStep {
             EarningsStep::Digest => "digest",
             EarningsStep::IpoCheck => "ipo:check",
             EarningsStep::IpoSweep => "ipo:sweep",
+            EarningsStep::IpoArticle => "ipo:article",
         }
     }
 }
@@ -107,6 +113,7 @@ impl JobKind {
             "digest" => Some(JobKind::Earnings(EarningsStep::Digest)),
             "ipo:check" => Some(JobKind::Earnings(EarningsStep::IpoCheck)),
             "ipo:sweep" => Some(JobKind::Earnings(EarningsStep::IpoSweep)),
+            "ipo:article" => Some(JobKind::Earnings(EarningsStep::IpoArticle)),
             "cards" => Some(JobKind::Cards),
             _ => None,
         }
@@ -116,7 +123,9 @@ impl JobKind {
 /// The queue binding a job is sent to.
 pub fn queue_for(job: &str) -> &'static str {
     match JobKind::parse(job) {
-        Some(JobKind::Earnings(EarningsStep::Build)) => EARNINGS_BUILD_QUEUE,
+        Some(JobKind::Earnings(EarningsStep::Build | EarningsStep::IpoArticle)) => {
+            EARNINGS_BUILD_QUEUE
+        }
         Some(JobKind::Earnings(EarningsStep::IpoSweep)) => JOBS_QUEUE,
         Some(JobKind::Earnings(_)) => EARNINGS_QUEUE,
         _ => JOBS_QUEUE,
@@ -358,10 +367,11 @@ mod tests {
             EarningsStep::Digest,
             EarningsStep::IpoCheck,
             EarningsStep::IpoSweep,
+            EarningsStep::IpoArticle,
         ] {
             assert_eq!(JobKind::parse(step.job()), Some(JobKind::Earnings(step)));
             let queue = match step {
-                EarningsStep::Build => EARNINGS_BUILD_QUEUE,
+                EarningsStep::Build | EarningsStep::IpoArticle => EARNINGS_BUILD_QUEUE,
                 EarningsStep::IpoSweep => JOBS_QUEUE,
                 _ => EARNINGS_QUEUE,
             };
