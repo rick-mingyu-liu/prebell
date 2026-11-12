@@ -1372,6 +1372,18 @@ pub(crate) mod tests {
 
     /// `db/seed-ipo-articles-preview.sql` and its facts object are what the
     /// generator renders from the preview state.
+    /// The dry-run example drafts from the seed's facts object without its
+    /// made-up items: that is the bundle the real stored state gives.
+    #[test]
+    fn the_dry_run_bundle_is_the_real_states() {
+        let json = include_str!(
+            "../../../../db/preview-facts/ipo/anthropic/range_set-0001628280-26-072484.json"
+        );
+        let mut stored: IpoArticleFacts = serde_json::from_str(json).unwrap();
+        stored.items.clear();
+        assert_eq!(stored, facts());
+    }
+
     #[test]
     fn the_preview_seed_is_the_rendered_write_up() {
         let seed = include_str!("../../../../db/seed-ipo-articles-preview.sql");
