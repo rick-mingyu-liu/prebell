@@ -1,3 +1,4 @@
+import "server-only";
 import { signup as en } from "../../messages/en.json";
 import { signup as zh } from "../../messages/zh.json";
 import type { Locale } from "../i18n/routing";
