@@ -475,3 +475,50 @@ describe("review fixes: the run-key range", () => {
     expect(home).toEqual({ arm: "Arm write-up", "arm-holdings": "Arm Holdings write-up", arma: null });
   });
 });
+
+describe("the generator's preview write-up (db/seed-ipo-articles-preview.sql)", () => {
+  const ARTICLE = readFileSync(new URL("../../../db/seed-ipo-articles-preview.sql", import.meta.url), "utf8");
+  const SLUG = "anthropic-ipo-price-range-2026-11-10";
+  const db = () => memoryD1(`${SEED}\n${ARTICLE}`);
+
+  it("its facts key names the IPO the site links to, and the facts object agrees", () => {
+    const facts = JSON.parse(
+      readFileSync(new URL("../../../db/preview-facts/ipo/anthropic/range_set-0001628280-26-072484.json", import.meta.url), "utf8"),
+    );
+    expect(facts.schema).toBe("ipo-article/v1");
+    expect(writeupIpoSlug("ipo/anthropic/range_set-0001628280-26-072484.json")).toBe(facts.ipo_slug);
+  });
+
+  it("is the home section's newest write-up and the IPO page's list, in both languages", async () => {
+    for (const locale of ["en", "zh"] as const) {
+      const [a] = (await listHomeIpos(db(), locale, TODAY)).filter((i) => i.slug === "anthropic");
+      expect(a.writeup?.slug).toBe(SLUG);
+      expect((await listIpoWriteups(db(), "anthropic", locale)).map((w) => w.slug)).toEqual([SLUG]);
+    }
+    expect((await listHomeIpos(db(), "en", TODAY)).find((i) => i.slug === "anthropic")!.writeup!.title).toBe(
+      "Anthropic sets IPO price range at $70 to $78 a share",
+    );
+    expect((await listPosts(db(), "en", 1, "ipo")).map((p) => p.slug)).toEqual([SLUG]);
+  });
+
+  it("renders through the post page: IPO link, cover lines on the flat tile, the reported quotes and the sources", async () => {
+    for (const locale of ["en", "zh"] as const) {
+      const d = db();
+      const post = (await getPostBySlug(d, SLUG, locale))!;
+      expect(post.contentType).toBe("ipo");
+      expect(post.coverLines?.[0]).toBe("Anthropic IPO");
+      const out = renderToStaticMarkup(<BriefView data={await loadBrief(d, undefined, post, locale)} locale={locale} signup={false} />);
+      const text = textOf(out);
+      expect(out).toContain(`<a class="more" href="/${locale}/ipo/anthropic">`);
+      expect(out).toContain('class="cover cover-article cover-flat"');
+      expect(text).toContain(locale === "en" ? "Price range $70.00–$78.00" : "价格区间 70.00–78.00美元");
+      expect(text).toContain(locale === "en" ? "What has been reported" : "已有报道");
+      // Quotes stay in English on both pages, word for word.
+      expect(text).toContain("At the top of the range the offering would value Anthropic at roughly $1.4 trillion, the people said.");
+      // The filing link in Sources is a real link (a stored source); the article links too.
+      expect(out).toContain('href="https://www.sec.gov/Archives/edgar/data/2130357/000162828026072484/0001628280-26-072484-index.htm"');
+      expect(out).toContain('href="https://news.example/2026/11/10/anthropic-ipo-pricing"');
+      expect(text).toContain(locale === "en" ? "✓ Numbers checked against source data" : "✓ 数字已与源数据核对");
+    }
+  });
+});
