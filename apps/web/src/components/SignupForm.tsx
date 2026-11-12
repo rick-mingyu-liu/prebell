@@ -1,104 +1,13 @@
-"use client";
-
-import { type FormEvent, useState } from "react";
-import { signup as signupEn } from "../../messages/en.json";
-import { signup as signupZh } from "../../messages/zh.json";
+import { signup as en } from "../../messages/en.json";
+import { signup as zh } from "../../messages/zh.json";
 import type { Locale } from "../i18n/routing";
-
-type Status = "idle" | "loading" | "done" | "already" | "error" | "invalid";
-type SignupMessages = typeof signupEn;
-
-/** The form's state after /api/subscribe answers: a 200 is done (or already, when the route says so). */
-export async function statusOf(res: Response): Promise<Status> {
-  if (!res.ok) return res.status === 400 ? "invalid" : "error";
-  const body: unknown = await res.json().catch(() => null);
-  return typeof body === "object" && body !== null && (body as { already?: unknown }).already === true
-    ? "already"
-    : "done";
-}
-
-/** The inline line under the form for `status`, or null while idle or sending. */
-export function messageFor(status: Status, m: SignupMessages): string | null {
-  switch (status) {
-    case "done":
-      return m.success;
-    case "already":
-      return m.already;
-    case "error":
-      return m.error;
-    case "invalid":
-      return m.invalid;
-    default:
-      return null;
-  }
-}
+import SignupFormClient from "./SignupFormClient";
 
 /**
- * Weekly-digest signup: email field, Subscribe button and an inline result. Posts JSON to
- * /api/subscribe; the honeypot `website` field stays out of sight (not display:none, which bots skip).
- * The digest is one English email to every subscriber. Pages in both languages show the form, in
- * the page's language (`locale`), and the Chinese copy says the email is in English. `source` names
- * the page (the route checks it) and keeps the field ids unique. Only the signup strings are pulled
- * in, not the whole message catalogues.
+ * Weekly-digest signup, rendered on the server: it picks the page's language and hands the client
+ * form only that language's signup strings. The digest is one English email to every subscriber;
+ * pages in both languages show the form, and the Chinese heading and copy say the email is in English.
  */
 export default function SignupForm({ source, locale }: { source: "post" | "home" | "about"; locale: Locale }) {
-  const m: SignupMessages = locale === "zh" ? signupZh : signupEn;
-  const [status, setStatus] = useState<Status>("idle");
-
-  async function onSubmit(e: FormEvent<HTMLFormElement>) {
-    e.preventDefault();
-    const data = new FormData(e.currentTarget);
-    const email = String(data.get("email") ?? "").trim();
-    if (!email) return setStatus("invalid");
-    setStatus("loading");
-    try {
-      const res = await fetch("/api/subscribe", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ email, source, website: String(data.get("website") ?? "") }),
-      });
-      setStatus(await statusOf(res));
-    } catch {
-      setStatus("error");
-    }
-  }
-
-  const message = messageFor(status, m);
-  const settled = status === "done" || status === "already";
-
-  return (
-    <section className="signup">
-      <h2 className="signup-title">{m.heading}</h2>
-      <p className="signup-copy">{m.copy}</p>
-      {!settled && (
-        <form className="signup-form" onSubmit={onSubmit} noValidate>
-          <label className="sr-only" htmlFor={`signup-email-${source}`}>
-            {m.emailLabel}
-          </label>
-          <input
-            id={`signup-email-${source}`}
-            type="email"
-            name="email"
-            autoComplete="email"
-            placeholder={m.placeholder}
-            required
-          />
-          <input className="sr-only" type="text" name="website" tabIndex={-1} autoComplete="off" aria-hidden="true" />
-          <button type="submit" disabled={status === "loading"}>
-            {status === "loading" ? m.sending : m.submit}
-          </button>
-        </form>
-      )}
-      {message && (
-        <p className={settled ? "signup-msg" : "signup-msg err"} role={settled ? "status" : "alert"}>
-          {message}
-        </p>
-      )}
-      <p className="signup-manage">
-        <a href="https://buttondown.com/portal" target="_blank" rel="noopener noreferrer">
-          {m.manage}
-        </a>
-      </p>
-    </section>
-  );
+  return <SignupFormClient source={source} m={locale === "zh" ? zh : en} />;
 }

@@ -65,6 +65,7 @@ describe("weekly-digest signup placement", () => {
       expect(out, name).toContain('class="signup"');
       expect(out, name).toContain(`id="signup-email-${name}"`);
       expect(out, name).toContain("Get the weekly digest");
+      expect(out, name).not.toContain("英文");
     }
   });
 
@@ -73,8 +74,8 @@ describe("weekly-digest signup placement", () => {
       const out = await html(await page("zh"));
       expect(out, name).toContain('class="signup"');
       expect(out, name).toContain(`id="signup-email-${name}"`);
-      expect(out, name).toContain("订阅每周摘要");
-      expect(out, name).toContain("邮件目前只有英文版");
+      expect(out, name).toContain("订阅每周摘要（英文邮件）");
+      expect(out, name).toContain("每周一封英文邮件");
       expect(out, name).not.toContain("Get the weekly digest");
     }
   });

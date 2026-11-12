@@ -76,8 +76,8 @@ describe("About page", () => {
     const out = await render("zh");
     expect(out).toContain('class="signup"');
     expect(out).toContain('id="signup-email-about"');
-    expect(out).toContain("订阅每周摘要");
-    expect(out).toContain("邮件目前只有英文版");
+    expect(out).toContain("订阅每周摘要（英文邮件）");
+    expect(out).toContain("每周一封英文邮件");
     expect(out).not.toContain("Get the weekly digest");
     expect(out).toContain("<h2>关于作者</h2>");
     expect(out).toContain("来自 PreBell 团队。");

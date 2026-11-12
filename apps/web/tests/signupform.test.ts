@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { messageFor, statusOf } from "../src/components/SignupForm";
+import { messageFor, statusOf } from "../src/components/SignupFormClient";
 import { signup as en } from "../messages/en.json";
 import { signup as zh } from "../messages/zh.json";
 
@@ -34,7 +34,8 @@ describe("SignupForm result", () => {
   it("has every string in Chinese too, and the Chinese copy says the email is in English", () => {
     expect(Object.keys(zh).sort()).toEqual(Object.keys(en).sort());
     for (const [k, v] of Object.entries(zh)) expect(v, k).not.toBe("");
-    expect(zh.copy).toContain("邮件目前只有英文版");
+    expect(zh.heading).toContain("英文邮件");
+    expect(zh.copy).toContain("每周一封英文邮件");
     expect(zh.success).toContain("英文");
     expect(zh.copy).toContain("财报速评");
     expect(zh.copy).not.toContain("简报");
