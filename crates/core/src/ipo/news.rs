@@ -647,14 +647,25 @@ fn title_party_re() -> &'static Regex {
 /// template (`date_templates`), with nothing after it that makes it
 /// conditional or past (`tail_re`), and no negation or change word in the
 /// sentence (`CHANGE_WORDS`).
-pub fn is_trading_date(quote: &str, d: NaiveDate, t: &Tracked) -> bool {
+///
+/// `ticker` is the symbol from the company's filing, given only when the
+/// article's headline names the company: a sentence that does not name it
+/// but holds the ticker ("Shares are expected to start trading on the
+/// Nasdaq on November 19 under the symbol "ANT."", Reuters 2026-11-10) is
+/// read with "Shares" or "The stock" as the company's shares
+/// (`ticker_subject`), under every check above.
+pub fn is_trading_date(quote: &str, d: NaiveDate, t: &Tracked, ticker: Option<&str>) -> bool {
     let marked = mark_company(&normalize(&visible(quote)), t);
     sentences(&marked).iter().any(|s| {
+        let s = match ticker {
+            Some(sym) if !s.contains(CO) && has_ticker(s, sym) => ticker_subject(s),
+            _ => s.clone(),
+        };
         !s.ends_with('?')
-            && !change_re().is_match(s)
-            && !contrast_re().is_match(s)
+            && !change_re().is_match(&s)
+            && !contrast_re().is_match(&s)
             && date_templates().iter().any(|r| {
-                r.captures_iter(s).any(|c| {
+                r.captures_iter(&s).any(|c| {
                     let tail_ok = c
                         .name("tail")
                         .is_none_or(|m| !tail_re().is_match(m.as_str()));
@@ -670,6 +681,33 @@ pub fn is_trading_date(quote: &str, d: NaiveDate, t: &Tracked) -> bool {
                 })
             })
     })
+}
+
+/// `symbol` occurs in `text` as written (case-sensitive), with no letter
+/// or digit right before or after it: "ANT" is in "symbol "ANT."" but not
+/// in "ANTHROPIC" or "want".
+pub fn has_ticker(text: &str, symbol: &str) -> bool {
+    let text = normalize(&visible(text));
+    !symbol.is_empty()
+        && text.match_indices(symbol).any(|(i, _)| {
+            let before = text[..i].chars().next_back();
+            let after = text[i + symbol.len()..].chars().next();
+            !before.is_some_and(char::is_alphanumeric) && !after.is_some_and(char::is_alphanumeric)
+        })
+}
+
+/// A sentence opening with "Shares", "The shares", "Its stock" (not
+/// "Shares of" or "Shares in", which name their own company) rewritten to
+/// open with the company's shares, so the date templates can read it.
+fn ticker_subject(s: &str) -> String {
+    static R: OnceLock<Regex> = OnceLock::new();
+    let r = R.get_or_init(|| {
+        re(r"(?i)^(?:(?:the|its|their)\s+)?(?:common\s+)?(?:shares|stock)(?P<of>\s+(?:of|in)\b)?")
+    });
+    match r.captures(s) {
+        Some(c) if c.name("of").is_none() => format!("{CO}'s shares{}", &s[c[0].len()..]),
+        _ => s.to_string(),
+    }
 }
 
 /// Decoded, whitespace collapsed, curly quotes kept.
@@ -780,6 +818,7 @@ pub fn check_item(
     p: &Proposed,
     hits: &[SearchHit],
     t: &Tracked,
+    symbol: Option<&str>,
     now: DateTime<Utc>,
 ) -> Result<ItemRow, Reject> {
     if !["valuation", "expected_date", "company_move", "view"].contains(&p.kind.as_str()) {
@@ -827,7 +866,11 @@ pub fn check_item(
         row.speaker = Some(speaker);
         return Ok(row);
     }
-    if !names_company(&quote, t) {
+    // A listing date may name the company by the ticker from its filing
+    // instead, in an article whose headline names it (decisions.md,
+    // 2026-11-11, "ticker match"). No stored symbol: no such path.
+    let ticker = symbol.filter(|_| p.kind == "expected_date" && names_company(&hit.title, t));
+    if !names_company(&quote, t) && !ticker.is_some_and(|s| has_ticker(&quote, s)) {
         return Err(Reject::CompanyNotNamed);
     }
     match p.kind.as_str() {
@@ -854,7 +897,7 @@ pub fn check_item(
             {
                 return Err(Reject::DateNotInQuote);
             }
-            if !is_trading_date(&quote, d, t) {
+            if !is_trading_date(&quote, d, t, ticker) {
                 return Err(Reject::NotTheCompanysTradingDate);
             }
             row.value_date = Some(ymd(d));
@@ -1114,8 +1157,10 @@ async fn sweep_one(
         .collect();
     out.proposed = proposed.len();
     let mut new: Vec<ItemRow> = Vec::new();
+    // The ticker as stored from the verified cover (`ipo_watch.symbol`).
+    let symbol = st.row(&t.slug).and_then(|r| r.symbol.clone());
     for p in &proposed {
-        match check_item(p, &hits, &t, now) {
+        match check_item(p, &hits, &t, symbol.as_deref(), now) {
             Ok(row) => {
                 let dup = st.items.iter().chain(&new).any(|i| i.key() == row.key());
                 if !dup {
@@ -1241,7 +1286,7 @@ mod tests {
         }
     }
     fn ck(p: &Proposed) -> Result<ItemRow, Reject> {
-        check_item(p, &hits(), &anthropic(), utc(NOW))
+        check_item(p, &hits(), &anthropic(), None, utc(NOW))
     }
 
     #[test]
@@ -1270,7 +1315,7 @@ mod tests {
         valuation_figures(q, &anthropic(), 2026)
     }
     fn td(q: &str, day: &str) -> bool {
-        is_trading_date(q, d(day), &anthropic())
+        is_trading_date(q, d(day), &anthropic(), None)
     }
 
     #[test]
@@ -1543,7 +1588,7 @@ mod tests {
             ..date_item()
         };
         assert_eq!(
-            check_item(&p, &h, &anthropic(), utc(NOW)),
+            check_item(&p, &h, &anthropic(), None, utc(NOW)),
             Err(Reject::NotTheCompanysTradingDate)
         );
     }
@@ -1669,7 +1714,7 @@ mod tests {
         );
         let undated = vec![hit(A_URL, ARTICLE_A, None)];
         assert_eq!(
-            check_item(&valuation(), &undated, &anthropic(), utc(NOW)),
+            check_item(&valuation(), &undated, &anthropic(), None, utc(NOW)),
             Err(Reject::NoDate)
         );
     }
@@ -1691,13 +1736,13 @@ mod tests {
             ..view_item()
         };
         assert_eq!(
-            check_item(&p, &h, &anthropic(), utc(NOW)),
+            check_item(&p, &h, &anthropic(), None, utc(NOW)),
             Err(Reject::CompanyNotNamed)
         );
         // In the same paragraph: kept.
         let one = "“The sector is hot right now,” said Jane Doe, an analyst at Example Securities, of Anthropic's offering.";
         let h = vec![hit(A_URL, one, Some("2026-11-10T18:00:00Z"))];
-        assert!(check_item(&p, &h, &anthropic(), utc(NOW)).is_ok());
+        assert!(check_item(&p, &h, &anthropic(), None, utc(NOW)).is_ok());
     }
 
     #[test]
@@ -2178,5 +2223,187 @@ mod tests {
             .await
             .unwrap();
         assert_eq!((out.hits, l.calls.get()), (0, 0));
+    }
+
+    // Rick, 2026-11-11, "ticker match": the three date sentences of the
+    // 2026-11-10 articles, one sentence each.
+    const REUTERS_HEAD: &str =
+        "EXCLUSIVE: Anthropic eyes $1.4 trillion IPO valuation in test of Wall Street's AI fervor | Reuters";
+    const REUTERS_DATE: &str = "Shares are expected to start trading on \u{200b}the Nasdaq on November 19 under the symbol \"ANT.\"";
+    const CNBC_DATE: &str = "The company is planning to price on Nov. 18 and trade on Nov. 19, according to people familiar with the details";
+    const CRAMER_DATE: &str =
+        "The company plans to price its shares Nov. 18 and begin trading the following day.";
+
+    fn headed(url: &str, title: &str, content: &str) -> SearchHit {
+        SearchHit {
+            title: title.into(),
+            ..hit(url, content, Some("2026-11-10T19:55:19Z"))
+        }
+    }
+    fn on_19(url: &str, quote: &str) -> Proposed {
+        Proposed {
+            kind: "expected_date".into(),
+            url: url.into(),
+            quote: quote.into(),
+            date: Some("2026-11-19".into()),
+            ..Default::default()
+        }
+    }
+    fn ck_ticker(content: &str, title: &str, symbol: Option<&str>) -> Result<ItemRow, Reject> {
+        let h = [headed(A_URL, title, content)];
+        check_item(&on_19(A_URL, content), &h, &anthropic(), symbol, utc(NOW))
+    }
+
+    #[test]
+    fn a_listing_date_may_name_the_company_by_the_ticker_from_its_filing() {
+        let r = ck_ticker(REUTERS_DATE, REUTERS_HEAD, Some("ANT")).unwrap();
+        assert_eq!(
+            (r.value_date.as_deref(), r.outlet.as_str()),
+            (Some("2026-11-19"), "Reuters")
+        );
+        // No ticker in the sentence: still refused.
+        let cnbc = [headed(
+            C_URL,
+            "Anthropic sets price range of $70 to $78 in upcoming IPO",
+            CNBC_DATE,
+        )];
+        assert_eq!(
+            check_item(
+                &on_19(C_URL, CNBC_DATE),
+                &cnbc,
+                &anthropic(),
+                Some("ANT"),
+                utc(NOW)
+            ),
+            Err(Reject::CompanyNotNamed)
+        );
+        let cramer = [headed(
+            C_URL,
+            "Anthropic IPO: Cramer on revenue growth and valuation",
+            CRAMER_DATE,
+        )];
+        assert_eq!(
+            check_item(
+                &on_19(C_URL, CRAMER_DATE),
+                &cramer,
+                &anthropic(),
+                Some("ANT"),
+                utc(NOW)
+            ),
+            Err(Reject::CompanyNotNamed)
+        );
+        // Another company's ticker, a headline that does not name the
+        // company, or no symbol stored yet: the path is closed.
+        let other = REUTERS_DATE.replace("ANT", "XYZ");
+        assert_eq!(
+            ck_ticker(&other, REUTERS_HEAD, Some("ANT")),
+            Err(Reject::CompanyNotNamed)
+        );
+        assert_eq!(
+            ck_ticker(
+                REUTERS_DATE,
+                "AI listings test Wall Street's fervor | Reuters",
+                Some("ANT")
+            ),
+            Err(Reject::CompanyNotNamed)
+        );
+        assert_eq!(
+            ck_ticker(REUTERS_DATE, REUTERS_HEAD, None),
+            Err(Reject::CompanyNotNamed)
+        );
+        // Case-sensitive on the stored symbol.
+        assert_eq!(
+            ck_ticker(
+                &REUTERS_DATE.replace("ANT", "ant"),
+                REUTERS_HEAD,
+                Some("ANT")
+            ),
+            Err(Reject::CompanyNotNamed)
+        );
+        // The ticker opens the path; every other date check still applies.
+        for q in [
+            "Shares are no longer expected to start trading on the Nasdaq on November 19 under the symbol \"ANT.\"",
+            "Shares are expected to start trading on the Nasdaq on November 19 under the symbol \"ANT\" unless markets fall.",
+            "Shares of Acme are expected to start trading on the Nasdaq on November 19, a day after \"ANT.\"",
+            "Shares are expected to start trading on the Nasdaq on November 19 under the symbol \"ANT\"?",
+        ] {
+            assert_eq!(
+                ck_ticker(q, REUTERS_HEAD, Some("ANT")),
+                Err(Reject::NotTheCompanysTradingDate),
+                "{q}"
+            );
+        }
+        assert_eq!(
+            ck_ticker(
+                "Shares started trading on the Nasdaq on November 2 under the symbol \"ANT.\"",
+                REUTERS_HEAD,
+                Some("ANT")
+            ),
+            Err(Reject::DateNotInQuote)
+        );
+        // Valuations keep the name-in-sentence rule.
+        let v = "Shares under the symbol \"ANT\" would value it at $1.4 trillion.";
+        let h = [headed(A_URL, REUTERS_HEAD, v)];
+        let p = Proposed {
+            kind: "valuation".into(),
+            url: A_URL.into(),
+            quote: v.into(),
+            value_usd: Some(1.4e12),
+            ..Default::default()
+        };
+        assert_eq!(
+            check_item(&p, &h, &anthropic(), Some("ANT"), utc(NOW)),
+            Err(Reject::CompanyNotNamed)
+        );
+    }
+
+    #[test]
+    fn the_ticker_is_a_whole_token_as_written() {
+        for (text, found) in [
+            ("under the symbol \"ANT.\"", true),
+            ("under the symbol \u{201c}ANT\u{201d}", true),
+            ("(Nasdaq: ANT)", true),
+            ("ANT", true),
+            ("ANTHROPIC shares", false),
+            ("investors want more", false),
+            ("under the symbol \"ant\"", false),
+            ("under the symbol \"ANTX\"", false),
+        ] {
+            assert_eq!(has_ticker(text, "ANT"), found, "{text}");
+        }
+        assert!(!has_ticker("ANT", ""));
+    }
+
+    #[tokio::test]
+    async fn a_sweep_dates_the_row_from_a_ticker_sentence_once_the_symbol_is_stored() {
+        for (symbol, kept) in [(Some("ANT"), true), (None, false)] {
+            let ipo = MemIpoStore::default();
+            with_filing(&ipo);
+            ipo.state.borrow_mut().watch.push(WatchRow {
+                slug: "anthropic".into(),
+                symbol: symbol.map(Into::into),
+                ..Default::default()
+            });
+            let (es, store) = (MemEarningsStore::default(), MemStore::default());
+            let n = ns(vec![headed(A_URL, REUTERS_HEAD, REUTERS_DATE)]);
+            let l = llm(vec![on_19(A_URL, REUTERS_DATE)]);
+            let out = sweep_tick(utc(NOW), &list(), &ipo, &es, &store, &n, &l)
+                .await
+                .unwrap();
+            let st = ipo.state.borrow();
+            let r = st.row("anthropic").unwrap();
+            if kept {
+                assert_eq!(out.kept, [format!("expected_date {A_URL}")], "{out:?}");
+                assert_eq!(r.first_trade_date.as_deref(), Some("2026-11-19"));
+                assert_eq!(
+                    (r.date_status.as_deref(), r.date_source.as_deref()),
+                    (Some("reported"), Some("news"))
+                );
+            } else {
+                assert_eq!(out.rejected, [format!("CompanyNotNamed {A_URL}")]);
+                assert!(st.items.is_empty());
+                assert_eq!(r.first_trade_date, None);
+            }
+        }
     }
 }
