@@ -70,7 +70,7 @@ Checks before publishing (code, not the model):
 
 Length and shape: about the size of an earnings write-up; what happened and the figures first, then what the filing says about the offering, then "What has been reported" with the quoted news items if any exist, then the next step in the process stated generally (for example, that a final prospectus follows pricing) without a date unless a stored reported date is quoted.
 
-Every write-up ends with the standing line that it is generated automatically from SEC filings and public news reports, for information only, and is not investment advice.
+Every write-up's stored body (`body_md`) ends with the standing line that it is generated automatically from SEC filings and public news reports, for information only, and is not investment advice, as the other generators' bodies do. The site does not render it on the post: the not-advice statement lives only on the legal page (Rick, 2026-11-05, `docs/decisions.md` line 41). Corrected 2026-11-11, the lead's ruling.
 
 ## Contract between the generator and the site
 

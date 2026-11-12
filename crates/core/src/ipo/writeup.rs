@@ -1557,6 +1557,73 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn the_listed_table_carries_the_offering_price_and_size_from_the_final_prospectus() {
+        use crate::ipo::store::{FactRow, FilingRow, TradingRow};
+        let mut st = real_state();
+        let fin = "0001628280-26-090001";
+        st.filings.push(FilingRow {
+            accession: fin.into(),
+            slug: "anthropic".into(),
+            form: "424B4".into(),
+            filing_date: "2026-11-18".into(),
+            index_url: "https://www.sec.gov/Archives/edgar/data/2130357/000162828026090001/0001628280-26-090001-index.htm".into(),
+            read_state: "read".into(),
+            ..Default::default()
+        });
+        for (k, v) in [("price_final", 80.0), ("shares_offered", 825e6)] {
+            st.facts.push(FactRow {
+                accession: fin.into(),
+                kind: k.into(),
+                slug: "anthropic".into(),
+                value_num: Some(v),
+                value_text: None,
+                quote: "q".into(),
+            });
+        }
+        st.trading.push(TradingRow {
+            slug: "anthropic".into(),
+            session_date: "2026-11-19".into(),
+            symbol: "ANT".into(),
+            open: None,
+            close: 101.5,
+            volume: Some(120_000_000),
+            ipo_price: Some(80.0),
+            change_pct: Some(26.88),
+            source_url: "https://finance.yahoo.com/quote/ANT".into(),
+            fetched_at: "2026-11-19T21:30:00Z".into(),
+        });
+        let r = latest(&st, "anthropic").unwrap();
+        assert_eq!(r.milestone, Milestone::Listed);
+        let f = bundle(
+            &st,
+            &anthropic(),
+            &r,
+            "2026-11-19T22:00:00Z".parse().unwrap(),
+        );
+        // The priced write-up was passed over: the listed one still says
+        // what the offering was priced at, and its size at that price.
+        let md = table(&f, Lang::En);
+        for want in [
+            "| Offering price per share | $80.00 |",
+            "| Offering size at $80.00 (825,000,000 shares × $80.00) | $66 billion |",
+            "| Close, Nov 19, 2026 | $101.50 |",
+            "| Change from the offering price | +26.88% |",
+            OFFERING_SIZE_EN,
+        ] {
+            assert!(md.contains(want), "missing {want:?} in\n{md}");
+        }
+        assert!(!md.contains("Price range per share"), "{md}");
+        let zh = table(&f, Lang::Zh);
+        assert!(
+            zh.contains("| 每股发行价 | 80.00美元 |")
+                && zh.contains("660亿美元")
+                && zh.contains(OFFERING_SIZE_ZH),
+            "{zh}"
+        );
+        assert_eq!(cover_lines(&f, Lang::En)[1], "First day close $101.50");
+    }
+
+    #[test]
     fn a_figure_not_in_the_filing_is_refused() {
         // A valuation-sized number, with no refused word around it.
         let e = refused(
