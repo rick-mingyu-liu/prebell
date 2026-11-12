@@ -109,4 +109,4 @@ Elsewhere on the site:
 
 ## Left to the builders
 
-Module layout, prompt wording, the exact check implementation (reuse the earnings checker where it fits), the section's design, and test fixtures. Raise anything that would change what a reader sees and is not covered here.
+Module layout, the template wording, the page guard (reuse the earnings number checker where it fits), the section's design, and test fixtures. Raise anything that would change what a reader sees and is not covered here.

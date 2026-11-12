@@ -621,7 +621,7 @@ mod tests {
             .starts_with("# Anthropic's IPO filing gives a price range of $70 to $78 a share\n"));
         assert!(zh
             .body_md
-            .starts_with("# AnthropicIPO文件载明价格区间：每股70至78美元\n"));
+            .starts_with("# Anthropic IPO文件载明价格区间：每股70至78美元\n"));
         assert_eq!(en.cover_line2.as_deref(), Some("Price range $70.00–$78.00"));
         let json =
             w.base.facts.borrow()["ipo/anthropic/range_set-0001628280-26-072484.json"].clone();

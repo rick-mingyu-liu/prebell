@@ -104,7 +104,7 @@ Anthropic filed an amended registration statement (Form S-1/A) with the SEC on N
 
 ## What the filing says
 
-Anthropic is selling 801,351,354 shares and the selling stockholders are selling 23,648,646 shares. The underwriters have an option to purchase up to 123,750,000 shares more. At $70.00 a share, the 825,000,000 shares offered come to $57.75 billion; at $78.00 a share, the 825,000,000 shares offered come to $64.35 billion. These are PreBell's gross figures before underwriting discounts, including any shares sold by selling stockholders and excluding the underwriters' option; they are not the company's proceeds. The filing names the Nasdaq Global Select Market as the exchange and ANT as the symbol.
+Anthropic is selling 801,351,354 shares and the selling stockholders are selling 23,648,646 shares. The underwriters have an option to purchase up to 123,750,000 more shares. At $70.00 a share, the 825,000,000 shares offered come to $57.75 billion; at $78.00 a share, the 825,000,000 shares offered come to $64.35 billion. These are PreBell's gross figures before underwriting discounts, including any shares sold by selling stockholders and excluding the underwriters' option; they are not the company's proceeds. The filing names the Nasdaq Global Select Market as the exchange and ANT as the symbol.
 
 ## What comes next
 
@@ -119,7 +119,7 @@ This IPO write-up is generated automatically from SEC filings and public news re
 
 With news items, "What has been reported" sits between "What the filing says" and "What comes next", one line per item: `- Reuters, Nov 10, 2026: "<exact quote>" ([article](<url>))`, or for a view `- <speaker>, in <outlet>, <date>: "<exact quote>" ([article](<url>))`; ZH `- Reuters（2026年11月10日）报道：“<exact quote>”（[原文](<url>)）`. Link targets have spaces, parentheses and angle brackets percent-encoded.
 
-Chinese headings: `发生了什么`, `文件披露了什么`, `已有报道`, `下一步`, `来源`; table header `招股文件数据`. Table rows are shown only for facts the filing has. For an ADS deal (`security = "ads"`) the text and the table say ADSs (`ADSs offered`, `per ADS`; ZH `份美国存托股`).
+Chinese headings: `发生了什么`, `文件披露了什么`, `已有报道`, `下一步`, `来源`; table header `招股文件数据`. Known exchange names are written in Chinese in the Chinese page (纳斯达克全球精选市场, 纽约证券交易所, …); others stay as stored. Table rows are shown only for facts the filing has. For an ADS deal (`security = "ads"`) the text and the table say ADSs (`ADSs offered`, `per ADS`; ZH `份美国存托股`).
 
 ## The facts object (R2, `facts_r2_key`)
 
