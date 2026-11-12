@@ -496,7 +496,10 @@ describe("the generator's preview write-up (db/seed-ipo-articles-preview.sql)", 
       expect((await listIpoWriteups(db(), "anthropic", locale)).map((w) => w.slug)).toEqual([SLUG]);
     }
     expect((await listHomeIpos(db(), "en", TODAY)).find((i) => i.slug === "anthropic")!.writeup!.title).toBe(
-      "Anthropic sets IPO price range at $70 to $78 a share",
+      "Anthropic's IPO filing gives a price range of $70 to $78 a share",
+    );
+    expect((await listHomeIpos(db(), "zh", TODAY)).find((i) => i.slug === "anthropic")!.writeup!.title).toBe(
+      "AnthropicIPO文件载明价格区间：每股70至78美元",
     );
     expect((await listPosts(db(), "en", 1, "ipo")).map((p) => p.slug)).toEqual([SLUG]);
   });
