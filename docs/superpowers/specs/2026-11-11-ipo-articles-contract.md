@@ -79,7 +79,7 @@ Markdown like the earnings write-up, written entirely by code from the facts obj
 Anthropic's real `range_set`, as the generator renders it (EN; no news items stored yet, so no "What has been reported"):
 
 ```
-# Anthropic sets IPO price range at $70 to $78 a share
+# Anthropic's IPO filing gives a price range of $70 to $78 a share
 
 Anthropic filed an amended registration statement (Form S-1/A) on Nov 10, 2026 with a price range of $70.00 to $78.00 per share for 825,000,000 shares.
 
@@ -100,7 +100,7 @@ Offering size is computed by PreBell from the cover: shares offered (including s
 
 ## What happened
 
-Anthropic filed an amended registration statement (Form S-1/A) with the SEC on Nov 10, 2026. The cover sets a price range of $70.00 to $78.00 per share for 825,000,000 shares.
+Anthropic filed an amended registration statement (Form S-1/A) with the SEC on Nov 10, 2026. The cover states a price range of $70.00 to $78.00 per share for 825,000,000 shares.
 
 ## What the filing says
 
@@ -142,7 +142,7 @@ JSON, written once before the post. Every field is present; a field without data
 | `cover` | list | `ipo_facts` rows of `filing`: `kind`, `value_num` (number or null), `value_text` (string or null), `quote` (the cover's sentence). Kinds as in the IPO watch contract. |
 | `security` | string | `shares`, or `ads` when the cover's own sentences call the securities American depositary shares (Arm). |
 | `previous` | object or null | `range_changed`: the previous range milestone's; `priced`: the last range milestone's (the price is placed against its range); `withdrawn`: the facts source the withdrawal ends. Fields: `accession`, `form`, `filing_date`, `index_url`, `price_low`, `price_high`, `shares_offered` (numbers or null). |
-| `first_range` | boolean | `range_set` only: true when every earlier registration statement of the IPO was read and none stated a range, so this is provably the first range; false otherwise (Anthropic: false, its S-1 and first S-1/A were never read). The write-up calls the range the first only when true. |
+| `first_range` | boolean | `range_set` only: true when every earlier registration statement of the IPO was read and none stated a range, so this is provably the first range; false otherwise (Anthropic: false, its S-1 and first S-1/A were never read). Only when true does the write-up say the filing sets the range or is the first to state one ("Acme sets IPO price range at $X to $Y a share"); when false the headline is "Acme's IPO filing gives a price range of $X to $Y a share" (ZH "AcmeIPO文件载明价格区间：每股X至Y美元") and nothing implies the range is new. |
 | `derived` | list | The only figures PreBell computes, by code: `kind` (`offering_at_low`, `offering_at_high`, `offering_at_price`), `value_usd`, its two inputs `shares` (the cover's `shares_offered`: sold by the company and by selling stockholders, excluding the underwriters' option) and `price` (the range's low or high end, or the offering price once priced), and `definition` (the sentence below). Nothing else is ever multiplied, never shares outstanding. Show it only with both inputs and as the gross offering size: never as the company's proceeds, what it raises, or a valuation. `definition`: "Gross offering size at this price: shares offered on the cover (sold by the company and by selling stockholders, excluding the underwriters' option) x the price per share, before underwriting discounts. Not the company's proceeds and not a valuation." |
 | `session` | object or null | `listed` only: the first session's `session_date`, `symbol`, `open` (number or null), `close`, `volume` (number or null), `ipo_price` (number or null), `change_pct` (number or null), `source_url`, as stored in `ipo_trading`. |
 | `timeline` | list | The IPO's filings, newest first: `accession`, `form`, `filing_date`, `index_url`. |

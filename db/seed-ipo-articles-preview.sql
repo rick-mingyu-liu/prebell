@@ -22,9 +22,9 @@ INSERT INTO posts (run_key, content_type, template_id, trading_date, slug, facts
 
 INSERT INTO post_translations (post_id, lang, status, title, summary, body_md, cover_line1, cover_line2, updated_at)
 SELECT id, 'en', 'published',
-  'Anthropic sets IPO price range at $70 to $78 a share',
+  'Anthropic''s IPO filing gives a price range of $70 to $78 a share',
   'Anthropic filed an amended registration statement (Form S-1/A) on Nov 10, 2026 with a price range of $70.00 to $78.00 per share for 825,000,000 shares.',
-  '# Anthropic sets IPO price range at $70 to $78 a share
+  '# Anthropic''s IPO filing gives a price range of $70 to $78 a share
 
 Anthropic filed an amended registration statement (Form S-1/A) on Nov 10, 2026 with a price range of $70.00 to $78.00 per share for 825,000,000 shares.
 
@@ -45,7 +45,7 @@ Offering size is computed by PreBell from the cover: shares offered (including s
 
 ## What happened
 
-Anthropic filed an amended registration statement (Form S-1/A) with the SEC on Nov 10, 2026. The cover sets a price range of $70.00 to $78.00 per share for 825,000,000 shares.
+Anthropic filed an amended registration statement (Form S-1/A) with the SEC on Nov 10, 2026. The cover states a price range of $70.00 to $78.00 per share for 825,000,000 shares.
 
 ## What the filing says
 
@@ -78,9 +78,9 @@ FROM posts WHERE run_key = 'ipo:anthropic:range_set:0001628280-26-072484';
 
 INSERT INTO post_translations (post_id, lang, status, title, summary, body_md, cover_line1, cover_line2, updated_at)
 SELECT id, 'zh', 'published',
-  'Anthropic公布IPO价格区间：每股70至78美元',
+  'AnthropicIPO文件载明价格区间：每股70至78美元',
   'Anthropic于2026年11月10日递交注册声明修订稿（S-1/A表格），价格区间为每股70.00至78.00美元，发行8.25亿股。',
-  '# Anthropic公布IPO价格区间：每股70至78美元
+  '# AnthropicIPO文件载明价格区间：每股70至78美元
 
 Anthropic于2026年11月10日递交注册声明修订稿（S-1/A表格），价格区间为每股70.00至78.00美元，发行8.25亿股。
 
@@ -101,7 +101,7 @@ Anthropic于2026年11月10日递交注册声明修订稿（S-1/A表格），价�
 
 ## 发生了什么
 
-Anthropic于2026年11月10日向美国证监会递交注册声明修订稿（S-1/A表格）。封面将价格区间定为每股70.00至78.00美元，发行8.25亿股。
+Anthropic于2026年11月10日向美国证监会递交注册声明修订稿（S-1/A表格）。封面载明的价格区间为每股70.00至78.00美元，发行8.25亿股。
 
 ## 文件披露了什么
 
