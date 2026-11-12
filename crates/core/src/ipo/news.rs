@@ -189,23 +189,32 @@ fn squash(s: &str) -> String {
 }
 
 /// `hits` without a second copy of an article (the same story under two
-/// URLs): the same title, or the same first 300 characters of text,
-/// ignoring case, spaces and punctuation. The first copy stays.
+/// URLs on one host): the same title, or the same first 300 characters of
+/// text, ignoring case, spaces and punctuation. The first copy stays. Two
+/// outlets with the same headline or the same opening both stay.
 pub fn distinct(hits: Vec<SearchHit>) -> Vec<SearchHit> {
-    let mut seen: Vec<(String, String)> = Vec::new();
+    let mut seen: Vec<(String, String, String)> = Vec::new();
     let mut out = Vec::new();
     for h in hits {
+        let host = host_of(&h.url);
         let title = squash(&h.title);
         let head: String = squash(&h.content).chars().take(300).collect();
-        let dup = seen
-            .iter()
-            .any(|(t, c)| (!title.is_empty() && *t == title) || (!head.is_empty() && *c == head));
+        let dup = seen.iter().any(|(o, t, c)| {
+            *o == host && ((!title.is_empty() && *t == title) || (!head.is_empty() && *c == head))
+        });
         if !dup {
-            seen.push((title, head));
+            seen.push((host, title, head));
             out.push(h);
         }
     }
     out
+}
+
+/// The URL's host, lowercase, without `www.`.
+fn host_of(url: &str) -> String {
+    let rest = url.split_once("://").map_or(url, |(_, r)| r);
+    let h = rest[..rest.find(['/', '?', '#']).unwrap_or(rest.len())].to_ascii_lowercase();
+    h.strip_prefix("www.").map(str::to_string).unwrap_or(h)
 }
 
 /// The outlet of an https article URL on an allowlisted host.
@@ -236,18 +245,43 @@ fn re(p: &str) -> Regex {
 /// run, so a template reads `@CO` wherever the quote names the company.
 const CO: &str = "@CO";
 
-/// `text` without zero-width characters, which some sites put inside a
-/// sentence ("on \u{200b}the Nasdaq", Reuters 2026-11-10): the shapes then
-/// read the words as written. The quote itself is verified as stored.
+/// A character that renders as nothing: zero-width space, joiners and
+/// direction marks (U+200B-U+200F), word joiner and invisible operators
+/// (U+2060-U+2064), the byte-order mark, the soft hyphen (`&shy;`), the
+/// combining grapheme joiner and the Mongolian vowel separator.
+fn invisible(c: char) -> bool {
+    matches!(
+        c,
+        '\u{ad}' | '\u{34f}' | '\u{180e}' | '\u{200b}'..='\u{200f}' | '\u{2060}'..='\u{2064}' | '\u{feff}'
+    )
+}
+
+/// `text` without invisible characters (`invisible`), which some sites put
+/// inside a sentence ("on \u{200b}the Nasdaq", Reuters 2026-11-10): the
+/// shapes then read the words as written. The quote itself is verified as
+/// stored.
 pub fn visible(text: &str) -> String {
-    text.chars()
-        .filter(|c| {
-            !matches!(
-                c,
-                '\u{200b}' | '\u{200c}' | '\u{200d}' | '\u{2060}' | '\u{feff}'
-            )
-        })
-        .collect()
+    text.chars().filter(|c| !invisible(*c)).collect()
+}
+
+/// Whether reading `quote`'s invisible characters as spaces shows a word
+/// from one of `refusals` that deleting them hides ("in\u{200b}May" reads
+/// "inMay" once deleted, "in May" once spaced). The shapes read the deleted
+/// variant (`visible`); a refusal in either variant refuses.
+fn hides_refusal(quote: &str, refusals: &[&Regex]) -> bool {
+    if !quote.chars().any(invisible) {
+        return false;
+    }
+    let joined = normalize(&visible(quote));
+    let split = normalize(
+        &quote
+            .chars()
+            .map(|c| if invisible(c) { ' ' } else { c })
+            .collect::<String>(),
+    );
+    refusals
+        .iter()
+        .any(|r| r.find_iter(&split).count() > r.find_iter(&joined).count())
 }
 
 /// `text` with each of the company's names (case-insensitive, whole words,
@@ -476,6 +510,17 @@ fn years_re() -> &'static Regex {
 /// word, a trailing "if" or "unless", or (outside the aside) a past-time
 /// word in its clause; a "would" shape needs the offering in the sentence.
 pub fn valuation_figures(quote: &str, t: &Tracked, year: i32) -> Vec<f64> {
+    let refusals = [
+        speculation_re(),
+        contrast_re(),
+        other_party_re(),
+        past_re(),
+        years_re(),
+        tail_conditional_re(),
+    ];
+    if hides_refusal(quote, &refusals) {
+        return Vec::new();
+    }
     let marked = mark_company(&normalize(&visible(quote)), t);
     let mut out = Vec::new();
     for s in sentences(&marked) {
@@ -657,6 +702,12 @@ fn title_party_re() -> &'static Regex {
 /// symbol phrase must sit after the date with no other name there
 /// (`gives_symbol`).
 pub fn is_trading_date(quote: &str, d: NaiveDate, t: &Tracked, ticker: Option<&str>) -> bool {
+    if hides_refusal(
+        quote,
+        &[change_re(), contrast_re(), tail_re(), title_party_re()],
+    ) {
+        return false;
+    }
     let marked = mark_company(&normalize(&visible(quote)), t);
     sentences(&marked).iter().any(|s| {
         let (s, by_ticker) = match ticker {
@@ -2461,5 +2512,106 @@ mod tests {
                 assert_eq!(r.first_trade_date, None);
             }
         }
+    }
+
+    #[test]
+    fn an_invisible_character_inside_a_refusal_word_still_refuses() {
+        assert_eq!(
+            visible("a\u{ad}b\u{34f}c\u{180e}d\u{200e}e\u{200f}f\u{2061}g\u{2064}h"),
+            "abcdefgh"
+        );
+        // Deleted, these would read "inMay" and "lastyear".
+        for q in [
+            "Anthropic is valued at $965 billion in\u{200b}May.",
+            "Anthropic is valued at $965 billion in\u{ad}May.",
+            "Anthropic is valued at $965 billion last\u{200b}year.",
+            "Anthropic could\u{2060}be valued at $965 billion.",
+        ] {
+            assert!(val(q).is_empty(), "{q}");
+        }
+        for q in [
+            "Anthropic is expected to list on Nov. 16 un\u{ad}less markets fall.",
+            "Anthropic is expected to list on Nov. 16 un\u{200e}less markets fall.",
+            "Anthropic is expected to list on Nov. 16 un\u{2061}less markets fall.",
+            "Anthropic is expected to list on Nov. 16, a date now in\u{200b}doubt.",
+        ] {
+            assert!(!td(q, "2026-11-16"), "{q}");
+        }
+        // Between words, an invisible character changes nothing.
+        assert_eq!(
+            val("Anthropic is valued at \u{200b}$965 billion."),
+            [9.65e11]
+        );
+        assert!(td(
+            "Anthropic is expected to list on \u{ad}the Nasdaq on Nov. 16.",
+            "2026-11-16"
+        ));
+    }
+
+    #[test]
+    fn distinct_merges_copies_only_within_one_host() {
+        let titled = |url: &str, title: &str, content: &str| SearchHit {
+            title: title.into(),
+            ..hit(url, content, Some("2026-11-10T18:00:00Z"))
+        };
+        let banner = "We use cookies to improve your experience on our site. ".repeat(8);
+        let reuters2 = "https://www.reuters.com/markets/2026-11-10/anthropic-ipo-copy";
+        let kept = |h: Vec<SearchHit>| distinct(h).into_iter().map(|h| h.url).collect::<Vec<_>>();
+        // The same headline at two outlets, different text: both stay.
+        assert_eq!(
+            kept(vec![
+                titled(A_URL, "Anthropic IPO: what to know", "Reuters text."),
+                titled(C_URL, "Anthropic IPO: what to know", "CNBC text."),
+            ]),
+            [A_URL, C_URL]
+        );
+        // The same opening at two outlets: both stay.
+        assert_eq!(
+            kept(vec![
+                titled(A_URL, "One", &format!("{banner}Reuters text.")),
+                titled(C_URL, "Two", &format!("{banner}CNBC text.")),
+            ]),
+            [A_URL, C_URL]
+        );
+        // One host, the same title or the same opening: one copy.
+        assert_eq!(
+            kept(vec![
+                titled(A_URL, "Anthropic IPO: what to know", "First text."),
+                titled(reuters2, "Anthropic IPO: what to know", "Second text."),
+            ]),
+            [A_URL]
+        );
+        assert_eq!(
+            kept(vec![
+                titled(A_URL, "One", &format!("{banner}First.")),
+                titled(reuters2, "Two", &format!("{banner}Second.")),
+            ]),
+            [A_URL]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failing_outcome_record_leaves_the_sweep_result_unchanged() {
+        let mut outs = Vec::new();
+        for fail in [false, true] {
+            let ipo = MemIpoStore::default();
+            with_filing(&ipo);
+            let (es, store) = (MemEarningsStore::default(), MemStore::default());
+            if fail {
+                *es.fail_kv_set.borrow_mut() = Some(format!("{KV_SWEEP_LAST}:anthropic"));
+            }
+            let l = llm(vec![valuation(), date_item()]);
+            let out = sweep_tick(utc(NOW), &list(), &ipo, &es, &store, &ns(hits()), &l).await;
+            assert_eq!(ipo.state.borrow().items.len(), 2);
+            assert_eq!(
+                es.kv
+                    .borrow()
+                    .contains_key(&format!("{KV_SWEEP_LAST}:anthropic")),
+                !fail
+            );
+            outs.push(out);
+        }
+        assert_eq!(outs[0].as_ref().unwrap().kept.len(), 2);
+        assert_eq!(outs[0], outs[1]);
     }
 }
