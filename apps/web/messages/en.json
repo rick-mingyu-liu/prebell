@@ -340,5 +340,86 @@
     "error": "Something went wrong. Please try again.",
     "invalid": "Enter a valid email address.",
     "manage": "Already subscribed? Manage preferences"
+  },
+  "ipo": {
+    "kicker": "IPO watch",
+    "watchTitle": "IPO watch",
+    "title": "{name} IPO",
+    "description": "{name}'s IPO: the offering from its SEC filings, the filing timeline, and valuation and company news as reported, each with its source.",
+    "calendarGroup": "IPO",
+    "openPage": "IPO page",
+    "dateNotSet": "Date not set",
+    "legend": "IPO: the date is dashed until a filing states it or the stock has traded; each links to its IPO page.",
+    "status": {
+      "filed": "Filed",
+      "range_set": "Price range set",
+      "priced": "Priced",
+      "listed": "Listed",
+      "withdrawn": "Withdrawn"
+    },
+    "date": {
+      "reported": "Expected to start trading {date}, as reported by {source}{hasDay, select, yes { on {day}} other {}}.",
+      "expected": "Expected to start trading {date}: the trading day after pricing ({source}{hasDay, select, yes { filed {day}} other {}}).",
+      "confirmedFiling": "First trading day {date}, as stated in the {source}{hasDay, select, yes { filed {day}} other {}}.",
+      "confirmedTrading": "First trading day {date}: its first regular session, per {source}.",
+      "notSet": "First trading day: date not set."
+    },
+    "article": "Article",
+    "sourceWords": "The source's words",
+    "filingWords": "Filing text",
+    "secFiling": "SEC filing",
+    "withdrawn": "This IPO has been withdrawn: the company filed to withdraw its registration statement{hasDay, select, yes { on {day}} other {}}.",
+    "offering": {
+      "heading": "The offering",
+      "from": "From the {form} filed {date}",
+      "none": "The offering's terms are not available yet.",
+      "noTerms": "Shares and price are not available yet.",
+      "exchange": "Exchange",
+      "symbol": "Symbol",
+      "sharesOffered": "Shares offered",
+      "sharesCompany": "Sold by the company",
+      "sharesSelling": "Sold by selling stockholders",
+      "optionShares": "Underwriters’ option",
+      "priceRange": "Price range",
+      "priceFinal": "IPO price",
+      "prospectusDate": "Priced",
+      "shares": "{n} shares",
+      "option": "up to {n} more shares",
+      "range": "${low} to ${high} per share",
+      "price": "${price} per share"
+    },
+    "timeline": {
+      "heading": "Filing timeline",
+      "filing": "Filing"
+    },
+    "valuation": {
+      "heading": "Valuation as reported",
+      "note": "Each figure is as the named outlet reported it on that day."
+    },
+    "reportedBy": "Reported by {outlet} on {date}",
+    "reportedByLead": "{outlet} reported on {date}:",
+    "moves": {
+      "heading": "Recent moves"
+    },
+    "views": {
+      "heading": "What others say",
+      "by": "{speaker}, quoted by {outlet} on {date}:"
+    },
+    "trading": {
+      "heading": "After listing",
+      "session": "Session",
+      "first": "First trading day",
+      "latest": "Latest",
+      "open": "Open",
+      "close": "Close",
+      "volume": "Volume",
+      "change": "Change from IPO price",
+      "changeInputs": "close ${close} vs. IPO price ${ipo}",
+      "volumeValue": "{n} shares",
+      "money": "${n}",
+      "source": "Source: {source}"
+    },
+    "disclaimer": "This page is generated automatically from SEC filings and public news reports for information only. It is not investment advice.",
+    "asReported": "Valuations, dates and company news before listing are as reported by the named sources and may be wrong."
   }
 }

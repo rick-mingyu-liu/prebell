@@ -327,5 +327,86 @@
     "linkedin": "LinkedIn",
     "allBriefs": "全部简报 →",
     "heading": "关于作者"
+  },
+  "ipo": {
+    "kicker": "IPO 追踪",
+    "watchTitle": "IPO 追踪",
+    "title": "{name} IPO",
+    "description": "{name} IPO：来自美国证监会文件的发行条款与申报时间线，以及媒体报道的估值和公司动态，均注明出处。",
+    "calendarGroup": "IPO",
+    "openPage": "IPO 页面",
+    "dateNotSet": "日期未定",
+    "legend": "IPO：申报文件写明日期或股票已开始交易之前，日期以虚线框显示；点击可查看 IPO 页面。",
+    "status": {
+      "filed": "已提交注册",
+      "range_set": "已定发行价区间",
+      "priced": "已定价",
+      "listed": "已上市",
+      "withdrawn": "已撤回"
+    },
+    "date": {
+      "reported": "预计{date}开始交易，据 {source} {hasDay, select, yes {{day}} other {}}报道。",
+      "expected": "预计{date}开始交易：定价后的下一个交易日（{hasDay, select, yes {{day}提交的 } other {}}{source}）。",
+      "confirmedFiling": "首个交易日为{date}，见{hasDay, select, yes {{day}提交的 } other {}}{source}。",
+      "confirmedTrading": "首个交易日为{date}：据 {source}，当日为其首个常规交易日。",
+      "notSet": "首个交易日：日期未定。"
+    },
+    "article": "原文",
+    "sourceWords": "来源原文",
+    "filingWords": "文件原文",
+    "secFiling": "SEC 文件",
+    "withdrawn": "此次 IPO 已撤回：公司已{hasDay, select, yes {于{day}} other {}}提交撤回注册申请。",
+    "offering": {
+      "heading": "发行概况",
+      "from": "出自{date}提交的{form}",
+      "none": "发行条款暂未公布。",
+      "noTerms": "发行股数和价格暂未公布。",
+      "exchange": "交易所",
+      "symbol": "股票代码",
+      "sharesOffered": "发行股数",
+      "sharesCompany": "公司发售",
+      "sharesSelling": "售股股东发售",
+      "optionShares": "承销商超额配售权",
+      "priceRange": "发行价区间",
+      "priceFinal": "发行价",
+      "prospectusDate": "定价日期",
+      "shares": "{n}股",
+      "option": "最多再购{n}股",
+      "range": "每股{low}至{high}美元",
+      "price": "每股{price}美元"
+    },
+    "timeline": {
+      "heading": "申报时间线",
+      "filing": "文件"
+    },
+    "valuation": {
+      "heading": "媒体报道的估值",
+      "note": "每个数字均为所列媒体在当日报道的数据。"
+    },
+    "reportedBy": "{outlet} {date}报道",
+    "reportedByLead": "{outlet} {date}报道：",
+    "moves": {
+      "heading": "公司近期动态"
+    },
+    "views": {
+      "heading": "各方观点",
+      "by": "{outlet} {date}引述 {speaker}："
+    },
+    "trading": {
+      "heading": "上市后表现",
+      "session": "交易日",
+      "first": "首个交易日",
+      "latest": "最新",
+      "open": "开盘价",
+      "close": "收盘价",
+      "volume": "成交量",
+      "change": "较发行价涨跌",
+      "changeInputs": "收盘价{close}美元，发行价{ipo}美元",
+      "volumeValue": "{n}股",
+      "money": "{n}美元",
+      "source": "来源：{source}"
+    },
+    "disclaimer": "本页根据美国证监会文件和公开新闻报道自动生成，仅供参考，不构成投资建议。",
+    "asReported": "上市前的估值、日期和公司动态均为所列来源的报道，可能有误。"
   }
 }

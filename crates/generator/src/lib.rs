@@ -4,6 +4,7 @@ mod alerts;
 mod earnings_store;
 mod events_store;
 mod http;
+mod ipo_store;
 mod store;
 
 use async_trait::async_trait;
@@ -18,6 +19,8 @@ use prebell_core::earnings::share::Shares;
 use prebell_core::edgar::{Edgar, BUILD_GAP_MS};
 use prebell_core::events::check::{check_tick, mark_checked, missing_table};
 use prebell_core::events::watch::StoreWatch;
+use prebell_core::ipo;
+use prebell_core::ipo::store::IpoStore;
 use prebell_core::jobs::{redact, run_job, JobRunner};
 use prebell_core::llm::{api_key_var, llm_from_env, unknown_provider};
 use prebell_core::providers::CountingHttp;
@@ -206,7 +209,10 @@ impl JobRunner for Runner<'_> {
                     .await
             }
             ContentJob::Recap => {
-                recap::tick_with_hooks(at, store, &md, &ns, llm.as_ref(), &hooks).await
+                // IPO watch: tracked IPOs' closes ride the movers' batch.
+                let ipo: Option<&dyn IpoStore> =
+                    ipo::enabled(text(env, "IPO_WATCH_ENABLED").as_deref()).then_some(store);
+                recap::tick_with_ipo(at, store, &md, &ns, llm.as_ref(), ipo, &hooks).await
             }
         })
     }
@@ -251,6 +257,12 @@ impl JobRunner for Runner<'_> {
                 }
                 // The digest only while DIGEST_ENABLED is exactly "true".
                 gate(&mut o.follow_ups, text(env, "DIGEST_ENABLED").as_deref());
+                // IPO watch only while IPO_WATCH_ENABLED is exactly "true"
+                // (off: nothing is read or queued).
+                match ipo::follow_ups(text(env, "IPO_WATCH_ENABLED").as_deref(), store, t).await {
+                    Ok(steps) => o.follow_ups.extend(steps),
+                    Err(e) => console_warn!("ipo: {e}"),
+                }
                 for next in &o.follow_ups {
                     // Builds go to their own queue, the calendar to this one.
                     let sent = match env.queue(queue_for(next.job())) {
@@ -328,6 +340,83 @@ impl JobRunner for Runner<'_> {
                 let src: Option<&dyn CalendarSource> = if yahoo { Some(&cal) } else { None };
                 let o = refresh_tick(t, store, store, src, &ns, llm.as_ref()).await?;
                 Ok((format!("{o:?}"), false))
+            }
+            EarningsStep::IpoCheck => {
+                if !ipo::enabled(text(env, "IPO_WATCH_ENABLED").as_deref()) {
+                    return Ok((
+                        "disabled (IPO_WATCH_ENABLED is not true); skipped".into(),
+                        false,
+                    ));
+                }
+                // A config error marks the hour first, so polls do not
+                // queue the check again every 5 minutes.
+                let edgar = match self.edgar() {
+                    Ok(e) => e,
+                    Err(e) => {
+                        ipo::check::mark_checked(store, t).await?;
+                        return Err(e);
+                    }
+                };
+                match ipo::check::check_tick(t, ipo::tracked(), store, store, store, &edgar).await {
+                    Ok(o) => {
+                        for e in &o.errors {
+                            console_warn!("ipo check: {e}");
+                        }
+                        Ok((format!("{o:?}"), false))
+                    }
+                    // Before migration 0009: no alert, marked for the hour.
+                    Err(e) if ipo::missing_table(&e) => {
+                        ipo::check::mark_checked(store, t).await?;
+                        Ok((
+                            "ipo: tables missing (apply migration 0009); skipped".into(),
+                            false,
+                        ))
+                    }
+                    Err(e) => Err(e),
+                }
+            }
+            EarningsStep::IpoSweep => {
+                if !ipo::enabled(text(env, "IPO_WATCH_ENABLED").as_deref()) {
+                    return Ok((
+                        "disabled (IPO_WATCH_ENABLED is not true); skipped".into(),
+                        false,
+                    ));
+                }
+                let news_key = secret_or_empty(env, "TAVILY_API_KEY");
+                let ns = Tavily::new(self.http.clone(), news_key.clone());
+                // A config error takes the slot first, so polls do not
+                // queue the sweep again every 5 minutes.
+                let llm = match self.llm(&[&news_key]) {
+                    Ok(l) => l,
+                    Err(e) => {
+                        ipo::news::claim(store, ipo::tracked(), t).await?;
+                        return Err(e);
+                    }
+                };
+                match ipo::news::sweep_tick(
+                    t,
+                    ipo::tracked(),
+                    store,
+                    store,
+                    store,
+                    &ns,
+                    llm.as_ref(),
+                )
+                .await
+                {
+                    Ok(o) => {
+                        for e in &o.errors {
+                            console_warn!("ipo sweep: {e}");
+                        }
+                        Ok((format!("{o:?}"), false))
+                    }
+                    // Before migration 0009: the slot is already marked.
+                    Err(e) if ipo::missing_table(&e) => Ok((
+                        "ipo: tables missing (apply migration 0009); skipped".into(),
+                        false,
+                    )),
+                    Err(e) => Err(e),
+                }
             }
             EarningsStep::Digest => {
                 // Read quietly: no key is the normal state until the owner

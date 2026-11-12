@@ -243,6 +243,16 @@ pub trait NewsSearch {
     ) -> Result<Vec<SearchHit>, ProviderError> {
         self.search(query, max).await
     }
+    /// `search_since` with only results whose full article text the
+    /// provider returned. The default trusts `search_since`.
+    async fn search_full(
+        &self,
+        query: &str,
+        max: usize,
+        since: DateTime<Utc>,
+    ) -> Result<Vec<SearchHit>, ProviderError> {
+        self.search_since(query, max, since).await
+    }
 }
 
 #[async_trait(?Send)]

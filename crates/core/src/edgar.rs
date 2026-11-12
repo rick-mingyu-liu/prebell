@@ -157,6 +157,11 @@ impl<H: Http, T: Timer> Edgar<H, T> {
         self.fetch(url, false).await
     }
 
+    /// A JSON document (the IPO check's submissions), capped at `MAX_BYTES`.
+    pub(crate) async fn get_json(&self, url: &str) -> Result<String, ProviderError> {
+        self.get(url).await
+    }
+
     /// `prefix`: keep the first `MAX_BYTES` of a bigger body instead of failing.
     async fn fetch(&self, url: &str, prefix: bool) -> Result<String, ProviderError> {
         self.fetch_max(url, prefix, MAX_BYTES).await

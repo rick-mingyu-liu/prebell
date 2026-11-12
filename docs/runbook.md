@@ -202,15 +202,15 @@ The site is the OpenNext Worker in `apps/web` (`wrangler.jsonc`, name `prebell-w
   3. Routing rules: add custom addresses `privacy` and `support`, each sending to that Gmail. Turn on the catch-all only if wanted.
   4. Check: send a message to each address from another account and confirm it arrives.
   Do this before deploying the generator with `SEC_CONTACT = "support@prebell.site"`, so SEC can reach the address.
-- **Search and sharing:** every page has Open Graph and Twitter card tags in its language (`shareMetadata` in `src/lib/seo.ts`); posts are `og:type=article` with their card and times, and carry schema.org `NewsArticle` JSON-LD (author Rick Liu, publisher PreBell); the home page carries `Organization` and `WebSite`. `/sitemap.xml` lists the fixed pages, every published translation (paired with `xhtml:link` hreflang only when both are published) and the ticker pages that have an earnings check; calendar-only ticker pages and pending Chinese pages are noindex and left out. It is built on a cache miss from one D1 query and kept an hour in the colo's edge cache through the Cache API (`caches.default`): a Worker's own responses are not cached by their `Cache-Control` header alone, so the pages' `s-maxage=60` does not keep anything at the edge. Building it costs a few ms of CPU per thousand posts (about 16 ms on the build machine at 5,000); past about 2,000 posts, split it into a sitemap index with one file per year to stay inside the Free plan's 10 ms. `/robots.txt` allows everything and names the sitemap; on prebell.site Cloudflare's managed robots.txt (content signals) is prepended to it, which keeps both.
+- **Search and sharing:** every page has Open Graph and Twitter card tags in its language (`shareMetadata` in `src/lib/seo.ts`); posts are `og:type=article` with their card and times, and carry schema.org `NewsArticle` JSON-LD (author Rick Liu, publisher PreBell); the home page carries `Organization` and `WebSite`. `/sitemap.xml` lists the fixed pages, every published translation (paired with `xhtml:link` hreflang only when both are published) and the ticker pages that have an earnings check; calendar-only ticker pages and pending Chinese pages are noindex and left out. It is built on a cache miss from two D1 queries (posts, and the tracked IPOs' pages `/{locale}/ipo/{slug}`) and kept an hour in the colo's edge cache through the Cache API (`caches.default`): a Worker's own responses are not cached by their `Cache-Control` header alone, so the pages' `s-maxage=60` does not keep anything at the edge. Building it costs a few ms of CPU per thousand posts (about 16 ms on the build machine at 5,000); past about 2,000 posts, split it into a sitemap index with one file per year to stay inside the Free plan's 10 ms. `/robots.txt` allows everything and names the sitemap; on prebell.site Cloudflare's managed robots.txt (content signals) is prepended to it, which keeps both.
 - **Cloudflare Web Analytics** (cookie-less). The privacy page says the site uses it, so **set the token in the same deploy that ships that privacy text** (Rick approved the wording on 2026-11-06); a deploy with the text and no token states analytics the site does not run. Add the site's token to `vars` in `apps/web/wrangler.jsonc` as `"CF_BEACON_TOKEN": "<token>"` and deploy (the token is public: it is printed in every page; a var set only in the dashboard is dropped by the next `wrangler deploy`). Every page then loads `static.cloudflareinsights.com/beacon.min.js` with `async` (React places it in `<head>`; async never blocks rendering or `DOMContentLoaded`, so a slow or blocked connection from mainland China costs nothing); unset, there is no script. It is the only third-party resource a page loads: fonts, logos, covers, cards and charts are all same-origin.
 - **Deploy order** (owner only): first apply any new D1 migrations, then deploy the generator, then the site.
-  1. `cd crates/generator && pnpm exec wrangler d1 migrations apply prebell --remote`. Migration `0006_covers.sql` adds `posts.cover_key` and `post_translations.cover_line1` / `cover_line2`, and `0007_post_revised_at.sql` adds `posts.revised_at` (nullable; nothing existing changes), and `0008_macro_events.sql` adds the `macro_events` table (new table only). Both Workers read them, so they must run before either deploys: without 0007 every post query fails with a `no such column` error.
+  1. `cd crates/generator && pnpm exec wrangler d1 migrations apply prebell --remote`. Migration `0006_covers.sql` adds `posts.cover_key` and `post_translations.cover_line1` / `cover_line2`, and `0007_post_revised_at.sql` adds `posts.revised_at` (nullable; nothing existing changes), and `0008_macro_events.sql` adds the `macro_events` table (new table only), and `0009_ipo_watch.sql` adds the five IPO watch tables (new tables only; "IPO watch" below). Both Workers read them, so they must run before either deploys: without 0007 every post query fails with a `no such column` error.
   2. `pnpm exec wrangler deploy` in `crates/generator`.
   3. `cd apps/web && pnpm exec opennextjs-cloudflare build && pnpm exec opennextjs-cloudflare deploy`.
 - **One-off for the earnings widening (S&P 500 ∪ Nasdaq-100):** before step 2, create the build queue: `cd crates/generator && pnpm exec wrangler queues create prebell-earnings-build`. A generator deployed without it fails its deploy (the consumer has no queue). No migration is needed. Either Worker can go first.
 - **One-off for the data-graphic covers change:** deploy the site (step 3) before the generator (step 2) this one time. The new site serves `.svg` covers and draws them on paper. A new generator deployed first would point posts at `covers/<slug>.svg`, which the old site answers with a 404. Then run the graphics backfill above. Later deploys go back to the order above.
-- **Local preview:** the site's preview uses the generator's local state (`--persist-to ../../crates/generator/.wrangler/state`), so the local D1 needs the migrations too. From `crates/generator`: `pnpm exec wrangler d1 migrations apply prebell --local`, then `pnpm exec wrangler d1 execute prebell --local --file ../../db/seed-preview.sql` and `bash ../../db/load-preview-facts.sh`. Then `cd ../../apps/web && pnpm preview` (add `--port <n>` if 8787 is taken). Without migrations 0006 and 0007 the post queries fail with a `no such column` error.
+- **Local preview:** the site's preview uses the generator's local state (`--persist-to ../../crates/generator/.wrangler/state`), so the local D1 needs the migrations too. From `crates/generator`: `pnpm exec wrangler d1 migrations apply prebell --local`, then `pnpm exec wrangler d1 execute prebell --local --file ../../db/seed-preview.sql` and `bash ../../db/load-preview-facts.sh`. Then `cd ../../apps/web && pnpm preview` (add `--port <n>` if 8787 is taken). Without migrations 0006 and 0007 the post queries fail with a `no such column` error. For the IPO watch pages, also apply `0009_ipo_watch.sql` and `db/seed-ipo-preview.sql` (made-up companies and news items besides Anthropic's real filing facts); for `next dev` (which reads `apps/web/.wrangler/state`) run each file with `pnpm exec wrangler d1 execute prebell --local --file <file>` from `apps/web`. Before 0009 is applied the calendar shows no IPOs and the sitemap lists none; an IPO page reads D1 five times and R2 never, the calendar two more reads.
 
 ### MCP server
 
@@ -329,6 +329,82 @@ From then on, the first earnings poll from 18:00 ET each Friday, after that day'
 
 - The digest: delete `DIGEST_ENABLED` from `[vars]` (or set it to anything but `"true"`), commit, and deploy the generator. Drafts already saved stay in Buttondown until deleted there; a schedule already set stays until unscheduled there.
 - The signup: `cd apps/web && pnpm exec wrangler secret delete BUTTONDOWN_API_KEY`; the form disappears and `/api/subscribe` returns 503. Subscribers stay in Buttondown.
+
+## IPO watch
+
+Big upcoming US listings on the market calendar and a page each (`/en/ipo/<slug>`, `/zh/ipo/<slug>`). Design `docs/superpowers/specs/2026-11-11-ipo-watch-design.md`; what the site reads, `docs/superpowers/specs/2026-11-11-ipo-watch-contract.md`; the rules, `docs/decisions.md` (2026-11-11, including the review fixes). Code in `crates/core/src/ipo/`.
+
+### Add or remove an IPO
+
+1. Find the company's CIK on EDGAR (company search; Anthropic is 2130357).
+2. Add one tab-separated line to `crates/core/data/ipo-watch.tsv`: slug (the page URL: lowercase letters, digits, `-`), CIK, display name, Chinese name or `-`, aliases or `-`, a note. Aliases are other names news quotes use for the company, comma-separated: a news item is kept only when its quote names the company by its name or an alias. At most 10 lines.
+3. `cargo test -p prebell-core` (it checks the file parses), commit, deploy the generator.
+
+The next hourly check reads the company's EDGAR submissions, adds its filings to the timeline, reads the newest registration statement's cover and creates its row; the next day's sweep adds news. Removing a line stops checks and sweeps; its rows stay in D1 and its page keeps showing them. To take a page down, delete its rows by hand (`DELETE FROM ipo_watch WHERE slug = '<slug>'`, and the same for `ipo_filings`, `ipo_facts`, `ipo_items`, `ipo_trading`).
+
+### What runs, and when
+
+- **`ipo:check`** (earnings queue, serial with the polls): queued by an earnings poll at most once an hour (kv `ipo_checked_at`), 06:00-22:00 ET on trading days. One EDGAR submissions request per tracked IPO still being checked (at most 10) and at most 3 cover reads (the first 160 KB of the newest S-1/S-1/A/F-1/F-1/A/424B4/424B1): at most 13 requests, paced like the poll (125 ms). The earnings polls' own requests and pacing are unchanged. Once listed, an IPO is checked only for its own final prospectus (often filed a day or two after the first trade; one filed up to 5 trading days after the first session counts): until one is read completely, or 10 trading days after the first session, then one `ipo-no-final:<slug>` warning and no more checks. Nothing else filed after listing joins the timeline. A cover replaces the page's facts only when it yields everything it must (a final prospectus its price and shares; an amendment every kind the current cover has); otherwise an `ipo-cover-partial` warning names what was missing. D1: one state read, one write per cover read (its attempt, written first), one write with the results, and the kv marker. CPU: a cover read took about 1.7-1.9 ms cold and 0.1 ms warm natively in release; Wasm is a few times slower.
+- **`ipo:sweep`** (jobs queue): queued by an earnings poll from 16:30 ET on trading days, one message per IPO not yet swept that day (kv `ipo_sweeps`). One Tavily search (results with the full article text only) and one model call: 2 requests. No model-written sentence is stored: every item shows as its attributed quote. D1: about 6 queries. A sweep stops for an IPO 30 days after its first session, after 60 days with no new filing, or once withdrawn.
+- **Recap**: with the switch on, the recap's batched Yahoo close read also asks for tracked symbols from `range_set` on, once an `EFFECT` notice or a final prospectus is on file, only while the last 50-symbol batch has room (32 slots now), so no extra request; plus 1 D1 read and, with a close, 1 write. Its diagnostics line shows `ipo symbols=N closes=M` (or `ipo_err=...`).
+- Logs: `job ipo:check: CheckOutcome { companies, new_filings, covers, rows, throttled, errors }` and `job ipo:sweep: SweepOutcome { slug, slot, skipped, hits, proposed, kept, rejected, errors }`. `rejected` lists each dropped item's reason (`QuoteNotInArticle`, `NotAnOutlet`, `CompanyNotNamed`, `NotTheCompanysValuation`, `NotTheCompanysTradingDate`, `DateNotInQuote`, `NotDirectQuote`, ...) and URL.
+- **The news checks**: an item's quote must be word for word in the full article from an allowlisted outlet and name the company. A valuation or an expected date is then kept only when its sentence has one of the allowed shapes (lists in `docs/decisions.md`, 2026-11-11, "accept by template" and "valuations are current"): the company itself valued now (no speculation, projection, difference, condition, question or past-dated figure; "would" only for the offering's pricing), or the company or its shares the subject of a present or future trading verb on that day (no negation, change, condition or question). Word lists (comparisons, other parties, bounds) are a second line.
+
+### Outlets
+
+News items come only from these hosts (https, the host itself or with `www.`; no other subdomain), and the outlet name shown is the one here, never the model's. Paths with a whole segment `press-release(s)`, `sponsored`, `sponsor`, `partner(s)`, `partner-content`, `paid-post`, `paidpost` or `brandvoice` are refused. Adding an outlet is a code change (`OUTLETS` in `crates/core/src/ipo/news.rs`) and a line here:
+
+Reuters (reuters.com), Bloomberg (bloomberg.com), The Wall Street Journal (wsj.com), Financial Times (ft.com), CNBC (cnbc.com), The New York Times (nytimes.com), MarketWatch (marketwatch.com), Barron's (barrons.com), Axios (axios.com), Fortune (fortune.com), Business Insider (businessinsider.com), AP (apnews.com), The Information (theinformation.com), TechCrunch (techcrunch.com), The Verge (theverge.com), Semafor (semafor.com), Investor's Business Daily (investors.com), The Economist (economist.com), The Washington Post (washingtonpost.com), The Guardian (theguardian.com), BBC (bbc.com, bbc.co.uk), South China Morning Post (scmp.com), Nikkei Asia (asia.nikkei.com), Caixin Global (caixinglobal.com). Forbes (contributor posts) and Yahoo Finance (syndicated wires) were removed on 2026-11-11.
+
+### Costs (counted from the code, 2026-11-11)
+
+| | Today, per trading day (most) | IPO watch adds |
+|---|---|---|
+| Tavily searches | premarket 12 (8 movers at 4 a side, 3 macro, 1 theme), update 12, recap 13 (8 movers, 3 macro, after-hours 1, theme 1), calendar 5: **42**. That is **882 in a 21-trading-day month, 924 in 22, 966 in 23**, and more when a build retries (each retry searches again) | **1 per tracked IPO a trading day**, **capped at 30 a month** in all (kv `ipo_searches`) |
+| Model calls | premarket 14 (8 mover extractions, macro 1, theme 1, 2-4 drafts), update 14, recap 15, calendar 5: **48**, plus 3-5 per earnings check | **1 per tracked IPO** a trading day (the sweep's extraction; no Chinese call) |
+| Monthly model cost | about $23-32 (2026-11-06 eval, Sonnet 5.5 at $2 / $10 per million input / output tokens) | about **$0.80 a month per IPO**; at most about **$1.10 a month** in all |
+
+How the model cost is estimated: a sweep's one call reads up to 5 articles cut to 6,000 characters each, about 8,000 input tokens ($0.016), and writes up to 8 items, about 2,000 output tokens with effort `low` ($0.02). So about $0.036 a sweep and about $0.80 a month per IPO (21-23 sweeps); the 30-search cap is also a cap of about $1.10 a month. These are estimates from the code, not measured: check the Claude Console's usage after the first week.
+
+**Tavily's free allowance is 1,000 API credits a month** (a basic search is 1). The briefs alone can reach 966 in a 23-trading-day month before retries, so the allowance can run out with or without IPO watch; with its 30, the planned worst case is 996. **What readers lose if it runs out**: every search fails until the allowance resets, so the briefs' movers lose their news reasons (they fall back to "reported results" or a theme, else "No clear news"), the macro and theme sections thin out, the calendar's company-announcement checks stop, and IPO sweeps stop. The brief still publishes. Watch the Tavily dashboard near month end; a paid Tavily plan is the fix if it runs out. At the IPO cap the sweeps stop until the 1st (ET) with one `ipo-search-cap` warning a day; the filing check and the recap closes go on.
+
+### The switch
+
+`IPO_WATCH_ENABLED = "true"` in `crates/generator/wrangler.toml` `[vars]`. Only exactly `"true"` is on; unset, `"false"`, `" true"` or `"TRUE"` is off. Off: polls queue no IPO messages (and read nothing for them), a stray `ipo:check` or `ipo:sweep` logs `disabled (IPO_WATCH_ENABLED is not true); skipped`, and the recap reads no IPO symbols. The site keeps showing what is stored, and drops a reported date that has passed by itself (nothing recomputes rows while off). To turn it off, delete the line (or set it to anything else), commit and deploy the generator.
+
+### Alerts
+
+Each at most once a day per key; the IPO keys are per IPO.
+
+- `ipo-cover-failed:<slug>` (error): a cover failed 3 reads (one an hour) and is given up. Look at the filing on EDGAR.
+- `ipo-cover-partial:<slug>` (warn): a newer cover was read but lacks what it needs to replace the current facts (it names the filing and the kinds); the page keeps the earlier facts and status. A new cover wording may need a pattern in `cover.rs`; check it against the filing.
+- `ipo-cover-empty:<slug>` (warn): a cover read gave no facts at all (an amendment filed only for exhibits is not alerted).
+- `ipo-no-final:<slug>` (warn, once ever): the IPO listed but no complete final prospectus was read within 10 trading days; the page shows no IPO price, and checks for it have stopped. Read the 424B4 on EDGAR; a new cover wording may need a pattern.
+- `sec-throttled` (error, shared with the earnings poll): SEC answered 403/429 in the IPO check, which then stopped for that hour.
+- `ipo-sweep:<slug>` (warn): the news search or the model call failed; the next day tries again.
+- `ipo-search-cap` (warn): the month's 30 searches are used.
+- `config:ipo:<date>` (error): a store error or a bad LLM or `SEC_CONTACT` config in an IPO job. The hour (check) or the day's slot (sweep) is marked first, so it is not re-queued every 5 minutes.
+
+### Deploy order (owner only)
+
+1. Migration: `cd crates/generator && pnpm exec wrangler d1 migrations apply prebell --remote` (adds `0009_ipo_watch.sql`, new tables only). Until it is applied, both jobs log `ipo: tables missing (apply migration 0009); skipped` with no alert.
+2. The generator: `pnpm exec wrangler deploy` in `crates/generator`. The first poll after it queues the first check; Anthropic's row appears within the hour.
+3. The site: the build and deploy in "Web site" above.
+
+Local preview data: `cd crates/generator && pnpm exec wrangler d1 execute prebell --local --file ../../db/seed-ipo-preview.sql` (after the local migrations). Anthropic's filings and cover facts there are real; the news items and the two other companies are made up.
+
+### Known limits
+
+The list for v1, with the reasons, is in `docs/decisions.md` (2026-11-11, "IPO watch, known limits for v1"). In short:
+
+- News items are kept only in fixed sentence shapes (the lists are in `docs/decisions.md`, "accept by template" and "valuations are current"), so some true reports are dropped. Measured on clean wire sentences: dates 10 of 12, current valuations 8 of 12; the dropped ones are listed in the test `recall_on_clean_wire_sentences`.
+- A hedged or conflicting date report in an accepted shape is kept, with its outlet and quote; the newest wins.
+- Valuations print as the stored figure without the quote's hedge; the quote is shown beside it.
+- No past-dated valuations in v1 ("valued at $965 billion in May" is dropped); a `value_as_of` column would bring them back.
+- The model can still propose an in-shape sentence that is not about the company's own figure or date; every item is shown as reported by its outlet, unconfirmed, with its quote.
+- Covers like Figma's 424B4 (no share count in the heading) never read completely: such an IPO stays at its range and ends with `ipo-no-final`.
+- No opening price after listing (the recap's quote read has none). A new listing's first-day close is stored only if Yahoo's v7 quote gives a previous close for it; if day one has no close, no session is called the first day.
+- Items are deduplicated by URL, so an article updated in place keeps its first stored version; the sweeps' monthly counter can be off by one if two sweeps start at the same moment.
 
 ## Logos
 
