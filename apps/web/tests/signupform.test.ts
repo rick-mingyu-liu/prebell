@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
-import { messageFor, statusOf } from "../src/components/SignupForm";
+import { messageFor, statusOf } from "../src/components/SignupFormClient";
 import { signup as en } from "../messages/en.json";
-import zh from "../messages/zh.json";
+import { signup as zh } from "../messages/zh.json";
 
 const res = (status: number, body: unknown) =>
   new Response(typeof body === "string" ? body : JSON.stringify(body), { status });
@@ -31,7 +31,17 @@ describe("SignupForm result", () => {
     expect(en.copy).not.toMatch(/brief/i);
   });
 
-  it("is English only: the Chinese catalogue has no signup strings", () => {
-    expect("signup" in zh).toBe(false);
+  it("has every string in Chinese too, and the Chinese copy says the email is in English", () => {
+    expect(Object.keys(zh).sort()).toEqual(Object.keys(en).sort());
+    for (const [k, v] of Object.entries(zh)) expect(v, k).not.toBe("");
+    expect(zh.heading).toContain("英文邮件");
+    expect(zh.copy).toContain("每周一封英文邮件");
+    expect(zh.success).toContain("英文");
+    expect(zh.copy).toContain("财报速评");
+    expect(zh.copy).not.toContain("简报");
+    expect(messageFor("done", zh)).toBe(zh.success);
+    expect(messageFor("already", zh)).toBe(zh.already);
+    expect(messageFor("invalid", zh)).toBe(zh.invalid);
+    expect(messageFor("error", zh)).toBe(zh.error);
   });
 });

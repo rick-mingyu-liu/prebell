@@ -7,7 +7,8 @@ const HEADERS = { "Cache-Control": "private, no-store" };
 const reply = (body: { ok: boolean; already?: true }, status: number) => Response.json(body, { status, headers: HEADERS });
 
 /**
- * Weekly-digest signup (one English email to every subscriber, so no tags). 400 for a malformed
+ * Weekly-digest signup, from pages in either language (one English email to every subscriber, so
+ * no tags and no language is sent). 400 for a malformed
  * request (a bad email, or a `source` other than the pages the form is on) or a filled honeypot
  * (`website`), 503 until the key is configured, 502 when Buttondown fails. `source` is checked, not
  * sent: tags would need a paid Buttondown plan. Already-subscribed is a success flagged `already: true`, so the form can say so. Responses
