@@ -441,7 +441,9 @@ pub(crate) async fn run_post(
                     .collect::<Option<BTreeMap<_, _>>>()
             })
             .flatten()
-            .filter(|js| js.values().all(|j| j.error.as_deref() != Some(NOT_RUN)));
+            // A judge whose call failed (the budget, a network error, bad
+            // JSON) is asked again.
+            .filter(|js| js.values().all(|j| j.error.is_none()));
         if let Some(js) = kept {
             results.insert(name.clone(), js);
             continue;
@@ -647,16 +649,14 @@ fn run_plan(inputs: &Inputs, done: &[Record], ledger: &Path) -> Plan {
     plan
 }
 
-/// A post's records are complete when every judge has a result that is not
-/// `NOT_RUN`.
+/// A post's records are complete when every judge answered without an
+/// error: a call the budget stopped, or that failed, is made again.
 fn complete(records: &[Record]) -> bool {
     !records.is_empty()
         && records.iter().all(|r| {
-            JUDGES.iter().all(|j| {
-                r.judges
-                    .get(*j)
-                    .is_some_and(|x| x.error.as_deref() != Some(NOT_RUN))
-            })
+            JUDGES
+                .iter()
+                .all(|j| r.judges.get(*j).is_some_and(|x| x.error.is_none()))
         })
 }
 
@@ -761,6 +761,66 @@ fn seed_plan(plans: &[seed::PostPlan], ledger: &Path) -> Plan {
     plan
 }
 
+/// The posts `seed` will do. All of them when their expected cost fits in
+/// `left`; otherwise a fixed-seed random sample of whole posts that fits,
+/// with a note saying which and how many rows that sends.
+pub(crate) fn fit_seed(
+    plans: Vec<seed::PostPlan>,
+    ledger: &Path,
+    left: f64,
+) -> Result<(Vec<seed::PostPlan>, Plan, Option<String>), String> {
+    let costs: Vec<f64> = plans
+        .iter()
+        .map(|p| seed_plan(std::slice::from_ref(p), ledger).expected_usd)
+        .collect();
+    let total: f64 = costs.iter().sum();
+    if total <= left {
+        let plan = seed_plan(&plans, ledger);
+        return Ok((plans, plan, None));
+    }
+    let mut order: Vec<usize> = (0..plans.len()).collect();
+    page::Rng(page::SEED).shuffle(&mut order);
+    let mut keep = vec![false; plans.len()];
+    let mut spent = 0.0;
+    for k in order {
+        if spent + costs[k] <= left {
+            spent += costs[k];
+            keep[k] = true;
+        }
+    }
+    let all = plans.len();
+    let kept: Vec<seed::PostPlan> = plans
+        .into_iter()
+        .zip(&keep)
+        .filter_map(|(p, k)| k.then_some(p))
+        .collect();
+    if kept.is_empty() {
+        return Err(format!(
+            "not starting: no post's seeding fits in the ${left:.2} left under the cap (all {all} would cost ${total:.2})"
+        ));
+    }
+    let sent = |control: bool| -> usize {
+        kept.iter()
+            .map(|p| {
+                p.calls
+                    .iter()
+                    .flatten()
+                    .filter(|&&k| (p.rows[k].0.kind == seed::Kind::Control) == control)
+                    .count()
+            })
+            .sum()
+    };
+    let note = format!(
+        "all {all} posts would cost ${total:.2}, more than the ${left:.2} left under the cap: seeding a random sample (fixed seed) of {} posts: {}; that sends each judge {} wrong lines and {} controls",
+        kept.len(),
+        kept.iter().map(|p| p.post.as_str()).collect::<Vec<_>>().join(", "),
+        sent(false),
+        sent(true)
+    );
+    let plan = seed_plan(&kept, ledger);
+    Ok((kept, plan, Some(note)))
+}
+
 /// One seed call's packs and lines. Each mover appears once per call, under
 /// its own ticker, as production sends it.
 fn call_items(p: &seed::PostPlan, call: &[usize]) -> (Vec<Pack>, Vec<Insight>) {
@@ -782,9 +842,12 @@ pub(crate) async fn seed(m: &Models, out: &Path, fresh: bool) -> Result<(), Stri
         .into_iter()
         .filter(|p| !done.iter().any(|d| d.post == p.post))
         .collect();
-    let plan = seed_plan(&plans, &m.budget.ledger);
+    let left = m.budget.cap - m.budget.spent.get();
+    let (plans, plan, note) = fit_seed(plans, &m.budget.ledger, left)?;
+    if let Some(note) = note {
+        eprintln!("{note}");
+    }
     eprintln!("{}", plan.describe("seed"));
-    plan.fits(&m.budget)?;
     for p in plans {
         let mut rows: Vec<seed::Seeded> = p.rows.iter().map(|(s, _)| s.clone()).collect();
         for call in &p.calls {
@@ -951,7 +1014,16 @@ async fn main() {
                     .into_iter()
                     .filter(|p| !done.iter().any(|d| d.post == p.post))
                     .collect();
-                eprintln!("{}", seed_plan(&plans, &budget.ledger).describe("seed"));
+                let left = budget.cap - budget.spent.get();
+                match fit_seed(plans, &budget.ledger, left) {
+                    Ok((_, plan, note)) => {
+                        if let Some(note) = note {
+                            eprintln!("{note}");
+                        }
+                        eprintln!("{}", plan.describe("seed"));
+                    }
+                    Err(e) => eprintln!("{e}"),
+                }
                 return;
             }
             let m = live_models(&args, budget);
@@ -1442,9 +1514,9 @@ pub(crate) mod tests {
         assert_eq!(judge.calls.get(), 3);
         let rows: Vec<seed::Seeded> = read_jsonl(&out.join("seeded.jsonl"));
         let kinds: Vec<seed::Kind> = rows.iter().map(|r| r.kind).collect();
-        // One number in each line and one outlet in the pack: the number
-        // swaps change a digit (the checks refuse that), and there is no
-        // second outlet or direction word to swap.
+        // One number in each line and no other value cited: the number
+        // swaps could only make a true line, so they are skipped and
+        // counted; there is no second outlet or direction word to swap.
         assert_eq!(
             kinds,
             [
@@ -1454,8 +1526,8 @@ pub(crate) mod tests {
                 seed::Kind::Control
             ]
         );
-        assert!(!rows[0].check.is_empty() && rows[0].judges.is_empty());
-        assert!(!rows[1].check.is_empty() && rows[1].judges.is_empty());
+        assert!(rows[0].skipped && rows[0].judges.is_empty());
+        assert!(rows[1].skipped && rows[1].judges.is_empty());
         assert!(rows[2].check.is_empty(), "{:?}", rows[2].check);
         assert_eq!(rows[2].caught("deepseek"), Some(true));
         assert!(rows[3].judges["deepseek"].passed);
@@ -1590,5 +1662,76 @@ pub(crate) mod tests {
             {"et_date": "2026-11-14", "series": "unknown_series", "ref_period": null, "variant": null},
         ]);
         assert_eq!(events_json(&rows), json!([["2026-11-13", "October CPI"]]));
+    }
+
+    /// Round 2, M2: when seeding every post would pass what is left under
+    /// the cap, a fixed-seed sample of whole posts that fits is taken, and
+    /// the note says which and how many rows it sends.
+    #[test]
+    fn seed_samples_posts_when_the_plan_passes_the_cap() {
+        use crate::page::tests::record;
+        let records: Vec<Record> = (1..=6)
+            .flat_map(|d| {
+                let post = format!("recap_2026-11-0{d}");
+                vec![
+                    record(&post, &format!("A{d}"), (true, true)),
+                    record(&post, &format!("B{d}"), (true, false)),
+                ]
+            })
+            .collect();
+        let dir = tmp("seed-fit");
+        let ledger = dir.join("spend.jsonl");
+        let plans = seed::plan(&records);
+        let total = seed_plan(&plans, &ledger).expected_usd;
+        let (all, _, note) = fit_seed(seed::plan(&records), &ledger, total + 0.01).unwrap();
+        assert_eq!((all.len(), note), (6, None));
+        let left = total / 2.0;
+        let (kept, plan, note) = fit_seed(seed::plan(&records), &ledger, left).unwrap();
+        let note = note.unwrap();
+        assert!(!kept.is_empty() && kept.len() < 6, "{}", kept.len());
+        assert!(plan.expected_usd <= left);
+        assert!(note.contains("random sample (fixed seed)"), "{note}");
+        assert!(note.contains(&format!("of {} posts", kept.len())), "{note}");
+        assert!(
+            note.contains("wrong lines and") && note.contains("controls"),
+            "{note}"
+        );
+        for p in &kept {
+            assert!(note.contains(&p.post), "{note}");
+        }
+        // The same sample every time.
+        let (again, _, _) = fit_seed(seed::plan(&records), &ledger, left).unwrap();
+        assert_eq!(
+            kept.iter().map(|p| &p.post).collect::<Vec<_>>(),
+            again.iter().map(|p| &p.post).collect::<Vec<_>>()
+        );
+        let e = fit_seed(seed::plan(&records), &ledger, 0.0).err().unwrap();
+        assert!(e.contains("not starting"), "{e}");
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// Round 2, L5: a judge call that failed for a reason other than the
+    /// budget is made again on a re-run; the writer is not.
+    #[tokio::test]
+    async fn a_failed_judge_call_is_retried_on_a_rerun() {
+        let out = tmp("retry");
+        let writer = Mock::new(vec![claude_body(&writer_reply(CLEAN), 200)]);
+        let judge = Mock::new(vec![]);
+        let m = mock_models(budget(&out, 3.0), &writer, &[("claude", &judge)]);
+        let (n, p) = one_post("2026-11-12");
+        let i = inputs(vec![(&n, p)]);
+        // No reply queued: the judge call fails with a network error.
+        run(&i, &m, &out, false).await.unwrap();
+        let lines: Vec<Record> = read_jsonl(&out.join("lines.jsonl"));
+        assert!(lines[0].judges["claude"].error.is_some());
+        judge
+            .replies
+            .borrow_mut()
+            .push_back(claude_body(&judge_reply(true), 200));
+        run(&i, &m, &out, false).await.unwrap();
+        assert_eq!((writer.calls.get(), judge.calls.get()), (1, 2));
+        let lines: Vec<Record> = read_jsonl(&out.join("lines.jsonl"));
+        assert!(lines[0].judges["claude"].passed);
+        fs::remove_dir_all(out).unwrap();
     }
 }

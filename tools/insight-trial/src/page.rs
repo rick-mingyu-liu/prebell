@@ -5,20 +5,20 @@
 use crate::{line_key, Record};
 
 pub(crate) const CARDS: usize = 60;
-const SEED: u64 = 20_261_113;
+pub(crate) const SEED: u64 = 20_261_113;
 
 /// splitmix64: a fixed-seed shuffle needs no dependency.
-struct Rng(u64);
+pub(crate) struct Rng(pub(crate) u64);
 
 impl Rng {
-    fn next(&mut self) -> u64 {
+    pub(crate) fn next(&mut self) -> u64 {
         self.0 = self.0.wrapping_add(0x9e37_79b9_7f4a_7c15);
         let mut z = self.0;
         z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
         z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
         z ^ (z >> 31)
     }
-    fn shuffle<T>(&mut self, v: &mut [T]) {
+    pub(crate) fn shuffle<T>(&mut self, v: &mut [T]) {
         for i in (1..v.len()).rev() {
             let j = (self.next() % (i as u64 + 1)) as usize;
             v.swap(i, j);

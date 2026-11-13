@@ -8,9 +8,13 @@ the evidence packs, one Claude writer call per post, the code checks, and one
 judge call per judge (Claude and DeepSeek) over the lines that pass the checks.
 Nothing here touches the Worker or the site.
 
-A native crate outside the workspace: it builds into its own `target/` and
-has its own `Cargo.lock`. Do not point it at a shared `CARGO_TARGET_DIR`
-(the commands below unset it).
+A native crate outside the workspace: it has its own `Cargo.lock` and
+builds into its own `tools/insight-trial/target/`. Its `.cargo/config.toml`
+pins that, overriding a `target-dir` an enclosing checkout's
+`.cargo/config.toml` may set (the main checkout's local one points every
+worktree at `~/.cache/prebell-target`). The `CARGO_TARGET_DIR` variable
+would still win over both, so every command below starts with
+`env -u CARGO_TARGET_DIR`.
 
 ## Spend
 
@@ -67,10 +71,17 @@ env -u CARGO_TARGET_DIR cargo run --release -- score --out out --labels ~/Downlo
 Re-runs keep what was paid for: `run` skips a post already complete in
 `out/lines.jsonl`, and finishes one a budget stop left part-done by calling
 only its missing judges; `seed` skips a post already in `out/seeded.jsonl`.
+A judge call that failed for any reason (the budget, a network error, a
+reply that would not parse) is made again on a re-run. `seed` writes a post
+only when all its calls are done: a post the budget cuts part-way is not
+written (its finished calls stay in the ledger) and is redone on a re-run.
 `--fresh` redoes everything. `--plan` (on `run` and `seed`) prints the calls
 the step would make and their expected cost, and makes none; without it the
 plan is printed first and the step refuses to start when the expected cost
-would pass what is left of `--budget`. The expected cost uses the average
+would pass what is left of `--budget`. `seed` instead seeds a fixed-seed
+random sample of whole posts that fits what is left, and says which posts
+and how many wrong lines and controls that sends (`--plan` prints the same).
+The expected cost uses the average
 output of earlier calls in the ledger, or an assumed 500 to 600 tokens per
 mover plus 1,500 for Claude's thinking; each call still reserves its
 worst case (16,000 output tokens for Claude, 4,096 for DeepSeek) before it
@@ -105,10 +116,14 @@ is sent.
   `advice_or_informal`).
 - `out/report.md` (from `score`): each judge's agreement with Rick's labels
   (a judge pass counts as "Fine"), the judge-passed lines Rick marked wrong in
-  full, seeded recall overall and by kind, the false-reject rate on
-  controls, how many results were left out (failed calls, omitted movers,
-  labels or seeds for older text), what the code checks refused,
-  eligibility, spend, the judge to choose (higher agreement, ties broken by
-  seeded recall), whether the bar is met (at least 50 judge-passed lines
-  read, none marked wrong, seeded recall at least 90%), and the limits of
-  the trial.
+  full, seeded recall overall and by kind (with the kinds that were skipped
+  because every change would still be true), the flip rate on controls of
+  lines the judge had passed and its consistent rejections apart, how many
+  results were left out (failed calls, omitted movers, labels or seeds for
+  older text), what the code checks refused, eligibility, spend, the judge
+  to choose (higher agreement, ties broken by seeded recall), how many
+  judge-passed lines were labelled, whether the trial's part of the bar
+  holds (none marked wrong, seeded recall at least 90%), and the limits of
+  the trial. The bar's 50 labelled judge-passed lines cannot be reached
+  with this trial's 37 eligible movers: the report calls the bar "not yet
+  assessable" until they are, and they accumulate through the shadow stage.

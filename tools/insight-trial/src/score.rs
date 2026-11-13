@@ -49,9 +49,14 @@ pub(crate) struct JudgeScore<'a> {
     pub unanswered_seeds: usize,
     /// (counted, caught) per kind.
     pub by_kind: BTreeMap<Kind, (usize, usize)>,
-    /// Controls answered, and how many the judge rejected.
+    /// Controls of lines this judge passed in `run`, answered, and how many
+    /// it now rejected (it changed its mind: a flip).
     pub controls: usize,
     pub controls_rejected: usize,
+    /// Controls of lines it had rejected in `run`, and how many it rejected
+    /// again (consistent rejections, not false rejects).
+    pub controls_of_rejected: usize,
+    pub rejected_again: usize,
 }
 
 impl JudgeScore<'_> {
@@ -61,6 +66,7 @@ impl JudgeScore<'_> {
     pub fn recall(&self) -> f64 {
         ratio(self.caught, self.seeded)
     }
+    /// The flip rate: controls of lines it passed in `run` that it rejected.
     pub fn false_rejects(&self) -> f64 {
         ratio(self.controls_rejected, self.controls)
     }
@@ -74,10 +80,20 @@ fn ratio(a: usize, b: usize) -> f64 {
     }
 }
 
+/// The spec's bar for the chosen judge.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Bar {
+    /// Fewer than 50 judge-passed lines labelled: the offline trial cannot
+    /// reach 50 (37 eligible movers); the rest come in the shadow stage.
+    NotYetAssessable,
+    Met,
+    NotMet,
+}
+
 pub(crate) struct Score<'a> {
     pub judges: Vec<JudgeScore<'a>>,
     pub chosen: &'static str,
-    pub bar_met: bool,
+    pub bar: Bar,
     /// Labels for a line whose text has changed since the page was made.
     pub stale_labels: usize,
     /// Seeded rows made from a line whose text has changed since.
@@ -94,6 +110,12 @@ fn current_key(records: &[Record], post: &str, ticker: &str) -> Option<String> {
         .find(|r| judged(r) && r.post == post && r.ticker == ticker)
         .and_then(|r| r.insight.as_ref())
         .map(line_key)
+}
+
+/// The trial's own part of the bar: no judge-passed line marked wrong, and
+/// seeded recall at least 0.9.
+fn trial_ok(c: &JudgeScore) -> bool {
+    c.passed_wrong.is_empty() && c.seeded > 0 && c.recall() >= RECALL_BAR
 }
 
 pub(crate) fn score<'a>(records: &'a [Record], seeded: &[Seeded], labels: &[Label]) -> Score<'a> {
@@ -138,6 +160,8 @@ pub(crate) fn score<'a>(records: &'a [Record], seeded: &[Seeded], labels: &[Labe
                 by_kind: BTreeMap::new(),
                 controls: 0,
                 controls_rejected: 0,
+                controls_of_rejected: 0,
+                rejected_again: 0,
             };
             for (r, l) in &labelled {
                 let Some(j) = r.judges.get(name) else {
@@ -166,8 +190,13 @@ pub(crate) fn score<'a>(records: &'a [Record], seeded: &[Seeded], labels: &[Labe
                     continue;
                 }
                 if v.kind == Kind::Control {
-                    s.controls += 1;
-                    s.controls_rejected += usize::from(!j.passed);
+                    if v.original_passed.get(name) == Some(&true) {
+                        s.controls += 1;
+                        s.controls_rejected += usize::from(!j.passed);
+                    } else {
+                        s.controls_of_rejected += 1;
+                        s.rejected_again += usize::from(!j.passed);
+                    }
                     continue;
                 }
                 match v.caught(name) {
@@ -196,10 +225,13 @@ pub(crate) fn score<'a>(records: &'a [Record], seeded: &[Seeded], labels: &[Labe
     let c = &judges[best];
     Score {
         chosen: c.name,
-        bar_met: c.passed_wrong.is_empty()
-            && c.seeded > 0
-            && c.recall() >= RECALL_BAR
-            && c.passed_labelled >= READ_BAR,
+        bar: if c.passed_labelled < READ_BAR {
+            Bar::NotYetAssessable
+        } else if trial_ok(c) {
+            Bar::Met
+        } else {
+            Bar::NotMet
+        },
         judges,
         stale_labels,
         stale_seeds,
@@ -310,7 +342,7 @@ pub(crate) fn report(
     let _ = writeln!(out, "\n## Judges\n");
     let _ = writeln!(
         out,
-        "| Judge | Labelled | Agreement with Rick | Judge-passed lines labelled | Judge-passed lines marked wrong | Seeded recall | Controls rejected | Left out (no answer) |"
+        "| Judge | Labelled | Agreement with Rick | Judge-passed lines labelled | Judge-passed lines marked wrong | Seeded recall | Controls flipped | Left out (no answer) |"
     );
     let _ = writeln!(out, "|---|---|---|---|---|---|---|---|");
     for j in &s.judges {
@@ -344,21 +376,37 @@ pub(crate) fn report(
             .join("; ")
     );
 
+    for j in &s.judges {
+        let _ = writeln!(
+            out,
+            "- {}: rejected again {} of {} controls of lines it had rejected in `run` (consistent, not counted as flips).",
+            j.name, j.rejected_again, j.controls_of_rejected
+        );
+    }
+
     let _ = writeln!(out, "\n## Seeded wrong lines by kind\n");
-    let mut head = "| Kind | Made | Refused by the checks |".to_string();
-    let mut rule = "|---|---|---|".to_string();
+    let mut head = "| Kind | Made | Skipped (every change would be true) | Refused by the checks |"
+        .to_string();
+    let mut rule = "|---|---|---|---|".to_string();
     for j in JUDGES {
         let _ = write!(head, " {j} caught |");
         rule.push_str("---|");
     }
     let _ = writeln!(out, "{head}\n{rule}");
     for kind in Kind::ALL {
-        let made = seeded.iter().filter(|v| v.kind == kind).count();
+        let made = seeded
+            .iter()
+            .filter(|v| v.kind == kind && !v.skipped)
+            .count();
+        let skipped = seeded
+            .iter()
+            .filter(|v| v.kind == kind && v.skipped)
+            .count();
         let refused = seeded
             .iter()
             .filter(|v| v.kind == kind && !v.check.is_empty())
             .count();
-        let mut row = format!("| {} | {made} | {refused} |", kind.name());
+        let mut row = format!("| {} | {made} | {skipped} | {refused} |", kind.name());
         for j in &s.judges {
             match j.by_kind.get(&kind) {
                 Some((n, c)) => {
@@ -442,35 +490,42 @@ pub(crate) fn report(
         pct(c.agreement()),
         pct(c.recall())
     );
-    let mut why = Vec::new();
-    if !c.passed_wrong.is_empty() {
-        why.push(format!(
-            "{} judge-passed lines were marked wrong",
-            c.passed_wrong.len()
-        ));
-    }
-    if c.seeded == 0 || c.recall() < RECALL_BAR {
-        why.push(format!(
-            "seeded recall is {} (needs at least {})",
-            pct(c.recall()),
-            pct(RECALL_BAR)
-        ));
-    }
-    if c.passed_labelled < READ_BAR {
-        why.push(format!(
-            "Rick has read {} judge-passed lines (needs at least {READ_BAR})",
-            c.passed_labelled
-        ));
-    }
-    if s.bar_met {
-        let _ = writeln!(
-            out,
-            "\nThe bar is met: Rick read {} judge-passed lines, none was marked wrong, and seeded recall is {}.",
-            c.passed_labelled,
-            pct(c.recall())
-        );
-    } else {
-        let _ = writeln!(out, "\nThe bar is not met: {}.", why.join("; "));
+    let _ = writeln!(
+        out,
+        "\nJudge-passed lines Rick labelled for this judge: {}.",
+        c.passed_labelled
+    );
+    let _ = writeln!(
+        out,
+        "\nThe trial's own part of the bar (no judge-passed line marked wrong, seeded recall at least {}): {}: {} judge-passed lines marked wrong, seeded recall {}.",
+        pct(RECALL_BAR),
+        if trial_ok(c) { "holds" } else { "does not hold" },
+        c.passed_wrong.len(),
+        pct(c.recall())
+    );
+    match s.bar {
+        Bar::NotYetAssessable => {
+            let _ = writeln!(
+                out,
+                "\nThe bar is not yet assessable: it needs at least {READ_BAR} judge-passed lines labelled, and this trial has {}. The rest come from the shadow stage.",
+                c.passed_labelled
+            );
+        }
+        Bar::Met => {
+            let _ = writeln!(
+                out,
+                "\nThe bar is met: {} judge-passed lines labelled, none marked wrong, seeded recall {}.",
+                c.passed_labelled,
+                pct(c.recall())
+            );
+        }
+        Bar::NotMet => {
+            let _ = writeln!(
+                out,
+                "\nThe bar is not met: {} judge-passed lines labelled, but its trial part does not hold.",
+                c.passed_labelled
+            );
+        }
     }
 
     let _ = writeln!(out, "\n## Limits of this trial\n");
@@ -554,6 +609,7 @@ mod tests {
                 .collect(),
             original_passed: BTreeMap::from([("claude".into(), true), ("deepseek".into(), true)]),
             line_key: line_key(r.insight.as_ref().unwrap()),
+            skipped: false,
         }
     }
 
@@ -619,8 +675,8 @@ mod tests {
         assert_eq!((c.controls, c.controls_rejected), (2, 0));
         assert_eq!((d.controls, d.controls_rejected), (2, 1));
         assert_eq!(s.chosen, "claude");
-        // Claude passed r9, which Rick marked as advice.
-        assert!(!s.bar_met);
+        // Claude passed r9, which Rick marked as advice; only 9 lines read.
+        assert_eq!(s.bar, Bar::NotYetAssessable);
 
         // Equal agreement: seeded recall decides.
         let mut records2 = records.clone();
@@ -631,8 +687,8 @@ mod tests {
         let s = score(&records2, &seeded, &labels);
         assert_eq!((s.judges[1].agree, s.chosen), (9, "deepseek"));
         // DeepSeek passed nothing Rick marked wrong and caught every seed,
-        // but Rick read only 7 lines it passed, not 50.
-        assert!(!s.bar_met);
+        // but Rick read only 7 lines it passed, not 50: never "met".
+        assert_eq!(s.bar, Bar::NotYetAssessable);
 
         let posts = [json!({"post": "recap_2026-11-12", "movers": 16, "eligible": 10})];
         let spend = [
@@ -644,11 +700,13 @@ mod tests {
             "Eligible movers: 10 of 16 (62%)",
             "| claude | 10 | 90% (9/10) | 9 | 1 | 90% (9/10) | 0% (0/2) | 0 labels, 0 seeds |",
             "| deepseek | 10 | 70% (7/10) | 5 | 0 | 100% (10/10) | 50% (1/2) | 0 labels, 0 seeds |",
-            "| outlet_swap | 3 | 1 | 2 of 2 | 2 of 2 |",
-            "| formal_advice | 2 | 0 | 1 of 2 | 2 of 2 |",
+            "| outlet_swap | 3 | 0 | 1 | 2 of 2 | 2 of 2 |",
+            "| formal_advice | 2 | 0 | 0 | 1 of 2 | 2 of 2 |",
             "Total: $0.0210 over 2 calls",
             "Judge: **claude**",
-            "The bar is not met: 1 judge-passed lines were marked wrong; Rick has read 9 judge-passed lines (needs at least 50).",
+            "Judge-passed lines Rick labelled for this judge: 9.",
+            "does not hold: 1 judge-passed lines marked wrong, seeded recall 90%.",
+            "The bar is not yet assessable: it needs at least 50 judge-passed lines labelled, and this trial has 9.",
             "## Limits of this trial",
             "today's, read for past posts",
         ] {
@@ -676,15 +734,21 @@ mod tests {
         let labels: Vec<Label> = records.iter().map(|r| label(r, "fine")).collect();
         let s = score(&records, &seeded, &labels);
         assert_eq!(s.judges[0].passed_labelled, 60);
-        assert!(s.bar_met);
+        assert_eq!(s.bar, Bar::Met);
         let s = score(&records, &seeded, &labels[..49]);
-        assert!(!s.bar_met);
+        assert_eq!(s.bar, Bar::NotYetAssessable);
+        let md = report(&records, &[], &seeded, &[], &labels[..49]);
+        assert!(!md.contains("The bar is met"), "{md}");
+        // Fifty read, but one passed line marked wrong: not met.
+        let mut wrong = labels.clone();
+        wrong[0].label = "wrong_fact".into();
+        assert_eq!(score(&records, &seeded, &wrong).bar, Bar::NotMet);
         // A judge that passes nothing never meets the bar.
         let none: Vec<Record> = (0..60)
             .map(|k| record("recap_2026-11-12", &format!("T{k}"), (false, false)))
             .collect();
         let s = score(&none, &seeded, &labels);
-        assert!(!s.bar_met);
+        assert_ne!(s.bar, Bar::Met);
     }
 
     /// Review H2: a failed call or an omitted mover is neither a pass nor a
@@ -761,7 +825,10 @@ mod tests {
             .filter(|s| s.kind != Kind::OutletSwap)
             .collect();
         let md = report(&records, &[], &seeds, &[], &labels);
-        assert!(md.contains("| outlet_swap | 0 | 0 | N/A | N/A |"), "{md}");
+        assert!(
+            md.contains("| outlet_swap | 0 | 0 | 0 | N/A | N/A |"),
+            "{md}"
+        );
     }
 
     #[test]
@@ -809,6 +876,62 @@ mod tests {
         );
         assert!(
             md.contains("- en: hook has N words (at most N): 1 lines"),
+            "{md}"
+        );
+    }
+
+    /// Round 2, M4: a control of a line the judge passed in `run` and now
+    /// rejects is a flip; one it had rejected and rejects again is a
+    /// consistent rejection, reported apart.
+    #[test]
+    fn controls_count_flips_apart_from_consistent_rejections() {
+        let (records, labels) = fixture();
+        let r = &records[0];
+        let t = &r.ticker;
+        let mut again = row(
+            r,
+            Kind::Control,
+            [("claude", answer(t, false)), ("deepseek", answer(t, false))],
+        );
+        again.original_passed.insert("deepseek".into(), false);
+        let flipped = row(
+            r,
+            Kind::Control,
+            [("claude", answer(t, true)), ("deepseek", answer(t, false))],
+        );
+        let s = score(&records, &[again, flipped], &labels);
+        let (c, d) = (&s.judges[0], &s.judges[1]);
+        assert_eq!((c.controls, c.controls_rejected), (2, 1));
+        assert_eq!((d.controls, d.controls_rejected), (1, 1));
+        assert_eq!((d.controls_of_rejected, d.rejected_again), (1, 1));
+        let md = report(&records, &[], &seeded(r), &[], &labels);
+        assert!(
+            md.contains("rejected again 0 of 0 controls of lines it had rejected"),
+            "{md}"
+        );
+    }
+
+    /// Round 2, H1: a kind that could only make a true line is counted as
+    /// skipped, not made, and never scored.
+    #[test]
+    fn skipped_seeds_are_counted_and_never_scored() {
+        let (records, labels) = fixture();
+        let r = &records[0];
+        let mut skipped = row(
+            r,
+            Kind::NumberSwap,
+            [
+                ("claude", answer(&r.ticker, true)),
+                ("deepseek", answer(&r.ticker, true)),
+            ],
+        );
+        skipped.skipped = true;
+        skipped.judges.clear();
+        let s = score(&records, std::slice::from_ref(&skipped), &labels);
+        assert_eq!(s.judges[0].seeded, 0);
+        let md = report(&records, &[], &[skipped], &[], &labels);
+        assert!(
+            md.contains("| number_swap | 0 | 1 | 0 | N/A | N/A |"),
             "{md}"
         );
     }
