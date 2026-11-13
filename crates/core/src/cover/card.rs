@@ -39,7 +39,7 @@ const SCALE: f64 = 1200.0 / 640.0;
 
 /// Static cuts of the site's Inter and Newsreader, printable ASCII only
 /// (`scripts/build-card-fonts.py`; OFL, licences beside them).
-const FONTS: [&[u8]; 4] = [
+pub(super) const FONTS: [&[u8]; 4] = [
     include_bytes!("../../data/fonts/inter-500.ttf"),
     include_bytes!("../../data/fonts/inter-600.ttf"),
     include_bytes!("../../data/fonts/inter-700.ttf"),
@@ -150,7 +150,8 @@ pub fn render_png(svg: &str) -> Result<Vec<u8>, String> {
 pub struct CoverPost {
     pub cover_key: String,
     pub trading_date: String,
-    /// The earnings filing's ticker; `None` for briefs.
+    /// The earnings filing's ticker, or an IPO write-up's symbol (its IPO's
+    /// watch row); `None` for briefs and an IPO without a symbol.
     pub ticker: Option<String>,
 }
 
@@ -179,7 +180,8 @@ fn attempts_key(card: &str) -> String {
     format!("{}.attempts", card.trim_end_matches(".png"))
 }
 
-/// "AAPL · 2026-11-05", or the date alone for a brief.
+/// "AAPL · 2026-11-05" ("ANT · 2026-11-10" for an IPO write-up), or the
+/// date alone for a brief.
 fn kicker(p: &CoverPost) -> String {
     match &p.ticker {
         Some(t) => format!("{t} · {}", p.trading_date),

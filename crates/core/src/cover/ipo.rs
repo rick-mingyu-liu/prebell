@@ -723,9 +723,19 @@ mod tests {
     #[test]
     fn every_ipo_cover_renders_as_a_share_card() {
         for (name, f) in all() {
-            let svg = card_svg(&ipo_graphic(&f).unwrap(), "2026-11-10").unwrap();
+            let svg = card_svg(&ipo_graphic(&f).unwrap(), "ANT · 2026-11-10").unwrap();
             let png = render_png(&svg).unwrap_or_else(|e| panic!("{name}: {e}"));
             assert_eq!(&png[..8], b"\x89PNG\r\n\x1a\n", "{name}");
+            // Every character printed has a glyph in every embedded font.
+            let chars: Vec<char> = texts(&svg).iter().flat_map(|t| t.2.chars()).collect();
+            for font in crate::cover::card::FONTS {
+                let face = ttf_parser::Face::parse(font, 0).unwrap();
+                let missing: Vec<&char> = chars
+                    .iter()
+                    .filter(|&&c| c != ' ' && face.glyph_index(c).is_none())
+                    .collect();
+                assert!(missing.is_empty(), "{name}: missing glyphs {missing:?}");
+            }
         }
     }
 }

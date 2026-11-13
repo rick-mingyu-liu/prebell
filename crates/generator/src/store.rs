@@ -601,9 +601,14 @@ struct ReportRec {
 /// Newest published posts with an SVG cover and a trading date on or after
 /// `?2`, for the `cards` job (`?1` is the limit). The date bound reads
 /// `idx_posts_trading_date`, so the rows read stay flat as history grows. A
-/// revised post counts from its update, which gave it a new cover key.
-pub(crate) const COVER_POSTS: &str = "SELECT p.cover_key, p.trading_date, f.ticker FROM posts p \
+/// revised post counts from its update, which gave it a new cover key. The
+/// kicker's ticker: an earnings check's filing ticker, or an IPO write-up's
+/// symbol from its IPO's watch row (`ipo:<ipo_slug>:...`), when it has one.
+pub(crate) const COVER_POSTS: &str =
+    "SELECT p.cover_key, p.trading_date, COALESCE(f.ticker, w.symbol) AS ticker FROM posts p \
      LEFT JOIN earnings_filings f ON f.run_key = p.run_key \
+     LEFT JOIN ipo_watch w ON p.content_type = 'ipo' \
+     AND w.slug = substr(p.run_key, 5, instr(substr(p.run_key, 5), ':') - 1) \
      WHERE p.trading_date >= ?2 AND p.published_at IS NOT NULL AND p.cover_key LIKE 'covers/%.svg' \
      ORDER BY COALESCE(p.revised_at, p.published_at) DESC LIMIT ?1";
 
