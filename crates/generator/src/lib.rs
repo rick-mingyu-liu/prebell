@@ -444,8 +444,9 @@ impl JobRunner for Runner<'_> {
                 }
                 // Written by code: no model, no provider config.
                 match ipo::article::article_tick(t, ipo::tracked(), store, store, store).await {
-                    // No share card: an IPO write-up has no cover image.
-                    Ok(o) => Ok((format!("{o:?}"), false)),
+                    // A write-up that got its cover (built or backfilled)
+                    // queues its share card, rendered in a message of its own.
+                    Ok(o) => Ok((format!("{o:?}"), o.card)),
                     // Before migration 0009: the hour is already marked.
                     Err(e) if ipo::missing_table(&e) => Ok((
                         "ipo: tables missing (apply migration 0009); skipped".into(),

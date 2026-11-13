@@ -41,7 +41,7 @@ Only the latest milestone an IPO has reached is ever written up; one it has move
 | `slug` | `<ipo_slug>-ipo-<words>-<as_of>`, words below; if another run already owns it, `-<last 6 of the key without dashes>` is appended. |
 | `facts_r2_key` | `ipo/<ipo_slug>/<milestone>-<key>.json`, for example `ipo/anthropic/range_set-0001628280-26-072484.json` |
 | `published_at` | set when the post is written |
-| `cover_key` | NULL in v1 (no cover image; the site's flat tile with `cover_line1`/`cover_line2`) |
+| `cover_key` | `covers/<slug>.svg` (changed 2026-11-12, `docs/decisions.md`): the milestone's cover graphic, drawn by code from the facts object (`crates/core/src/cover/ipo.rs`) and stored before the row; its share card is `og/<slug>.png`. NULL for `withdrawn`, for a milestone missing a figure its graphic needs, or when the R2 write failed (the site's flat tile with `cover_line1`/`cover_line2`, and the default card); a later `ipo:article` pass backfills a NULL one when the facts give a graphic. |
 | `revised_at` | NULL in v1 |
 
 Slug words: `filed` → `filing`, `range_set` → `price-range`, `range_changed` → `new-price-range`, `priced` → `priced`, `listed` → `first-trading-day`, `withdrawn` → `withdrawn`. Example: `anthropic-ipo-price-range-2026-11-10`.

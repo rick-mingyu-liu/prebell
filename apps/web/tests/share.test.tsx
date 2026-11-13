@@ -98,6 +98,26 @@ describe("share cards", () => {
     }
   });
 
+  it("an IPO write-up with a cover names its own card in both languages", async () => {
+    env.db = memoryD1(`${seed}
+INSERT INTO runs VALUES ('ipo:anthropic:range_set:0001628280-26-072484','ipo','2026-11-10','published',1,NULL,'2026-11-11T22:00:00Z','2026-11-11T22:00:00Z');
+INSERT INTO posts (id, run_key, content_type, template_id, trading_date, slug, facts_r2_key, published_at, cover_key)
+  VALUES (2,'ipo:anthropic:range_set:0001628280-26-072484','ipo','ipo-range_set','2026-11-10','anthropic-ipo-price-range-2026-11-10',NULL,'2026-11-11T22:00:00Z','covers/anthropic-ipo-price-range-2026-11-10.svg');
+INSERT INTO post_translations (post_id, lang, status, title, summary, body_md, updated_at)
+  VALUES (2,'en','published','Anthropic''s IPO filing gives a price range of $70 to $78 a share','S.','# x','2026-11-11T22:00:00Z');
+INSERT INTO post_translations (post_id, lang, status, title, summary, body_md, updated_at)
+  VALUES (2,'zh','published','Anthropic IPO文件载明价格区间：每股70至78美元','S.','# x','2026-11-11T22:00:00Z');`);
+    env.cards = new Set(["og/anthropic-ipo-price-range-2026-11-10.png"]);
+    for (const locale of ["en", "zh"] as const) {
+      const props_ = props({ locale, slug: "anthropic-ipo-price-range-2026-11-10" });
+      const m = await post.generateMetadata(props_);
+      expect(og(m)).toMatchObject({ type: "article", images: [{ url: "/og/anthropic-ipo-price-range-2026-11-10.png", width: 1200, height: 630 }] });
+      expect(tw(m).images).toEqual([expect.objectContaining({ url: "/og/anthropic-ipo-price-range-2026-11-10.png" })]);
+      const out = await html(await post.default(props_));
+      expect(ldBlocks(out)[0].image).toEqual(["https://prebell.site/og/anthropic-ipo-price-range-2026-11-10.png"]);
+    }
+  });
+
   it("a post names the default card until its own is rendered, so an early share never caches a URL that changes", async () => {
     env.cards = new Set();
     const props_ = props({ locale: "en", slug: "premarket-2026-11-05" });

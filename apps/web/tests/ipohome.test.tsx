@@ -504,7 +504,7 @@ describe("the generator's preview write-up (db/seed-ipo-articles-preview.sql)", 
     expect((await listPosts(db(), "en", 1, "ipo")).map((p) => p.slug)).toEqual([SLUG]);
   });
 
-  it("renders through the post page: IPO link, cover lines on the flat tile, the reported quotes and the sources", async () => {
+  it("renders through the post page: IPO link, cover lines over the cover graphic, the reported quotes and the sources", async () => {
     for (const locale of ["en", "zh"] as const) {
       const d = db();
       const post = (await getPostBySlug(d, SLUG, locale))!;
@@ -513,8 +513,13 @@ describe("the generator's preview write-up (db/seed-ipo-articles-preview.sql)", 
       const out = renderToStaticMarkup(<BriefView data={await loadBrief(d, undefined, post, locale)} locale={locale} signup={false} />);
       const text = textOf(out);
       expect(out).toContain(`<a class="more" href="/${locale}/ipo/anthropic">`);
-      expect(out).toContain('class="cover cover-article cover-flat"');
-      expect(text).toContain(locale === "en" ? "Price range $70.00–$78.00" : "价格区间 70.00–78.00美元");
+      // The generator's graphic under both cover lines, as on every other post with a cover.
+      expect(post.coverKey).toBe(`covers/${SLUG}.svg`);
+      expect(out).not.toContain("cover-flat");
+      const cover = out.slice(out.indexOf('<figure class="cover cover-article"'), out.indexOf("</figure>") + 9);
+      expect(cover).toContain(`<img class="cover-bg" src="/covers/${SLUG}.svg" alt="" loading="eager" fetchPriority="high"/>`);
+      const line2 = locale === "en" ? "Price range $70.00–$78.00" : "价格区间 70.00–78.00美元";
+      expect(cover).toContain(`<p class="cover-stat">Anthropic IPO<br/>${line2}</p>`);
       expect(text).toContain(locale === "en" ? "What has been reported" : "已有报道");
       // Quotes stay in English on both pages, word for word.
       expect(text).toContain("At the top of the range the offering would value Anthropic at roughly $1.4 trillion, the people said.");

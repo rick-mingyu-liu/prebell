@@ -97,8 +97,9 @@ fn dollars_cents(c: i128) -> String {
     format!("{}.{:02}", group_int(c / 100), (c % 100).abs())
 }
 
-/// A per-unit price: "$70.00", "$1,500.00" / "70.00美元".
-fn price(v: f64, lang: Lang) -> String {
+/// A per-unit price: "$70.00", "$1,500.00" / "70.00美元". The IPO cover
+/// graphic labels its prices with it too.
+pub(crate) fn price(v: f64, lang: Lang) -> String {
     match lang {
         Lang::En => format!("${}", dollars_cents(cents(v))),
         Lang::Zh => format!("{}美元", dollars_cents(cents(v))),
@@ -392,7 +393,8 @@ fn capital(s: &str) -> String {
     })
 }
 
-/// The two lines on the post's flat tile, by code.
+/// The two lines printed over the post's cover (its graphic, or the flat
+/// tile), by code.
 pub fn cover_lines(f: &IpoArticleFacts, lang: Lang) -> [String; 2] {
     let first = format!("{} IPO", name_of(f, lang));
     let lo_hi = f.num("price_low").zip(f.num("price_high"));
