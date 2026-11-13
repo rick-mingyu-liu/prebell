@@ -18,7 +18,6 @@
 //! cargo run --release -- seed --out DIR --dev-vars PATH [--budget 3.0] [--fresh] [--plan]
 //! cargo run --release -- page --out DIR [--cards 60]
 //! cargo run --release -- score --out DIR --labels FILE
-//! cargo run --release -- events-json ROWS.json > events.json
 //! ```
 //!
 //! Keys come from `--dev-vars` (or the environment) and stay in memory: no
@@ -116,7 +115,6 @@ pub(crate) struct Inputs {
     pub posts: Vec<(String, Post)>,
     pub checks: Vec<EarningsFacts>,
     pub calendar: Vec<(String, NaiveDate, ReportStatus)>,
-    pub macro_events: Vec<(NaiveDate, String)>,
 }
 
 impl Inputs {
@@ -131,7 +129,6 @@ impl Inputs {
             themes: post.themes(),
             checks: &self.checks,
             calendar: &self.calendar,
-            macro_events: &self.macro_events,
         });
         (p, movers.len())
     }
@@ -167,9 +164,10 @@ pub(crate) fn load_inputs(dir: &Path, only: Option<&str>) -> Inputs {
                     None => eprintln!("calendar: skipping {t} {d} ({status})"),
                 }
             }
-        } else if name == "events" {
-            let rows: Vec<(String, String)> = parse(&name, &json);
-            i.macro_events = rows.into_iter().map(|(d, n)| (date(&d), n)).collect();
+        } else if name == "events" || name == "macro_events.rows" {
+            // Saved by earlier versions of fetch-facts.sh: macro events are
+            // no longer a mover's evidence (trial run 1).
+            continue;
         } else if name.starts_with("earnings_") {
             i.checks.push(parse(&name, &json));
         } else if name.starts_with("premarket_") || name.starts_with("recap_") {
@@ -731,13 +729,39 @@ pub(crate) async fn run(
             })
             .collect();
         eprintln!(
-            "{name}: {} eligible of {movers}, {written} written, {checked} passed the checks, judge passes: {} (spent ${:.4})",
+            "{name}: {} eligible of {movers}, {written} written, {checked} passed the checks, judge passes: {} (spent ${:.4}){}",
             packs.len(),
             passes.join(", "),
-            m.budget.spent.get()
+            m.budget.spent.get(),
+            top_refusals(&records)
         );
     }
     Ok(())
+}
+
+/// The three most common reasons the code checks gave in `records`, as
+/// "; refused for: en: does not name … (3), …", or nothing.
+pub(crate) fn top_refusals(records: &[Record]) -> String {
+    let mut counts: BTreeMap<String, usize> = BTreeMap::new();
+    for r in records {
+        let mut kinds: Vec<String> = r.check.iter().map(|c| score::reason_kind(c)).collect();
+        kinds.sort();
+        kinds.dedup();
+        for k in kinds {
+            *counts.entry(k).or_default() += 1;
+        }
+    }
+    let mut counts: Vec<(String, usize)> = counts.into_iter().collect();
+    counts.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+    if counts.is_empty() {
+        return String::new();
+    }
+    let top: Vec<String> = counts
+        .iter()
+        .take(3)
+        .map(|(k, n)| format!("{k} ({n})"))
+        .collect();
+    format!("; refused for: {}", top.join(", "))
 }
 
 /// The calls `seed` would make for `plans`.
@@ -892,27 +916,6 @@ pub(crate) async fn seed(m: &Models, out: &Path, fresh: bool) -> Result<(), Stri
     Ok(())
 }
 
-/// `events-json`: D1 `macro_events` rows (`fetch-facts.sh`) as
-/// `[["YYYY-MM-DD", title], ...]`, titled as the site titles them. Rows the
-/// site does not show (a series without a title) are left out.
-fn events_json(rows: &Value) -> Value {
-    let rows = rows.as_array().cloned().unwrap_or_default();
-    let s = |r: &Value, k: &str| r.get(k).and_then(Value::as_str).map(str::to_string);
-    Value::Array(
-        rows.iter()
-            .filter_map(|r| {
-                let title = prebell_core::events::title(
-                    &s(r, "series")?,
-                    s(r, "ref_period").as_deref(),
-                    s(r, "variant").as_deref(),
-                    prebell_core::Lang::En,
-                )?;
-                Some(json!([s(r, "et_date")?, title]))
-            })
-            .collect(),
-    )
-}
-
 fn arg(args: &[String], name: &str) -> Option<String> {
     args.iter()
         .position(|a| a == name)
@@ -972,7 +975,7 @@ fn finish(m: &Models, r: Result<(), String>) {
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
     let args: Vec<String> = std::env::args().collect();
-    let usage = "usage: insight-trial run --facts DIR --out DIR --dev-vars PATH [--budget 3.0] [--only SUBSTR] [--fresh] [--plan]\n       insight-trial seed --out DIR --dev-vars PATH [--budget 3.0] [--fresh] [--plan]\n       insight-trial page --out DIR [--cards 60]\n       insight-trial score --out DIR --labels FILE\n       insight-trial events-json ROWS.json";
+    let usage = "usage: insight-trial run --facts DIR --out DIR --dev-vars PATH [--budget 3.0] [--only SUBSTR] [--fresh] [--plan]\n       insight-trial seed --out DIR --dev-vars PATH [--budget 3.0] [--fresh] [--plan]\n       insight-trial page --out DIR [--cards 60]\n       insight-trial score --out DIR --labels FILE";
     match args.get(1).map(String::as_str) {
         Some("run") => {
             let out = PathBuf::from(need(&args, "--out"));
@@ -985,11 +988,10 @@ async fn main() {
             let done: Vec<Record> = kept_jsonl(&out.join("lines.jsonl"), fresh);
             let plan = run_plan(&inputs, &done, &budget.ledger);
             eprintln!(
-                "{} posts, {} earnings checks, {} calendar rows, {} macro events",
+                "{} posts, {} earnings checks, {} calendar rows",
                 inputs.posts.len(),
                 inputs.checks.len(),
-                inputs.calendar.len(),
-                inputs.macro_events.len()
+                inputs.calendar.len()
             );
             eprintln!("{}", plan.describe("run"));
             if flag(&args, "--plan") {
@@ -1070,14 +1072,6 @@ async fn main() {
             let md = score::report(&records, &posts, &seeded, &spend, &labels);
             fs::write(out.join("report.md"), &md).expect("report.md");
             println!("{md}");
-        }
-        Some("events-json") => {
-            let rows = args.get(2).unwrap_or_else(|| {
-                eprintln!("{usage}");
-                std::process::exit(2)
-            });
-            let v: Value = parse(rows, &fs::read_to_string(rows).expect("read rows"));
-            println!("{}", events_json(&v));
         }
         _ => {
             eprintln!("{usage}");
@@ -1630,6 +1624,7 @@ pub(crate) mod tests {
             r#"[["AAPL","2026-11-19","unconfirmed"],["AAPL","2026-08-01","quarantined"]]"#,
         )
         .unwrap();
+        // Saved by earlier versions; ignored now.
         fs::write(dir.join("events.json"), r#"[["2026-11-13","October CPI"]]"#).unwrap();
         fs::write(dir.join("macro_events.rows.json"), "[]").unwrap();
         let i = load_inputs(&dir, Some("11-12"));
@@ -1642,26 +1637,13 @@ pub(crate) mod tests {
                 ReportStatus::Unconfirmed
             )]
         );
-        assert_eq!(
-            i.macro_events,
-            [(date("2026-11-13"), "October CPI".to_string())]
-        );
         let (packs, movers) = i.packs(&i.posts[0].1);
         assert_eq!((packs.len(), movers), (1, 1));
         let kinds: Vec<_> = packs[0].evidence.iter().map(|e| e.kind).collect();
         use prebell_core::insight::EvidenceKind::*;
-        assert_eq!(kinds, [Move, News, ReportDate, MacroEvent]);
+        assert_eq!(kinds, [Move, News, ReportDate]);
         assert!(packs[0].evidence[2].unconfirmed);
         fs::remove_dir_all(dir).unwrap();
-    }
-
-    #[test]
-    fn events_are_titled_as_the_site_titles_them() {
-        let rows = json!([
-            {"et_date": "2026-11-13", "series": "cpi", "ref_period": "2026-10", "variant": null},
-            {"et_date": "2026-11-14", "series": "unknown_series", "ref_period": null, "variant": null},
-        ]);
-        assert_eq!(events_json(&rows), json!([["2026-11-13", "October CPI"]]));
     }
 
     /// Round 2, M2: when seeding every post would pass what is left under
@@ -1733,5 +1715,28 @@ pub(crate) mod tests {
         let lines: Vec<Record> = read_jsonl(&out.join("lines.jsonl"));
         assert!(lines[0].judges["claude"].passed);
         fs::remove_dir_all(out).unwrap();
+    }
+
+    /// Trial run 1, item 7: the progress line names the commonest refusals.
+    #[test]
+    fn the_progress_line_names_the_commonest_refusals() {
+        use crate::page::tests::record;
+        let mut rs: Vec<Record> = (0..4)
+            .map(|k| record("recap_2026-11-10", &format!("T{k}"), (true, true)))
+            .collect();
+        rs[0].check = vec![
+            "en: does not name seekingalpha.com, the outlet of a cited item".into(),
+            "zh: hook has 15 characters (at most 14)".into(),
+        ];
+        rs[1].check = vec!["en: does not name benzinga.com, the outlet of a cited item".into()];
+        rs[2].check = vec![
+            "zh: relative time: 今年".into(),
+            "zh: hook has 16 characters (at most 14)".into(),
+        ];
+        assert_eq!(
+            top_refusals(&rs),
+            "; refused for: zh: hook has N characters (at most N) (2), en: does not name benzinga.com, the outlet of a cited item (1), en: does not name seekingalpha.com, the outlet of a cited item (1)"
+        );
+        assert_eq!(top_refusals(&rs[3..]), "");
     }
 }

@@ -240,7 +240,7 @@ pub(crate) fn score<'a>(records: &'a [Record], seeded: &[Seeded], labels: &[Labe
 
 /// A refusal reason without its particulars, for counting: the language and
 /// the rule ("en: numbers not in the cited evidence"), digits as "N".
-fn reason_kind(r: &str) -> String {
+pub(crate) fn reason_kind(r: &str) -> String {
     let mut parts = r.splitn(3, ": ");
     let head = [parts.next(), parts.next()]
         .into_iter()

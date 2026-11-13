@@ -8,8 +8,6 @@
 #   premarket_<date>.json, recap_<date>.json   briefs and recaps, last 14 days
 #   earnings_<TICKER>_<accession>.json          earnings checks, last 21 days
 #   calendar.json   [[ticker, "YYYY-MM-DD", status], ...] report dates, not quarantined
-#   events.json     [["YYYY-MM-DD", title], ...]  macro events, titled as the site does
-#   macro_events.rows.json                       the raw macro rows events.json is built from
 #
 # Each R2 key is saved with "/" replaced by "_"; a file already saved is kept.
 # Needs wrangler (run through npx from crates/generator, so it finds the
@@ -55,12 +53,4 @@ query "SELECT ticker, report_date, status FROM earnings_calendar
     AND report_date BETWEEN date('now', '-120 day') AND date('now', '+100 day')
   ORDER BY ticker, report_date" | jq '[.[] | [.ticker, .report_date, .status]]' >"$out/calendar.json"
 
-# Macro events from the oldest post's date to a week ahead; titles come from
-# prebell_core::events::title, as on the site.
-query "SELECT et_date, series, ref_period, variant FROM macro_events
-  WHERE status != 'postponed'
-    AND et_date BETWEEN date('now', '-15 day') AND date('now', '+8 day')
-  ORDER BY et_date, id" >"$out/macro_events.rows.json"
-(cd "$tool" && env -u CARGO_TARGET_DIR cargo run --release --quiet -- events-json "$out/macro_events.rows.json") >"$out/events.json"
-
-echo "calendar rows: $(jq length "$out/calendar.json"), events: $(jq length "$out/events.json")" >&2
+echo "calendar rows: $(jq length "$out/calendar.json")" >&2

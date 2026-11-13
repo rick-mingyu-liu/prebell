@@ -36,7 +36,7 @@ From the repository root:
 ```sh
 # 1. Save the last two weeks of briefs and recaps, three weeks of earnings
 #    checks, the earnings calendar (every status but quarantined, as
-#    [ticker, date, status]) and the macro events (read-only: D1
+#    [ticker, date, status]) (read-only: D1
 #    SELECTs and R2 gets).
 tools/insight-trial/fetch-facts.sh tools/insight-trial/facts
 
@@ -65,6 +65,11 @@ env -u CARGO_TARGET_DIR cargo run --release -- score --out out --labels ~/Downlo
 
 `--dev-vars` names the file that holds the keys: in the main checkout,
 `crates/generator/.dev.vars` (a git worktree has none, so give its full path).
+The ledger lives in `--out`, so a run into a new folder starts it empty.
+To keep one cap across folders (trial run 1 is kept in `out-v1/`, ignored by
+git as `out-*/`), copy the earlier `spend.jsonl` into the new folder first,
+or lower `--budget` by what the earlier folder spent.
+
 `--only SUBSTR` keeps the posts whose file name contains it (for example
 `--only recap_2026-11-12`).
 
