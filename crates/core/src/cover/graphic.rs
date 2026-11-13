@@ -14,24 +14,24 @@ use crate::earnings::facts::{numbers_in_facts, EarningsFacts};
 use crate::facts::Mover;
 use crate::numbers::{check, Lang};
 
-const INK: &str = "#1a1a1a";
+pub(super) const INK: &str = "#1a1a1a";
 const UP: &str = "#15803d";
 const DOWN: &str = "#b91c1c";
-const GREY: &str = "#d9d5cc";
-const CAPTION: &str = "#666";
+pub(super) const GREY: &str = "#d9d5cc";
+pub(super) const CAPTION: &str = "#666";
 
 /// Side margin kept clear of every mark and label.
-const MARGIN: f64 = 24.0;
+pub(super) const MARGIN: f64 = 24.0;
 /// Top of the chart area: the lower 58% of the 360-unit height.
-const CHART_TOP: f64 = 151.2;
+pub(super) const CHART_TOP: f64 = 151.2;
 /// Caption baseline, bottom-left.
 const CAPTION_Y: f64 = 350.0;
 /// Label size, and the width budgeted per label character at that size
 /// (generous for Inter, so an estimate never overruns the margin).
-const LABEL_SIZE: f64 = 15.0;
-const CHAR_W: f64 = 10.0;
+pub(super) const LABEL_SIZE: f64 = 15.0;
+pub(super) const CHAR_W: f64 = 10.0;
 /// Space between a bar and its labels.
-const GAP: f64 = 8.0;
+pub(super) const GAP: f64 = 8.0;
 
 /// One mover as the brief cover draws it.
 #[derive(Debug, Clone, PartialEq)]
@@ -82,12 +82,12 @@ pub(crate) const BACKGROUND: &str =
     r##"<rect x="0" y="0" width="640" height="360" fill="#faf8f3"/>"##;
 
 /// The root element and the paper background.
-fn open_svg() -> String {
+pub(super) fn open_svg() -> String {
     format!("{ROOT}{BACKGROUND}")
 }
 
 /// One rect in the shape the tests parse.
-fn rect(out: &mut String, x: f64, y: f64, w: f64, h: f64, fill: &str) {
+pub(super) fn rect(out: &mut String, x: f64, y: f64, w: f64, h: f64, fill: &str) {
     write!(
         out,
         r#"<rect x="{x:.1}" y="{y:.1}" width="{w:.1}" height="{h:.1}" fill="{fill}"/>"#
@@ -96,7 +96,7 @@ fn rect(out: &mut String, x: f64, y: f64, w: f64, h: f64, fill: &str) {
 }
 
 /// One text; `attrs` follows x and y, `content` is escaped here.
-fn text(out: &mut String, x: f64, y: f64, attrs: &str, content: &str) {
+pub(super) fn text(out: &mut String, x: f64, y: f64, attrs: &str, content: &str) {
     write!(
         out,
         r#"<text x="{x:.1}" y="{y:.1}" {attrs}>{}</text>"#,
@@ -106,7 +106,7 @@ fn text(out: &mut String, x: f64, y: f64, attrs: &str, content: &str) {
 }
 
 /// A label in ink at the label size, anchored `anchor`.
-fn label(out: &mut String, x: f64, y: f64, anchor: &str, weight: u16, content: &str) {
+pub(super) fn label(out: &mut String, x: f64, y: f64, anchor: &str, weight: u16, content: &str) {
     let attrs = format!(
         r#"font-size="{LABEL_SIZE}" font-weight="{weight}" fill="{INK}" text-anchor="{anchor}""#
     );
@@ -114,7 +114,7 @@ fn label(out: &mut String, x: f64, y: f64, anchor: &str, weight: u16, content: &
 }
 
 /// The grey, letter-spaced caption bottom-left, then the closing tag.
-fn caption_and_close(mut out: String, caption: &str) -> String {
+pub(super) fn caption_and_close(mut out: String, caption: &str) -> String {
     let attrs =
         format!(r#"font-size="11" font-weight="600" letter-spacing="1.5" fill="{CAPTION}""#);
     text(&mut out, MARGIN, CAPTION_Y, &attrs, caption);
@@ -123,7 +123,7 @@ fn caption_and_close(mut out: String, caption: &str) -> String {
 }
 
 /// The width budgeted for `s` at the label size.
-fn label_width(s: &str) -> f64 {
+pub(super) fn label_width(s: &str) -> f64 {
     s.chars().count() as f64 * CHAR_W
 }
 
@@ -325,7 +325,7 @@ fn earnings_svg(all: &[Series], allowed: &[f64]) -> Option<String> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
     use crate::earnings::facts::tests::{facts, fig};
     use crate::earnings::facts::{QuarterPoint, Trend, Unit};
@@ -344,7 +344,7 @@ mod tests {
     }
 
     /// Every `<rect>` as (x, y, width, height, fill).
-    fn rects(svg: &str) -> Vec<(f64, f64, f64, f64, String)> {
+    pub(in crate::cover) fn rects(svg: &str) -> Vec<(f64, f64, f64, f64, String)> {
         let re = Regex::new(
             r#"<rect x="([-\d.]+)" y="([-\d.]+)" width="([-\d.]+)" height="([-\d.]+)" fill="([^"]+)"/>"#,
         )
@@ -363,7 +363,7 @@ mod tests {
     }
 
     /// Every `<text>` as (x, y, content).
-    fn texts(svg: &str) -> Vec<(f64, f64, String)> {
+    pub(in crate::cover) fn texts(svg: &str) -> Vec<(f64, f64, String)> {
         let re = Regex::new(r#"<text x="([-\d.]+)" y="([-\d.]+)"[^>]*>([^<]*)</text>"#).unwrap();
         re.captures_iter(svg)
             .map(|c| {

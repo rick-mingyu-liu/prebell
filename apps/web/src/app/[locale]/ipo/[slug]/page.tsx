@@ -1,9 +1,11 @@
 import type { Metadata } from "next";
 import { notFound } from "next/navigation";
 import { cache } from "react";
+import { getCloudflareContext } from "@opennextjs/cloudflare";
 import { getTranslations, setRequestLocale } from "next-intl/server";
 import IpoView from "@/components/IpoView";
 import type { Locale } from "@/i18n/routing";
+import { postCard } from "@/lib/covers";
 import { getDb } from "@/lib/db";
 import { todayEt } from "@/lib/earnings";
 import { loadIpo } from "@/lib/ipo";
@@ -30,6 +32,8 @@ export async function generateMetadata({ params }: PageProps<"/[locale]/ipo/[slu
       title,
       description,
       siteName: t("site.name"),
+      // The newest write-up's share card, once the generator has rendered it (one R2 head); else the default.
+      image: await postCard(getCloudflareContext().env.FACTS, ipo.writeups[0]?.coverKey ?? null),
     }),
   };
 }

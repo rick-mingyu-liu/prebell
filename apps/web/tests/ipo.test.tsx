@@ -22,9 +22,13 @@ import { todayEt } from "../src/lib/earnings";
 import { memoryD1 } from "./d1";
 
 // The pages read D1 through getDb() and messages through next-intl/server; both are swapped for an in-memory D1
-// (every migration plus db/seed-ipo-preview.sql) and the synchronous translator.
-const env = vi.hoisted(() => ({ db: null as unknown, locale: "en" as string }));
+// (every migration plus db/seed-ipo-preview.sql) and the synchronous translator. R2 (the share-card lookup)
+// holds the cards in `env.cards`.
+const env = vi.hoisted(() => ({ db: null as unknown, locale: "en" as string, cards: new Set<string>() }));
 vi.mock("@/lib/db", () => ({ getDb: () => env.db }));
+vi.mock("@opennextjs/cloudflare", () => ({
+  getCloudflareContext: () => ({ env: { FACTS: { head: async (k: string) => (env.cards.has(k) ? { key: k } : null) } } }),
+}));
 vi.mock("next-intl/server", () => ({
   setRequestLocale: (l: string) => {
     env.locale = l;
@@ -98,6 +102,7 @@ const VIEW_QUOTE = "The office tools show how far they want to push into softwar
 
 beforeEach(() => {
   env.db = memoryD1(SEED);
+  env.cards = new Set();
   // The watch list keeps a listed IPO for 30 days after its first trade; fix "today" at the seed's day.
   vi.useFakeTimers({ toFake: ["Date"] });
   vi.setSystemTime(new Date("2026-11-11T15:00:00Z"));
@@ -537,6 +542,27 @@ describe("IPO page", () => {
     expect(en.description).toMatch(/^Anthropic's IPO: the offering from its SEC filings/);
     const zh = await generateMetadata(props({ locale: "zh", slug: "northwind-robotics" }));
     expect(zh).toMatchObject({ title: "北风机器人 IPO", alternates: { canonical: "/zh/ipo/northwind-robotics" }, openGraph: { locale: "zh_CN" } });
+  });
+
+  it("names its newest write-up's share card once the generator has rendered it, else the default card", async () => {
+    const ARTICLE = readFileSync(new URL("../../../db/seed-ipo-articles-preview.sql", import.meta.url), "utf8");
+    const image = async (locale: Locale) =>
+      ((await generateMetadata(props({ locale, slug: "anthropic" }))).openGraph as { images: { url: string }[] }).images[0].url;
+    // No write-up: the default card.
+    expect(await image("en")).toBe("/og-default.png");
+    env.db = memoryD1(`${SEED}
+${ARTICLE}`);
+    // A write-up whose card is not rendered yet: still the default, so an early share never caches a changing URL.
+    expect(await image("en")).toBe("/og-default.png");
+    env.cards = new Set(["og/anthropic-ipo-price-range-2026-11-10.png"]);
+    for (const locale of ["en", "zh"] as const) expect(await image(locale)).toBe("/og/anthropic-ipo-price-range-2026-11-10.png");
+    const tw = (await generateMetadata(props({ locale: "en", slug: "anthropic" }))).twitter as { images: { url: string }[] };
+    expect(tw.images[0].url).toBe("/og/anthropic-ipo-price-range-2026-11-10.png");
+    // A write-up without a cover (published before covers): the default card, and no R2 lookup.
+    env.db = memoryD1(`${SEED}
+${ARTICLE}
+UPDATE posts SET cover_key = NULL;`);
+    expect(await image("en")).toBe("/og-default.png");
   });
 
   it("reads D1 six times (the sixth lists its write-ups) and R2 never", async () => {

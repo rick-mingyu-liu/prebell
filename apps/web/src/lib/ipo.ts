@@ -8,6 +8,7 @@
  * on www.sec.gov, the trading source only on finance.yahoo.com).
  */
 
+import { COVER_KEY } from "./covers";
 import { addDays, isDate, todayEt } from "./earnings";
 import { round2 } from "./format";
 import type { D1Like, Lang } from "./posts";
@@ -153,7 +154,7 @@ export interface IpoPage extends IpoSummary {
   trading: { first: IpoSession | null; latest: IpoSession | null; firstIsDayOne: boolean } | null;
   updatedAt: string | null;
   /** PreBell's write-ups about this IPO published in the page's language, newest first. */
-  writeups: IpoWriteup[];
+  writeups: IpoPageWriteup[];
 }
 
 /** The URL segment the generator writes. */
@@ -611,6 +612,12 @@ export interface IpoWriteup {
   tradingDate: string;
 }
 
+/** A write-up as the IPO page lists it, with its cover (the newest one's share card is the page's). */
+export interface IpoPageWriteup extends IpoWriteup {
+  /** `covers/<stem>.svg` once the generator drew one, else null. */
+  coverKey: string | null;
+}
+
 /** One active IPO as the home page's section shows it. */
 export interface HomeIpo extends IpoSummary {
   exchange: string | null;
@@ -745,23 +752,24 @@ export async function listHomeIpos(db: D1Like, lang: Lang, today: string): Promi
  * An IPO's write-ups published in `lang`, newest first (at most 12), by run-key range on posts' unique run_key
  * index: `ipo:<slug>:` up to `ipo:<slug>;`.
  */
-export async function listIpoWriteups(db: D1Like, slug: string, lang: Lang): Promise<IpoWriteup[]> {
+export async function listIpoWriteups(db: D1Like, slug: string, lang: Lang): Promise<IpoPageWriteup[]> {
   if (!isIpoSlug(slug)) return [];
   try {
     const { results } = await db
       .prepare(
-        `SELECT p.slug, t.title, p.trading_date FROM posts p
+        `SELECT p.slug, t.title, p.trading_date, p.cover_key FROM posts p
          CROSS JOIN post_translations t ON t.post_id = p.id AND t.lang = ? AND t.status = 'published'
          WHERE p.run_key >= ? AND p.run_key < ? AND p.content_type = 'ipo'
          ORDER BY p.trading_date DESC, p.published_at DESC, p.id DESC LIMIT 12`,
       )
       .bind(lang, `ipo:${slug}:`, `ipo:${slug};`)
-      .all<{ slug: unknown; title: unknown; trading_date: unknown }>();
+      .all<{ slug: unknown; title: unknown; trading_date: unknown; cover_key: unknown }>();
     return results.flatMap((r) => {
       const s = typeof r.slug === "string" && POST_SLUG.test(r.slug) ? r.slug : null;
       const title = text(r.title);
       const tradingDate = dateOf(r.trading_date);
-      return s && title && tradingDate ? [{ slug: s, title, tradingDate }] : [];
+      const coverKey = typeof r.cover_key === "string" && COVER_KEY.test(r.cover_key) ? r.cover_key : null;
+      return s && title && tradingDate ? [{ slug: s, title, tradingDate, coverKey }] : [];
     });
   } catch {
     return [];

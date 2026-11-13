@@ -32,14 +32,34 @@
 //! a page the guard refuses) is retried after 5, 15, 30 and 60 minutes; the
 //! fifth failed build marks the run `failed` with an error alert, so a
 //! milestone costs at most `MAX_BUILDS` builds over about two hours.
+//!
+//! **Cover and share card.** A build draws the milestone's cover graphic
+//! from the facts (`cover::ipo`) and writes it to R2 as
+//! `covers/<post slug>.svg` before the post row, so the post goes live with
+//! its `cover_key`; a withdrawal, a milestone missing a figure, or a failed
+//! R2 write leaves it NULL (the flat tile) and never fails the build. The
+//! message then queues a `cards` message, which renders the share card in
+//! an invocation of its own (`cover::card`).
+//!
+//! **Cover backfill.** A message that built nothing gives at most one
+//! already-published write-up without a cover its cover, recomputed from
+//! its stored facts bundle: a write-up of the last `card::WINDOW_DAYS` days
+//! (older ones would get no card), not a withdrawal, with its text live.
+//! Its attempts are counted in R2 (`covers/<post slug>.attempts`, never
+//! served) before each try, `COVER_TRIES` at most; facts that give no
+//! graphic use them all up at once. Setting `cover_key` (`upsert_post`,
+//! which keeps `published_at` and `revised_at`) makes it once only.
 
 use chrono::{DateTime, Duration, Utc};
 
-use super::milestone::{bundle, latest, IpoArticleFacts, Reached};
+use super::milestone::{bundle, latest, reached, IpoArticleFacts, Milestone, Reached};
 use super::store::{IpoState, IpoStore};
 use super::writeup::{self, cover_lines, source_rows, template_id, CONTENT_TYPE};
 use super::{iso, Tracked};
 use crate::clock::{et, trading_day, DayKind};
+use crate::cover::card::WINDOW_DAYS;
+use crate::cover::ipo::ipo_graphic;
+use crate::cover::store_graphic;
 use crate::earnings::store::EarningsStore;
 use crate::jobs::alert_once_today;
 use crate::numbers::Lang;
@@ -60,6 +80,8 @@ const LEASE_MINUTES: i64 = 15;
 /// A milestone older than this (ET days from its filing or session) when
 /// first found is skipped.
 pub const LATE_DAYS: i64 = 7;
+/// Tries the cover backfill gives one write-up.
+pub const COVER_TRIES: u32 = 3;
 
 /// `IPO_ARTICLES_ENABLED`: on only when it is exactly `true`.
 pub fn enabled(raw: Option<&str>) -> bool {
@@ -102,6 +124,9 @@ pub struct ArticleOutcome {
     pub next: String,
     /// Whether a write-up went live.
     pub published: bool,
+    /// Whether a write-up got its cover (built with one, or backfilled), so
+    /// its share card should be rendered now.
+    pub card: bool,
 }
 
 fn parse_iso(s: &str) -> Option<DateTime<Utc>> {
@@ -202,10 +227,25 @@ pub async fn article_tick(
                     next = next.min(at);
                 }
                 out.published |= b.published;
+                out.card |= b.card;
                 b.what
             }
         };
         out.runs.push((key, what));
+    }
+    // One build or one backfill per message.
+    if !built {
+        match backfill_cover(now, &st, list, store).await {
+            Ok(Some((key, what, card))) => {
+                out.card |= card;
+                out.runs.push((key, what));
+            }
+            Ok(None) => {}
+            // Never fails the pass: the next one tries again.
+            Err(e) => out
+                .runs
+                .push(("cover backfill".into(), format!("failed: {e}"))),
+        }
     }
     if next != idle {
         es.kv_set(KV_NEXT, &iso(next), &iso(now)).await?;
@@ -287,6 +327,8 @@ struct Built {
     /// When to come back for a failed build.
     retry: Option<DateTime<Utc>>,
     published: bool,
+    /// Published with a cover.
+    card: bool,
 }
 
 /// The post's slug (contract), with the key's tail when another run owns it.
@@ -364,6 +406,7 @@ async fn build(
                 what: "published (run closed)".into(),
                 retry: None,
                 published: false,
+                card: false,
             });
         }
     }
@@ -400,21 +443,25 @@ async fn build(
             what: "finished elsewhere".into(),
             retry: None,
             published: false,
+            card: false,
         });
     }
     let facts_key = f.facts_key();
     let json = serde_json::to_string(&f).map_err(|e| format!("facts json: {e}"))?;
     store.put_facts(&facts_key, &json).await?;
+    let slug = post_slug(es, &f).await?;
+    // Never fails the build: without a cover the post keeps the flat tile.
+    let (cover_key, cover, cover_err) = store_graphic(store, &slug, ipo_graphic(&f)).await;
     let mut post = PostRow {
         id: None,
         run_key: key.clone(),
         content_type: CONTENT_TYPE.into(),
         template_id: template_id(f.milestone),
         trading_date: f.as_of.clone(),
-        slug: post_slug(es, &f).await?,
+        slug,
         facts_r2_key: facts_key,
         published_at: Some(ts.clone()),
-        cover_key: None,
+        cover_key,
         revised_at: None,
     };
     // Invisible until the batch below: no translation yet.
@@ -430,11 +477,95 @@ async fn build(
     row.last_error = None;
     row.updated_at = ts;
     store.upsert_run(&row).await?;
+    let cover = match cover_err {
+        Some(e) => format!("{cover}: {e}"),
+        None => cover.to_string(),
+    };
     Ok(Built {
-        what: format!("published {}", post.slug),
+        what: format!("published {} (cover {cover})", post.slug),
         retry: None,
         published: true,
+        card: post.cover_key.is_some(),
     })
+}
+
+/// The cover backfill (module docs): `(run_key, what happened, whether a
+/// cover was added)` for the one write-up it tried, or `None`.
+async fn backfill_cover(
+    now: DateTime<Utc>,
+    st: &IpoState,
+    list: &[Tracked],
+    store: &dyn Store,
+) -> Result<Option<(String, String, bool)>, String> {
+    for t in list {
+        for r in reached(st, &t.slug) {
+            if r.milestone == Milestone::Withdrawn || late(&r, now) > WINDOW_DAYS {
+                continue;
+            }
+            let key = r.run_key(&t.slug);
+            let Some(mut post) = store.get_post_by_run(&key).await? else {
+                continue;
+            };
+            let Some(id) = post.id else { continue };
+            if post.cover_key.is_some() || post.published_at.is_none() {
+                continue;
+            }
+            // Read first, so a given-up write-up costs no translation read.
+            let counter = format!("covers/{}.attempts", post.slug);
+            let tried: u32 = match store.get_facts(&counter).await? {
+                Some(n) => n.trim().parse().unwrap_or(COVER_TRIES),
+                None => 0,
+            };
+            if tried >= COVER_TRIES {
+                continue;
+            }
+            // Only a live write-up: a half-built one gets its cover from its build.
+            if !store
+                .get_translation(id, "en")
+                .await?
+                .is_some_and(|x| x.status == "published")
+            {
+                continue;
+            }
+            // Counted first, so a pass that dies here still counts.
+            store.put_facts(&counter, &(tried + 1).to_string()).await?;
+            let svg = match store.get_facts(&post.facts_r2_key).await? {
+                Some(json) => match serde_json::from_str::<IpoArticleFacts>(&json) {
+                    Ok(f) => ipo_graphic(&f),
+                    Err(e) => {
+                        let what = format!("no cover: bad facts bundle: {e}");
+                        return Ok(Some((key, what, false)));
+                    }
+                },
+                None => {
+                    let what = format!("no cover: facts bundle {} missing", post.facts_r2_key);
+                    return Ok(Some((key, what, false)));
+                }
+            };
+            let Some(svg) = svg else {
+                // The facts give no graphic, now or later: not tried again.
+                store.put_facts(&counter, &COVER_TRIES.to_string()).await?;
+                return Ok(Some((
+                    key,
+                    "no cover: the facts give no graphic".into(),
+                    false,
+                )));
+            };
+            let (cover_key, outcome, err) = store_graphic(store, &post.slug, Some(svg)).await;
+            let Some(cover_key) = cover_key else {
+                let what = format!(
+                    "no cover: {outcome} (try {} of {COVER_TRIES}): {}",
+                    tried + 1,
+                    err.unwrap_or_default()
+                );
+                return Ok(Some((key, what, false)));
+            };
+            post.cover_key = Some(cover_key.clone());
+            store.upsert_post(&post).await?;
+            return Ok(Some((key, format!("cover added: {cover_key}"), true)));
+        }
+    }
+    Ok(None)
 }
 
 async fn not_ready(
@@ -451,6 +582,7 @@ async fn not_ready(
             what,
             retry: None,
             published: false,
+            card: false,
         });
     }
     row.status = "pending".into();
@@ -469,6 +601,7 @@ async fn not_ready(
         what: format!("retrying: {err}"),
         retry: at,
         published: false,
+        card: false,
     })
 }
 
@@ -581,10 +714,10 @@ mod tests {
             out.runs,
             [(
                 RUN.to_string(),
-                "published anthropic-ipo-price-range-2026-11-10".into()
+                "published anthropic-ipo-price-range-2026-11-10 (cover ok)".into()
             )]
         );
-        assert!(out.published);
+        assert!(out.published && out.card);
         let posts = w.base.posts.borrow().clone();
         assert_eq!(posts.len(), 1);
         let p = &posts[0];
@@ -604,9 +737,18 @@ mod tests {
                 "ipo-range_set",
                 "2026-11-10",
                 "ipo/anthropic/range_set-0001628280-26-072484.json",
-                None,
+                Some("covers/anthropic-ipo-price-range-2026-11-10.svg"),
                 None
             )
+        );
+        // The cover is the facts' own graphic, in R2 before the post went live.
+        let (svg, ctype) =
+            w.base.bytes.borrow()["covers/anthropic-ipo-price-range-2026-11-10.svg"].clone();
+        assert_eq!(ctype, "image/svg+xml");
+        let svg = String::from_utf8(svg).unwrap();
+        assert!(
+            svg.contains(">$70.00<") && svg.contains(">$78.00<"),
+            "{svg}"
         );
         assert!(p.published_at.is_some());
         let tr = w.base.translations.borrow().clone();
@@ -639,7 +781,7 @@ mod tests {
 
         // Published once: later passes write nothing.
         let out = w.tick("2026-11-12T15:00:00Z").await;
-        assert!(out.runs.is_empty() && !out.published);
+        assert!(out.runs.is_empty() && !out.published && !out.card);
         assert_eq!(w.base.posts.borrow().len(), 1);
     }
 
@@ -748,7 +890,7 @@ mod tests {
             out.runs,
             [(
                 "ipo:anthropic:priced:0001628280-26-090001".to_string(),
-                "published anthropic-ipo-priced-2026-11-18".into()
+                "published anthropic-ipo-priced-2026-11-18 (cover ok)".into()
             )],
             "{out:?}"
         );
@@ -804,6 +946,168 @@ mod tests {
             en.starts_with("# Anthropic closes first trading day at $101.50\n"),
             "{en}"
         );
+    }
+
+    const SLUG: &str = "anthropic-ipo-price-range-2026-11-10";
+    const COVER: &str = "covers/anthropic-ipo-price-range-2026-11-10.svg";
+    const TRIES: &str = "covers/anthropic-ipo-price-range-2026-11-10.attempts";
+
+    impl World {
+        /// The live write-up as the first deploy published it: no cover.
+        async fn published_without_cover(&self) {
+            self.tick(NOW).await;
+            let mut posts = self.base.posts.borrow_mut();
+            posts[0].cover_key = None;
+            posts[0].revised_at = Some("2026-11-11T22:30:00Z".into());
+            self.base.bytes.borrow_mut().clear();
+        }
+        fn post(&self) -> PostRow {
+            self.base.posts.borrow()[0].clone()
+        }
+        fn tries(&self) -> Option<String> {
+            self.base.facts.borrow().get(TRIES).cloned()
+        }
+    }
+
+    #[tokio::test]
+    async fn a_published_write_up_without_a_cover_gets_one_on_a_later_pass() {
+        let w = world();
+        w.published_without_cover().await;
+        let before = w.post();
+        let out = w.tick("2026-11-12T15:00:00Z").await;
+        assert_eq!(
+            out.runs,
+            [(RUN.to_string(), format!("cover added: {COVER}"))]
+        );
+        assert!(out.card && !out.published);
+        let after = w.post();
+        assert_eq!(after.cover_key.as_deref(), Some(COVER));
+        // Only the cover changed: not the slug, the dates or the text.
+        assert_eq!(
+            PostRow {
+                cover_key: None,
+                ..after.clone()
+            },
+            before
+        );
+        let (svg, _) = w.base.bytes.borrow()[COVER].clone();
+        let svg = String::from_utf8(svg).unwrap();
+        let f: IpoArticleFacts =
+            serde_json::from_str(&w.base.facts.borrow()[&after.facts_r2_key]).unwrap();
+        assert_eq!(Some(svg), ipo_graphic(&f));
+        assert_eq!(w.tries().as_deref(), Some("1"));
+        // Once only: the next pass finds the cover and does nothing.
+        let out = w.tick("2026-11-12T16:00:00Z").await;
+        assert!(out.runs.is_empty() && !out.card, "{out:?}");
+    }
+
+    #[tokio::test]
+    async fn the_backfill_gives_up_after_three_failed_tries() {
+        let w = world();
+        w.published_without_cover().await;
+        w.base.fail_put_bytes.set(true);
+        for (n, at) in ["15:00", "16:00", "17:00"].iter().enumerate() {
+            let out = w.tick(&format!("2026-11-12T{at}:00Z")).await;
+            assert_eq!(out.runs.len(), 1, "{out:?}");
+            assert!(
+                out.runs[0]
+                    .1
+                    .starts_with(&format!("no cover: err (try {} of 3)", n + 1)),
+                "{out:?}"
+            );
+            assert!(!out.card);
+        }
+        w.base.fail_put_bytes.set(false);
+        let out = w.tick("2026-11-12T18:00:00Z").await;
+        assert!(out.runs.is_empty(), "{out:?}");
+        assert_eq!(w.post().cover_key, None);
+        assert_eq!(w.tries().as_deref(), Some("3"));
+    }
+
+    #[tokio::test]
+    async fn facts_without_a_graphic_or_missing_are_not_tried_again() {
+        // The stored bundle lost its range: no graphic, now or later.
+        let w = world();
+        w.published_without_cover().await;
+        let key = w.post().facts_r2_key;
+        let mut f: IpoArticleFacts = serde_json::from_str(&w.base.facts.borrow()[&key]).unwrap();
+        f.cover.retain(|c| c.kind != "price_high");
+        w.base
+            .facts
+            .borrow_mut()
+            .insert(key.clone(), serde_json::to_string(&f).unwrap());
+        let out = w.tick("2026-11-12T15:00:00Z").await;
+        assert_eq!(out.runs[0].1, "no cover: the facts give no graphic");
+        assert!(w.tick("2026-11-12T16:00:00Z").await.runs.is_empty());
+        assert!(w.base.bytes.borrow().is_empty());
+
+        // The bundle is gone: three tries, then none.
+        let w = world();
+        w.published_without_cover().await;
+        w.base.facts.borrow_mut().remove(&key);
+        for at in ["15:00", "16:00", "17:00"] {
+            let out = w.tick(&format!("2026-11-12T{at}:00Z")).await;
+            assert!(out.runs[0].1.contains("missing"), "{out:?}");
+        }
+        assert!(w.tick("2026-11-12T18:00:00Z").await.runs.is_empty());
+    }
+
+    #[tokio::test]
+    async fn the_backfill_skips_old_and_unpublished_write_ups() {
+        // More than WINDOW_DAYS after the filing: no card would follow.
+        let w = world();
+        w.published_without_cover().await;
+        assert!(w.tick("2026-11-25T15:00:00Z").await.runs.is_empty());
+        assert_eq!(w.post().cover_key, None);
+        assert_eq!(w.tries(), None);
+        // Text not live: left to its build.
+        let w = world();
+        w.published_without_cover().await;
+        w.base
+            .translations
+            .borrow_mut()
+            .get_mut(&(1, "en".to_string()))
+            .unwrap()
+            .status = "pending".into();
+        assert!(w.tick("2026-11-12T15:00:00Z").await.runs.is_empty());
+        assert_eq!(w.post().cover_key, None);
+    }
+
+    #[tokio::test]
+    async fn a_build_and_a_backfill_never_share_a_message() {
+        let w = world();
+        w.published_without_cover().await;
+        w.add_final();
+        let out = w.tick("2026-11-18T22:00:00Z").await;
+        assert_eq!(out.runs.len(), 1, "{out:?}");
+        assert!(out.runs[0].0.contains(":priced:") && out.published && out.card);
+        assert_eq!(w.post().cover_key, None);
+        // The next pass, with nothing to build, covers the older write-up.
+        let out = w.tick("2026-11-18T23:00:00Z").await;
+        assert_eq!(
+            out.runs,
+            [(RUN.to_string(), format!("cover added: {COVER}"))]
+        );
+        assert_eq!(w.post().slug, SLUG);
+    }
+
+    #[tokio::test]
+    async fn a_failed_cover_write_still_publishes_without_a_cover() {
+        let w = world();
+        w.base.fail_put_bytes.set(true);
+        let out = w.tick(NOW).await;
+        assert_eq!(
+            out.runs[0].1,
+            format!("published {SLUG} (cover err: r2: put_bytes failed)")
+        );
+        assert!(out.published && !out.card);
+        assert_eq!(w.post().cover_key, None);
+        assert_eq!((w.visible("en"), w.visible("zh")), (1, 1));
+        // The backfill covers it on a later pass.
+        w.base.fail_put_bytes.set(false);
+        let out = w.tick("2026-11-12T15:00:00Z").await;
+        assert!(out.card, "{out:?}");
+        assert_eq!(w.post().cover_key.as_deref(), Some(COVER));
     }
 
     #[tokio::test]

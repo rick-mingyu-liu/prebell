@@ -1,7 +1,8 @@
 -- IPO write-up preview for apps/web (local D1 only). Re-runnable. Contract:
 -- docs/superpowers/specs/2026-11-11-ipo-articles-contract.md.
 -- Apply after db/seed-ipo-preview.sql: cd crates/generator && pnpm exec wrangler d1 execute prebell --local --file ../../db/seed-ipo-articles-preview.sql
--- Facts object: bash db/load-preview-facts.sh (local R2, ipo/anthropic/range_set-0001628280-26-072484.json).
+-- Facts object and cover: bash db/load-preview-facts.sh (local R2, ipo/anthropic/range_set-0001628280-26-072484.json
+-- and covers/anthropic-ipo-price-range-2026-11-10.svg, the graphic the generator draws from those facts).
 --
 -- One published range_set write-up for Anthropic, EN and ZH, as the generator renders it
 -- (crates/core/src/ipo/writeup.rs, test the_preview_seed_is_the_rendered_write_up keeps them equal).
@@ -17,8 +18,8 @@ DELETE FROM runs WHERE run_key = 'ipo:anthropic:range_set:0001628280-26-072484';
 INSERT INTO runs (run_key, content_type, trading_date, status, attempts, last_error, created_at, updated_at) VALUES
   ('ipo:anthropic:range_set:0001628280-26-072484', 'ipo', '2026-11-10', 'published', 1, NULL, '2026-11-11T22:00:00Z', '2026-11-11T22:00:00Z');
 
-INSERT INTO posts (run_key, content_type, template_id, trading_date, slug, facts_r2_key, published_at) VALUES
-  ('ipo:anthropic:range_set:0001628280-26-072484', 'ipo', 'ipo-range_set', '2026-11-10', 'anthropic-ipo-price-range-2026-11-10', 'ipo/anthropic/range_set-0001628280-26-072484.json', '2026-11-11T22:00:00Z');
+INSERT INTO posts (run_key, content_type, template_id, trading_date, slug, facts_r2_key, published_at, cover_key) VALUES
+  ('ipo:anthropic:range_set:0001628280-26-072484', 'ipo', 'ipo-range_set', '2026-11-10', 'anthropic-ipo-price-range-2026-11-10', 'ipo/anthropic/range_set-0001628280-26-072484.json', '2026-11-11T22:00:00Z', 'covers/anthropic-ipo-price-range-2026-11-10.svg');
 
 INSERT INTO post_translations (post_id, lang, status, title, summary, body_md, cover_line1, cover_line2, updated_at)
 SELECT id, 'en', 'published',

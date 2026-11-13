@@ -9,12 +9,14 @@ use serde::{Deserialize, Serialize};
 use crate::earnings::draft::{fmt_value, period_label};
 use crate::earnings::facts::{EarningsFacts, Metric, Unit};
 use crate::facts::{Field, Mover, PremarketFacts, Quote};
+use crate::ipo::milestone::IpoArticleFacts;
 use crate::numbers::Lang;
 use crate::recap::RecapFacts;
 use crate::store::Store;
 
 pub mod card;
 pub mod graphic;
+pub mod ipo;
 pub use graphic::{brief_graphic, cover_movers, earnings_graphic, CoverMover, Session};
 
 /// The `kv` key the front page reads the latest index snapshot from.
@@ -234,7 +236,8 @@ pub fn lines_for_facts(content_type: &str, facts_json: &str) -> Result<CoverLine
 
 /// The cover graphic of a stored post, recomputed from its facts JSON: the
 /// SVG, or `None` when the facts give no graphic (the post keeps the flat
-/// tile). Same `content_type` values and errors as `lines_for_facts`.
+/// tile). Same `content_type` values and errors as `lines_for_facts`, and
+/// `ipo` (an IPO write-up's `ipo-article/v1` bundle).
 pub fn graphic_for_facts(content_type: &str, facts_json: &str) -> Result<Option<String>, String> {
     match content_type {
         "premarket" => {
@@ -252,6 +255,10 @@ pub fn graphic_for_facts(content_type: &str, facts_json: &str) -> Result<Option<
             ))
         }
         "earnings" => Ok(earnings_graphic(&parse_facts::<EarningsFacts>(
+            content_type,
+            facts_json,
+        )?)),
+        "ipo" => Ok(ipo::ipo_graphic(&parse_facts::<IpoArticleFacts>(
             content_type,
             facts_json,
         )?)),
@@ -652,6 +659,15 @@ pub(crate) mod tests {
             Ok(earnings_graphic(&f))
         );
         assert!(earnings_graphic(&f).is_some());
+        let bundle = include_str!(
+            "../../../../db/preview-facts/ipo/anthropic/range_set-0001628280-26-072484.json"
+        );
+        let svg = graphic_for_facts("ipo", bundle).unwrap().unwrap();
+        assert_eq!(
+            Some(svg.clone()),
+            ipo::ipo_graphic(&serde_json::from_str(bundle).unwrap())
+        );
+        assert!(svg.contains(">$70.00<") && svg.contains(">$78.00<"));
     }
 
     #[test]
@@ -661,5 +677,6 @@ pub(crate) mod tests {
         let e = graphic_for_facts("recap", "not json").unwrap_err();
         assert!(e.contains("recap"), "{e}");
         assert!(graphic_for_facts("earnings", &premarket_json()).is_err());
+        assert!(graphic_for_facts("ipo", &premarket_json()).is_err());
     }
 }
