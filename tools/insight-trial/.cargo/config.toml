@@ -1,0 +1,5 @@
+# The trial builds into its own target/, not the shared directory an
+# ancestor .cargo/config.toml may set (CARGO_TARGET_DIR still wins, so the
+# README unsets it).
+[build]
+target-dir = "target"

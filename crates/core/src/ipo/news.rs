@@ -211,7 +211,7 @@ pub fn distinct(hits: Vec<SearchHit>) -> Vec<SearchHit> {
 }
 
 /// The URL's host, lowercase, without `www.`.
-fn host_of(url: &str) -> String {
+pub(crate) fn host_of(url: &str) -> String {
     let rest = url.split_once("://").map_or(url, |(_, r)| r);
     let h = rest[..rest.find(['/', '?', '#']).unwrap_or(rest.len())].to_ascii_lowercase();
     h.strip_prefix("www.").map(str::to_string).unwrap_or(h)
