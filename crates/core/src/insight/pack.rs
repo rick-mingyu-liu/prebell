@@ -112,6 +112,24 @@ fn period_text(c: &EarningsFacts) -> Option<String> {
     })
 }
 
+/// `text` without Markdown links, bare URLs or bold marks: "agreed to
+/// [sell](https://seekingalpha.com/pr/…) six assets" reads "agreed to sell
+/// six assets". A model is never sent a URL, and a URL's digits never
+/// become allowed numbers.
+pub fn plain(text: &str) -> String {
+    static R: OnceLock<[Regex; 2]> = OnceLock::new();
+    let [link, url] = R.get_or_init(|| {
+        [
+            Regex::new(r#"\[([^\]]*)\]\([^)\s]*(?:\s+"[^"]*")?\)"#).expect("valid built-in regex"),
+            Regex::new(r"\(?https?://[^\s)]+\)?").expect("valid built-in regex"),
+        ]
+    });
+    let text = link.replace_all(text, "$1");
+    let text = url.replace_all(&text, "");
+    let text = text.replace("**", "");
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
 /// Adds an item to `ev` with the next id, without invisible characters. The
 /// same sentence twice from one source (one quote holding two figures) is
 /// one item; two outlets carrying it are two.
@@ -123,7 +141,7 @@ fn push<'a>(
     url: Option<String>,
     date: Option<NaiveDate>,
 ) -> Option<&'a mut Evidence> {
-    let text = visible(text);
+    let text = plain(&visible(text));
     let text = text.trim();
     if text.is_empty() || ev.iter().any(|e| e.text == text && e.outlet == outlet) {
         return None;
@@ -158,9 +176,10 @@ fn pack(i: &PackInputs, m: &Mover) -> Option<Pack> {
         &mut ev,
         EvidenceKind::Move,
         &format!(
-            "{} ({ticker}) {verb} {:.2}% {session}.",
+            "{} ({ticker}) {verb} {:.2}% {session} on {}.",
             m.name,
-            m.quote.change_pct.abs()
+            m.quote.change_pct.abs(),
+            long_date(td)
         ),
         None,
         None,
@@ -1053,5 +1072,50 @@ mod tests {
             .map(|e| e.outlet.as_deref())
             .collect();
         assert_eq!(outlets, [Some("Reuters"), Some("CNBC")]);
+    }
+
+    /// Round 2, L4: real quotes carry Markdown links; the pack keeps the
+    /// link text and never a URL.
+    #[test]
+    fn links_are_reduced_to_their_text() {
+        assert_eq!(
+            plain("after saying it agreed to [sell](https://seekingalpha.com/pr/20718237-nrg-energy-announces-4-billion-asset-sale \"sell\") six natural gas generation assets"),
+            "after saying it agreed to sell six natural gas generation assets"
+        );
+        assert_eq!(
+            plain("Fox Advisors downgraded [SNDK](https://financefeeds.com/sandisk-sndk-stock-1238/) from Overweight"),
+            "Fox Advisors downgraded SNDK from Overweight"
+        );
+        assert_eq!(plain("see https://example.com/a1 now"), "see now");
+        assert_eq!(
+            plain("CEO **Strauss Zelnick** said"),
+            "CEO Strauss Zelnick said"
+        );
+        let f = Fixture::new(vec![mover(
+            "NRG",
+            3.0,
+            vec![reason(
+                "https://seekingalpha.com/news/1",
+                "NRG",
+                "agreed to [sell](https://seekingalpha.com/pr/20718237-x) six assets for $4B",
+            )],
+        )]);
+        let p = f.packs("2026-11-09");
+        assert_eq!(p[0].evidence[1].text, "agreed to sell six assets for $4B");
+        assert!(!serde_json::to_string(&p[0].evidence[1].text)
+            .unwrap()
+            .contains("http"));
+    }
+
+    /// Round 2, L3: the move names its day, so a line may name it too.
+    #[test]
+    fn the_move_names_its_trading_date() {
+        let f = Fixture::new(vec![mover("AAPL", -4.2, vec![news()])]);
+        let p = f.packs("2026-11-12");
+        assert_eq!(
+            p[0].evidence[0].text,
+            "AAPL Inc (AAPL) fell 4.20% in premarket trading on November 12, 2026."
+        );
+        assert_eq!(p[0].evidence[0].date, Some(d("2026-11-12")));
     }
 }

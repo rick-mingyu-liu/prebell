@@ -627,4 +627,27 @@ mod tests {
         .unwrap();
         assert_eq!(v.len(), 1);
     }
+
+    /// Round 2, L3: a line naming the day of the move passes when the
+    /// judge quotes the move, which now holds the date.
+    #[test]
+    fn a_line_may_name_the_day_of_the_move() {
+        let mut p = pack(TEXT);
+        p.evidence[0].text =
+            "Apple (AAPL) rose 4.20% in premarket trading on November 12, 2026.".into();
+        let mut i = insight("AAPL");
+        i.en.watch = "Reuters reports a $1.0 billion buyback after the November 12 move.".into();
+        i.zh.watch = "据路透社报道，公司宣布10亿美元回购，股价于11月12日上涨。".into();
+        let mut v = verdict();
+        let moved = claim(
+            "the move",
+            "e1",
+            "rose 4.20% in premarket trading on November 12, 2026",
+        );
+        v.en_claims.push(moved.clone());
+        v.zh_claims.push(moved);
+        assert!(passed(&p, &i, &v));
+        v.en_claims.pop();
+        assert!(!passed(&p, &i, &v));
+    }
 }

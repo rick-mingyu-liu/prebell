@@ -17,24 +17,24 @@ pub const HOOK_CHARS_ZH: usize = 14;
 pub const WATCH_WORDS_EN: usize = 40;
 pub const WATCH_CHARS_ZH: usize = 80;
 
-/// Advice, rating, target and prediction wording, refused even when the
-/// evidence uses it. Regex fragments matched as whole words, ignoring case
-/// (`has_phrase`);
-/// a hyphen does not join a word ("Buy-rated" holds "buy"), except in the
-/// compounds of `EXEMPT_COMPOUNDS`. "hold" has its own rule (`advice_hold`).
+/// Advice, rating, target, consensus and prediction wording, refused even
+/// when the evidence uses it. Regex fragments matched as whole words,
+/// ignoring case (`has_phrase`); a hyphen does not join a word
+/// ("Overweight-rated" holds "overweight"), except in the compounds of
+/// `EXEMPT_COMPOUNDS`. Words that also have a plain sense ("buy", "sell",
+/// "target", "hold", "neutral", "upside") have their own rules
+/// (`advice_words`, `advice_hold`).
 const REFUSED_EN: &[&str] = &[
-    "buy",
-    "sell",
     "should",
     "must",
     r"recommend\w*",
     r"will\s+(?:rise|fall|rally|drop|climb|soar|surge|jump|gain|rebound)",
-    r"(?:could|may|might|is\s+likely\s+to|are\s+likely\s+to)\s+(?:rise|fall|rally|drop|climb|soar|surge|jump|rebound)",
+    r"(?:could|may|might|is\s+likely\s+to|are\s+likely\s+to)\s+(?:rise|fall|rally|drop|climb|soar|surge|jump|gain|rebound|recover)",
     r"set\s+to\s+(?:surge|soar|jump|rally|climb|rise)",
+    r"poised\s+to",
     r"price\s+targets?",
     r"target\s+prices?",
     r"price\s+objectives?",
-    r"targets?",
     "overweight",
     "underweight",
     r"equal[- ]?weight",
@@ -43,24 +43,24 @@ const REFUSED_EN: &[&str] = &[
     r"market\s+perform",
     r"sector\s+(?:perform|weight)",
     r"peer\s+perform",
-    "neutral",
     "accumulate",
     r"top\s+picks?",
-    r"analysts?\s+expect\w*",
+    r"analysts?['’]?\s+(?:\w+\s+){0,4}?(?:expect\w*|estimat\w*|forecast\w*|views?)",
     r"wall\s+street\s+expect\w*",
+    r"(?:street|wall\s+street|market|consensus)\s+(?:estimates?|expectations?|forecasts?|views?)",
+    r"(?:above|below|beat|beats|beating|missed|miss|misses|missing|topp\w*|tops?|exceed\w*|ahead\s+of|short\s+of|in\s+line\s+with|versus|vs\.?|against)\s+(?:\w+\s+){0,4}?estimates?",
     "consensus",
     "undervalued",
     "overvalued",
     "bullish",
     "bearish",
-    "upside",
-    "downside",
     r"entry\s+points?",
 ];
 const EXEMPT_COMPOUNDS: &[&str] = &[
     "sell-off",
     "sell-offs",
     "sell-side",
+    "sell-through",
     "buy-side",
     "buy-back",
     "buy-backs",
@@ -98,11 +98,16 @@ const REFUSED_ZH: &[&str] = &[
     "加仓",
     "减仓",
     "仓位",
-    "配置",
     "逢低",
     "抄底",
     "华尔街预期",
     "市场预期",
+    "分析师预期",
+    "一致预期",
+    "预期共识",
+    "有望反弹",
+    "有望回升",
+    "有望走高",
 ];
 const RELATIVE_ZH: &[&str] = &[
     "下周",
@@ -288,9 +293,20 @@ fn worded_figures(text: &str) -> Vec<String> {
     out.extend(
         find_alone(en, text)
             .into_iter()
+            // "double-digit growth" names no figure.
+            .filter(|m| {
+                !text[m.end()..].starts_with("-digit") && !text[m.end()..].starts_with(" digit")
+            })
             .map(|m| m.as_str().to_string()),
     );
     out
+}
+
+/// A count in Chinese numerals in a hook ("三大看点"): a hook has no numbers.
+fn hook_count(text: &str) -> Option<String> {
+    static R: OnceLock<Regex> = OnceLock::new();
+    let r = R.get_or_init(|| re(r"[一二三四五六七八九十两]+[大个项条只点家季]"));
+    r.find(text).map(|m| m.as_str().to_string())
 }
 
 fn refused_en() -> &'static [Regex] {
@@ -525,6 +541,18 @@ fn date_marks(text: &str, year_of: NaiveDate) -> Vec<Mark> {
             if k == 7 && text[e..].starts_with('元') {
                 continue;
             }
+            // "the 20th" is a day only at a clause's end or before "of"
+            // ("on the 20th.", "the 20th of"); "the 10th straight quarter"
+            // is a count.
+            if k == 6 {
+                let rest = text[e..].trim_start();
+                let day = rest.is_empty()
+                    || rest.starts_with(|c: char| ",.;:!?)，。".contains(c))
+                    || rest.to_ascii_lowercase().starts_with("of ");
+                if !day {
+                    continue;
+                }
+            }
             let (y, m, d) = match k {
                 0 | 3 => (num(c.get(1)), num(c.get(2)), num(c.get(3))),
                 1 => (
@@ -643,13 +671,13 @@ fn zh_years(text: &str) -> Vec<i32> {
 fn relative_en_re() -> &'static Regex {
     static R: OnceLock<Regex> = OnceLock::new();
     R.get_or_init(|| {
-        re(r"(?i)(?:next\s+(?:week|month|quarter|year|few\s+\w+|several\s+\w+)|(?:over|in|during|within)\s+the\s+(?:next|coming)\s+(?:\w+\s+)?(?:days|weeks|months|quarters|years)|in\s+(?:the\s+)?coming\s+(?:days|weeks|months|quarters)|(?:later\s+)?this\s+(?:week|month|quarter|year)|last\s+(?:week|month|quarter|year)|later\s+today|today|tonight|tomorrow|yesterday|soon|shortly|in\s+the\s+(?:days|weeks|months|quarters|years)\s+ahead|(?:days|weeks|months)\s+ahead)")
+        re(r"(?i)(?:next\s+(?:week|month|quarter|year|few\s+\w+|several\s+\w+)|(?:over|in|during|within)\s+the\s+(?:next|coming)\s+(?:\w+\s+)?(?:days|weeks|months|quarters|years)|in\s+(?:the\s+)?coming\s+(?:days|weeks|months|quarters)|(?:later\s+)?this\s+(?:week|month|quarter|year)|last\s+(?:week|month|quarter|year)|later\s+today|today|tonight|tomorrow|yesterday|soon|shortly|in\s+the\s+(?:days|weeks|months|quarters|years)\s+ahead|(?:days|weeks|months)\s+ahead|in\s+the\s+near\s+term|near[- ]term|by\s+(?:the\s+)?(?:year[- ]end|end\s+of\s+the\s+year)|later\s+in\s+the\s+year)")
     })
 }
 
 fn relative_zh_re() -> &'static Regex {
     static R: OnceLock<Regex> = OnceLock::new();
-    R.get_or_init(|| re(r"未来(?:几|数)(?:天|周|个月|月|个季度|季度|年)|近(?:几|数)(?:天|周|个月)|接下来几(?:天|周|个月)"))
+    R.get_or_init(|| re(r"未来(?:几|数)(?:天|周|个月|月|个季度|季度|年)|近(?:几|数)(?:天|周|个月)|接下来几(?:天|周|个月)|短期内|年底前|年末前"))
 }
 
 fn relative_time(text: &str) -> Option<String> {
@@ -659,7 +687,11 @@ fn relative_time(text: &str) -> Option<String> {
         .or_else(|| {
             RELATIVE_ZH
                 .iter()
-                .find(|w| text.contains(**w))
+                .find(|w| {
+                    // 去年同期 is "a year earlier", the same as "year over year".
+                    text.match_indices(**w)
+                        .any(|(at, m)| !(**w == "去年" && text[at + m.len()..].starts_with("同期")))
+                })
                 .map(|w| w.to_string())
         })
         .or_else(|| relative_zh_re().find(text).map(|m| m.as_str().to_string()))
@@ -798,6 +830,34 @@ pub(crate) fn dates_not_in(
         .collect()
 }
 
+/// The dates written in `text` with the text that wrote them, each read in
+/// `year`'s year and the ones either side.
+fn written_dates(text: &str, year: Option<NaiveDate>) -> Vec<(String, NaiveDate)> {
+    [0, -1, 1]
+        .iter()
+        .filter_map(|k| year.and_then(|y| y.with_year(y.year() + k)))
+        .flat_map(|y| date_marks(text, y))
+        .filter_map(|(raw, d)| d.map(|d| (raw, d)))
+        .collect()
+}
+
+/// The clause of `text` holding `part`: between commas, semicolons, colons,
+/// sentence ends and the conjunctions that open a new clause ("and", "but",
+/// "while", "whereas", 并, 而, 但). A decimal point is not a boundary.
+fn clause_of(text: &str, part: &str) -> String {
+    static R: OnceLock<Regex> = OnceLock::new();
+    let r = R.get_or_init(|| {
+        re(r"[,，;；:：。!?！？、]|\.(?:\s|$)|\s(?:and|but|while|whereas)\s|并|而|但")
+    });
+    let at = text.find(part).unwrap_or(0);
+    let start = r.find_iter(&text[..at]).last().map_or(0, |m| m.end());
+    let end = r
+        .find_iter(&text[at + part.len().min(text.len() - at)..])
+        .next()
+        .map_or(text.len(), |m| at + part.len() + m.start());
+    text[start..end].to_string()
+}
+
 /// The pack's trading date (its move's date), for dates written without a year.
 pub(crate) fn year_of(pack: &Pack) -> Option<NaiveDate> {
     pack.evidence
@@ -869,6 +929,9 @@ fn check_line(pack: &Pack, line: &Line, lang: Lang) -> Vec<String> {
         bad.push("hook has a digit".to_string());
     }
     if let Some(m) = worded_figures(&hook).first() {
+        bad.push(format!("hook has a figure in words: {m}"));
+    }
+    if let Some(m) = hook_count(&hook) {
         bad.push(format!("hook has a figure in words: {m}"));
     }
     if both.contains([';', '；']) {
@@ -1012,37 +1075,243 @@ fn check_line(pack: &Pack, line: &Line, lang: Lang) -> Vec<String> {
             .iter()
             .any(|d| unconfirmed.iter().any(|e| e.date == Some(*d)) && !firm.contains(d));
     if leans_on_unconfirmed {
-        let hedged = match lang {
-            Lang::En => HEDGE_EN.iter().any(|w| has_word(&watch, w)),
-            Lang::Zh => HEDGE_ZH.iter().any(|w| watch.contains(w)),
+        let hedged_in = |clause: &str| match lang {
+            Lang::En => HEDGE_EN.iter().any(|w| has_word(clause, w)),
+            Lang::Zh => HEDGE_ZH.iter().any(|w| clause.contains(w)),
         };
-        if !hedged {
-            bad.push("an unconfirmed report date is not hedged".to_string());
+        // Each unconfirmed date the line writes is hedged in its own clause
+        // ("预计营收…，并将于11月20日公布财报" hedges the revenue, not the
+        // date); a line that only cites the item hedges it anywhere.
+        let mut unhedged = false;
+        let mut dated = false;
+        for (raw, d) in written_dates(&watch, year) {
+            if unconfirmed.iter().any(|e| e.date == Some(d)) && !firm.contains(&d) {
+                dated = true;
+                if !hedged_in(&clause_of(&watch, &raw)) {
+                    unhedged = true;
+                }
+            }
+        }
+        if unhedged || !dated && !hedged_in(&watch) {
+            bad.push("an unconfirmed report date is not hedged in its clause".to_string());
         }
     }
 
     // 9. Refusal list.
+    let analyst_cited = cited.iter().any(|e| e.kind == EvidenceKind::AnalystAction);
+    bad.extend(
+        refused_wording(&both, analyst_cited)
+            .into_iter()
+            .map(|w| format!("refused wording: {w}")),
+    );
+    bad
+}
+
+/// The advice, rating, target, consensus and prediction wording in `text`
+/// (rule 9 of `check`). With `analyst_cited`, a bare "target" is refused
+/// too: next to an analyst action it is the price target.
+pub fn refused_wording(text: &str, analyst_cited: bool) -> Vec<String> {
+    let mut out = Vec::new();
     for r in refused_en() {
-        if let Some(m) = has_phrase(&both, r) {
-            bad.push(format!("refused wording: {m}"));
+        if let Some(m) = has_phrase(text, r) {
+            out.push(m);
         }
     }
-    if let Some(m) = advice_hold(&both) {
-        bad.push(format!("refused wording: {m}"));
+    out.extend(advice_words(text, analyst_cited));
+    if let Some(m) = advice_hold(text) {
+        out.push(m);
     }
     for w in REFUSED_ZH {
-        if both.contains(w) {
-            bad.push(format!("refused wording: {w}"));
+        if text.contains(w) {
+            out.push(w.to_string());
         }
     }
-    // 持有 is advice ("继续持有"), except as "held" ("持有的现金").
-    if both
-        .match_indices("持有")
-        .any(|(at, m)| !both[at + m.len()..].starts_with('的'))
+    // 配置 is "allocate" as advice (提高配置), but 资本配置 is capital
+    // allocation, a company plan.
+    if text
+        .match_indices("配置")
+        .any(|(at, _)| !(text[..at].ends_with("资本") || text[..at].ends_with("资源")))
     {
-        bad.push("refused wording: 持有".to_string());
+        out.push("配置".to_string());
     }
-    bad
+    // 持有 is advice ("继续持有该股"), except as "held" or "holds a stake":
+    // 持有的现金, 持有约一半股份, 持有该公司12%股权.
+    let held = |rest: &str| {
+        let head: String = rest.chars().take(12).collect();
+        rest.starts_with(['的', '约'])
+            || rest
+                .starts_with(|c: char| c.is_ascii_digit() || "一二三四五六七八九十两".contains(c))
+            || (head.contains("股份") || head.contains("股权")) && !head.contains("该股")
+    };
+    if text
+        .match_indices("持有")
+        .any(|(at, m)| !held(&text[at + m.len()..]))
+    {
+        out.push("持有".to_string());
+    }
+    out
+}
+
+/// Verbs that make "buy" and "sell" a deal, not advice: "agreed to sell its
+/// Texas factory", "a deal to buy a chip designer".
+const DEAL_WORDS: &[&str] = &[
+    "agreed",
+    "agree",
+    "agrees",
+    "agreement",
+    "deal",
+    "plans",
+    "plan",
+    "planned",
+    "offer",
+    "offered",
+    "offers",
+    "bid",
+    "proposal",
+    "proposed",
+    "decided",
+    "intends",
+    "intend",
+    "would",
+    "will",
+    "move",
+    "talks",
+    "seeks",
+    "seeking",
+    "sought",
+    "announced",
+];
+
+/// Words that make "buy" or "sell" advice when they come shortly before it.
+const ADVICE_LEAD: &[&str] = &[
+    "investors",
+    "investor",
+    "should",
+    "could",
+    "may",
+    "might",
+    "can",
+    "time",
+    "reason",
+    "opportunity",
+    "worth",
+    "consider",
+    "a",
+    "an",
+    "strong",
+    "rated",
+    "from",
+];
+
+/// "buy", "sell", "target", "neutral", "upside" and "downside" in their
+/// advice, rating or prediction senses, allowed in their plain senses.
+fn advice_words(text: &str, analyst_cited: bool) -> Vec<String> {
+    static R: OnceLock<[Regex; 4]> = OnceLock::new();
+    let [trade, target, neutral, side] = R.get_or_init(|| {
+        [
+            re(r"(?i)(?:buy|buys|buying|sell|sells|selling)"),
+            re(r"(?i)(?:(?:stock|share)\s+targets?|targets?\s+(?:to|of)\s+\$|targets?\s+(?:on|for)\s+(?:the\s+)?(?:stock|shares|company)|targets?)"),
+            re(r"(?i)neutral"),
+            re(r"(?i)(?:upside|downside)"),
+        ]
+    });
+    let lower = text.to_ascii_lowercase();
+    let words_before = |at: usize, n: usize| -> Vec<String> {
+        lower[..at]
+            .split(|c: char| !c.is_ascii_alphanumeric())
+            .filter(|w| !w.is_empty())
+            .rev()
+            .take(n)
+            .map(str::to_string)
+            .collect()
+    };
+    let mut out = Vec::new();
+    for m in find_alone(trade, text) {
+        let exempt = EXEMPT_COMPOUNDS.iter().any(|c| {
+            let from = lower[..m.start()]
+                .rfind(|ch: char| !(ch.is_ascii_alphabetic() || ch == '-'))
+                .map_or(0, |i| i + 1);
+            lower[from..].starts_with(c)
+        });
+        if exempt {
+            continue;
+        }
+        let after = &lower[m.end()..];
+        let before = words_before(m.start(), 4);
+        let rating = [
+            "-rated",
+            "-rating",
+            " rating",
+            " rated",
+            " from ",
+            " recommendation",
+            " call",
+            " signal",
+        ]
+        .iter()
+        .any(|a| after.starts_with(a));
+        let led = before
+            .first()
+            .is_some_and(|w| ADVICE_LEAD.contains(&w.as_str()))
+            || before.iter().any(|w| {
+                matches!(
+                    w.as_str(),
+                    "investors"
+                        | "investor"
+                        | "should"
+                        | "time"
+                        | "reason"
+                        | "opportunity"
+                        | "worth"
+                        | "consider"
+                )
+            });
+        let deal = before.iter().any(|w| DEAL_WORDS.contains(&w.as_str()));
+        let sentence_start = lower[..m.start()]
+            .trim_end()
+            .chars()
+            .next_back()
+            .is_none_or(|c| matches!(c, '.' | ':' | '!' | '?'));
+        let object = [
+            " the dip",
+            " the rally",
+            " the news",
+            " the stock",
+            " the shares",
+            " shares",
+            " stock",
+            " into ",
+            " on weakness",
+            " on strength",
+        ]
+        .iter()
+        .any(|a| after.starts_with(a));
+        if rating || (!deal && (led || sentence_start || object)) {
+            out.push(m.as_str().to_string());
+        }
+    }
+    for m in find_alone(target, text) {
+        let bare = m.as_str().to_ascii_lowercase().starts_with("target");
+        let bare = bare && !m.as_str().contains(['$', ' ']);
+        if !bare || analyst_cited {
+            out.push(m.as_str().to_string());
+        }
+    }
+    for m in find_alone(neutral, text) {
+        let before = lower[..m.start()].trim_end_matches(['-', ' ']);
+        if !(before.ends_with("carbon")
+            || before.ends_with("climate")
+            || before.ends_with("emissions"))
+        {
+            out.push(m.as_str().to_string());
+        }
+    }
+    for m in find_alone(side, text) {
+        if !lower[..m.start()].ends_with("on the ") {
+            out.push(m.as_str().to_string());
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -1945,5 +2214,174 @@ mod tests {
         }
         // A confirmed date needs no hedge.
         assert!(en(&en_ok().watch, &["e2", "e5"]).is_empty());
+    }
+
+    /// Round 2, M1: refused_wording against every stored mover reason of
+    /// 2026-11-04 to 2026-11-12. Only consensus comparisons and analyst
+    /// actions are refused; deals ("agreed to sell"), plans ("targets a
+    /// launch") and sell-offs pass.
+    #[test]
+    fn real_reasons_are_refused_only_for_consensus_and_analyst_wording() {
+        let fixture = include_str!("testdata/reasons_2026_11.tsv");
+        let mut n = 0;
+        for line in fixture.lines().filter(|l| !l.starts_with('#')) {
+            let mut cols = line.splitn(3, '\t');
+            let (want, ticker, quote) = (
+                cols.next().unwrap(),
+                cols.next().unwrap(),
+                cols.next().unwrap(),
+            );
+            let got = refused_wording(quote, false);
+            assert_eq!(got.is_empty(), want == "ok", "{ticker}: {quote} -> {got:?}");
+            n += 1;
+        }
+        assert_eq!(n, 50);
+    }
+
+    /// Round 2 review inputs (M1, M3, L1, L2), as (language, should refuse,
+    /// hook, watch, cites) against the review pack plus an unconfirmed
+    /// report date on November 20.
+    #[test]
+    fn the_round_two_probe_inputs() {
+        const H: &str = "Guidance sets the next test";
+        const HZ: &str = "业绩指引成为下一道考验";
+        let mut p = review_pack();
+        p.evidence.push(Evidence {
+            id: "e11".into(),
+            kind: EvidenceKind::ReportDate,
+            text: "Expected report date, not confirmed by the company: November 20, 2026.".into(),
+            outlet: None,
+            url: None,
+            date: Some(d("2026-11-20")),
+            quote: None,
+            unconfirmed: true,
+        });
+        let en_cases: &[(bool, &str, &str, &[&str])] = &[
+            // M1: deals and plans pass; consensus and advice senses do not.
+            (false, H, "Reuters reports Apple agreed to sell its Texas factory before its November 19 report.", &["e2", "e5"]),
+            (false, H, "Reuters reports Apple agreed to buy a chip designer before its November 19 report.", &["e2", "e5"]),
+            (false, H, "Reuters reports Apple targets a first launch before its November 19 report.", &["e2", "e5"]),
+            (false, H, "The company guided an operating margin target of 70 percent for fiscal 2027.", &["e6"]),
+            (false, H, "Reuters reports a $1.0 billion buyback, with sell-through data to track at the November 19 report.", &["e2", "e5"]),
+            (true, H, "Reuters reports revenue of $4.2 billion, above analysts' estimates, before its November 19 report.", &["e2", "e5"]),
+            (true, H, "Reuters reports revenue of $4.2 billion, ahead of Street estimates, before its November 19 report.", &["e2", "e5"]),
+            (true, H, "Reuters reports revenue of $4.2 billion, versus market estimates, before its November 19 report.", &["e2", "e5"]),
+            (true, H, "Reuters reports Apple expects revenue of $4.2 billion, and investors may wish to buy before November 19.", &["e2", "e5"]),
+            (true, "A buy case into results", "Reuters reports Apple expects revenue of $4.2 billion before its November 19 report.", &["e2", "e5"]),
+            (true, H, "Reuters reports Apple expects revenue of $4.2 billion, a reason to sell the stock before November 19.", &["e2", "e5"]),
+            (true, H, "CNBC reports Morgan Stanley raised its target on the shares, and Reuters reports revenue of $4.2 billion.", &["e2", "e3"]),
+            (true, H, "CNBC reports Morgan Stanley moved Apple, and Reuters reports revenue of $4.2 billion against a target.", &["e2", "e3"]),
+            // L1: plain senses pass.
+            (false, H, "Reuters reports Apple expects revenue of $4.2 billion and a carbon neutral supply chain by its November 19 report.", &["e2", "e5"]),
+            (false, H, "Reuters reports Apple expects revenue of $4.2 billion for the 10th straight quarter of growth before November 19.", &["e2", "e5"]),
+            (false, H, "Reuters reports Apple expects double-digit growth and revenue of $4.2 billion before November 19.", &["e2", "e5"]),
+            (false, H, "Reuters reports Apple expects revenue of $4.2 billion, which the November 19 report will test on the downside.", &["e2", "e5"]),
+            (true, H, "Reuters reports revenue of $4.2 billion, leaving upside for the shares into the November 19 report.", &["e2", "e5"]),
+            (true, H, "Reuters reports revenue of $4.2 billion before results on the 20th.", &["e2"]),
+            // L2: prediction and relative time.
+            (true, H, "Reuters reports revenue of $4.2 billion, and the shares could gain into the November 19 report.", &["e2", "e5"]),
+            (true, H, "Reuters reports revenue of $4.2 billion, and the shares look poised to react at the November 19 report.", &["e2", "e5"]),
+            (true, H, "Reuters reports revenue of $4.2 billion, a figure to watch in the near term.", &["e2"]),
+            (true, H, "Reuters reports revenue of $4.2 billion, a figure to watch by year-end.", &["e2"]),
+            (true, H, "Reuters reports revenue of $4.2 billion, a figure to watch later in the year.", &["e2"]),
+            // M3: the hedge belongs to the date's own clause.
+            (true, H, "Reuters reports Apple expected revenue of $4.2 billion, and it reports results on November 20.", &["e2", "e11"]),
+            (false, H, "Reuters reports Apple expects revenue of $4.2 billion, and it is expected to report results on November 20.", &["e2", "e11"]),
+            (false, H, "Reuters reports revenue of $4.2 billion before a report scheduled for November 20.", &["e2", "e11"]),
+        ];
+        let zh_cases: &[(bool, &str, &str, &[&str])] = &[
+            (
+                true,
+                HZ,
+                "据路透社报道，苹果营收42亿美元，高于分析师预期，11月19日的财报将检验这一水平。",
+                &["e2", "e5"],
+            ),
+            (
+                true,
+                HZ,
+                "据路透社报道，苹果营收42亿美元，与一致预期相符，11月19日的财报将检验这一水平。",
+                &["e2", "e5"],
+            ),
+            (
+                false,
+                HZ,
+                "据路透社报道，苹果营收42亿美元，高于去年同期，11月19日的财报将检验这一水平。",
+                &["e2", "e5"],
+            ),
+            (
+                false,
+                HZ,
+                "据路透社报道，苹果营收42亿美元，资本配置计划将在11月19日的财报中披露。",
+                &["e2", "e5"],
+            ),
+            (
+                false,
+                HZ,
+                "据路透社报道，苹果营收42亿美元，公司持有约一半合资公司股份，11月19日财报将披露。",
+                &["e2", "e5"],
+            ),
+            (
+                true,
+                HZ,
+                "据路透社报道，苹果营收42亿美元，投资者可继续持有该股至11月19日财报。",
+                &["e2", "e5"],
+            ),
+            (
+                true,
+                HZ,
+                "据路透社报道，苹果营收42亿美元，股价有望反弹至11月19日。",
+                &["e2", "e5"],
+            ),
+            (
+                true,
+                HZ,
+                "据路透社报道，苹果营收42亿美元，短期内值得关注。",
+                &["e2"],
+            ),
+            (
+                true,
+                HZ,
+                "据路透社报道，苹果营收42亿美元，年底前值得关注。",
+                &["e2"],
+            ),
+            (
+                true,
+                "苹果财报三大看点",
+                "据路透社报道，苹果预计营收42亿美元，11月19日的财报将检验这一预期。",
+                &["e2", "e5"],
+            ),
+            (
+                true,
+                HZ,
+                "据路透社报道，苹果预计营收42亿美元，并将于11月20日公布财报。",
+                &["e2", "e11"],
+            ),
+            (
+                false,
+                HZ,
+                "据路透社报道，苹果营收42亿美元，预计于11月20日公布财报。",
+                &["e2", "e11"],
+            ),
+            (
+                false,
+                HZ,
+                "据路透社报道，苹果营收42亿美元，财报暂定于11月20日公布。",
+                &["e2", "e11"],
+            ),
+        ];
+        let mut wrong = vec![];
+        for (refuse, hook, watch, cites) in en_cases {
+            let f = check(&p, &insight(line(hook, watch, cites), zh_ok()));
+            if f.is_empty() == *refuse {
+                wrong.push(format!("{watch} -> {f:?}"));
+            }
+        }
+        for (refuse, hook, watch, cites) in zh_cases {
+            let f = check(&p, &insight(en_ok(), line(hook, watch, cites)));
+            if f.is_empty() == *refuse {
+                wrong.push(format!("{hook} {watch} -> {f:?}"));
+            }
+        }
+        assert!(wrong.is_empty(), "{}", wrong.join("\n"));
     }
 }
