@@ -1,6 +1,7 @@
-//! The judge score: agreement with the owner's labels, seeded recall, what
-//! the code checks refused, eligibility and spend, ending with the judge to
-//! choose and whether the spec's bar is met.
+//! The judge score: agreement with the owner's labels, seeded recall, the
+//! false-reject rate on controls, what the code checks refused, eligibility
+//! and spend, ending with the judge to choose and whether the spec's bar is
+//! met.
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -9,32 +10,48 @@ use serde::Deserialize;
 use serde_json::Value;
 
 use crate::seed::{Kind, Seeded};
-use crate::{Record, JUDGES};
+use crate::{line_key, Record, JUDGES};
 
 /// Seeded recall the chosen judge needs (the spec's bar).
 const RECALL_BAR: f64 = 0.9;
+/// Judge-passed lines Rick must have read (the spec's bar).
+const READ_BAR: usize = 50;
 
 #[derive(Deserialize, Clone, Debug)]
 pub(crate) struct Label {
     pub post: String,
     pub ticker: String,
+    /// `line_key` of the line labelled; absent in labels saved before it.
+    #[serde(default)]
+    pub key: Option<String>,
     pub label: String,
 }
 
 pub(crate) struct JudgeScore<'a> {
     pub name: &'static str,
-    /// Labelled lines this judge judged, and how many it agreed on.
+    /// Labelled lines this judge answered for, and how many it agreed on.
     pub labelled: usize,
     pub agree: usize,
+    /// Labelled lines left out because the judge did not answer (a failed
+    /// call or an omitted mover).
+    pub unanswered_labels: usize,
     /// Labelled lines it passed.
     pub passed_labelled: usize,
     /// Lines it passed that the owner marked wrong, with the label.
     pub passed_wrong: Vec<(&'a Record, String)>,
-    /// Seeded wrong lines it judged, and caught.
+    /// Seeded wrong lines that count (the judge passed the original and
+    /// answered for the variant), and how many it caught.
     pub seeded: usize,
     pub caught: usize,
-    /// (judged, caught) per kind.
+    /// Wrong lines not counted because the judge had rejected the original.
+    pub original_rejected: usize,
+    /// Seeded rows left out because the judge did not answer.
+    pub unanswered_seeds: usize,
+    /// (counted, caught) per kind.
     pub by_kind: BTreeMap<Kind, (usize, usize)>,
+    /// Controls answered, and how many the judge rejected.
+    pub controls: usize,
+    pub controls_rejected: usize,
 }
 
 impl JudgeScore<'_> {
@@ -43,6 +60,9 @@ impl JudgeScore<'_> {
     }
     pub fn recall(&self) -> f64 {
         ratio(self.caught, self.seeded)
+    }
+    pub fn false_rejects(&self) -> f64 {
+        ratio(self.controls_rejected, self.controls)
     }
 }
 
@@ -58,22 +78,49 @@ pub(crate) struct Score<'a> {
     pub judges: Vec<JudgeScore<'a>>,
     pub chosen: &'static str,
     pub bar_met: bool,
+    /// Labels for a line whose text has changed since the page was made.
+    pub stale_labels: usize,
+    /// Seeded rows made from a line whose text has changed since.
+    pub stale_seeds: usize,
 }
 
 fn judged(r: &Record) -> bool {
     r.insight.is_some() && r.check.is_empty()
 }
 
+fn current_key(records: &[Record], post: &str, ticker: &str) -> Option<String> {
+    records
+        .iter()
+        .find(|r| judged(r) && r.post == post && r.ticker == ticker)
+        .and_then(|r| r.insight.as_ref())
+        .map(line_key)
+}
+
 pub(crate) fn score<'a>(records: &'a [Record], seeded: &[Seeded], labels: &[Label]) -> Score<'a> {
+    let mut stale_labels = 0;
     let labelled: Vec<(&Record, &Label)> = labels
         .iter()
         .filter_map(|l| {
-            records
+            let r = records
                 .iter()
-                .find(|r| judged(r) && r.post == l.post && r.ticker == l.ticker)
-                .map(|r| (r, l))
+                .find(|r| judged(r) && r.post == l.post && r.ticker == l.ticker)?;
+            if l.key
+                .as_ref()
+                .is_some_and(|k| Some(k) != current_key(records, &l.post, &l.ticker).as_ref())
+            {
+                stale_labels += 1;
+                return None;
+            }
+            Some((r, l))
         })
         .collect();
+    let fresh_seeds: Vec<&Seeded> = seeded
+        .iter()
+        .filter(|s| {
+            current_key(records, &s.post, &s.ticker).as_deref() == Some(s.line_key.as_str())
+        })
+        .collect();
+    let stale_seeds = seeded.len() - fresh_seeds.len();
     let judges: Vec<JudgeScore> = JUDGES
         .iter()
         .map(|&name| {
@@ -81,33 +128,57 @@ pub(crate) fn score<'a>(records: &'a [Record], seeded: &[Seeded], labels: &[Labe
                 name,
                 labelled: 0,
                 agree: 0,
+                unanswered_labels: 0,
                 passed_labelled: 0,
                 passed_wrong: vec![],
                 seeded: 0,
                 caught: 0,
+                original_rejected: 0,
+                unanswered_seeds: 0,
                 by_kind: BTreeMap::new(),
+                controls: 0,
+                controls_rejected: 0,
             };
             for (r, l) in &labelled {
-                let Some(&passed) = r.published_if.get(name) else {
+                let Some(j) = r.judges.get(name) else {
                     continue;
                 };
+                if !j.answered() {
+                    s.unanswered_labels += 1;
+                    continue;
+                }
                 let fine = l.label == "fine";
                 s.labelled += 1;
-                s.agree += usize::from(passed == fine);
-                if passed {
+                s.agree += usize::from(j.passed == fine);
+                if j.passed {
                     s.passed_labelled += 1;
                     if !fine {
                         s.passed_wrong.push((r, l.label.clone()));
                     }
                 }
             }
-            for v in seeded {
-                if let Some(caught) = v.caught(name) {
-                    s.seeded += 1;
-                    s.caught += usize::from(caught);
-                    let k = s.by_kind.entry(v.kind).or_default();
-                    k.0 += 1;
-                    k.1 += usize::from(caught);
+            for v in fresh_seeds.iter().filter(|v| v.check.is_empty()) {
+                let Some(j) = v.judges.get(name) else {
+                    continue;
+                };
+                if !j.answered() {
+                    s.unanswered_seeds += 1;
+                    continue;
+                }
+                if v.kind == Kind::Control {
+                    s.controls += 1;
+                    s.controls_rejected += usize::from(!j.passed);
+                    continue;
+                }
+                match v.caught(name) {
+                    Some(caught) => {
+                        s.seeded += 1;
+                        s.caught += usize::from(caught);
+                        let k = s.by_kind.entry(v.kind).or_default();
+                        k.0 += 1;
+                        k.1 += usize::from(caught);
+                    }
+                    None => s.original_rejected += 1,
                 }
             }
             s
@@ -125,8 +196,13 @@ pub(crate) fn score<'a>(records: &'a [Record], seeded: &[Seeded], labels: &[Labe
     let c = &judges[best];
     Score {
         chosen: c.name,
-        bar_met: c.passed_wrong.is_empty() && c.seeded > 0 && c.recall() >= RECALL_BAR,
+        bar_met: c.passed_wrong.is_empty()
+            && c.seeded > 0
+            && c.recall() >= RECALL_BAR
+            && c.passed_labelled >= READ_BAR,
         judges,
+        stale_labels,
+        stale_seeds,
     }
 }
 
@@ -204,25 +280,43 @@ pub(crate) fn report(
             .iter()
             .filter(|r| r.published_if.get(j) == Some(&true))
             .count();
-        let _ = writeln!(out, "- Passed by {j}: {n} of {to_judges}");
+        let failed = records
+            .iter()
+            .filter(|r| judged(r) && r.judges.get(j).is_some_and(|x| !x.answered()))
+            .count();
+        let _ = writeln!(
+            out,
+            "- Passed by {j}: {n} of {to_judges} ({failed} with no answer: a failed call or an omitted mover)"
+        );
     }
-    let matched: usize = s.judges.first().map_or(0, |j| j.labelled);
+    let matched: usize = s
+        .judges
+        .first()
+        .map_or(0, |j| j.labelled + j.unanswered_labels);
     let _ = writeln!(
         out,
-        "- Labels: {} read, {matched} matched a judged line",
-        labels.len()
+        "- Labels: {} read, {matched} matched a judged line, {} for a line whose text has changed since (left out)",
+        labels.len(),
+        s.stale_labels
     );
+    if s.stale_seeds > 0 {
+        let _ = writeln!(
+            out,
+            "- Seeded rows made from an older line: {} (left out; re-run `seed --fresh`)",
+            s.stale_seeds
+        );
+    }
 
     let _ = writeln!(out, "\n## Judges\n");
     let _ = writeln!(
         out,
-        "| Judge | Labelled | Agreement with Rick | Judge-passed lines labelled | Judge-passed lines marked wrong | Seeded recall |"
+        "| Judge | Labelled | Agreement with Rick | Judge-passed lines labelled | Judge-passed lines marked wrong | Seeded recall | Controls rejected | Left out (no answer) |"
     );
-    let _ = writeln!(out, "|---|---|---|---|---|---|");
+    let _ = writeln!(out, "|---|---|---|---|---|---|---|---|");
     for j in &s.judges {
         let _ = writeln!(
             out,
-            "| {} | {} | {} ({}/{}) | {} | {} | {} ({}/{}) |",
+            "| {} | {} | {} ({}/{}) | {} | {} | {} ({}/{}) | {} ({}/{}) | {} labels, {} seeds |",
             j.name,
             j.labelled,
             pct(j.agreement()),
@@ -232,27 +326,46 @@ pub(crate) fn report(
             j.passed_wrong.len(),
             pct(j.recall()),
             j.caught,
-            j.seeded
+            j.seeded,
+            pct(j.false_rejects()),
+            j.controls_rejected,
+            j.controls,
+            j.unanswered_labels,
+            j.unanswered_seeds
         );
     }
+    let _ = writeln!(
+        out,
+        "\nA judge pass counts as agreeing with \"Fine\". Seeded recall counts a wrong line only when that judge passed the original line in `run`; {}. Controls are the original lines sent again beside the wrong ones: rejecting one is a false reject.",
+        s.judges
+            .iter()
+            .map(|j| format!("{} wrong lines were not counted for {} because it had rejected the original", j.original_rejected, j.name))
+            .collect::<Vec<_>>()
+            .join("; ")
+    );
 
     let _ = writeln!(out, "\n## Seeded wrong lines by kind\n");
-    let mut head = "| Kind | Refused by the checks |".to_string();
-    let mut rule = "|---|---|".to_string();
+    let mut head = "| Kind | Made | Refused by the checks |".to_string();
+    let mut rule = "|---|---|---|".to_string();
     for j in JUDGES {
         let _ = write!(head, " {j} caught |");
         rule.push_str("---|");
     }
     let _ = writeln!(out, "{head}\n{rule}");
     for kind in Kind::ALL {
+        let made = seeded.iter().filter(|v| v.kind == kind).count();
         let refused = seeded
             .iter()
             .filter(|v| v.kind == kind && !v.check.is_empty())
             .count();
-        let mut row = format!("| {} | {refused} |", kind.name());
+        let mut row = format!("| {} | {made} | {refused} |", kind.name());
         for j in &s.judges {
-            let (n, c) = j.by_kind.get(&kind).copied().unwrap_or_default();
-            let _ = write!(row, " {c} of {n} |");
+            match j.by_kind.get(&kind) {
+                Some((n, c)) => {
+                    let _ = write!(row, " {c} of {n} |");
+                }
+                None => row.push_str(" N/A |"),
+            }
         }
         let _ = writeln!(out, "{row}");
     }
@@ -343,19 +456,35 @@ pub(crate) fn report(
             pct(RECALL_BAR)
         ));
     }
+    if c.passed_labelled < READ_BAR {
+        why.push(format!(
+            "Rick has read {} judge-passed lines (needs at least {READ_BAR})",
+            c.passed_labelled
+        ));
+    }
     if s.bar_met {
         let _ = writeln!(
             out,
-            "\nThe bar is met: no judge-passed line was marked wrong, and seeded recall is {}.",
+            "\nThe bar is met: Rick read {} judge-passed lines, none was marked wrong, and seeded recall is {}.",
+            c.passed_labelled,
             pct(c.recall())
         );
     } else {
         let _ = writeln!(out, "\nThe bar is not met: {}.", why.join("; "));
     }
+
+    let _ = writeln!(out, "\n## Limits of this trial\n");
     let _ = writeln!(
         out,
-        "\n{} judge-passed lines were labelled with this judge (the spec's shadow-to-on bar asks for at least 50).",
-        c.passed_labelled
+        "- The calendar and macro-event rows are today's, read for past posts: a moved event shows its new date, a postponed one is missing, and a report date may read \"reported\" for a post written before the report. The live step will read the rows as they stood when each post was built."
+    );
+    let _ = writeln!(
+        out,
+        "- Seeded lines are made by code from lines that passed the checks; they test the kinds of error listed above, not every way a line can be wrong."
+    );
+    let _ = writeln!(
+        out,
+        "- Rick's labels cover a sample of about 60 lines; agreement on the rest is not measured."
     );
     out
 }
@@ -363,7 +492,7 @@ pub(crate) fn report(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::page::tests::record;
+    use crate::page::tests::{record, verdict};
     use crate::JudgeResult;
     use serde_json::json;
 
@@ -371,7 +500,16 @@ mod tests {
         Label {
             post: r.post.clone(),
             ticker: r.ticker.clone(),
+            key: Some(line_key(r.insight.as_ref().unwrap())),
             label: label.into(),
+        }
+    }
+
+    fn answer(ticker: &str, p: bool) -> JudgeResult {
+        JudgeResult {
+            verdict: Some(verdict(ticker, p)),
+            passed: p,
+            error: None,
         }
     }
 
@@ -403,28 +541,40 @@ mod tests {
         (records, labels)
     }
 
-    /// Ten judged seeded lines, two per kind, plus one the checks refused.
-    /// Claude misses one formal_advice line; DeepSeek catches all.
+    fn row(r: &Record, kind: Kind, judges: [(&str, JudgeResult); 2]) -> Seeded {
+        Seeded {
+            post: r.post.clone(),
+            ticker: r.ticker.clone(),
+            kind,
+            insight: r.insight.clone().unwrap(),
+            check: vec![],
+            judges: judges
+                .into_iter()
+                .map(|(n, j)| (n.to_string(), j))
+                .collect(),
+            original_passed: BTreeMap::from([("claude".into(), true), ("deepseek".into(), true)]),
+            line_key: line_key(r.insight.as_ref().unwrap()),
+        }
+    }
+
+    /// Ten judged seeded lines, two per kind, plus one the checks refused,
+    /// and two controls. Claude misses one formal_advice line and passes
+    /// both controls; DeepSeek catches all and rejects one control.
     fn seeded(r: &Record) -> Vec<Seeded> {
-        let j = |p: bool| JudgeResult {
-            verdict: None,
-            passed: p,
-            error: None,
-        };
+        let t = &r.ticker;
         let mut out: Vec<Seeded> = Kind::ALL
             .iter()
             .flat_map(|&kind| [kind, kind])
             .enumerate()
-            .map(|(k, kind)| Seeded {
-                post: r.post.clone(),
-                ticker: r.ticker.clone(),
-                kind,
-                insight: r.insight.clone().unwrap(),
-                check: vec![],
-                judges: BTreeMap::from([
-                    ("claude".to_string(), j(k == 9)),
-                    ("deepseek".to_string(), j(false)),
-                ]),
+            .map(|(k, kind)| {
+                row(
+                    r,
+                    kind,
+                    [
+                        ("claude", answer(t, k == 9)),
+                        ("deepseek", answer(t, false)),
+                    ],
+                )
             })
             .collect();
         out.push(Seeded {
@@ -433,6 +583,16 @@ mod tests {
             kind: Kind::OutletSwap,
             ..out[0].clone()
         });
+        out.push(row(
+            r,
+            Kind::Control,
+            [("claude", answer(t, true)), ("deepseek", answer(t, true))],
+        ));
+        out.push(row(
+            r,
+            Kind::Control,
+            [("claude", answer(t, true)), ("deepseek", answer(t, false))],
+        ));
         out
     }
 
@@ -456,6 +616,8 @@ mod tests {
         assert!((c.recall() - 0.9).abs() < 1e-12);
         assert_eq!(c.by_kind[&Kind::FormalAdvice], (2, 1));
         assert_eq!(c.by_kind[&Kind::NumberSwap], (2, 2));
+        assert_eq!((c.controls, c.controls_rejected), (2, 0));
+        assert_eq!((d.controls, d.controls_rejected), (2, 1));
         assert_eq!(s.chosen, "claude");
         // Claude passed r9, which Rick marked as advice.
         assert!(!s.bar_met);
@@ -463,21 +625,14 @@ mod tests {
         // Equal agreement: seeded recall decides.
         let mut records2 = records.clone();
         for r in records2.iter_mut().take(7).skip(5) {
+            r.judges.insert("deepseek".into(), answer(&r.ticker, true));
             r.published_if.insert("deepseek".into(), true);
         }
         let s = score(&records2, &seeded, &labels);
         assert_eq!((s.judges[1].agree, s.chosen), (9, "deepseek"));
-        // DeepSeek passed nothing Rick marked wrong and caught every seed.
-        assert!(s.bar_met);
-
-        // Labels for lines that were never judged are not counted.
-        let mut labels3 = labels.clone();
-        labels3.push(Label {
-            post: "recap_2026-11-12".into(),
-            ticker: "NOPE".into(),
-            label: "fine".into(),
-        });
-        assert_eq!(score(&records, &seeded, &labels3).judges[0].labelled, 10);
+        // DeepSeek passed nothing Rick marked wrong and caught every seed,
+        // but Rick read only 7 lines it passed, not 50.
+        assert!(!s.bar_met);
 
         let posts = [json!({"post": "recap_2026-11-12", "movers": 16, "eligible": 10})];
         let spend = [
@@ -487,16 +642,126 @@ mod tests {
         let md = report(&records, &posts, &seeded, &spend, &labels);
         for want in [
             "Eligible movers: 10 of 16 (62%)",
-            "| claude | 10 | 90% (9/10) | 9 | 1 | 90% (9/10) |",
-            "| deepseek | 10 | 70% (7/10) | 5 | 0 | 100% (10/10) |",
-            "| outlet_swap | 1 | 2 of 2 | 2 of 2 |",
-            "| formal_advice | 0 | 1 of 2 | 2 of 2 |",
+            "| claude | 10 | 90% (9/10) | 9 | 1 | 90% (9/10) | 0% (0/2) | 0 labels, 0 seeds |",
+            "| deepseek | 10 | 70% (7/10) | 5 | 0 | 100% (10/10) | 50% (1/2) | 0 labels, 0 seeds |",
+            "| outlet_swap | 3 | 1 | 2 of 2 | 2 of 2 |",
+            "| formal_advice | 2 | 0 | 1 of 2 | 2 of 2 |",
             "Total: $0.0210 over 2 calls",
             "Judge: **claude**",
-            "The bar is not met: 1 judge-passed lines were marked wrong.",
+            "The bar is not met: 1 judge-passed lines were marked wrong; Rick has read 9 judge-passed lines (needs at least 50).",
+            "## Limits of this trial",
+            "today's, read for past posts",
         ] {
             assert!(md.contains(want), "{want}\n{md}");
         }
+    }
+
+    /// Review H2: the bar needs at least 50 judge-passed lines read.
+    #[test]
+    fn the_bar_needs_fifty_read_judge_passed_lines() {
+        let records: Vec<Record> = (0..60)
+            .map(|k| record("recap_2026-11-12", &format!("T{k}"), (true, true)))
+            .collect();
+        let t = &records[0].ticker;
+        let seeded: Vec<Seeded> = Kind::ALL
+            .iter()
+            .map(|&k| {
+                row(
+                    &records[0],
+                    k,
+                    [("claude", answer(t, false)), ("deepseek", answer(t, false))],
+                )
+            })
+            .collect();
+        let labels: Vec<Label> = records.iter().map(|r| label(r, "fine")).collect();
+        let s = score(&records, &seeded, &labels);
+        assert_eq!(s.judges[0].passed_labelled, 60);
+        assert!(s.bar_met);
+        let s = score(&records, &seeded, &labels[..49]);
+        assert!(!s.bar_met);
+        // A judge that passes nothing never meets the bar.
+        let none: Vec<Record> = (0..60)
+            .map(|k| record("recap_2026-11-12", &format!("T{k}"), (false, false)))
+            .collect();
+        let s = score(&none, &seeded, &labels);
+        assert!(!s.bar_met);
+    }
+
+    /// Review H2: a failed call or an omitted mover is neither a pass nor a
+    /// catch, and a wrong line counts only when the judge passed its original.
+    #[test]
+    fn failures_and_rejected_originals_are_left_out() {
+        let (mut records, labels) = fixture();
+        let t = records[0].ticker.clone();
+        records[0].judges.insert(
+            "deepseek".into(),
+            JudgeResult {
+                verdict: None,
+                passed: false,
+                error: Some("http status 500".into()),
+            },
+        );
+        records[1].judges.insert(
+            "deepseek".into(),
+            JudgeResult {
+                verdict: None,
+                passed: false,
+                error: None,
+            },
+        );
+        let mut seeds = seeded(&records[0]);
+        seeds[0].judges.insert(
+            "claude".into(),
+            JudgeResult {
+                verdict: None,
+                passed: false,
+                error: Some("parse error".into()),
+            },
+        );
+        seeds[1].original_passed.insert("claude".into(), false);
+        seeds[2].judges.insert("deepseek".into(), answer(&t, true));
+        let s = score(&records, &seeds, &labels);
+        let (c, d) = (&s.judges[0], &s.judges[1]);
+        assert_eq!((d.labelled, d.unanswered_labels), (8, 2));
+        assert_eq!(
+            (c.seeded, c.unanswered_seeds, c.original_rejected),
+            (8, 1, 1)
+        );
+        assert_eq!((d.seeded, d.caught), (10, 9));
+    }
+
+    #[test]
+    fn stale_labels_and_seeds_are_left_out() {
+        let (records, mut labels) = fixture();
+        labels[0].key = Some("0000000000000000".into());
+        labels[1].key = None;
+        let mut seeds = seeded(&records[0]);
+        seeds[0].line_key = "0000000000000000".into();
+        let s = score(&records, &seeds, &labels);
+        assert_eq!(s.stale_labels, 1);
+        assert_eq!(s.judges[0].labelled, 9);
+        assert_eq!(s.stale_seeds, 1);
+        assert_eq!(s.judges[0].seeded, 9);
+        let md = report(&records, &[], &seeds, &[], &labels);
+        assert!(
+            md.contains("1 for a line whose text has changed since"),
+            "{md}"
+        );
+        assert!(
+            md.contains("Seeded rows made from an older line: 1"),
+            "{md}"
+        );
+    }
+
+    #[test]
+    fn a_kind_with_no_counted_seed_reads_n_a() {
+        let (records, labels) = fixture();
+        let seeds: Vec<Seeded> = seeded(&records[0])
+            .into_iter()
+            .filter(|s| s.kind != Kind::OutletSwap)
+            .collect();
+        let md = report(&records, &[], &seeds, &[], &labels);
+        assert!(md.contains("| outlet_swap | 0 | 0 | N/A | N/A |"), "{md}");
     }
 
     #[test]
@@ -504,6 +769,14 @@ mod tests {
         let (mut records, labels) = fixture();
         records[9].insight.as_mut().unwrap().en.watch =
             "Reuters reports the shares look cheap.".into();
+        let labels: Vec<Label> = labels
+            .iter()
+            .zip(&records)
+            .map(|(l, r)| Label {
+                key: Some(line_key(r.insight.as_ref().unwrap())),
+                ..l.clone()
+            })
+            .collect();
         let mut refused = record("recap_2026-11-12", "BAD", (false, false));
         refused.check = vec![
             "en: numbers not in the cited evidence: $5.1 billion".into(),

@@ -184,17 +184,32 @@ impl RecordingHttp {
         }
     }
 
-    /// Worst case for one call: the prompt at ~3 chars a token plus a long reply.
+    /// Worst case for one call: the prompt at ~3 chars a token plus the
+    /// longest reply the provider allows.
     fn reserve_for(&self, body: &Value) -> f64 {
-        let (inp, _, out) = prices(&self.model, Utc::now());
-        let in_tok = body.to_string().len() as f64 / 3.0;
-        let out_tok = if self.model.starts_with("claude") {
-            8000.0
-        } else {
-            4096.0
-        };
-        (in_tok * inp + out_tok * out) / 1e6
+        estimate_usd(
+            &self.model,
+            body.to_string().len(),
+            max_output_tokens(&self.model),
+        )
     }
+}
+
+/// The most output a call can bill: Claude's `MAX_TOKENS` (16,000, thinking
+/// included) and DeepSeek's `max_tokens` (4,096).
+pub(crate) fn max_output_tokens(model: &str) -> f64 {
+    if model.starts_with("claude") {
+        16_000.0
+    } else {
+        4_096.0
+    }
+}
+
+/// USD for a call of `prompt_chars` request characters (at ~3 a token) and
+/// `out_tokens` output tokens, at today's rates.
+pub(crate) fn estimate_usd(model: &str, prompt_chars: usize, out_tokens: f64) -> f64 {
+    let (inp, _, out) = prices(model, Utc::now());
+    (prompt_chars as f64 / 3.0 * inp + out_tokens * out) / 1e6
 }
 
 /// Usage and reply text from a Claude or DeepSeek response body.

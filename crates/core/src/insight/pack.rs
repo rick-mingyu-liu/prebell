@@ -471,14 +471,17 @@ fn names_broker(text: &str, mover: &str) -> bool {
 /// downgrade, an initiation, a rating or a price target. Rating wording
 /// that is unambiguous counts alone ("price target", "to buy from hold",
 /// "sector weight"); words with other meanings ("upgrade", "outperformed",
-/// "target", "upside") count only beside a broker or an analyst.
+/// "target", "upside") count only beside a broker or an analyst. The quote
+/// (and its summary) decide, not the headline: "Arista Gains as Strong Q3
+/// Results and Fresh Analyst Target Hikes" can carry the company's own
+/// outlook as its quote.
 pub fn is_analyst_action(r: &NewsReason) -> bool {
     analyst_action(r, "")
 }
 
 /// `is_analyst_action` for a reason about the mover named `mover`.
 fn analyst_action(r: &NewsReason, mover: &str) -> bool {
-    [&r.title, &r.quote, &r.summary_en].iter().any(|t| {
+    [&r.quote, &r.summary_en].iter().any(|t| {
         let t = visible(t);
         analyst_strong_re().is_match(&t)
             || analyst_weak_re().is_match(&t) && names_broker(&t, mover)

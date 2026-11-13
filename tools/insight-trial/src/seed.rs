@@ -1,5 +1,6 @@
 //! Seeded wrong lines: deliberately broken variants of lines that passed the
-//! code checks, to measure how many each judge catches.
+//! code checks, to measure how many each judge catches, sent beside the
+//! original lines as controls.
 
 use std::collections::BTreeMap;
 
@@ -8,7 +9,7 @@ use prebell_core::insight::{EvidenceKind, Insight, Pack};
 use prebell_core::numbers::{self, Lang, Num};
 use serde::{Deserialize, Serialize};
 
-use crate::{JudgeResult, Record};
+use crate::{line_key, JudgeResult, Record};
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "snake_case")]
@@ -18,9 +19,12 @@ pub(crate) enum Kind {
     OutletSwap,
     ZhOnlyNumber,
     FormalAdvice,
+    /// The original line, unchanged: a judge should pass it again.
+    Control,
 }
 
 impl Kind {
+    /// The wrong kinds.
     pub const ALL: [Kind; 5] = [
         Kind::NumberSwap,
         Kind::DirectionFlip,
@@ -35,11 +39,12 @@ impl Kind {
             Kind::OutletSwap => "outlet_swap",
             Kind::ZhOnlyNumber => "zh_only_number",
             Kind::FormalAdvice => "formal_advice",
+            Kind::Control => "control",
         }
     }
 }
 
-/// One line of `seeded.jsonl`.
+/// One line of `seeded.jsonl`: a wrong variant or a control.
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub(crate) struct Seeded {
     pub post: String,
@@ -48,39 +53,49 @@ pub(crate) struct Seeded {
     pub insight: Insight,
     /// The code checks' reasons: a variant they refuse is not sent to a judge.
     pub check: Vec<String>,
-    /// Each judge's answer, for variants the checks let through.
+    /// Each judge's answer, for rows the checks let through.
     pub judges: BTreeMap<String, JudgeResult>,
+    /// Whether each judge passed the original line in `run`: a variant
+    /// counts against a judge only when it did.
+    pub original_passed: BTreeMap<String, bool>,
+    /// `line_key` of the original line, to notice a stale file.
+    pub line_key: String,
 }
 
 impl Seeded {
-    /// Whether `judge` caught this wrong line (did not pass it).
+    /// Whether `judge` caught this wrong line, when it counts: the judge
+    /// passed the original, and answered for this one (no failed call, no
+    /// omitted mover).
     pub fn caught(&self, judge: &str) -> Option<bool> {
-        self.judges.get(judge).map(|j| !j.passed)
+        if self.kind == Kind::Control || self.original_passed.get(judge) != Some(&true) {
+            return None;
+        }
+        self.judges
+            .get(judge)
+            .filter(|j| j.answered())
+            .map(|j| !j.passed)
     }
 }
 
-/// Formal sentences that read as advice but avoid every refused word,
-/// joined to the watch line so it stays one sentence.
+/// Formal clauses that read as advice but avoid every refused word, joined
+/// to the watch line with a comma so it stays one sentence.
 const ADVICE: [(&str, &str); 5] = [
     (
         "investors may wish to add exposure ahead of that date",
-        "投资者不妨在此之前提高配置",
+        "投资者不妨在此之前适度布局",
     ),
     (
-        "this may be an opportune moment to increase positions",
-        "当前或是增加仓位的合适时机",
+        "this may be an opportune moment to increase holdings",
+        "当前或是介入的合适时机",
     ),
-    (
-        "a measured addition to positions appears warranted",
-        "适度增加仓位似属合理",
-    ),
+    ("a measured addition appears warranted", "适度介入似属合理"),
     (
         "the shares appear attractively priced at current levels",
         "当前股价似乎颇具吸引力",
     ),
     (
         "reducing exposure before the report may be prudent",
-        "在财报公布前降低仓位或属审慎",
+        "在财报公布前降低持股比例或属审慎",
     ),
 ];
 
@@ -233,33 +248,58 @@ fn find_name<'a>(text: &str, names: &'a [String]) -> Option<(usize, &'a str)> {
         .min_by_key(|(at, n)| (*at, std::cmp::Reverse(n.len())))
 }
 
-fn outlet_swap(pack: &Pack, i: &Insight) -> Option<Insight> {
-    let outlet_of = |id: &String| {
-        pack.evidence
+/// The outlets of the news items `cites` names, distinct, in cite order.
+fn cited_outlets(pack: &Pack, cites: &[String]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for id in cites {
+        let outlet = pack
+            .evidence
             .iter()
             .find(|e| {
                 e.id == *id && matches!(e.kind, EvidenceKind::News | EvidenceKind::AnalystAction)
             })
-            .and_then(|e| e.outlet.clone())
-    };
-    let cited = i.en.cites.iter().find_map(outlet_of)?;
-    let other = pack
-        .evidence
-        .iter()
-        .filter_map(|e| e.outlet.clone())
-        .find(|o| *o != cited)?;
+            .and_then(|e| e.outlet.clone());
+        if let Some(o) = outlet.filter(|o| !out.contains(o)) {
+            out.push(o);
+        }
+    }
+    out
+}
+
+/// A line citing two news items from two outlets, with the outlets' names
+/// swapped: every cited outlet is still named, so the checks pass, but each
+/// fact is now attributed to the other outlet.
+fn outlet_swap(pack: &Pack, i: &Insight) -> Option<Insight> {
     let mut v = i.clone();
     let mut changed = false;
     for (line, lang) in [(&mut v.en, Lang::En), (&mut v.zh, Lang::Zh)] {
-        if let Some((at, name)) = find_name(&line.watch, &outlet_names(&cited, lang)) {
-            let to = outlet_names(&other, lang).remove(0);
-            line.watch = format!(
-                "{}{to}{}",
-                &line.watch[..at],
-                &line.watch[at + name.len()..]
-            );
-            changed = true;
+        let outlets = cited_outlets(pack, &line.cites);
+        let [a, b, ..] = outlets.as_slice() else {
+            continue;
+        };
+        let (names_a, names_b) = (outlet_names(a, lang), outlet_names(b, lang));
+        let (Some((at_a, name_a)), Some((at_b, name_b))) = (
+            find_name(&line.watch, &names_a),
+            find_name(&line.watch, &names_b),
+        ) else {
+            continue;
+        };
+        if at_a + name_a.len() > at_b && at_b + name_b.len() > at_a {
+            continue;
         }
+        let w = &line.watch;
+        let ((s1, n1), (s2, n2)) = if at_a < at_b {
+            ((at_a, name_a), (at_b, name_b))
+        } else {
+            ((at_b, name_b), (at_a, name_a))
+        };
+        line.watch = format!(
+            "{}{n2}{}{n1}{}",
+            &w[..s1],
+            &w[s1 + n1.len()..s2],
+            &w[s2 + n2.len()..]
+        );
+        changed = true;
     }
     changed.then_some(v)
 }
@@ -275,7 +315,7 @@ fn formal_advice(i: &Insight, pick: usize) -> Insight {
     let (en, zh) = ADVICE[pick % ADVICE.len()];
     let mut v = i.clone();
     let body = i.en.watch.trim_end().trim_end_matches(['.', '!', '?']);
-    v.en.watch = format!("{body}; {en}.");
+    v.en.watch = format!("{body}, {en}.");
     let body = i.zh.watch.trim_end().trim_end_matches(['。', '！', '？']);
     v.zh.watch = format!("{body}，{zh}。");
     v
@@ -292,6 +332,7 @@ pub(crate) fn variants(pack: &Pack, i: &Insight, pick: usize) -> Vec<(Kind, Insi
             Kind::OutletSwap => outlet_swap(pack, i),
             Kind::ZhOnlyNumber => zh_only_number(pack, i),
             Kind::FormalAdvice => Some(formal_advice(i, pick)),
+            Kind::Control => None,
         };
         if let Some(v) = v.filter(|v| v != i) {
             out.push((kind, v));
@@ -300,28 +341,73 @@ pub(crate) fn variants(pack: &Pack, i: &Insight, pick: usize) -> Vec<(Kind, Insi
     out
 }
 
-/// The variants of every line that passed the checks, grouped by post, each
-/// with its own check result. A judge call later covers one post's variants
-/// that the checks let through.
-pub(crate) fn seed_records(records: &[Record]) -> Vec<(Seeded, Pack)> {
+/// One post's seeded rows and the judge calls that cover them.
+pub(crate) struct PostPlan {
+    pub post: String,
+    /// Controls and variants, each with its pack.
+    pub rows: Vec<(Seeded, Pack)>,
+    /// Each call's rows (indices into `rows`): at most one row per mover, so
+    /// a judge never sees two versions of one mover side by side, and every
+    /// mover's original line is in one of the calls as a control.
+    pub calls: Vec<Vec<usize>>,
+}
+
+/// The seeding plan: for every line that passed the checks in `run`, its
+/// control and its wrong variants, per post.
+pub(crate) fn plan(records: &[Record]) -> Vec<PostPlan> {
+    let mut posts: Vec<&str> = records.iter().map(|r| r.post.as_str()).collect();
+    posts.dedup();
     let mut out = Vec::new();
-    for (k, r) in records.iter().enumerate() {
-        let Some(i) = r.insight.as_ref().filter(|_| r.check.is_empty()) else {
-            continue;
-        };
-        for (kind, v) in variants(&r.pack, i, k) {
-            out.push((
-                Seeded {
-                    post: r.post.clone(),
-                    ticker: r.ticker.clone(),
-                    kind,
-                    check: check::check(&r.pack, &v),
-                    insight: v,
-                    judges: BTreeMap::new(),
-                },
-                r.pack.clone(),
-            ));
+    let mut pick = 0;
+    for post in posts {
+        let mut rows: Vec<(Seeded, Pack)> = Vec::new();
+        let mut sequences: Vec<Vec<usize>> = Vec::new();
+        for r in records.iter().filter(|r| r.post == post) {
+            let Some(i) = r.insight.as_ref().filter(|_| r.check.is_empty()) else {
+                continue;
+            };
+            let original_passed = r
+                .judges
+                .iter()
+                .map(|(j, res)| (j.clone(), res.passed))
+                .collect::<BTreeMap<_, _>>();
+            let row = |kind, v: Insight, check: Vec<String>| Seeded {
+                post: r.post.clone(),
+                ticker: r.ticker.clone(),
+                kind,
+                insight: v,
+                check,
+                judges: BTreeMap::new(),
+                original_passed: original_passed.clone(),
+                line_key: line_key(i),
+            };
+            let mut sendable = Vec::new();
+            for (kind, v) in variants(&r.pack, i, pick) {
+                let c = check::check(&r.pack, &v);
+                if c.is_empty() {
+                    sendable.push(rows.len());
+                }
+                rows.push((row(kind, v, c), r.pack.clone()));
+            }
+            pick += 1;
+            // The control goes in a different round for each mover.
+            let at = sequences.len() % (sendable.len() + 1);
+            sendable.insert(at, rows.len());
+            rows.push((row(Kind::Control, i.clone(), vec![]), r.pack.clone()));
+            sequences.push(sendable);
         }
+        if rows.is_empty() {
+            continue;
+        }
+        let rounds = sequences.iter().map(Vec::len).max().unwrap_or(0);
+        let calls = (0..rounds)
+            .map(|k| sequences.iter().filter_map(|s| s.get(k).copied()).collect())
+            .collect();
+        out.push(PostPlan {
+            post: post.to_string(),
+            rows,
+            calls,
+        });
     }
     out
 }
@@ -339,6 +425,8 @@ mod tests {
             outlet: outlet.map(str::to_string),
             url: None,
             date: None,
+            quote: None,
+            unconfirmed: false,
         }
     }
 
@@ -359,17 +447,21 @@ mod tests {
         }
     }
 
-    fn insight(en: &str, zh: &str) -> Insight {
+    fn insight_citing(en: &str, zh: &str, cites: &[&str]) -> Insight {
         let l = |hook: &str, watch: &str| Line {
             hook: hook.into(),
             watch: watch.into(),
-            cites: vec!["e2".into()],
+            cites: cites.iter().map(|c| c.to_string()).collect(),
         };
         Insight {
             ticker: "AAPL".into(),
             en: l("Guidance sets the test", en),
             zh: l("指引成为考验", zh),
         }
+    }
+
+    fn insight(en: &str, zh: &str) -> Insight {
+        insight_citing(en, zh, &["e2"])
     }
 
     fn base() -> Insight {
@@ -379,12 +471,24 @@ mod tests {
         )
     }
 
-    fn kind(kind: Kind) -> Insight {
-        variants(&pack(), &base(), 0)
+    /// A line citing two news items from two outlets.
+    fn two_outlets() -> Insight {
+        insight_citing(
+            "Reuters reports Apple raised its revenue forecast to $4.2 billion, and Bloomberg reports it will build a plant in Texas.",
+            "据路透社报道，苹果将营收预期上调至42亿美元，彭博社则报道其将在得州建厂。",
+            &["e2", "e3"],
+        )
+    }
+
+    fn kind_of(i: &Insight, kind: Kind) -> Option<Insight> {
+        variants(&pack(), i, 0)
             .into_iter()
             .find(|(k, _)| *k == kind)
-            .unwrap_or_else(|| panic!("no {kind:?}"))
-            .1
+            .map(|(_, v)| v)
+    }
+
+    fn kind(kind: Kind) -> Insight {
+        kind_of(&base(), kind).unwrap_or_else(|| panic!("no {kind:?}"))
     }
 
     #[test]
@@ -407,15 +511,6 @@ mod tests {
             "据路透社报道，苹果将营收预期下调至42亿美元，并宣布10亿美元回购。"
         );
 
-        let v = kind(Kind::OutletSwap);
-        assert!(
-            v.en.watch.starts_with("Bloomberg reports"),
-            "{}",
-            v.en.watch
-        );
-        assert!(v.zh.watch.starts_with("据彭博社报道"), "{}", v.zh.watch);
-        assert_eq!(v.en.cites, b.en.cites);
-
         let v = kind(Kind::ZhOnlyNumber);
         assert_eq!(v.en, b.en);
         assert_eq!(
@@ -423,31 +518,47 @@ mod tests {
             "据路透社报道，苹果将营收预期上调至10亿美元，并宣布10亿美元回购。"
         );
 
+        // Review L3: the advice clause joins with a comma, not a semicolon.
         let v = kind(Kind::FormalAdvice);
         assert_eq!(
             v.en.watch,
-            "Reuters reports Apple raised its revenue forecast to $4.2 billion alongside a $1.0 billion buyback; investors may wish to add exposure ahead of that date."
+            "Reuters reports Apple raised its revenue forecast to $4.2 billion alongside a $1.0 billion buyback, investors may wish to add exposure ahead of that date."
         );
         assert_eq!(
             v.zh.watch,
-            "据路透社报道，苹果将营收预期上调至42亿美元，并宣布10亿美元回购，投资者不妨在此之前提高配置。"
+            "据路透社报道，苹果将营收预期上调至42亿美元，并宣布10亿美元回购，投资者不妨在此之前适度布局。"
         );
-        // The checks let the swapped number, the flipped direction, the
-        // zh-only number and the advice through; the swapped outlet no
-        // longer names the cited item's outlet.
-        for k in [
-            Kind::NumberSwap,
-            Kind::DirectionFlip,
-            Kind::ZhOnlyNumber,
-            Kind::FormalAdvice,
+
+        // Review M1: the outlets of two cited items trade places.
+        let o = two_outlets();
+        let v = kind_of(&o, Kind::OutletSwap).expect("two outlets");
+        assert_eq!(
+            v.en.watch,
+            "Bloomberg reports Apple raised its revenue forecast to $4.2 billion, and Reuters reports it will build a plant in Texas."
+        );
+        assert_eq!(
+            v.zh.watch,
+            "据彭博社报道，苹果将营收预期上调至42亿美元，路透社则报道其将在得州建厂。"
+        );
+        assert_eq!(v.en.cites, o.en.cites);
+
+        // Every kind still passes the checks, so it reaches the judges.
+        assert_eq!(check::check(&pack(), &o), Vec::<String>::new());
+        assert_eq!(check::check(&pack(), &b), Vec::<String>::new());
+        for (k, v) in [
+            (Kind::NumberSwap, kind(Kind::NumberSwap)),
+            (Kind::DirectionFlip, kind(Kind::DirectionFlip)),
+            (Kind::ZhOnlyNumber, kind(Kind::ZhOnlyNumber)),
+            (Kind::FormalAdvice, kind(Kind::FormalAdvice)),
+            (Kind::OutletSwap, v),
         ] {
-            assert_eq!(
-                check::check(&pack(), &kind(k)),
-                Vec::<String>::new(),
-                "{k:?}"
-            );
+            assert_eq!(check::check(&pack(), &v), Vec::<String>::new(), "{k:?}");
         }
-        assert!(!check::check(&pack(), &kind(Kind::OutletSwap)).is_empty());
+        // Every advice clause passes too.
+        for k in 0..ADVICE.len() {
+            let v = formal_advice(&b, k);
+            assert_eq!(check::check(&pack(), &v), Vec::<String>::new(), "{k}");
+        }
     }
 
     #[test]
@@ -464,6 +575,8 @@ mod tests {
         assert!(!kinds.contains(&Kind::ZhOnlyNumber));
         assert!(kinds.contains(&Kind::DirectionFlip));
         assert!(kinds.contains(&Kind::FormalAdvice));
+        // A line citing one outlet has no outlet swap.
+        assert!(!kinds.contains(&Kind::OutletSwap));
         // With one number, the swap uses another number of the cited item.
         let i = insight(
             "Reuters reports Apple expects revenue of $4.2 billion at its report.",
@@ -475,15 +588,61 @@ mod tests {
             swap.en.watch,
             "Reuters reports Apple expects revenue of $1 billion at its report."
         );
-        // No direction word and no other outlet: those kinds are skipped.
-        let mut p = pack();
-        p.evidence.truncate(2);
+        // No direction word: that kind is skipped.
         let i = insight(
             "Reuters reports a $1.0 billion buyback.",
             "据路透社报道，公司宣布10亿美元回购。",
         );
-        let kinds: Vec<Kind> = variants(&p, &i, 0).into_iter().map(|(k, _)| k).collect();
+        let kinds: Vec<Kind> = variants(&pack(), &i, 0)
+            .into_iter()
+            .map(|(k, _)| k)
+            .collect();
         assert!(!kinds.contains(&Kind::DirectionFlip));
-        assert!(!kinds.contains(&Kind::OutletSwap));
+    }
+
+    /// Review M9 and H2: one row per mover per call, each mover's original
+    /// line as a control in a different round.
+    #[test]
+    fn the_plan_mixes_controls_and_never_repeats_a_mover_in_a_call() {
+        use crate::page::tests::record;
+        let records = vec![
+            record("recap_2026-11-12", "T0", (true, true)),
+            record("recap_2026-11-12", "T1", (true, false)),
+            record("recap_2026-11-13", "T2", (true, true)),
+        ];
+        let plans = plan(&records);
+        assert_eq!(plans.len(), 2);
+        let p = &plans[0];
+        let kinds = |call: &Vec<usize>| -> Vec<(String, Kind)> {
+            call.iter()
+                .map(|&k| (p.rows[k].0.ticker.clone(), p.rows[k].0.kind))
+                .collect()
+        };
+        // Each line's only variant the checks pass is the advice clause.
+        assert_eq!(
+            p.calls.iter().map(kinds).collect::<Vec<_>>(),
+            [
+                vec![
+                    ("T0".to_string(), Kind::Control),
+                    ("T1".to_string(), Kind::FormalAdvice)
+                ],
+                vec![
+                    ("T0".to_string(), Kind::FormalAdvice),
+                    ("T1".to_string(), Kind::Control)
+                ],
+            ]
+        );
+        // The refused variants are rows with no call.
+        let sent: Vec<usize> = p.calls.iter().flatten().copied().collect();
+        for (k, (row, _)) in p.rows.iter().enumerate() {
+            assert_eq!(sent.contains(&k), row.check.is_empty(), "{:?}", row.kind);
+        }
+        assert!(p.rows[0].0.original_passed["deepseek"]);
+        let t1 = p.rows.iter().find(|(r, _)| r.ticker == "T1").unwrap();
+        assert!(!t1.0.original_passed["deepseek"]);
+        assert_eq!(
+            t1.0.line_key,
+            line_key(records[1].insight.as_ref().unwrap())
+        );
     }
 }

@@ -7,7 +7,7 @@
 # Writes into OUT_DIR:
 #   premarket_<date>.json, recap_<date>.json   briefs and recaps, last 14 days
 #   earnings_<TICKER>_<accession>.json          earnings checks, last 21 days
-#   calendar.json   [[ticker, "YYYY-MM-DD"], ...] confirmed or reported dates
+#   calendar.json   [[ticker, "YYYY-MM-DD", status], ...] report dates, not quarantined
 #   events.json     [["YYYY-MM-DD", title], ...]  macro events, titled as the site does
 #   macro_events.rows.json                       the raw macro rows events.json is built from
 #
@@ -47,12 +47,13 @@ done
 echo "facts bundles listed: $n" >&2
 
 # Report dates near the posts' trading dates (the pack keeps those within
-# 100 days). Unconfirmed and quarantined dates are left out: an insight may
-# only rest on a date with primary proof.
-query "SELECT ticker, report_date FROM earnings_calendar
-  WHERE status IN ('confirmed', 'reported')
+# 100 days), with their status: reported, confirmed or unconfirmed. An
+# unconfirmed date reaches the pack marked as such, and a line citing it
+# must hedge it. Quarantined dates are left out.
+query "SELECT ticker, report_date, status FROM earnings_calendar
+  WHERE status != 'quarantined'
     AND report_date BETWEEN date('now', '-120 day') AND date('now', '+100 day')
-  ORDER BY ticker, report_date" | jq '[.[] | [.ticker, .report_date]]' >"$out/calendar.json"
+  ORDER BY ticker, report_date" | jq '[.[] | [.ticker, .report_date, .status]]' >"$out/calendar.json"
 
 # Macro events from the oldest post's date to a week ahead; titles come from
 # prebell_core::events::title, as on the site.

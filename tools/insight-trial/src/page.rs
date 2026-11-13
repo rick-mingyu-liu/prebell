@@ -2,7 +2,7 @@
 //! lines in random order, with the judges' verdicts hidden, for the owner to
 //! mark "Fine", "Wrong fact" or "Advice or not formal".
 
-use crate::Record;
+use crate::{line_key, Record};
 
 pub(crate) const CARDS: usize = 60;
 const SEED: u64 = 20_261_113;
@@ -47,6 +47,14 @@ pub(crate) fn pick(records: &[Record], n: usize) -> Vec<&Record> {
     must
 }
 
+/// How many lines `pick` must show whatever `n` is.
+pub(crate) fn must_show(records: &[Record]) -> usize {
+    records
+        .iter()
+        .filter(|r| judged(r) && r.published_if.values().any(|p| !p))
+        .count()
+}
+
 fn esc(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {
@@ -71,19 +79,24 @@ fn card(k: usize, r: &Record) -> String {
         .pack
         .evidence
         .iter()
-        .filter(|e| cites.contains(&&e.id))
         .map(|e| {
             let source = e
                 .outlet
                 .as_deref()
                 .map_or(String::new(), |o| format!(" · {}", esc(o)));
+            let cited = cites.contains(&&e.id);
+            let quote = e.quote.as_deref().map_or(String::new(), |q| {
+                format!(" <span class=\"quote\">Source text: {}</span>", esc(q))
+            });
             format!(
-                "<li><span class=\"tag\">{}{source}</span> {}</li>",
+                "<li{}><span class=\"tag\">{}{source}{}</span> {}{quote}</li>",
+                if cited { " class=\"cited\"" } else { "" },
                 esc(&serde_json::to_value(e.kind)
                     .expect("kind")
                     .as_str()
                     .unwrap_or("")
                     .replace('_', " ")),
+                if cited { " · cited" } else { "" },
                 esc(&e.text)
             )
         })
@@ -92,16 +105,17 @@ fn card(k: usize, r: &Record) -> String {
         format!("<label><input type=\"radio\" name=\"c{k}\" value=\"{value}\"> {label}</label>")
     };
     format!(
-        r#"<article class="card" data-post="{post}" data-ticker="{ticker}">
+        r#"<article class="card" data-post="{post}" data-ticker="{ticker}" data-key="{key}">
 <header><span class="n">{n}</span> <strong>{ticker}</strong> {name} <span class="post">{post}</span></header>
 <div class="lines">
 <div lang="en"><p class="hook">{en_hook}</p><p>{en_watch}</p></div>
 <div lang="zh"><p class="hook">{zh_hook}</p><p>{zh_watch}</p></div>
 </div>
-<details open><summary>Cited evidence</summary><ul>{evidence}</ul></details>
+<details open><summary>Evidence the writer had (the items the line cites are marked)</summary><ul>{evidence}</ul></details>
 <fieldset>{fine}{wrong}{advice}</fieldset>
 </article>"#,
         n = k + 1,
+        key = line_key(i),
         post = esc(&r.post),
         ticker = esc(&r.ticker),
         name = esc(&r.pack.name),
@@ -134,7 +148,9 @@ button { font: inherit; padding: 6px 14px; border-radius: 6px; border: 1px solid
 .lines p { margin: 2px 0; }
 .hook { font-weight: 600; }
 ul { padding-left: 18px; margin: 6px 0; }
-li { margin: 4px 0; overflow-wrap: anywhere; }
+li { margin: 4px 0; overflow-wrap: anywhere; color: var(--muted); }
+li.cited { color: var(--fg); border-left: 3px solid var(--accent); padding-left: 8px; margin-left: -11px; }
+.quote { display: block; font-size: 0.85rem; color: var(--muted); }
 fieldset { border: 0; padding: 8px 0 0; margin: 0; display: flex; gap: 16px; flex-wrap: wrap; }
 label { cursor: pointer; }
 "#;
@@ -143,7 +159,9 @@ const SCRIPT: &str = r#"
 (function () {
   var KEY = "insight-trial-labels";
   var cards = Array.prototype.slice.call(document.querySelectorAll(".card"));
-  function id(c) { return c.dataset.post + "|" + c.dataset.ticker; }
+  // Keyed by the line's text and writer version: a new run's lines never
+  // inherit choices made for older text.
+  function id(c) { return c.dataset.key; }
   function load() {
     try { return JSON.parse(localStorage.getItem(KEY) || "{}"); } catch (e) { return {}; }
   }
@@ -176,7 +194,7 @@ const SCRIPT: &str = r#"
     var out = [];
     cards.forEach(function (c) {
       var on = c.querySelector("input:checked");
-      if (on) out.push({ post: c.dataset.post, ticker: c.dataset.ticker, label: on.value });
+      if (on) out.push({ post: c.dataset.post, ticker: c.dataset.ticker, key: c.dataset.key, label: on.value });
     });
     var blob = new Blob([JSON.stringify(out, null, 1)], { type: "application/json" });
     var a = document.createElement("a");
@@ -210,7 +228,7 @@ pub(crate) fn page(records: &[Record], n: usize) -> String {
 <body>
 <main>
 <h1>Mover insight lines</h1>
-<p class="intro">{count} lines, in random order. For each, read the English and Chinese lines against the cited evidence and choose one: <b>Fine</b>; <b>Wrong fact</b> (a claim the evidence does not support, or the two languages differ); <b>Advice or not formal</b>. Choices are kept in this browser; "Save labels" downloads <code>labels.json</code>.</p>
+<p class="intro">{count} lines, in random order. For each, read the English and Chinese lines against the evidence and choose one: <b>Fine</b>; <b>Wrong fact</b> (a claim the evidence does not support, or the two languages differ); <b>Advice or not formal</b>. Choices are kept in this browser; "Save labels" downloads <code>labels.json</code>.</p>
 <div class="bar"><button id="save" type="button">Save labels</button><span id="count"></span></div>
 {cards}
 </main>
@@ -226,8 +244,24 @@ pub(crate) fn page(records: &[Record], n: usize) -> String {
 pub(crate) mod tests {
     use super::*;
     use crate::JudgeResult;
+    use prebell_core::insight::judge::Verdict;
     use prebell_core::insight::{Evidence, EvidenceKind, Insight, Line, Pack};
     use std::collections::BTreeMap;
+
+    /// An answered verdict that passes or not.
+    pub(crate) fn verdict(ticker: &str, passed: bool) -> Verdict {
+        Verdict {
+            ticker: ticker.into(),
+            en_claims: vec![],
+            zh_claims: vec![],
+            en_supported: passed,
+            zh_supported: passed,
+            no_advice: true,
+            formal: true,
+            same_meaning: true,
+            notes: String::new(),
+        }
+    }
 
     /// A judged line; `verdicts` are (claude passed, deepseek passed).
     pub(crate) fn record(post: &str, ticker: &str, verdicts: (bool, bool)) -> Record {
@@ -237,7 +271,7 @@ pub(crate) mod tests {
             cites: vec!["e2".into()],
         };
         let j = |p: bool| JudgeResult {
-            verdict: None,
+            verdict: Some(verdict(ticker, p)),
             passed: p,
             error: None,
         };
@@ -254,6 +288,8 @@ pub(crate) mod tests {
                     outlet: Some("Reuters".into()),
                     url: Some("https://www.reuters.com/a".into()),
                     date: None,
+                    quote: None,
+                    unconfirmed: false,
                 }],
             },
             insight: Some(Insight {
@@ -352,5 +388,42 @@ pub(crate) mod tests {
         ] {
             assert!(html.contains(want), "{want}");
         }
+    }
+
+    /// Review M7, M5 and L4.
+    #[test]
+    fn the_page_shows_the_whole_pack_and_keys_choices_by_line() {
+        let mut r = record("recap_2026-11-12", "AAPL", (true, false));
+        r.pack.evidence.push(Evidence {
+            id: "e3".into(),
+            kind: EvidenceKind::CompanyFigure,
+            text: "Revenue: $18.52 billion, reported for Q1 of fiscal 2027.".into(),
+            outlet: None,
+            url: None,
+            date: None,
+            quote: Some("Total revenue 18,517 14,883".into()),
+            unconfirmed: false,
+        });
+        let html = page(std::slice::from_ref(&r), CARDS);
+        // The uncited item is shown too, and only the cited one is marked.
+        assert!(html.contains("Revenue: $18.52 billion"), "{html}");
+        assert!(html.contains("Source text: Total revenue 18,517 14,883"));
+        assert_eq!(html.matches("<li class=\"cited\">").count(), 1);
+        // Saved choices are keyed by the line, so a new line starts blank.
+        let key = line_key(r.insight.as_ref().unwrap());
+        assert!(html.contains(&format!("data-key=\"{key}\"")));
+        assert!(html.contains("return c.dataset.key;"));
+        assert!(html.contains("key: c.dataset.key"));
+        // More lines that must be shown than cards: all are, and main warns.
+        let many: Vec<Record> = (0..70)
+            .map(|k| record("recap_2026-11-12", &format!("T{k}"), (false, true)))
+            .collect();
+        assert_eq!(must_show(&many), 70);
+        assert_eq!(
+            page(&many, CARDS)
+                .matches("<article class=\"card\"")
+                .count(),
+            70
+        );
     }
 }

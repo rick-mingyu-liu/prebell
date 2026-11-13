@@ -8,13 +8,14 @@
 //! ours (`http.rs`): it prices each call and enforces a hard spend cap that
 //! spans runs (the ledger is `OUT/spend.jsonl`).
 //!
-//! `seed` makes deliberately wrong variants of the lines that passed the
-//! checks and asks each judge about them; `page` writes the labelling page;
-//! `score` reads the owner's labels back and writes the judge report.
+//! `seed` sends each judge deliberately wrong variants of the lines that
+//! passed the checks, beside the original lines as controls; `page` writes
+//! the labelling page; `score` reads the owner's labels back and writes the
+//! judge report.
 //!
 //! ```text
-//! cargo run --release -- run --facts DIR --out DIR --dev-vars PATH [--budget 3.0] [--only SUBSTR]
-//! cargo run --release -- seed --out DIR --dev-vars PATH [--budget 3.0]
+//! cargo run --release -- run --facts DIR --out DIR --dev-vars PATH [--budget 3.0] [--only SUBSTR] [--fresh] [--plan]
+//! cargo run --release -- seed --out DIR --dev-vars PATH [--budget 3.0] [--fresh] [--plan]
 //! cargo run --release -- page --out DIR [--cards 60]
 //! cargo run --release -- score --out DIR --labels FILE
 //! cargo run --release -- events-json ROWS.json > events.json
@@ -34,12 +35,12 @@ use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
-use chrono::NaiveDate;
+use chrono::{DateTime, NaiveDate, Utc};
 use prebell_core::cover::Session;
 use prebell_core::earnings::facts::EarningsFacts;
 use prebell_core::facts::{Mover, PremarketFacts, Theme};
 use prebell_core::insight::judge::{self, Verdict, JUDGE_VERSION};
-use prebell_core::insight::pack::{packs, PackInputs};
+use prebell_core::insight::pack::{packs, PackInputs, ReportStatus};
 use prebell_core::insight::write::{self, WRITER_VERSION};
 use prebell_core::insight::{check, Insight, Pack};
 use prebell_core::llm::{api_key_var, llm_from_env};
@@ -48,7 +49,7 @@ use prebell_core::recap::RecapFacts;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
-use http::{Budget, RecordingHttp, ReqwestHttp};
+use http::{estimate_usd, max_output_tokens, Budget, RecordingHttp, ReqwestHttp};
 
 /// The writer is always Claude.
 const CLAUDE_MODEL: &str = "claude-sonnet-5-5";
@@ -57,6 +58,15 @@ const CLAUDE_MODEL: &str = "claude-sonnet-5-5";
 const DEEPSEEK_MODEL: &str = "deepseek-flash";
 /// The judges compared, in report order.
 pub(crate) const JUDGES: [&str; 2] = ["claude", "deepseek"];
+/// A judge result for a call the budget stopped: `run` makes it on a re-run.
+pub(crate) const NOT_RUN: &str = "not run: budget cap reached";
+
+fn model_of(provider: &str) -> &'static str {
+    match provider {
+        "claude" => CLAUDE_MODEL,
+        _ => DEEPSEEK_MODEL,
+    }
+}
 
 #[allow(clippy::large_enum_variant)] // a few dozen values per run, never moved in bulk
 pub(crate) enum Post {
@@ -75,6 +85,12 @@ impl Post {
         match self {
             Post::Premarket(f) => f.trading_date,
             Post::Recap(f) => f.trading_date,
+        }
+    }
+    fn as_of_utc(&self) -> DateTime<Utc> {
+        match self {
+            Post::Premarket(f) => f.as_of_utc,
+            Post::Recap(f) => f.as_of_utc,
         }
     }
     /// Gainers then losers, as listed.
@@ -99,7 +115,7 @@ pub(crate) struct Inputs {
     /// (file stem, facts), by file name.
     pub posts: Vec<(String, Post)>,
     pub checks: Vec<EarningsFacts>,
-    pub calendar: Vec<(String, NaiveDate)>,
+    pub calendar: Vec<(String, NaiveDate, ReportStatus)>,
     pub macro_events: Vec<(NaiveDate, String)>,
 }
 
@@ -110,6 +126,7 @@ impl Inputs {
         let p = packs(&PackInputs {
             session: post.session(),
             trading_date: post.trading_date(),
+            as_of_utc: post.as_of_utc(),
             movers: &movers,
             themes: post.themes(),
             checks: &self.checks,
@@ -143,8 +160,13 @@ pub(crate) fn load_inputs(dir: &Path, only: Option<&str>) -> Inputs {
         let name = p.file_stem().unwrap().to_string_lossy().to_string();
         let json = fs::read_to_string(&p).expect("read facts");
         if name == "calendar" {
-            let rows: Vec<(String, String)> = parse(&name, &json);
-            i.calendar = rows.into_iter().map(|(t, d)| (t, date(&d))).collect();
+            let rows: Vec<(String, String, String)> = parse(&name, &json);
+            for (t, d, status) in rows {
+                match ReportStatus::parse(&status) {
+                    Some(s) => i.calendar.push((t, date(&d), s)),
+                    None => eprintln!("calendar: skipping {t} {d} ({status})"),
+                }
+            }
         } else if name == "events" {
             let rows: Vec<(String, String)> = parse(&name, &json);
             i.macro_events = rows.into_iter().map(|(d, n)| (date(&d), n)).collect();
@@ -186,10 +208,8 @@ pub(crate) fn provider(
     budget: &Rc<Budget>,
     keys: &HashMap<String, String>,
 ) -> Box<dyn LlmProvider> {
-    let (model, pinned) = match provider {
-        "claude" => (CLAUDE_MODEL, Some(CLAUDE_MODEL.to_string())),
-        _ => (DEEPSEEK_MODEL, None),
-    };
+    let model = model_of(provider);
+    let pinned = (provider == "claude").then(|| CLAUDE_MODEL.to_string());
     let http = RecordingHttp::new(inner, model, role, budget.clone());
     let key = api_key_var(provider)
         .and_then(|v| keys.get(v))
@@ -223,9 +243,18 @@ pub(crate) fn models(
 pub(crate) struct JudgeResult {
     pub verdict: Option<Verdict>,
     pub passed: bool,
-    /// The judge call failed (not the budget: a budget stop ends the run).
+    /// The judge call failed, or (`NOT_RUN`) the budget stopped it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+}
+
+impl JudgeResult {
+    /// The judge answered for this mover: its call worked and its reply
+    /// held a verdict. A failed call or an omitted mover is not an answer,
+    /// so it counts neither as a pass nor as a catch.
+    pub fn answered(&self) -> bool {
+        self.error.is_none() && self.verdict.is_some()
+    }
 }
 
 /// One line of `lines.jsonl`: one mover that had a pack.
@@ -243,6 +272,27 @@ pub(crate) struct Record {
     pub judge_version: String,
 }
 
+/// A line's identity across runs: the writer version and the four texts.
+/// The labelling page keys its saved choices by it, and `score` uses it to
+/// notice labels or seeds made for an older line.
+pub(crate) fn line_key(i: &Insight) -> String {
+    // FNV-1a, 64 bits: stable across builds, unlike the std hasher.
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for part in [
+        WRITER_VERSION,
+        &i.en.hook,
+        &i.en.watch,
+        &i.zh.hook,
+        &i.zh.watch,
+    ] {
+        for b in part.bytes().chain([0]) {
+            h ^= u64::from(b);
+            h = h.wrapping_mul(0x0100_0000_01b3);
+        }
+    }
+    format!("{h:016x}")
+}
+
 /// The run stopped because the next call would pass the cap.
 #[derive(Debug)]
 pub(crate) struct BudgetStop;
@@ -255,87 +305,111 @@ pub(crate) fn stop_message(b: &Budget) -> String {
     )
 }
 
-/// Every judge's verdicts on `insights`, or why its call failed.
-pub(crate) async fn judge_all(
+/// One judge's verdicts on `insights`, or why its call failed. `Err` only
+/// when the budget stopped the call.
+async fn judge_one(
     m: &Models,
+    llm: &dyn LlmProvider,
     packs: &[Pack],
     insights: &[Insight],
-) -> Result<BTreeMap<String, Result<Vec<Verdict>, String>>, BudgetStop> {
-    let mut out = BTreeMap::new();
-    for (name, llm) in &m.judges {
-        let r = judge::judge(llm.as_ref(), packs, insights).await;
-        if r.is_err() && m.budget.exceeded.get() {
-            return Err(BudgetStop);
-        }
-        out.insert(name.clone(), r.map_err(|e| e.to_string()));
+) -> Result<Result<Vec<Verdict>, String>, BudgetStop> {
+    let r = judge::judge(llm, packs, insights).await;
+    if r.is_err() && m.budget.exceeded.get() {
+        return Err(BudgetStop);
     }
-    Ok(out)
+    Ok(r.map_err(|e| e.to_string()))
 }
 
-/// The answer of one judge on one mover from `judge_all`'s result.
+/// The answer of one judge on one mover. `sent` is false for a mover the
+/// checks kept from the judges.
 pub(crate) fn judge_result(
     r: &Result<Vec<Verdict>, String>,
     pack: &Pack,
+    insight: Option<&Insight>,
     sent: bool,
 ) -> JudgeResult {
-    match r {
-        Err(e) if sent => JudgeResult {
+    match (r, insight) {
+        (Err(e), _) if sent => JudgeResult {
             verdict: None,
             passed: false,
             error: Some(e.clone()),
         },
-        Err(_) => JudgeResult {
-            verdict: None,
-            passed: false,
-            error: None,
-        },
-        Ok(vs) => {
+        (Ok(vs), Some(i)) if sent => {
             let verdict = vs.iter().find(|v| v.ticker == pack.ticker).cloned();
             JudgeResult {
-                passed: verdict.as_ref().is_some_and(|v| judge::passed(pack, v)),
+                passed: verdict.as_ref().is_some_and(|v| judge::passed(pack, i, v)),
                 verdict,
                 error: None,
             }
         }
+        _ => JudgeResult {
+            verdict: None,
+            passed: false,
+            error: None,
+        },
     }
 }
 
-/// Writer, checks and judges for one post's packs.
+/// `run` stopped at the cap during a post. `records` holds what was paid
+/// for (the writer's lines and the judges that answered), when the writer
+/// call went out.
+pub(crate) struct Stopped {
+    pub records: Option<Vec<Record>>,
+}
+
+/// Writer, checks and judges for one post's packs. `earlier` holds this
+/// post's records from a run the budget stopped: their writer results are
+/// reused, and only the judges marked `NOT_RUN` are called.
 pub(crate) async fn run_post(
     post: &str,
     packs: &[Pack],
     m: &Models,
-) -> Result<Vec<Record>, BudgetStop> {
+    earlier: &[Record],
+) -> Result<Vec<Record>, Stopped> {
     let mut insights: BTreeMap<String, Insight> = BTreeMap::new();
     let mut errors: BTreeMap<String, String> = BTreeMap::new();
-    match write::write(m.writer.as_ref(), packs).await {
-        Err(e) => {
-            if m.budget.exceeded.get() {
-                return Err(BudgetStop);
+    if earlier.is_empty() {
+        match write::write(m.writer.as_ref(), packs).await {
+            Err(e) => {
+                if m.budget.exceeded.get() {
+                    return Err(Stopped { records: None });
+                }
+                for p in packs {
+                    errors.insert(p.ticker.clone(), format!("writer call failed: {e}"));
+                }
             }
-            for p in packs {
-                errors.insert(p.ticker.clone(), format!("writer call failed: {e}"));
-            }
-        }
-        Ok(items) => {
-            for item in items {
-                match item {
-                    Ok(i) => {
-                        insights.insert(i.ticker.clone(), i);
-                    }
-                    Err(e) => {
-                        let owner = packs
-                            .iter()
-                            .find(|p| e.starts_with(&format!("{}:", p.ticker)))
-                            .filter(|p| !insights.contains_key(&p.ticker));
-                        match owner {
-                            Some(p) => {
-                                errors.insert(p.ticker.clone(), e);
+            Ok(items) => {
+                for item in items {
+                    match item {
+                        Ok(i) => {
+                            insights.insert(i.ticker.clone(), i);
+                        }
+                        Err(e) => {
+                            let owner = packs
+                                .iter()
+                                .find(|p| {
+                                    e.to_ascii_uppercase()
+                                        .starts_with(&format!("{}:", p.ticker.to_ascii_uppercase()))
+                                })
+                                .filter(|p| !insights.contains_key(&p.ticker));
+                            match owner {
+                                Some(p) => {
+                                    errors.insert(p.ticker.clone(), e);
+                                }
+                                None => eprintln!("{post}: writer reply item dropped: {e}"),
                             }
-                            None => eprintln!("{post}: writer reply item dropped: {e}"),
                         }
                     }
                 }
+            }
+        }
+    } else {
+        for r in earlier {
+            if let Some(i) = &r.insight {
+                insights.insert(r.ticker.clone(), i.clone());
+            }
+            if let Some(e) = &r.write_error {
+                errors.insert(r.ticker.clone(), e.clone());
             }
         }
     }
@@ -353,15 +427,57 @@ pub(crate) async fn run_post(
         .filter(|p| checks.get(&p.ticker).is_some_and(Vec::is_empty))
         .map(|p| insights[&p.ticker].clone())
         .collect();
-    let verdicts = judge_all(m, packs, &to_judge).await?;
 
-    Ok(packs
+    // Each judge's results per mover: kept from the earlier run when it
+    // answered there, else called now.
+    let mut results: BTreeMap<String, BTreeMap<String, JudgeResult>> = BTreeMap::new();
+    let mut stopped = false;
+    for (name, llm) in &m.judges {
+        let kept: Option<BTreeMap<String, JudgeResult>> = (!earlier.is_empty())
+            .then(|| {
+                earlier
+                    .iter()
+                    .map(|r| r.judges.get(name).cloned().map(|j| (r.ticker.clone(), j)))
+                    .collect::<Option<BTreeMap<_, _>>>()
+            })
+            .flatten()
+            .filter(|js| js.values().all(|j| j.error.as_deref() != Some(NOT_RUN)));
+        if let Some(js) = kept {
+            results.insert(name.clone(), js);
+            continue;
+        }
+        let r = if stopped {
+            Err(BudgetStop)
+        } else {
+            judge_one(m, llm.as_ref(), packs, &to_judge).await
+        };
+        let r = match r {
+            Ok(r) => r,
+            Err(BudgetStop) => {
+                stopped = true;
+                Err(NOT_RUN.to_string())
+            }
+        };
+        let per_mover = packs
+            .iter()
+            .map(|p| {
+                let sent = to_judge.iter().any(|i| i.ticker == p.ticker);
+                (
+                    p.ticker.clone(),
+                    judge_result(&r, p, insights.get(&p.ticker), sent),
+                )
+            })
+            .collect();
+        results.insert(name.clone(), per_mover);
+    }
+
+    let records: Vec<Record> = packs
         .iter()
         .map(|p| {
             let sent = to_judge.iter().any(|i| i.ticker == p.ticker);
-            let judges: BTreeMap<String, JudgeResult> = verdicts
+            let judges: BTreeMap<String, JudgeResult> = results
                 .iter()
-                .map(|(name, r)| (name.clone(), judge_result(r, p, sent)))
+                .map(|(name, per)| (name.clone(), per[&p.ticker].clone()))
                 .collect();
             let published_if = judges
                 .iter()
@@ -380,7 +496,14 @@ pub(crate) async fn run_post(
                 judge_version: JUDGE_VERSION.to_string(),
             }
         })
-        .collect())
+        .collect();
+    if stopped {
+        Err(Stopped {
+            records: Some(records),
+        })
+    } else {
+        Ok(records)
+    }
 }
 
 pub(crate) fn append_jsonl<T: Serialize>(path: &Path, rows: &[T]) {
@@ -394,6 +517,11 @@ pub(crate) fn append_jsonl<T: Serialize>(path: &Path, rows: &[T]) {
     }
 }
 
+fn write_jsonl<T: Serialize>(path: &Path, rows: &[T]) {
+    fs::write(path, "").unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+    append_jsonl(path, rows);
+}
+
 pub(crate) fn read_jsonl<T: serde::de::DeserializeOwned>(path: &Path) -> Vec<T> {
     fs::read_to_string(path)
         .unwrap_or_else(|e| panic!("{}: {e}", path.display()))
@@ -403,27 +531,190 @@ pub(crate) fn read_jsonl<T: serde::de::DeserializeOwned>(path: &Path) -> Vec<T> 
         .collect()
 }
 
-/// `run`: every post in `inputs`, writing `lines.jsonl` (fresh each run) and
-/// `posts.jsonl` (movers and eligible movers per post). A post with no
-/// eligible mover makes no call. Stops at the budget cap, keeping every post
-/// already finished.
-pub(crate) async fn run(inputs: &Inputs, m: &Models, out: &Path) -> Result<(), String> {
-    fs::create_dir_all(out).expect("out dir");
-    let lines = out.join("lines.jsonl");
-    let posts = out.join("posts.jsonl");
-    fs::write(&lines, "").expect("lines.jsonl");
-    fs::write(&posts, "").expect("posts.jsonl");
+/// `path`'s rows, or none when it does not exist (or `fresh`).
+fn kept_jsonl<T: serde::de::DeserializeOwned>(path: &Path, fresh: bool) -> Vec<T> {
+    if fresh || !path.exists() {
+        vec![]
+    } else {
+        read_jsonl(path)
+    }
+}
+
+/// Average output tokens of earlier calls by `role` on `model` in the
+/// ledger, if any.
+fn ledger_out_tokens(ledger: &Path, role: &str, model: &str) -> Option<f64> {
+    let rows: Vec<Value> = kept_jsonl(ledger, false);
+    let outs: Vec<f64> = rows
+        .iter()
+        .filter(|v| v["role"] == role && v["model"] == model)
+        .filter_map(|v| v["output_tokens"].as_f64())
+        .collect();
+    (!outs.is_empty()).then(|| outs.iter().sum::<f64>() / outs.len() as f64)
+}
+
+/// Assumed output tokens for a call over `movers` movers, when the ledger
+/// has no earlier call to go by: Claude spends some on thinking.
+fn assumed_out_tokens(role: &str, model: &str, movers: usize) -> f64 {
+    let thinking = if model.starts_with("claude") {
+        1500.0
+    } else {
+        0.0
+    };
+    let per = if role == "writer" { 600.0 } else { 500.0 };
+    thinking + per * movers as f64
+}
+
+/// The calls a step will make and what they should cost.
+#[derive(Default, Debug)]
+pub(crate) struct Plan {
+    /// (role, model) -> calls.
+    pub calls: BTreeMap<(String, String), usize>,
+    pub expected_usd: f64,
+    pub worst_usd: f64,
+}
+
+impl Plan {
+    fn add(&mut self, ledger: &Path, role: &str, model: &str, prompt_chars: usize, movers: usize) {
+        *self
+            .calls
+            .entry((role.to_string(), model.to_string()))
+            .or_default() += 1;
+        let out = ledger_out_tokens(ledger, role, model)
+            .unwrap_or_else(|| assumed_out_tokens(role, model, movers));
+        self.expected_usd += estimate_usd(model, prompt_chars, out);
+        self.worst_usd += estimate_usd(model, prompt_chars, max_output_tokens(model));
+    }
+
+    fn total_calls(&self) -> usize {
+        self.calls.values().sum()
+    }
+
+    fn describe(&self, step: &str) -> String {
+        let calls: Vec<String> = self
+            .calls
+            .iter()
+            .map(|((role, model), n)| format!("{n} {role} calls on {model}"))
+            .collect();
+        format!(
+            "{step} plan: {} calls ({}), expected ${:.2}, at most ${:.2} if every reply ran to its token limit",
+            self.total_calls(),
+            if calls.is_empty() { "none".to_string() } else { calls.join(", ") },
+            self.expected_usd,
+            self.worst_usd
+        )
+    }
+
+    /// Refuses to start when the expected cost would pass what is left.
+    fn fits(&self, budget: &Budget) -> Result<(), String> {
+        let left = budget.cap - budget.spent.get();
+        if self.expected_usd > left {
+            return Err(format!(
+                "not starting: expected ${:.2} but only ${left:.2} of the ${:.2} cap is left",
+                self.expected_usd, budget.cap
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// The posts `run` still has to do: with eligible movers and not already
+/// complete in `lines.jsonl`.
+fn run_plan(inputs: &Inputs, done: &[Record], ledger: &Path) -> Plan {
+    let mut plan = Plan::default();
     for (name, post) in &inputs.posts {
-        let (packs, movers) = inputs.packs(post);
-        let summary = json!({"post": name, "movers": movers, "eligible": packs.len()});
-        if packs.is_empty() {
-            eprintln!("{name}: no eligible mover of {movers}");
-            append_jsonl(&posts, &[summary]);
+        let (packs, _) = inputs.packs(post);
+        let earlier: Vec<Record> = done.iter().filter(|r| r.post == *name).cloned().collect();
+        if packs.is_empty() || complete(&earlier) {
             continue;
         }
-        let records = run_post(name, &packs, m)
-            .await
-            .map_err(|_| stop_message(&m.budget))?;
+        let (system, user) = write::prompt(&packs);
+        if earlier.is_empty() {
+            plan.add(
+                ledger,
+                "writer",
+                CLAUDE_MODEL,
+                system.len() + user.len(),
+                packs.len(),
+            );
+        }
+        // The judge reads the same packs plus two lines per mover.
+        let (jsystem, _) = judge::prompt(&[], &[]);
+        let jchars = jsystem.len() + user.len() + 600 * packs.len();
+        for j in JUDGES {
+            plan.add(ledger, "judge", model_of(j), jchars, packs.len());
+        }
+    }
+    plan
+}
+
+/// A post's records are complete when every judge has a result that is not
+/// `NOT_RUN`.
+fn complete(records: &[Record]) -> bool {
+    !records.is_empty()
+        && records.iter().all(|r| {
+            JUDGES.iter().all(|j| {
+                r.judges
+                    .get(*j)
+                    .is_some_and(|x| x.error.as_deref() != Some(NOT_RUN))
+            })
+        })
+}
+
+/// `run`: every post in `inputs`, kept in `lines.jsonl` and `posts.jsonl`.
+/// A post already complete there is skipped (unless `fresh`), and one a
+/// budget stop left part-done is finished without paying for its writer
+/// again. A post with no eligible mover makes no call. Stops at the budget
+/// cap, keeping every result paid for.
+pub(crate) async fn run(
+    inputs: &Inputs,
+    m: &Models,
+    out: &Path,
+    fresh: bool,
+) -> Result<(), String> {
+    fs::create_dir_all(out).expect("out dir");
+    let lines_path = out.join("lines.jsonl");
+    let posts_path = out.join("posts.jsonl");
+    let mut lines: Vec<Record> = kept_jsonl(&lines_path, fresh);
+    let mut posts: Vec<Value> = kept_jsonl(&posts_path, fresh);
+    write_jsonl(&lines_path, &lines);
+    write_jsonl(&posts_path, &posts);
+    let save = |lines: &[Record], posts: &[Value]| {
+        write_jsonl(&lines_path, lines);
+        write_jsonl(&posts_path, posts);
+    };
+    for (name, post) in &inputs.posts {
+        let (packs, movers) = inputs.packs(post);
+        let earlier: Vec<Record> = lines.iter().filter(|r| r.post == *name).cloned().collect();
+        if complete(&earlier) {
+            eprintln!("{name}: already in lines.jsonl, skipped (pass --fresh to redo)");
+            continue;
+        }
+        posts.retain(|p| p["post"] != name.as_str());
+        posts.push(json!({"post": name, "movers": movers, "eligible": packs.len()}));
+        if packs.is_empty() {
+            eprintln!("{name}: no eligible mover of {movers}");
+            save(&lines, &posts);
+            continue;
+        }
+        let r = run_post(name, &packs, m, &earlier).await;
+        let (records, stop) = match r {
+            Ok(records) => (records, false),
+            Err(Stopped { records: Some(rs) }) => (rs, true),
+            Err(Stopped { records: None }) => {
+                posts.retain(|p| p["post"] != name.as_str());
+                save(&lines, &posts);
+                return Err(stop_message(&m.budget));
+            }
+        };
+        lines.retain(|r| r.post != *name);
+        lines.extend(records.iter().cloned());
+        save(&lines, &posts);
+        if stop {
+            return Err(format!(
+                "{} ({name} is kept part-done: a re-run calls only its missing judges)",
+                stop_message(&m.budget)
+            ));
+        }
         let written = records.iter().filter(|r| r.insight.is_some()).count();
         let checked = records
             .iter()
@@ -445,64 +736,95 @@ pub(crate) async fn run(inputs: &Inputs, m: &Models, out: &Path) -> Result<(), S
             passes.join(", "),
             m.budget.spent.get()
         );
-        append_jsonl(&lines, &records);
-        append_jsonl(&posts, &[summary]);
     }
     Ok(())
 }
 
-/// `seed`: wrong variants of every line in `lines.jsonl` that passed the
-/// checks, written to `seeded.jsonl` (fresh each run). The variants the
-/// checks let through go to each judge, one call per judge per post; each
-/// variant is sent under its own name ("AAPL-v2") so one call can hold
-/// several variants of one mover.
-pub(crate) async fn seed(m: &Models, out: &Path) -> Result<(), String> {
+/// The calls `seed` would make for `plans`.
+fn seed_plan(plans: &[seed::PostPlan], ledger: &Path) -> Plan {
+    let mut plan = Plan::default();
+    for p in plans {
+        for call in &p.calls {
+            let (packs, insights) = call_items(p, call);
+            let (system, user) = judge::prompt(&packs, &insights);
+            for j in JUDGES {
+                plan.add(
+                    ledger,
+                    "judge",
+                    model_of(j),
+                    system.len() + user.len(),
+                    call.len(),
+                );
+            }
+        }
+    }
+    plan
+}
+
+/// One seed call's packs and lines. Each mover appears once per call, under
+/// its own ticker, as production sends it.
+fn call_items(p: &seed::PostPlan, call: &[usize]) -> (Vec<Pack>, Vec<Insight>) {
+    call.iter()
+        .map(|&k| (p.rows[k].1.clone(), p.rows[k].0.insight.clone()))
+        .unzip()
+}
+
+/// `seed`: for every line in `lines.jsonl` that passed the checks, its wrong
+/// variants and the line itself as a control, to `seeded.jsonl`. The rows
+/// the checks let through go to each judge, at most one row per mover per
+/// call. A post already in `seeded.jsonl` is skipped unless `fresh`.
+pub(crate) async fn seed(m: &Models, out: &Path, fresh: bool) -> Result<(), String> {
     let records: Vec<Record> = read_jsonl(&out.join("lines.jsonl"));
     let path = out.join("seeded.jsonl");
-    fs::write(&path, "").expect("seeded.jsonl");
-    let all = seed::seed_records(&records);
-    let mut posts: Vec<&str> = all.iter().map(|(s, _)| s.post.as_str()).collect();
-    posts.dedup();
-    for post in posts {
-        let mut rows: Vec<seed::Seeded> = Vec::new();
-        let mut sent: Vec<(usize, Pack, Insight)> = Vec::new();
-        for (s, pack) in all.iter().filter(|(s, _)| s.post == post) {
-            if s.check.is_empty() {
-                let name = format!("{}-v{}", s.ticker, sent.len() + 1);
-                let mut p = pack.clone();
-                p.ticker = name.clone();
-                let mut i = s.insight.clone();
-                i.ticker = name;
-                sent.push((rows.len(), p, i));
+    let mut done: Vec<seed::Seeded> = kept_jsonl(&path, fresh);
+    write_jsonl(&path, &done);
+    let plans: Vec<seed::PostPlan> = seed::plan(&records)
+        .into_iter()
+        .filter(|p| !done.iter().any(|d| d.post == p.post))
+        .collect();
+    let plan = seed_plan(&plans, &m.budget.ledger);
+    eprintln!("{}", plan.describe("seed"));
+    plan.fits(&m.budget)?;
+    for p in plans {
+        let mut rows: Vec<seed::Seeded> = p.rows.iter().map(|(s, _)| s.clone()).collect();
+        for call in &p.calls {
+            let (packs, insights) = call_items(&p, call);
+            for (name, llm) in &m.judges {
+                let r = judge_one(m, llm.as_ref(), &packs, &insights)
+                    .await
+                    .map_err(|_| {
+                        format!(
+                            "{} ({} is not written: re-run seed to redo it)",
+                            stop_message(&m.budget),
+                            p.post
+                        )
+                    })?;
+                for (&k, (pack, insight)) in call.iter().zip(packs.iter().zip(&insights)) {
+                    rows[k]
+                        .judges
+                        .insert(name.clone(), judge_result(&r, pack, Some(insight), true));
+                }
             }
-            rows.push(s.clone());
         }
-        let packs: Vec<Pack> = sent.iter().map(|(_, p, _)| p.clone()).collect();
-        let insights: Vec<Insight> = sent.iter().map(|(_, _, i)| i.clone()).collect();
-        let verdicts = judge_all(m, &packs, &insights)
-            .await
-            .map_err(|_| stop_message(&m.budget))?;
-        for (row, p, _) in &sent {
-            rows[*row].judges = verdicts
-                .iter()
-                .map(|(name, r)| (name.clone(), judge_result(r, p, true)))
-                .collect();
-        }
-        let caught: Vec<String> = JUDGES
+        let summary: Vec<String> = JUDGES
             .iter()
             .map(|j| {
-                let n = rows.iter().filter(|r| r.caught(j) == Some(true)).count();
-                format!("{j} caught {n}")
+                let caught = rows.iter().filter(|r| r.caught(j) == Some(true)).count();
+                let counted = rows.iter().filter(|r| r.caught(j).is_some()).count();
+                format!("{j} caught {caught} of {counted}")
             })
             .collect();
         eprintln!(
-            "{post}: {} seeded, {} refused by the checks, {} (spent ${:.4})",
+            "{}: {} rows in {} calls per judge, {} refused by the checks, {} (spent ${:.4})",
+            p.post,
             rows.len(),
-            rows.len() - sent.len(),
-            caught.join(", "),
+            p.calls.len(),
+            rows.iter().filter(|r| !r.check.is_empty()).count(),
+            summary.join(", "),
             m.budget.spent.get()
         );
         append_jsonl(&path, &rows);
+        done.extend(rows);
     }
     Ok(())
 }
@@ -534,6 +856,10 @@ fn arg(args: &[String], name: &str) -> Option<String> {
         .and_then(|i| args.get(i + 1).cloned())
 }
 
+fn flag(args: &[String], name: &str) -> bool {
+    args.iter().any(|a| a == name)
+}
+
 fn need(args: &[String], name: &str) -> String {
     arg(args, name).unwrap_or_else(|| {
         eprintln!("missing {name}");
@@ -541,8 +867,14 @@ fn need(args: &[String], name: &str) -> String {
     })
 }
 
-/// The models for a run that spends money: both keys must be present.
-fn live_models(args: &[String], out: &Path) -> Models {
+fn budget(args: &[String], out: &Path) -> Rc<Budget> {
+    let cap: f64 = arg(args, "--budget").map_or(3.0, |v| v.parse().expect("--budget USD"));
+    fs::create_dir_all(out).expect("out dir");
+    Rc::new(Budget::new(cap, out.join("spend.jsonl")))
+}
+
+/// The models for a step that spends money: both keys must be present.
+fn live_models(args: &[String], budget: Rc<Budget>) -> Models {
     let keys = http::load_keys(arg(args, "--dev-vars").as_deref());
     for var in ["ANTHROPIC_API_KEY", "DEEPSEEK_API_KEY"] {
         if !keys.contains_key(var) {
@@ -550,12 +882,10 @@ fn live_models(args: &[String], out: &Path) -> Models {
             std::process::exit(2);
         }
     }
-    let cap: f64 = arg(args, "--budget").map_or(3.0, |v| v.parse().expect("--budget USD"));
-    fs::create_dir_all(out).expect("out dir");
-    let budget = Rc::new(Budget::new(cap, out.join("spend.jsonl")));
     eprintln!(
-        "spent before this run: ${:.4} of ${cap:.2}",
-        budget.spent.get()
+        "spent before this run: ${:.4} of ${:.2}",
+        budget.spent.get(),
+        budget.cap
     );
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(600))
@@ -564,10 +894,22 @@ fn live_models(args: &[String], out: &Path) -> Models {
     models(Rc::new(ReqwestHttp { client }), budget, &keys)
 }
 
+fn finish(m: &Models, r: Result<(), String>) {
+    eprintln!(
+        "spent: ${:.4} of ${:.2}",
+        m.budget.spent.get(),
+        m.budget.cap
+    );
+    if let Err(e) = r {
+        eprintln!("{e}");
+        std::process::exit(1);
+    }
+}
+
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
     let args: Vec<String> = std::env::args().collect();
-    let usage = "usage: insight-trial run --facts DIR --out DIR --dev-vars PATH [--budget 3.0] [--only SUBSTR]\n       insight-trial seed --out DIR --dev-vars PATH [--budget 3.0]\n       insight-trial page --out DIR [--cards 60]\n       insight-trial score --out DIR --labels FILE\n       insight-trial events-json ROWS.json";
+    let usage = "usage: insight-trial run --facts DIR --out DIR --dev-vars PATH [--budget 3.0] [--only SUBSTR] [--fresh] [--plan]\n       insight-trial seed --out DIR --dev-vars PATH [--budget 3.0] [--fresh] [--plan]\n       insight-trial page --out DIR [--cards 60]\n       insight-trial score --out DIR --labels FILE\n       insight-trial events-json ROWS.json";
     match args.get(1).map(String::as_str) {
         Some("run") => {
             let out = PathBuf::from(need(&args, "--out"));
@@ -575,41 +917,57 @@ async fn main() {
                 Path::new(&need(&args, "--facts")),
                 arg(&args, "--only").as_deref(),
             );
-            let m = live_models(&args, &out);
+            let fresh = flag(&args, "--fresh");
+            let budget = budget(&args, &out);
+            let done: Vec<Record> = kept_jsonl(&out.join("lines.jsonl"), fresh);
+            let plan = run_plan(&inputs, &done, &budget.ledger);
             eprintln!(
-                "{} posts, {} earnings checks",
+                "{} posts, {} earnings checks, {} calendar rows, {} macro events",
                 inputs.posts.len(),
-                inputs.checks.len()
+                inputs.checks.len(),
+                inputs.calendar.len(),
+                inputs.macro_events.len()
             );
-            let r = run(&inputs, &m, &out).await;
-            eprintln!(
-                "spent: ${:.4} of ${:.2}",
-                m.budget.spent.get(),
-                m.budget.cap
-            );
-            if let Err(e) = r {
+            eprintln!("{}", plan.describe("run"));
+            if flag(&args, "--plan") {
+                return;
+            }
+            if let Err(e) = plan.fits(&budget) {
                 eprintln!("{e}");
                 std::process::exit(1);
             }
+            let m = live_models(&args, budget);
+            let r = run(&inputs, &m, &out, fresh).await;
+            finish(&m, r);
         }
         Some("seed") => {
             let out = PathBuf::from(need(&args, "--out"));
-            let m = live_models(&args, &out);
-            let r = seed(&m, &out).await;
-            eprintln!(
-                "spent: ${:.4} of ${:.2}",
-                m.budget.spent.get(),
-                m.budget.cap
-            );
-            if let Err(e) = r {
-                eprintln!("{e}");
-                std::process::exit(1);
+            let fresh = flag(&args, "--fresh");
+            let budget = budget(&args, &out);
+            if flag(&args, "--plan") {
+                let records: Vec<Record> = read_jsonl(&out.join("lines.jsonl"));
+                let done: Vec<seed::Seeded> = kept_jsonl(&out.join("seeded.jsonl"), fresh);
+                let plans: Vec<seed::PostPlan> = seed::plan(&records)
+                    .into_iter()
+                    .filter(|p| !done.iter().any(|d| d.post == p.post))
+                    .collect();
+                eprintln!("{}", seed_plan(&plans, &budget.ledger).describe("seed"));
+                return;
             }
+            let m = live_models(&args, budget);
+            let r = seed(&m, &out, fresh).await;
+            finish(&m, r);
         }
         Some("page") => {
             let out = PathBuf::from(need(&args, "--out"));
             let n = arg(&args, "--cards").map_or(page::CARDS, |v| v.parse().expect("--cards N"));
             let records: Vec<Record> = read_jsonl(&out.join("lines.jsonl"));
+            let must = page::must_show(&records);
+            if must > n {
+                eprintln!(
+                    "warning: {must} lines a judge said no to or the judges disagreed on: the page shows all of them, more than {n}"
+                );
+            }
             let html = page::page(&records, n);
             fs::write(out.join("label.html"), &html).expect("label.html");
             eprintln!(
@@ -818,18 +1176,28 @@ pub(crate) mod tests {
         }
     }
 
+    fn one_post(date: &str) -> (String, Post) {
+        (
+            format!("premarket_{date}"),
+            premarket(date, vec![mover("AAPL", vec![reuters()])]),
+        )
+    }
+
+    fn budget(out: &Path, cap: f64) -> Rc<Budget> {
+        Rc::new(Budget::new(cap, out.join("spend.jsonl")))
+    }
+
     #[tokio::test]
     async fn a_post_with_no_eligible_mover_makes_no_call() {
         let out = tmp("no-eligible");
         let writer = Mock::new(vec![]);
         let judge = Mock::new(vec![]);
-        let budget = Rc::new(Budget::new(3.0, out.join("spend.jsonl")));
-        let m = mock_models(budget, &writer, &[("claude", &judge)]);
+        let m = mock_models(budget(&out, 3.0), &writer, &[("claude", &judge)]);
         let i = inputs(vec![(
             "premarket_2026-11-12",
             premarket("2026-11-12", vec![mover("AAPL", vec![])]),
         )]);
-        run(&i, &m, &out).await.unwrap();
+        run(&i, &m, &out, false).await.unwrap();
         assert_eq!((writer.calls.get(), judge.calls.get()), (0, 0));
         assert_eq!(fs::read_to_string(out.join("lines.jsonl")).unwrap(), "");
         let posts: Vec<Value> = read_jsonl(&out.join("posts.jsonl"));
@@ -846,16 +1214,10 @@ pub(crate) mod tests {
         let out = tmp("budget-zero");
         let writer = Mock::new(vec![claude_body(&writer_reply(CLEAN), 200)]);
         let judge = Mock::new(vec![]);
-        let m = mock_models(
-            Rc::new(Budget::new(0.0, out.join("spend.jsonl"))),
-            &writer,
-            &[("claude", &judge)],
-        );
-        let i = inputs(vec![(
-            "premarket_2026-11-12",
-            premarket("2026-11-12", vec![mover("AAPL", vec![reuters()])]),
-        )]);
-        let e = run(&i, &m, &out).await.unwrap_err();
+        let m = mock_models(budget(&out, 0.0), &writer, &[("claude", &judge)]);
+        let (n, p) = one_post("2026-11-12");
+        let i = inputs(vec![(&n, p)]);
+        let e = run(&i, &m, &out, false).await.unwrap_err();
         assert!(
             e.contains("budget cap reached: spent $0.0000 of $0.00"),
             "{e}"
@@ -864,30 +1226,19 @@ pub(crate) mod tests {
         assert!(out.join("lines.jsonl").exists());
         fs::remove_dir_all(out).unwrap();
 
-        // A cap that covers the first post (each call billed about $0.09)
-        // but not the second: the first post's line is kept.
+        // A cap that covers the first post (each call billed about $0.09,
+        // each reserving $0.16 first) but not the second's writer.
         let out = tmp("budget-second");
         let writer = Mock::new(vec![
             claude_body(&writer_reply(CLEAN), 9000),
             claude_body(&writer_reply(CLEAN), 9000),
         ]);
         let judge = Mock::new(vec![claude_body(&judge_reply(true), 9000)]);
-        let m = mock_models(
-            Rc::new(Budget::new(0.2, out.join("spend.jsonl"))),
-            &writer,
-            &[("claude", &judge)],
-        );
-        let i = inputs(vec![
-            (
-                "premarket_2026-11-12",
-                premarket("2026-11-12", vec![mover("AAPL", vec![reuters()])]),
-            ),
-            (
-                "premarket_2026-11-13",
-                premarket("2026-11-13", vec![mover("AAPL", vec![reuters()])]),
-            ),
-        ]);
-        let e = run(&i, &m, &out).await.unwrap_err();
+        let m = mock_models(budget(&out, 0.3), &writer, &[("claude", &judge)]);
+        let (n1, p1) = one_post("2026-11-12");
+        let (n2, p2) = one_post("2026-11-13");
+        let i = inputs(vec![(&n1, p1), (&n2, p2)]);
+        let e = run(&i, &m, &out, false).await.unwrap_err();
         assert!(e.contains("budget cap reached"), "{e}");
         assert_eq!((writer.calls.get(), judge.calls.get()), (1, 1));
         let lines: Vec<Record> = read_jsonl(&out.join("lines.jsonl"));
@@ -899,8 +1250,56 @@ pub(crate) mod tests {
         assert_eq!(spend[0]["role"], "writer");
         assert_eq!(spend[1]["role"], "judge");
         assert_eq!(spend[0]["output_tokens"], 9000);
-        let again = Budget::new(0.2, out.join("spend.jsonl"));
+        let again = Budget::new(0.3, out.join("spend.jsonl"));
         assert!((again.spent.get() - m.budget.spent.get()).abs() < 1e-12);
+        fs::remove_dir_all(out).unwrap();
+    }
+
+    /// Review M5: a stop between the writer and a judge keeps the paid
+    /// writer lines, and the re-run calls only the missing judge; a
+    /// complete post is skipped unless --fresh.
+    #[tokio::test]
+    async fn a_rerun_finishes_a_stopped_post_and_skips_done_ones() {
+        let out = tmp("rerun");
+        let writer = Mock::new(vec![claude_body(&writer_reply(CLEAN), 9000)]);
+        let judge = Mock::new(vec![]);
+        // $0.2 covers the writer's reservation, not the judge's after it.
+        let m = mock_models(budget(&out, 0.2), &writer, &[("claude", &judge)]);
+        let (n, p) = one_post("2026-11-12");
+        let i = inputs(vec![(&n, p)]);
+        let e = run(&i, &m, &out, false).await.unwrap_err();
+        assert!(e.contains("part-done"), "{e}");
+        let lines: Vec<Record> = read_jsonl(&out.join("lines.jsonl"));
+        assert_eq!(lines.len(), 1);
+        assert!(lines[0].insight.is_some());
+        assert_eq!(lines[0].judges["claude"].error.as_deref(), Some(NOT_RUN));
+
+        judge
+            .replies
+            .borrow_mut()
+            .push_back(claude_body(&judge_reply(true), 200));
+        let m = mock_models(budget(&out, 3.0), &writer, &[("claude", &judge)]);
+        run(&i, &m, &out, false).await.unwrap();
+        assert_eq!((writer.calls.get(), judge.calls.get()), (1, 1));
+        let lines: Vec<Record> = read_jsonl(&out.join("lines.jsonl"));
+        assert_eq!(lines.len(), 1);
+        assert!(lines[0].judges["claude"].passed);
+
+        // Done: a third run makes no call; --fresh redoes it.
+        let m = mock_models(budget(&out, 3.0), &writer, &[("claude", &judge)]);
+        run(&i, &m, &out, false).await.unwrap();
+        assert_eq!((writer.calls.get(), judge.calls.get()), (1, 1));
+        writer
+            .replies
+            .borrow_mut()
+            .push_back(claude_body(&writer_reply(CLEAN), 200));
+        judge
+            .replies
+            .borrow_mut()
+            .push_back(claude_body(&judge_reply(true), 200));
+        run(&i, &m, &out, true).await.unwrap();
+        assert_eq!((writer.calls.get(), judge.calls.get()), (2, 2));
+        assert_eq!(read_jsonl::<Record>(&out.join("lines.jsonl")).len(), 1);
         fs::remove_dir_all(out).unwrap();
     }
 
@@ -909,16 +1308,10 @@ pub(crate) mod tests {
         let out = tmp("every-stage");
         let writer = Mock::new(vec![claude_body(&writer_reply(CLEAN), 200)]);
         let judge = Mock::new(vec![deepseek_body(&judge_reply(true))]);
-        let m = mock_models(
-            Rc::new(Budget::new(3.0, out.join("spend.jsonl"))),
-            &writer,
-            &[("deepseek", &judge)],
-        );
-        let i = inputs(vec![(
-            "premarket_2026-11-12",
-            premarket("2026-11-12", vec![mover("AAPL", vec![reuters()])]),
-        )]);
-        run(&i, &m, &out).await.unwrap();
+        let m = mock_models(budget(&out, 3.0), &writer, &[("deepseek", &judge)]);
+        let (n, p) = one_post("2026-11-12");
+        let i = inputs(vec![(&n, p)]);
+        run(&i, &m, &out, false).await.unwrap();
         let lines: Vec<Record> = read_jsonl(&out.join("lines.jsonl"));
         assert_eq!(lines.len(), 1);
         let r = &lines[0];
@@ -966,16 +1359,10 @@ pub(crate) mod tests {
         let bad = "Reuters reports Apple expects revenue of $4.2 billion, so investors should buy before the report.";
         let writer = Mock::new(vec![claude_body(&writer_reply(bad), 200)]);
         let judge = Mock::new(vec![]);
-        let m = mock_models(
-            Rc::new(Budget::new(3.0, out.join("spend.jsonl"))),
-            &writer,
-            &[("claude", &judge)],
-        );
-        let i = inputs(vec![(
-            "premarket_2026-11-12",
-            premarket("2026-11-12", vec![mover("AAPL", vec![reuters()])]),
-        )]);
-        run(&i, &m, &out).await.unwrap();
+        let m = mock_models(budget(&out, 3.0), &writer, &[("claude", &judge)]);
+        let (n, p) = one_post("2026-11-12");
+        let i = inputs(vec![(&n, p)]);
+        run(&i, &m, &out, false).await.unwrap();
         assert_eq!(judge.calls.get(), 0);
         let lines: Vec<Record> = read_jsonl(&out.join("lines.jsonl"));
         let r = &lines[0];
@@ -997,34 +1384,156 @@ pub(crate) mod tests {
         fs::remove_dir_all(out).unwrap();
     }
 
-    #[test]
-    fn a_writer_error_is_kept_on_its_mover() {
+    #[tokio::test]
+    async fn a_writer_error_is_kept_on_its_mover() {
+        // Review L5: a lowercase ticker in the reply still lands on its mover.
         let out = tmp("writer-error");
         let writer = Mock::new(vec![claude_body(
-            &json!({"insights": [{"ticker": "AAPL", "en": {}}, {"ticker": "TSLA"}]}),
+            &json!({"insights": [{"ticker": "aapl", "en": {}}, {"ticker": "TSLA"}]}),
             200,
         )]);
-        let m = mock_models(
-            Rc::new(Budget::new(3.0, out.join("spend.jsonl"))),
-            &writer,
-            &[],
-        );
-        let i = inputs(vec![(
-            "premarket_2026-11-12",
-            premarket("2026-11-12", vec![mover("AAPL", vec![reuters()])]),
-        )]);
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .build()
-            .unwrap();
-        rt.block_on(run(&i, &m, &out)).unwrap();
+        let m = mock_models(budget(&out, 3.0), &writer, &[]);
+        let (n, p) = one_post("2026-11-12");
+        let i = inputs(vec![(&n, p)]);
+        run(&i, &m, &out, false).await.unwrap();
         let lines: Vec<Record> = read_jsonl(&out.join("lines.jsonl"));
         assert!(lines[0].insight.is_none());
-        assert!(
-            lines[0].write_error.as_deref().unwrap().contains("en"),
-            "{:?}",
-            lines[0].write_error
+        assert_eq!(
+            lines[0].write_error.as_deref(),
+            Some("AAPL: missing or incomplete en")
         );
         fs::remove_dir_all(out).unwrap();
+    }
+
+    #[test]
+    fn a_failed_call_or_an_omitted_mover_is_not_an_answer() {
+        let pack = Pack {
+            ticker: "AAPL".into(),
+            name: "Apple".into(),
+            evidence: vec![],
+        };
+        let failed = judge_result(&Err("http status 500".into()), &pack, None, true);
+        assert!(!failed.answered() && !failed.passed);
+        let omitted = judge_result(&Ok(vec![]), &pack, None, true);
+        assert!(!omitted.answered() && !omitted.passed);
+    }
+
+    #[tokio::test]
+    async fn seed_sends_one_row_per_mover_per_call_with_controls() {
+        let out = tmp("seed");
+        let writer = Mock::new(vec![claude_body(&writer_reply(CLEAN), 200)]);
+        let judge = Mock::new(vec![deepseek_body(&judge_reply(true))]);
+        let m = mock_models(budget(&out, 3.0), &writer, &[("deepseek", &judge)]);
+        let (n, p) = one_post("2026-11-12");
+        let i = inputs(vec![(&n, p)]);
+        run(&i, &m, &out, false).await.unwrap();
+
+        // Round 1 holds the control (passed again), round 2 the advice
+        // variant (rejected: caught).
+        judge
+            .replies
+            .borrow_mut()
+            .push_back(deepseek_body(&judge_reply(true)));
+        judge
+            .replies
+            .borrow_mut()
+            .push_back(deepseek_body(&judge_reply(false)));
+        seed(&m, &out, false).await.unwrap();
+        assert_eq!(judge.calls.get(), 3);
+        let rows: Vec<seed::Seeded> = read_jsonl(&out.join("seeded.jsonl"));
+        let kinds: Vec<seed::Kind> = rows.iter().map(|r| r.kind).collect();
+        // One number in each line and one outlet in the pack: the number
+        // swaps change a digit (the checks refuse that), and there is no
+        // second outlet or direction word to swap.
+        assert_eq!(
+            kinds,
+            [
+                seed::Kind::NumberSwap,
+                seed::Kind::ZhOnlyNumber,
+                seed::Kind::FormalAdvice,
+                seed::Kind::Control
+            ]
+        );
+        assert!(!rows[0].check.is_empty() && rows[0].judges.is_empty());
+        assert!(!rows[1].check.is_empty() && rows[1].judges.is_empty());
+        assert!(rows[2].check.is_empty(), "{:?}", rows[2].check);
+        assert_eq!(rows[2].caught("deepseek"), Some(true));
+        assert!(rows[3].judges["deepseek"].passed);
+        assert_eq!(rows[2].ticker, "AAPL");
+        assert_eq!(
+            rows[2].judges["deepseek"].verdict.as_ref().unwrap().ticker,
+            "AAPL"
+        );
+        assert!(rows[2].original_passed["deepseek"]);
+
+        // A re-run skips the post; --plan-style estimates count nothing.
+        seed(&m, &out, false).await.unwrap();
+        assert_eq!(judge.calls.get(), 3);
+        fs::remove_dir_all(out).unwrap();
+    }
+
+    #[tokio::test]
+    async fn seed_stops_before_starting_when_the_plan_would_pass_the_cap() {
+        let out = tmp("seed-plan");
+        let writer = Mock::new(vec![claude_body(&writer_reply(CLEAN), 200)]);
+        let judge = Mock::new(vec![claude_body(&judge_reply(true), 200)]);
+        let m = mock_models(budget(&out, 3.0), &writer, &[("claude", &judge)]);
+        let (n, p) = one_post("2026-11-12");
+        let i = inputs(vec![(&n, p)]);
+        run(&i, &m, &out, false).await.unwrap();
+        let records: Vec<Record> = read_jsonl(&out.join("lines.jsonl"));
+        let plan = seed_plan(&seed::plan(&records), &out.join("spend.jsonl"));
+        // Two rounds (control, advice) for each of the two judges.
+        assert_eq!(plan.total_calls(), 4);
+        assert!(plan.expected_usd > 0.0 && plan.worst_usd > plan.expected_usd);
+        let spent = m.budget.spent.get();
+        let tight = mock_models(
+            budget(&out, spent + plan.expected_usd / 2.0),
+            &writer,
+            &[("claude", &judge)],
+        );
+        let e = seed(&tight, &out, false).await.unwrap_err();
+        assert!(e.contains("not starting"), "{e}");
+        assert_eq!(judge.calls.get(), 1);
+        fs::remove_dir_all(out).unwrap();
+    }
+
+    #[test]
+    fn the_run_plan_counts_one_writer_and_one_call_per_judge_per_post() {
+        let (n1, p1) = one_post("2026-11-12");
+        let (n2, p2) = one_post("2026-11-13");
+        let i = inputs(vec![
+            (&n1, p1),
+            (&n2, p2),
+            (
+                "premarket_2026-11-14",
+                premarket("2026-11-14", vec![mover("AAPL", vec![])]),
+            ),
+        ]);
+        let dir = tmp("run-plan");
+        let plan = run_plan(&i, &[], &dir.join("spend.jsonl"));
+        let calls: Vec<((String, String), usize)> = plan.calls.clone().into_iter().collect();
+        assert_eq!(
+            calls,
+            [
+                (("judge".into(), CLAUDE_MODEL.into()), 2),
+                (("judge".into(), DEEPSEEK_MODEL.into()), 2),
+                (("writer".into(), CLAUDE_MODEL.into()), 2),
+            ]
+        );
+        assert!(plan.describe("run").contains("6 calls"));
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn line_keys_change_with_the_text() {
+        let i: Insight =
+            serde_json::from_value(writer_reply(CLEAN)["insights"][0].clone()).unwrap();
+        let mut j = i.clone();
+        assert_eq!(line_key(&i), line_key(&j));
+        j.zh.watch.push('。');
+        assert_ne!(line_key(&i), line_key(&j));
+        assert_eq!(line_key(&i).len(), 16);
     }
 
     #[test]
@@ -1044,12 +1553,23 @@ pub(crate) mod tests {
             serde_json::to_string(&p).unwrap(),
         )
         .unwrap();
-        fs::write(dir.join("calendar.json"), r#"[["AAPL","2026-11-19"]]"#).unwrap();
+        fs::write(
+            dir.join("calendar.json"),
+            r#"[["AAPL","2026-11-19","unconfirmed"],["AAPL","2026-08-01","quarantined"]]"#,
+        )
+        .unwrap();
         fs::write(dir.join("events.json"), r#"[["2026-11-13","October CPI"]]"#).unwrap();
         fs::write(dir.join("macro_events.rows.json"), "[]").unwrap();
         let i = load_inputs(&dir, Some("11-12"));
         assert_eq!(i.posts.len(), 1);
-        assert_eq!(i.calendar, [("AAPL".to_string(), date("2026-11-19"))]);
+        assert_eq!(
+            i.calendar,
+            [(
+                "AAPL".to_string(),
+                date("2026-11-19"),
+                ReportStatus::Unconfirmed
+            )]
+        );
         assert_eq!(
             i.macro_events,
             [(date("2026-11-13"), "October CPI".to_string())]
@@ -1059,49 +1579,8 @@ pub(crate) mod tests {
         let kinds: Vec<_> = packs[0].evidence.iter().map(|e| e.kind).collect();
         use prebell_core::insight::EvidenceKind::*;
         assert_eq!(kinds, [Move, News, ReportDate, MacroEvent]);
+        assert!(packs[0].evidence[2].unconfirmed);
         fs::remove_dir_all(dir).unwrap();
-    }
-
-    #[tokio::test]
-    async fn seed_judges_only_the_variants_the_checks_let_through() {
-        let out = tmp("seed");
-        let writer = Mock::new(vec![claude_body(&writer_reply(CLEAN), 200)]);
-        let judge = Mock::new(vec![deepseek_body(&judge_reply(true))]);
-        let m = mock_models(
-            Rc::new(Budget::new(3.0, out.join("spend.jsonl"))),
-            &writer,
-            &[("deepseek", &judge)],
-        );
-        let i = inputs(vec![(
-            "premarket_2026-11-12",
-            premarket("2026-11-12", vec![mover("AAPL", vec![reuters()])]),
-        )]);
-        run(&i, &m, &out).await.unwrap();
-
-        // The variant judge sees "AAPL-v1" and passes nothing.
-        let mut reply = judge_reply(false);
-        reply["verdicts"][0]["ticker"] = json!("AAPL-v1");
-        judge.replies.borrow_mut().push_back(deepseek_body(&reply));
-        seed(&m, &out).await.unwrap();
-        assert_eq!(judge.calls.get(), 2);
-        let rows: Vec<seed::Seeded> = read_jsonl(&out.join("seeded.jsonl"));
-        let kinds: Vec<seed::Kind> = rows.iter().map(|r| r.kind).collect();
-        // One number in each line and one outlet in the pack: the swaps
-        // change a digit (the checks refuse that), no outlet or direction to swap.
-        assert_eq!(
-            kinds,
-            [
-                seed::Kind::NumberSwap,
-                seed::Kind::ZhOnlyNumber,
-                seed::Kind::FormalAdvice
-            ]
-        );
-        assert!(!rows[0].check.is_empty() && rows[0].judges.is_empty());
-        assert!(!rows[1].check.is_empty() && rows[1].judges.is_empty());
-        assert!(rows[2].check.is_empty());
-        assert_eq!(rows[2].caught("deepseek"), Some(true));
-        assert_eq!(rows[2].ticker, "AAPL");
-        fs::remove_dir_all(out).unwrap();
     }
 
     #[test]
