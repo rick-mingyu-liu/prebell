@@ -6,6 +6,7 @@
 
 use serde::{Deserialize, Serialize};
 
+pub mod check;
 pub mod pack;
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
