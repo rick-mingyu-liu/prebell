@@ -325,7 +325,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn the_page_hides_verdicts_and_lists_at_most_sixty() {
+    fn the_page_hides_verdicts_and_lists_sixty_of_two_hundred() {
         let rs = records();
         let html = page(&rs, CARDS);
         assert_eq!(html.matches("<article class=\"card\"").count(), 60);

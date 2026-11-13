@@ -395,7 +395,14 @@ mod tests {
         );
         assert_eq!(m["lines"]["zh"]["hook"], "回购受关注");
         assert!(!user.contains("http"));
-        for want in ["not rewriting", "exact words", "same_meaning", "JSON only"] {
+        for want in [
+            "not rewriting",
+            "exact words",
+            "same_meaning",
+            "JSON only",
+            // Review L7: a missing attribution has a flag to set.
+            "attributed to another outlet, set that language's \"*_supported\" to false",
+        ] {
             assert!(system.contains(want), "{want}");
         }
     }
