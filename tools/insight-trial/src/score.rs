@@ -385,7 +385,7 @@ pub(crate) fn report(
     }
 
     let _ = writeln!(out, "\n## Seeded wrong lines by kind\n");
-    let mut head = "| Kind | Made | Skipped (every change would be true) | Refused by the checks |"
+    let mut head = "| Kind | Made | Skipped (no genuinely wrong, like-for-like change) | Refused by the checks |"
         .to_string();
     let mut rule = "|---|---|---|---|".to_string();
     for j in JUDGES {
@@ -416,6 +416,41 @@ pub(crate) fn report(
             }
         }
         let _ = writeln!(out, "{row}");
+    }
+
+    let _ = writeln!(out, "\n### Each seeded line\n");
+    let mut any = false;
+    for v in seeded.iter().filter(|v| v.kind != Kind::Control) {
+        any = true;
+        let what = v.change.as_deref().unwrap_or("(no change recorded)");
+        let verdicts = if v.skipped {
+            "skipped: no genuinely wrong, like-for-like change".to_string()
+        } else if !v.check.is_empty() {
+            "refused by the checks".to_string()
+        } else {
+            JUDGES
+                .iter()
+                .map(|j| {
+                    let r = match v.caught(j) {
+                        Some(true) => "caught",
+                        Some(false) => "missed",
+                        None => "not counted",
+                    };
+                    format!("{j} {r}")
+                })
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        let _ = writeln!(
+            out,
+            "- {} {} {}: {what} ({verdicts})",
+            v.post,
+            v.ticker,
+            v.kind.name()
+        );
+    }
+    if !any {
+        let _ = writeln!(out, "None.");
     }
 
     let _ = writeln!(out, "\n## Judge-passed lines Rick marked wrong\n");
@@ -541,6 +576,33 @@ pub(crate) fn report(
         out,
         "- Rick's labels cover a sample of about 60 lines; agreement on the rest is not measured."
     );
+    let outlet_swaps = seeded
+        .iter()
+        .filter(|v| v.kind == Kind::OutletSwap && !v.skipped)
+        .count();
+    if outlet_swaps == 0 {
+        let _ = writeln!(
+            out,
+            "- No line in this run cited two outlets, so the outlet_swap kind was not exercised."
+        );
+    }
+    let per_kind: Vec<String> = Kind::ALL
+        .iter()
+        .map(|k| {
+            let counts: Vec<String> = s
+                .judges
+                .iter()
+                .map(|j| j.by_kind.get(k).map_or(0, |(n, _)| *n).to_string())
+                .collect();
+            format!("{} {}", k.name(), counts.join(" / "))
+        })
+        .collect();
+    let _ = writeln!(
+        out,
+        "- Seeds counted per kind ({}): {}. A kind with fewer than 5 counted seeds is anecdotal.",
+        JUDGES.join(" / "),
+        per_kind.join(", ")
+    );
     out
 }
 
@@ -611,6 +673,7 @@ mod tests {
             original_passed: BTreeMap::from([("claude".into(), true), ("deepseek".into(), true)]),
             line_key: line_key(r.insight.as_ref().unwrap()),
             skipped: false,
+            change: Some(format!("{} change", kind.name())),
         }
     }
 
@@ -710,6 +773,9 @@ mod tests {
             "The bar is not yet assessable: it needs at least 50 judge-passed lines labelled, and this trial has 9.",
             "## Limits of this trial",
             "today's, read for past posts",
+            "### Each seeded line",
+            "recap_2026-11-12 T0 formal_advice: formal_advice change (claude missed, deepseek caught)",
+            "Seeds counted per kind (claude / deepseek): number_swap 2 / 2, direction_flip 2 / 2, outlet_swap 2 / 2, zh_only_number 2 / 2, formal_advice 2 / 2. A kind with fewer than 5 counted seeds is anecdotal.",
         ] {
             assert!(md.contains(want), "{want}\n{md}");
         }

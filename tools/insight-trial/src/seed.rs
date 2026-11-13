@@ -64,6 +64,9 @@ pub(crate) struct Seeded {
     /// change would still be true); never sent to a judge.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub skipped: bool,
+    /// What the variant changed ("$28.00 ↔ $7.54", "raised → cut").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub change: Option<String>,
 }
 
 impl Seeded {
@@ -125,6 +128,139 @@ const FLIPS_ZH: &[(&str, &str)] = &[
     ("上涨", "下跌"),
 ];
 
+/// What a figure measures. A number seed only exchanges or replaces like
+/// with like; a bare number (a year, a count, a label, the digits of "24/7
+/// Wall St.") has no class and is never changed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Class {
+    /// An amount of money with a scale ("$4.2 billion", "42亿美元").
+    Money,
+    /// Money without a scale: a per-share figure or a price ("$28.00").
+    PerShare,
+    Percent,
+    /// Percentage points ("7.2 percentage points", "7.2个百分点").
+    Points,
+}
+
+fn class(text: &str, n: &Num) -> Option<Class> {
+    let after = text[n.at + n.raw.len()..].trim_start().to_ascii_lowercase();
+    if n.is_percent {
+        return Some(Class::Percent);
+    }
+    if after.starts_with("percentage point") || after.starts_with("个百分点") {
+        return Some(Class::Points);
+    }
+    let money = n.raw.contains('$') || after.starts_with("美元") || after.starts_with("dollar");
+    money.then_some(if n.multiplier >= 1e3 {
+        Class::Money
+    } else {
+        Class::PerShare
+    })
+}
+
+/// The classed figures written in `text`.
+fn figures(text: &str, lang: Lang) -> Vec<(Num, Class)> {
+    numbers::extract(text, lang)
+        .into_iter()
+        .filter_map(|n| class(text, &n).map(|c| (n, c)))
+        .collect()
+}
+
+/// Every classed value written in the cited items, in base units.
+fn cited_values(pack: &Pack, cites: &[String]) -> Vec<(f64, Class)> {
+    pack.evidence
+        .iter()
+        .filter(|e| cites.contains(&e.id))
+        .flat_map(|e| figures(&e.text, Lang::En))
+        .map(|(n, c)| (n.value.abs(), c))
+        .collect()
+}
+
+/// Whether `to` is at least 5% away from `from`: closer, a rounded figure
+/// can still be true ("$18.5 billion" for a cited "$18.52 billion").
+fn far(from: f64, to: f64) -> bool {
+    from != 0.0 && (to - from).abs() / from.abs() >= 0.05
+}
+
+fn round_to(v: f64, decimals: u8) -> f64 {
+    let scale = 10f64.powi(decimals as i32);
+    (v * scale).round() / scale
+}
+
+/// The same value, written in either language ("$18.52 billion", "185.2亿").
+fn same_value(a: f64, b: f64) -> bool {
+    let (a, b) = (a.abs(), b.abs());
+    a.max(b) > 0.0 && (a - b).abs() / a.max(b) < 0.006
+}
+
+/// `text` with `n`'s digits replaced by `v` in `n`'s own unit, and the old
+/// and new figure as written.
+fn rewrite(text: &str, n: &Num, v: f64) -> (String, String, String) {
+    let (a, b) = core(text, n);
+    let new = format!("{}{}{}", &text[..a], fmt_num(v / n.multiplier), &text[b..]);
+    let old_raw = n.raw.clone();
+    let new_raw = format!(
+        "{}{}{}",
+        &text[n.at..a],
+        fmt_num(v / n.multiplier),
+        &text[b..n.at + n.raw.len()]
+    );
+    (new, old_raw, new_raw)
+}
+
+/// A cited value of `n`'s class, at least 5% away from it at the line's
+/// own precision.
+fn replacement(n: &Num, c: Class, cited: &[(f64, Class)]) -> Option<f64> {
+    let cur = round_to(n.value.abs() / n.multiplier, n.decimals);
+    cited
+        .iter()
+        .filter(|(_, k)| *k == c)
+        .map(|(v, _)| *v)
+        .find(|v| {
+            let x = v / n.multiplier;
+            (0.01..1e6).contains(&x) && far(cur, round_to(x, n.decimals))
+        })
+}
+
+/// `text` with the figures `a` and `b` trading places, at every place each
+/// is written ("$28.00" twice becomes "$7.54" twice), so the line stays
+/// consistent with itself.
+fn swapped(text: &str, figs: &[(Num, Class)], a: &Num, b: &Num) -> String {
+    let (ra, rb) = (
+        text[a.at..a.at + a.raw.len()].to_string(),
+        text[b.at..b.at + b.raw.len()].to_string(),
+    );
+    let mut spans: Vec<(usize, usize, &str)> = figs
+        .iter()
+        .filter_map(|(n, _)| {
+            let to = if same_value(n.value, a.value) {
+                rb.as_str()
+            } else if same_value(n.value, b.value) {
+                ra.as_str()
+            } else {
+                return None;
+            };
+            Some((n.at, n.at + n.raw.len(), to))
+        })
+        .collect();
+    spans.sort_by_key(|s| s.0);
+    let mut out = String::new();
+    let mut last = 0;
+    for (s, e, to) in spans {
+        out.push_str(&text[last..s]);
+        out.push_str(to);
+        last = e;
+    }
+    out.push_str(&text[last..]);
+    out
+}
+
+/// Whether `n` is one end of a range written in `text` ("38% to 40%").
+fn in_range(text: &str, figs: &[(Num, Class)], n: &Num) -> bool {
+    figs.iter()
+        .any(|(m, _)| m.at != n.at && range_ends(text, m, n))
+}
+
 /// Byte range of the digits (with "." and ",") inside a found number.
 fn core(text: &str, n: &Num) -> (usize, usize) {
     let raw = &text[n.at..n.at + n.raw.len()];
@@ -140,43 +276,10 @@ fn fmt_num(v: f64) -> String {
     s.trim_end_matches('0').trim_end_matches('.').to_string()
 }
 
-/// Every value written in the cited items of `line_cites`, in base units.
-fn cited_values(pack: &Pack, cites: &[String]) -> Vec<f64> {
-    pack.evidence
-        .iter()
-        .filter(|e| cites.contains(&e.id))
-        .flat_map(|e| numbers::extract(&e.text, Lang::En))
-        .map(|n| n.value.abs())
-        .collect()
-}
-
-/// Whether `to` is at least 5% away from `from`: closer, a rounded figure
-/// can still be true ("$18.5 billion" for a cited "$18.52 billion").
-fn far(from: f64, to: f64) -> bool {
-    from != 0.0 && (to - from).abs() / from.abs() >= 0.05
-}
-
-fn round_to(v: f64, decimals: u8) -> f64 {
-    let scale = 10f64.powi(decimals as i32);
-    (v * scale).round() / scale
-}
-
-/// `text` with the number `n` rewritten as another cited value in the same
-/// unit ("42亿" with $1.0 billion cited reads "10亿"), at least 5% away at
-/// the line's own precision; `None` when no cited value is that far.
-fn replace_number(text: &str, n: &Num, others: &[f64]) -> Option<String> {
-    let (a, b) = core(text, n);
-    let cur = round_to(n.value.abs() / n.multiplier, n.decimals);
-    let v = others
-        .iter()
-        .map(|v| v / n.multiplier)
-        .find(|v| *v >= 0.01 && *v < 1e6 && far(cur, round_to(*v, n.decimals)))?;
-    Some(format!("{}{}{}", &text[..a], fmt_num(v), &text[b..]))
-}
-
 /// Whether two numbers are the ends of one range ("$1.07 to $1.09"):
 /// swapping them changes nothing a reader would notice.
 fn range_ends(text: &str, a: &Num, b: &Num) -> bool {
+    let (a, b) = if a.at < b.at { (a, b) } else { (b, a) };
     let between = text[a.at + a.raw.len()..b.at]
         .trim()
         .trim_start_matches('$');
@@ -186,58 +289,102 @@ fn range_ends(text: &str, a: &Num, b: &Num) -> bool {
 /// What trying one kind on a line gave.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum Made {
-    /// A line that is wrong.
-    Wrong(Insight),
-    /// The kind applies, but every change it could make would still be
-    /// true (a figure within 5%, a range's ends, "higher or lower").
+    /// A line that is wrong, and what was changed ("$28.00 ↔ $7.54").
+    Wrong(Insight, String),
+    /// The kind applies, but no change it could make would be genuinely
+    /// wrong and like for like (a figure within 5%, a range's ends, only a
+    /// year to swap, "higher or lower").
     WouldBeTrue,
     /// Nothing in the line for this kind to change.
     NotApplicable,
 }
 
-/// The first number of `nums` that can be replaced by a cited value far
-/// enough from it.
-fn replace_any(text: &str, nums: &[Num], others: &[f64]) -> Option<String> {
-    nums.iter().find_map(|n| replace_number(text, n, others))
+/// The Chinese figure that writes the same value as `n`.
+fn counterpart<'a>(zh: &'a [(Num, Class)], n: &Num, c: Class) -> Option<&'a Num> {
+    zh.iter()
+        .find(|(z, k)| *k == c && same_value(z.value, n.value))
+        .map(|(z, _)| z)
 }
 
+/// Two figures of one class trade places in both languages ("$28.00 ↔
+/// $7.54"), or, failing that, one figure becomes another cited value of its
+/// class in both languages. Never a year, a date, a label or a range's two
+/// ends; skipped (and counted) when no such change exists.
 fn number_swap(pack: &Pack, i: &Insight) -> Made {
-    let w = &i.en.watch;
-    let nums = numbers::extract(w, Lang::En);
-    if nums.is_empty() {
+    let (w, z) = (&i.en.watch, &i.zh.watch);
+    let en = figures(w, Lang::En);
+    let zh = figures(z, Lang::Zh);
+    if numbers::extract(w, Lang::En).is_empty() {
         return Made::NotApplicable;
     }
-    // Two numbers of the line trade places, when they are far apart and
-    // not one range's ends.
-    let pair = nums.iter().enumerate().find_map(|(k, a)| {
-        nums[k + 1..]
-            .iter()
-            .find(|b| far(a.value.abs(), b.value.abs()) && !range_ends(w, a, b))
-            .map(|b| (a, b))
-    });
-    let watch = match pair {
-        Some((first, s)) => {
-            let (a1, b1) = (first.at, first.at + first.raw.len());
-            let (a2, b2) = (s.at, s.at + s.raw.len());
-            Some(format!(
-                "{}{}{}{}{}",
-                &w[..a1],
-                &w[a2..b2],
-                &w[b1..a2],
-                &w[a1..b1],
-                &w[b2..]
-            ))
-        }
-        None => replace_any(w, &nums, &cited_values(pack, &i.en.cites)),
-    };
-    match watch {
-        Some(watch) => {
+    for (k, (a, ca)) in en.iter().enumerate() {
+        for (b, cb) in &en[k + 1..] {
+            if ca != cb || !far(a.value.abs(), b.value.abs()) || range_ends(w, a, b) {
+                continue;
+            }
+            let (Some(za), Some(zb)) = (counterpart(&zh, a, *ca), counterpart(&zh, b, *cb)) else {
+                continue;
+            };
+            if za.at == zb.at || range_ends(z, za, zb) {
+                continue;
+            }
             let mut v = i.clone();
-            v.en.watch = watch;
-            Made::Wrong(v)
+            v.en.watch = swapped(w, &en, a, b);
+            v.zh.watch = swapped(z, &zh, za, zb);
+            return Made::Wrong(v, format!("{} ↔ {}", a.raw, b.raw));
         }
-        None => Made::WouldBeTrue,
     }
+    // One figure becomes another cited value of its class, never a range's
+    // end ("38% to 40%" must not become "40% to 40%").
+    let cited = cited_values(pack, &i.en.cites);
+    for (n, c) in &en {
+        if in_range(w, &en, n) {
+            continue;
+        }
+        let Some(zn) = counterpart(&zh, n, *c) else {
+            continue;
+        };
+        if in_range(z, &zh, zn) {
+            continue;
+        }
+        let Some(value) = replacement(n, *c, &cited) else {
+            continue;
+        };
+        let (en_new, old_raw, new_raw) = rewrite(w, n, value);
+        let (zh_new, _, _) = rewrite(z, zn, value);
+        let mut v = i.clone();
+        v.en.watch = en_new;
+        v.zh.watch = zh_new;
+        return Made::Wrong(v, format!("{old_raw} → {new_raw}"));
+    }
+    Made::WouldBeTrue
+}
+
+/// The words that differ between `old` and `new`, widened to whole words:
+/// "raised → cut".
+fn describe(old: &str, new: &str) -> String {
+    let pre = old
+        .char_indices()
+        .zip(new.chars())
+        .find(|((_, a), b)| a != b)
+        .map_or(old.len().min(new.len()), |((i, _), _)| i);
+    let suf = old[pre..]
+        .chars()
+        .rev()
+        .zip(new[pre..].chars().rev())
+        .take_while(|(a, b)| a == b)
+        .map(|(a, _)| a.len_utf8())
+        .sum::<usize>();
+    let start = old[..pre].rfind(char::is_whitespace).map_or(0, |i| i + 1);
+    let end_old = old.len() - suf;
+    let end_new = new.len() - suf;
+    let widen = |s: &str, end: usize| {
+        s[end..]
+            .find(char::is_whitespace)
+            .map_or(s.len(), |i| end + i)
+    };
+    let (eo, en) = (widen(old, end_old.max(pre)), widen(new, end_new.max(pre)));
+    format!("{} → {}", old[start..eo].trim(), new[start..en].trim())
 }
 
 fn has_word_at(text: &str, at: usize, len: usize) -> bool {
@@ -300,7 +447,12 @@ fn direction_flip(i: &Insight) -> Made {
     if let Ok(Some(w)) = zh {
         v.zh.watch = w;
     }
-    Made::Wrong(v)
+    let change = if v.en.watch != i.en.watch {
+        describe(&i.en.watch, &v.en.watch)
+    } else {
+        describe(&i.zh.watch, &v.zh.watch)
+    };
+    Made::Wrong(v, change)
 }
 
 /// The first of `names` in `text`, as (at, name).
@@ -367,19 +519,24 @@ fn outlet_swap(pack: &Pack, i: &Insight) -> Option<Insight> {
     changed.then_some(v)
 }
 
+/// One Chinese figure becomes another cited value of its class; the English
+/// line is unchanged, so the two languages differ.
 fn zh_only_number(pack: &Pack, i: &Insight) -> Made {
-    let nums = numbers::extract(&i.zh.watch, Lang::Zh);
-    if nums.is_empty() {
+    let z = &i.zh.watch;
+    if numbers::extract(z, Lang::Zh).is_empty() {
         return Made::NotApplicable;
     }
-    match replace_any(&i.zh.watch, &nums, &cited_values(pack, &i.zh.cites)) {
-        Some(w) => {
+    let figs = figures(z, Lang::Zh);
+    let cited = cited_values(pack, &i.zh.cites);
+    for (n, c) in figs.iter().filter(|(n, _)| !in_range(z, &figs, n)) {
+        if let Some(value) = replacement(n, *c, &cited) {
+            let (zh_new, old_raw, new_raw) = rewrite(z, n, value);
             let mut v = i.clone();
-            v.zh.watch = w;
-            Made::Wrong(v)
+            v.zh.watch = zh_new;
+            return Made::Wrong(v, format!("{old_raw} → {new_raw} (Chinese only)"));
         }
-        None => Made::WouldBeTrue,
     }
+    Made::WouldBeTrue
 }
 
 fn formal_advice(i: &Insight, pick: usize) -> Insight {
@@ -400,13 +557,20 @@ pub(crate) fn attempts(pack: &Pack, i: &Insight, pick: usize) -> Vec<(Kind, Made
             let made = match kind {
                 Kind::NumberSwap => number_swap(pack, i),
                 Kind::DirectionFlip => direction_flip(i),
-                Kind::OutletSwap => outlet_swap(pack, i).map_or(Made::NotApplicable, Made::Wrong),
+                Kind::OutletSwap => outlet_swap(pack, i).map_or(Made::NotApplicable, |v| {
+                    let change = describe(&i.en.watch, &v.en.watch);
+                    Made::Wrong(v, change)
+                }),
                 Kind::ZhOnlyNumber => zh_only_number(pack, i),
-                Kind::FormalAdvice => Made::Wrong(formal_advice(i, pick)),
+                Kind::FormalAdvice => {
+                    let v = formal_advice(i, pick);
+                    let change = describe(&i.en.watch, &v.en.watch);
+                    Made::Wrong(v, change)
+                }
                 Kind::Control => Made::NotApplicable,
             };
             let made = match made {
-                Made::Wrong(v) if v == *i => Made::WouldBeTrue,
+                Made::Wrong(v, _) if v == *i => Made::WouldBeTrue,
                 m => m,
             };
             (kind, made)
@@ -454,16 +618,19 @@ pub(crate) fn plan(records: &[Record]) -> Vec<PostPlan> {
                 original_passed: original_passed.clone(),
                 line_key: line_key(i),
                 skipped: false,
+                change: None,
             };
             let mut sendable = Vec::new();
             for (kind, made) in attempts(&r.pack, i, pick) {
                 match made {
-                    Made::Wrong(v) => {
+                    Made::Wrong(v, change) => {
                         let c = check::check(&r.pack, &v);
                         if c.is_empty() {
                             sendable.push(rows.len());
                         }
-                        rows.push((row(kind, v, c), r.pack.clone()));
+                        let mut seeded = row(kind, v, c);
+                        seeded.change = Some(change);
+                        rows.push((seeded, r.pack.clone()));
                     }
                     // Kept as a row so the report can count it.
                     Made::WouldBeTrue => {
@@ -508,7 +675,7 @@ mod tests {
         attempts(pack, i, pick)
             .into_iter()
             .filter_map(|(k, m)| match m {
-                Made::Wrong(v) => Some((k, v)),
+                Made::Wrong(v, _) => Some((k, v)),
                 _ => None,
             })
             .collect()
@@ -596,7 +763,11 @@ mod tests {
             v.en.watch,
             "Reuters reports Apple raised its revenue forecast to $1.0 billion alongside a $4.2 billion buyback."
         );
-        assert_eq!(v.zh, b.zh);
+        // The Chinese line says the same wrong thing.
+        assert_eq!(
+            v.zh.watch,
+            "据路透社报道，苹果将营收预期上调至10亿美元，并宣布42亿美元回购。"
+        );
 
         let v = kind(Kind::DirectionFlip);
         assert_eq!(
@@ -799,14 +970,14 @@ mod tests {
             &["e4", "e5"],
         );
         let m = made_kinds(&p, &i);
-        let Made::Wrong(v) = &m[&Kind::NumberSwap] else {
+        let Made::Wrong(v, _) = &m[&Kind::NumberSwap] else {
             panic!("{:?}", m[&Kind::NumberSwap])
         };
         assert_eq!(
             v.en.watch,
             "The company reported revenue of $4.55 billion for Q1 of fiscal 2027."
         );
-        let Made::Wrong(v) = &m[&Kind::ZhOnlyNumber] else {
+        let Made::Wrong(v, _) = &m[&Kind::ZhOnlyNumber] else {
             panic!("{:?}", m[&Kind::ZhOnlyNumber])
         };
         assert_eq!(v.zh.watch, "公司公布2027财年第一季度营收45.5亿美元。");
@@ -842,11 +1013,10 @@ mod tests {
         ));
         let mut i2 = i.clone();
         i2.en.cites.push("e8".into());
-        let Made::Wrong(v) = &made_kinds(&p2, &i2)[&Kind::NumberSwap] else {
-            panic!()
-        };
-        assert!(!v.en.watch.contains("$1.09 to $1.07"), "{}", v.en.watch);
-        assert!(v.en.watch.contains("$4.38"), "{}", v.en.watch);
+        // Neither end of a range is replaced either ("$4.38 to $1.09" would
+        // garble the range, as "38% to 40%" became "40% to 40%" in the
+        // final run), so a line whose only figures are a range is skipped.
+        assert_eq!(made_kinds(&p2, &i2)[&Kind::NumberSwap], Made::WouldBeTrue);
 
         let i = insight(
             "Reuters reports revenue of $4.2 billion, which could come in higher or lower at the report.",
@@ -856,5 +1026,133 @@ mod tests {
             made_kinds(&pack(), &i)[&Kind::DirectionFlip],
             Made::WouldBeTrue
         );
+    }
+
+    /// The final run's lines that passed the checks (2026-11-13), as stored.
+    fn final_run() -> Vec<Record> {
+        include_str!("../testdata/final_run_lines.jsonl")
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect()
+    }
+
+    /// The four-digit years written in `t`, in order.
+    fn years(t: &str) -> Vec<String> {
+        t.split(|c: char| !c.is_ascii_digit())
+            .filter(|w| w.len() == 4 && (w.starts_with("19") || w.starts_with("20")))
+            .map(str::to_string)
+            .collect()
+    }
+
+    /// Final run: number swaps exchanged a year with a money amount and
+    /// garbled the sentence ("guides to 2026 of $28.00 adjusted EPS",
+    /// "revenue to approximately 2026", "forecast to 2026-$3.63 billion").
+    /// Now a swap is like for like, in both languages, never a year; and a
+    /// line without such a pair is skipped.
+    #[test]
+    fn number_swaps_on_the_final_run_are_like_for_like() {
+        let records = final_run();
+        assert!(records.len() >= 9);
+        let mut made = 0;
+        for r in &records {
+            let i = r.insight.as_ref().unwrap();
+            match number_swap(&r.pack, i) {
+                Made::Wrong(v, change) => {
+                    made += 1;
+                    for garbled in [
+                        "to 2026 of",
+                        "approximately 2026",
+                        "2026-$",
+                        "7.2, down",
+                        "7/24",
+                    ] {
+                        assert!(
+                            !v.en.watch.contains(garbled),
+                            "{} {}: {}",
+                            r.post,
+                            r.ticker,
+                            v.en.watch
+                        );
+                    }
+                    // Years stay where they were, in both languages.
+                    assert_eq!(years(&v.en.watch), years(&i.en.watch), "{}", r.ticker);
+                    assert_eq!(years(&v.zh.watch), years(&i.zh.watch), "{}", r.ticker);
+                    // Both languages say the same wrong thing.
+                    assert_ne!(v.en.watch, i.en.watch);
+                    assert_ne!(v.zh.watch, i.zh.watch, "{} {}", r.ticker, v.zh.watch);
+                    assert!(change.contains('↔') || change.contains('→'), "{change}");
+                    let sides: Vec<&str> = change.split(['↔', '→']).map(str::trim).collect();
+                    for side in sides {
+                        assert!(side.contains(['$', '%']), "{} {change}", r.ticker);
+                    }
+                }
+                Made::WouldBeTrue | Made::NotApplicable => {}
+            }
+        }
+        assert!(made > 0);
+        // The four the lead named: no year is ever swapped.
+        let get = |post: &str, t: &str| {
+            records
+                .iter()
+                .find(|r| r.post == post && r.ticker == t)
+                .unwrap()
+        };
+        let cpay = get("recap_2026-11-05", "CPAY");
+        let Made::Wrong(v, change) = number_swap(&cpay.pack, cpay.insight.as_ref().unwrap()) else {
+            panic!()
+        };
+        assert_eq!(change, "$28.00 ↔ $7.54");
+        // Every place a figure is written changes, so the line stays
+        // consistent with itself.
+        assert_eq!(
+            v.en.watch,
+            "TIKR reports Corpay now guides to $7.54 of 2026 adjusted EPS after posting $28.00 for the quarter, so whether later results keep pace with that $7.54 full-year figure is what would confirm the raise."
+        );
+        assert_eq!(
+            v.zh.watch,
+            "据TIKR报道，Corpay本季调整后每股收益为28.00美元，并将2026年调整后每股收益指引上调至7.54美元，后续业绩能否跟上这一全年数字是验证的关键。"
+        );
+        // The ones whose only swaps were a year, a range or percentage
+        // points are skipped: AXON, ANET, FICO, CHTR premarket.
+        for (post, t) in [
+            ("recap_2026-11-06", "AXON"),
+            ("recap_2026-11-12", "ANET"),
+            ("premarket_2026-11-05", "FICO"),
+            ("premarket_2026-11-06", "CHTR"),
+        ] {
+            let r = get(post, t);
+            assert_eq!(
+                number_swap(&r.pack, r.insight.as_ref().unwrap()),
+                Made::WouldBeTrue,
+                "{t}"
+            );
+        }
+    }
+
+    /// Each kind records what it changed, for seeded.jsonl and the report.
+    #[test]
+    fn every_seed_says_what_it_changed() {
+        for (k, made) in attempts(&pack(), &two_outlets(), 0) {
+            if let Made::Wrong(_, change) = made {
+                assert!(
+                    !change.is_empty() && change.contains(['→', '↔']),
+                    "{k:?}: {change}"
+                );
+            }
+        }
+        let b = base();
+        let m: BTreeMap<Kind, Made> = attempts(&pack(), &b, 0).into_iter().collect();
+        let Made::Wrong(_, flip) = &m[&Kind::DirectionFlip] else {
+            panic!()
+        };
+        assert_eq!(flip, "raised → cut");
+        let Made::Wrong(_, swap) = &m[&Kind::NumberSwap] else {
+            panic!()
+        };
+        assert_eq!(swap, "$4.2 billion ↔ $1.0 billion");
+        let Made::Wrong(_, zh) = &m[&Kind::ZhOnlyNumber] else {
+            panic!()
+        };
+        assert_eq!(zh, "42亿 → 10亿 (Chinese only)");
     }
 }

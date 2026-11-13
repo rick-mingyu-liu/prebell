@@ -108,6 +108,12 @@ is sent.
   `ticker`, `kind` (`control` is the original line sent again), the
   `insight`, its `check` result, each judge's answer when the checks let it
   through, `original_passed` per judge, and the original line's `line_key`.
+  Each row records what it changed (`change`: "$28.00 ↔ $7.54", "raised →
+  cut"). A number seed exchanges or replaces like with like (money with
+  money, a per-share figure with a per-share figure, a percentage with a
+  percentage), never a year, a date, a label or a range's end, and changes
+  the Chinese line to match; when no such change exists it is skipped and
+  counted.
   Each judge call holds at most one row per mover, under the mover's own
   ticker, and each mover's control goes in a different call from its
   variants. A wrong line counts against a judge only when that judge passed
