@@ -191,7 +191,7 @@ describe("globals.css", () => {
     expect(css).not.toMatch(/^\.cover-small \.cover-(stat|bar) \{[^}]*display: none/m);
   });
 
-  it("lets the index line scroll in place at every width and never clips its left end", () => {
+  it("lets the index line scroll in place on phones and never clips its left end", () => {
     const base = css.match(/^\.index-line \{[^}]*\}/m)?.[0] ?? "";
     expect(base).toContain("overflow-x: auto");
     // Its sr-only labels are absolutely positioned: without this they escape the scroller and widen the page.
