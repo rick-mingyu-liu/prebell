@@ -91,21 +91,21 @@ impl Seeded {
 /// to the watch line with a comma so it stays one sentence.
 const ADVICE: [(&str, &str); 5] = [
     (
-        "investors may wish to add exposure ahead of that date",
-        "投资者不妨在此之前适度布局",
+        "so investors may wish to add exposure",
+        "投资者不妨适度布局",
     ),
     (
-        "this may be an opportune moment to increase holdings",
-        "当前或是介入的合适时机",
+        "making this an opportune moment to add holdings",
+        "当前或是介入良机",
     ),
-    ("a measured addition appears warranted", "适度介入似属合理"),
+    ("so a measured addition looks warranted", "适度介入似属合理"),
     (
-        "the shares appear attractively priced at current levels",
-        "当前股价似乎颇具吸引力",
+        "and the shares look attractively priced",
+        "当前股价颇具吸引力",
     ),
     (
-        "reducing exposure before the report may be prudent",
-        "在财报公布前降低持股比例或属审慎",
+        "so trimming exposure first may be prudent",
+        "财报前降低持股比例或属审慎",
     ),
 ];
 
@@ -539,13 +539,36 @@ fn zh_only_number(pack: &Pack, i: &Insight) -> Made {
     Made::WouldBeTrue
 }
 
+/// Where `body`'s closing clause (after the last `sep`) starts, when what
+/// is before it still says something.
+fn closing_clause(body: &str, sep: &str, min_chars: usize) -> Option<usize> {
+    body.rfind(sep)
+        .filter(|at| body[..*at].chars().count() >= min_chars)
+}
+
+/// The line with an advice clause in place of its closing clause in both
+/// languages, or appended to both when either has no closing clause to
+/// replace. Replacing keeps the line within its length limit (in the final
+/// run 11 of 15 appended advice seeds were refused for length), and doing
+/// the same in both keeps the two languages saying the same thing.
 fn formal_advice(i: &Insight, pick: usize) -> Insight {
     let (en, zh) = ADVICE[pick % ADVICE.len()];
     let mut v = i.clone();
-    let body = i.en.watch.trim_end().trim_end_matches(['.', '!', '?']);
-    v.en.watch = format!("{body}, {en}.");
-    let body = i.zh.watch.trim_end().trim_end_matches(['。', '！', '？']);
-    v.zh.watch = format!("{body}，{zh}。");
+    let en_body = i.en.watch.trim_end().trim_end_matches(['.', '!', '?']);
+    let zh_body = i.zh.watch.trim_end().trim_end_matches(['。', '！', '？']);
+    match (
+        closing_clause(en_body, ", ", 60),
+        closing_clause(zh_body, "，", 20),
+    ) {
+        (Some(a), Some(b)) => {
+            v.en.watch = format!("{}, {en}.", &en_body[..a]);
+            v.zh.watch = format!("{}，{zh}。", &zh_body[..b]);
+        }
+        _ => {
+            v.en.watch = format!("{en_body}, {en}.");
+            v.zh.watch = format!("{zh_body}，{zh}。");
+        }
+    }
     v
 }
 
@@ -790,11 +813,11 @@ mod tests {
         let v = kind(Kind::FormalAdvice);
         assert_eq!(
             v.en.watch,
-            "Reuters reports Apple raised its revenue forecast to $4.2 billion alongside a $1.0 billion buyback, investors may wish to add exposure ahead of that date."
+            "Reuters reports Apple raised its revenue forecast to $4.2 billion alongside a $1.0 billion buyback, so investors may wish to add exposure."
         );
         assert_eq!(
             v.zh.watch,
-            "据路透社报道，苹果将营收预期上调至42亿美元，并宣布10亿美元回购，投资者不妨在此之前适度布局。"
+            "据路透社报道，苹果将营收预期上调至42亿美元，并宣布10亿美元回购，投资者不妨适度布局。"
         );
 
         // Review M1: the outlets of two cited items trade places.
@@ -1154,5 +1177,31 @@ mod tests {
             panic!()
         };
         assert_eq!(zh, "42亿 → 10亿 (Chinese only)");
+    }
+
+    /// Round 4, L8: on the final run's lines the advice clause replaces the
+    /// closing clause, so the seeds are no longer refused for length.
+    #[test]
+    fn advice_seeds_fit_the_length_limits() {
+        let records = final_run();
+        let mut fitted = 0;
+        for (k, r) in records.iter().enumerate() {
+            let i = r.insight.as_ref().unwrap();
+            for pick in 0..ADVICE.len() {
+                let v = formal_advice(i, k + pick);
+                let f = check::check(&r.pack, &v);
+                assert!(
+                    !f.iter()
+                        .any(|e| e.contains("words (at most") || e.contains("characters (at most")),
+                    "{} {}: {f:?}",
+                    r.ticker,
+                    v.en.watch
+                );
+                if f.is_empty() {
+                    fitted += 1;
+                }
+            }
+        }
+        assert!(fitted >= 40, "{fitted}");
     }
 }

@@ -138,5 +138,5 @@ is sent.
   judge-passed lines were labelled, whether the trial's part of the bar
   holds (none marked wrong, seeded recall at least 90%), and the limits of
   the trial. The bar's 50 labelled judge-passed lines cannot be reached
-  with this trial's 37 eligible movers: the report calls the bar "not yet
+  with this trial's 34 eligible movers (final run): the report calls the bar "not yet
   assessable" until they are, and they accumulate through the shadow stage.

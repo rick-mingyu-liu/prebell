@@ -84,7 +84,8 @@ fn ratio(a: usize, b: usize) -> f64 {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Bar {
     /// Fewer than 50 judge-passed lines labelled: the offline trial cannot
-    /// reach 50 (37 eligible movers); the rest come in the shadow stage.
+    /// reach 50 (34 eligible movers in the final run); the rest come in the
+    /// shadow stage.
     NotYetAssessable,
     Met,
     NotMet,
@@ -576,6 +577,15 @@ pub(crate) fn report(
         out,
         "- Rick's labels cover a sample of about 60 lines; agreement on the rest is not measured."
     );
+    if records
+        .iter()
+        .any(|r| r.writer_version == "insight-writer/v4")
+    {
+        let _ = writeln!(
+            out,
+            "- Lines written by insight-writer/v4, whose prompt examples came from this trial's own evidence, are in-sample for those examples; the shadow week is the first out-of-sample test."
+        );
+    }
     let outlet_swaps = seeded
         .iter()
         .filter(|v| v.kind == Kind::OutletSwap && !v.skipped)
