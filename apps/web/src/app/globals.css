@@ -77,6 +77,14 @@ html:lang(zh-Hans) .site-nav { font-variant-caps: normal; }
 .ix { padding: 0 0.9em; }
 .ix + .ix { border-left: 1px solid var(--rule); }
 .ix-asof { font-style: normal; }
+/* Wider than a phone, the line wraps onto further rows instead of overflowing. It shrinks to its widest row and
+   centres as a block, rows start at its left edge, and the overflow clip hides the divider of any item that
+   starts a row (each item's divider is pulled 1px out of the box). */
+@media (min-width: 721px) {
+  .index-line { box-sizing: border-box; flex-wrap: wrap; width: fit-content; max-width: 100%; margin-left: auto; margin-right: auto; overflow: hidden; }
+  .ix:first-child, .ix:last-child { margin: 0; }
+  .ix + .ix { margin-left: -1px; }
+}
 
 .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
 

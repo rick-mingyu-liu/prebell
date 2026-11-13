@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 import { loadIndexLine, parseIndexLine } from "../src/lib/indexline";
 import { memoryD1 } from "./d1";
@@ -55,5 +56,24 @@ describe("loadIndexLine", () => {
     expect((await loadIndexLine(put(JSON.stringify(good))))?.entries).toHaveLength(3);
     expect(await loadIndexLine(put("{not json"))).toBeNull();
     expect(await loadIndexLine(put('{"kind":"x"}'))).toBeNull();
+  });
+});
+
+describe("index line styles", () => {
+  const css = readFileSync(new URL("../src/app/globals.css", import.meta.url), "utf8");
+  const phones = css.indexOf("@media (max-width: 720px)");
+
+  it("wraps on desktop widths instead of overflowing, and still scrolls sideways inside itself on phones", () => {
+    expect(css).toMatch(/^\.index-line \{[^}]*overflow-x: auto/m);
+    const desktop = css.match(/@media \(min-width: 721px\) \{\n([\s\S]*?)\n\}/)?.[1] ?? "";
+    expect(desktop).toMatch(/\.index-line \{[^}]*flex-wrap: wrap/);
+    expect(desktop).toMatch(/\.index-line \{[^}]*overflow: hidden/);
+    // The desktop block must come after the base rules it overrides and must not touch the phone block.
+    expect(css.indexOf("@media (min-width: 721px)")).toBeGreaterThan(css.indexOf(".ix:last-child { margin-right: auto; }"));
+    expect(css.indexOf("@media (min-width: 721px)")).toBeLessThan(phones);
+  });
+
+  it("pulls each divider out of the box so an item that starts a wrapped row shows none", () => {
+    expect(css).toMatch(/@media \(min-width: 721px\) \{[\s\S]*?\.ix \+ \.ix \{ margin-left: -1px; \}/);
   });
 });
