@@ -65,15 +65,15 @@ describe("index line styles", () => {
 
   it("wraps on desktop widths instead of overflowing, and still scrolls sideways inside itself on phones", () => {
     expect(css).toMatch(/^\.index-line \{[^}]*overflow-x: auto/m);
-    const desktop = css.match(/@media \(min-width: 721px\) \{\n([\s\S]*?)\n\}/)?.[1] ?? "";
+    const desktop = css.match(/@media not all and \(max-width: 720px\) \{\n([\s\S]*?)\n\}/)?.[1] ?? "";
     expect(desktop).toMatch(/\.index-line \{[^}]*flex-wrap: wrap/);
     expect(desktop).toMatch(/\.index-line \{[^}]*overflow: hidden/);
     // The desktop block must come after the base rules it overrides and must not touch the phone block.
-    expect(css.indexOf("@media (min-width: 721px)")).toBeGreaterThan(css.indexOf(".ix:last-child { margin-right: auto; }"));
-    expect(css.indexOf("@media (min-width: 721px)")).toBeLessThan(phones);
+    expect(css.indexOf("@media not all and (max-width: 720px)")).toBeGreaterThan(css.indexOf(".ix:last-child { margin-right: auto; }"));
+    expect(css.indexOf("@media not all and (max-width: 720px)")).toBeLessThan(phones);
   });
 
   it("pulls each divider out of the box so an item that starts a wrapped row shows none", () => {
-    expect(css).toMatch(/@media \(min-width: 721px\) \{[\s\S]*?\.ix \+ \.ix \{ margin-left: -1px; \}/);
+    expect(css).toMatch(/@media not all and \(max-width: 720px\) \{[\s\S]*?\.ix \+ \.ix \{ margin-left: -1px; \}/);
   });
 });
