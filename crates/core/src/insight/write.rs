@@ -7,7 +7,7 @@ use super::check::{HOOK_CHARS_ZH, HOOK_WORDS_EN, WATCH_CHARS_ZH, WATCH_WORDS_EN}
 use super::{EvidenceKind, Insight, Line, Pack};
 use crate::providers::{LlmProvider, ProviderError};
 
-pub const WRITER_VERSION: &str = "insight-writer/v4";
+pub const WRITER_VERSION: &str = "insight-writer/v5";
 
 /// What a news or analyst-action item is to the brief: the reason it gives
 /// for the move.
@@ -47,9 +47,9 @@ pub fn prompt(packs: &[Pack]) -> (String, String) {
 
 What to track:
 - It must be specific to this company and come from its evidence: a figure or target the company gave, a stated plan or timetable, a problem the evidence names, or its report date. Never a market-wide or macro event.
-- Say what would confirm or change the picture. Restating the result and adding "is worth tracking" is not an insight. In this spirit (do not copy): "…so whether expenses keep outgrowing revenue is the point to track"; "…targets Neutron's first launch for no earlier than 2027, so any change to that timing matters".
+- Say what would confirm or change the picture. Restating the result and adding "is worth tracking" is not an insight. In this spirit, about invented companies (do not copy): "…so whether Halvorsen Mills' freight costs keep outgrowing its sales is what decides the margin"; "…and Tarrow Bio's stated plan to start its Phase 3 trial in 2031 is the date that would test it".
 - If the evidence offers nothing of that kind, leave the mover out.
-- Vary how sentences close: across one reply, never use the same closing phrase twice, and end on the specific thing (the figure, the plan, the date) rather than a stock phrase such as "is the point to track". Keep it formal and one sentence. These only illustrate variety; do not copy them: "…, which puts the $3.61 billion to $3.63 billion range under test at the next report"; "…, and any slip in the Neutron timetable past 2027 would change that picture"; "…, so a climb back from the 47.2% margin would show the cost growth was temporary".
+- Vary how sentences close: across one reply, never use the same closing phrase twice, and end on the specific thing (the figure, the plan, the date) rather than a stock phrase such as "is the point to track". Keep it formal and one sentence. These invented lines only illustrate variety; never copy their wording or assume what they assume: "…, which puts Kestrel Foods' $910 million to $930 million sales range under test at its next report"; "…, and a return of Orvane Systems' gross margin to the 58.1% it reported would show the cost rise was temporary"; "…, so the opening of Brightwell Rail's second depot, which it set for 2031, is the milestone to watch".
 - Each "news" or "analyst_action" item has "role": "reason for the move": PreBell's brief gives it as a reason the stock moved, so a hook may tie the move to it ("Margin contraction behind the drop").
 
 People:
@@ -334,5 +334,35 @@ mod tests {
         let r = write(&llm, &[pack("AAPL")]).await.unwrap();
         assert_eq!(llm.calls.get(), 1);
         assert!(r[0].is_ok());
+    }
+
+    /// Round 4, M4: the prompt's examples are invented, never the trial's
+    /// own data (v4 used AXON's range, RKLB's Neutron and FICO's margin, and
+    /// RKLB's "any further slip" followed from it).
+    #[test]
+    fn the_examples_are_invented() {
+        let (system, _) = prompt(&[pack("AAPL")]);
+        for trial in [
+            "Neutron",
+            "47.2",
+            "3.61",
+            "3.63",
+            "slip",
+            "Axon",
+            "Rocket Lab",
+            "Fair Isaac",
+        ] {
+            assert!(!system.contains(trial), "{trial}");
+        }
+        for invented in [
+            "Halvorsen Mills",
+            "Tarrow Bio",
+            "Kestrel Foods",
+            "Orvane Systems",
+            "Brightwell Rail",
+        ] {
+            assert!(system.contains(invented), "{invented}");
+        }
+        assert_eq!(WRITER_VERSION, "insight-writer/v5");
     }
 }

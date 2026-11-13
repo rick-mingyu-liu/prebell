@@ -127,7 +127,6 @@ const RELATIVE_ZH: &[&str] = &[
     "今年底",
     "今年年底",
     "今年内",
-    "去年",
     "今天",
     "今日",
     "昨天",
@@ -152,7 +151,7 @@ const DATE_HEDGE_ZH: &[&str] = &["暂定", "未经公司确认", "未确认", "�
 
 /// Allegations about a person's private life: refused whatever the
 /// evidence says (a line names the company-level fact instead).
-const PERSONAL_EN: &[&str] = &["affair", "mistress", "extramarital"];
+const PERSONAL_EN: &[&str] = &["mistress", "extramarital"];
 const PERSONAL_ZH: &[&str] = &["婚外情", "出轨", "情妇", "绯闻"];
 
 /// `(English name as in ipo::news::OUTLETS, other English forms, Chinese forms)`.
@@ -229,17 +228,13 @@ fn row(outlet: &str) -> Option<&'static OutletRow> {
 pub fn outlet_names(outlet: &str, lang: Lang) -> Vec<String> {
     let Some((name, en, zh)) = row(outlet) else {
         // A brand outside the table, or a bare host: its name, and its host
-        // with and without the top-level domain ("stocktitan.net",
-        // "stocktitan"), in both languages.
+        // with its top-level domain ("stocktitan.net"; never the bare word,
+        // since "investing" or "fool" is an ordinary word), in both
+        // languages.
         let mut out = vec![outlet.to_string()];
         if let Some(host) = super::pack::outlet_host(outlet) {
-            let bare = host
-                .rsplit_once('.')
-                .map_or(host.clone(), |(b, _)| b.to_string());
-            for n in [host, bare] {
-                if !out.iter().any(|o| o.eq_ignore_ascii_case(&n)) {
-                    out.push(n);
-                }
+            if !out.iter().any(|o| o.eq_ignore_ascii_case(&host)) {
+                out.push(host);
             }
         }
         return out;
@@ -333,7 +328,9 @@ fn hook_count(text: &str) -> Option<String> {
     r.find_iter(text)
         // "一个" is the everyday "a"; 第三季度 names a quarter.
         .filter(|m| m.as_str() != "一个")
-        .find(|m| !(m.as_str().ends_with('季') && text[..m.start()].ends_with('第')))
+        // 三季度 (with or without 第) names a quarter: a fiscal label, checked
+        // as one, not a count.
+        .find(|m| !(m.as_str().ends_with('季') && text[m.end()..].starts_with('度')))
         .map(|m| m.as_str().to_string())
 }
 
@@ -400,15 +397,57 @@ fn names(text: &str, name: &str) -> bool {
     }
 }
 
-/// `names` ignoring ASCII case: a cited outlet may be written "Seeking
-/// Alpha", "Stocktitan.net" or "Benzinga.com".
-fn names_any_case(text: &str, name: &str) -> bool {
-    if name.chars().any(is_cjk) {
-        return names(text, name);
-    }
-    let (t, n) = (text.to_ascii_lowercase(), name.to_ascii_lowercase());
-    t.match_indices(&n)
-        .any(|(at, m)| ascii_alone(&t, at, at + m.len()))
+/// Whether `text` attributes something to the outlet `name`: the name (in
+/// any ASCII case) inside an attributing frame. English: "<name> reports",
+/// "<name> and Reuters report", "<name>'s report found", "according to
+/// <name>", "per <name>", "told <name>". Chinese: "据<name>报道", "<name>称",
+/// "<name>报道", "<name>则报道", "据<name>、路透社报道". An ordinary word that happens to be a
+/// name ("listed on the Nasdaq", "investing heavily", "no fool would") is
+/// not attribution.
+fn attributes(text: &str, name: &str) -> bool {
+    static R: OnceLock<[Regex; 3]> = OnceLock::new();
+    let [after_en, after_zh, before_zh] = R.get_or_init(|| {
+        [
+            re(r"(?i)^(?:'s|’s)?(?:\s+and\s+[^,.;，。]{1,40}?)?\s+(?:reports?|reported|reporting|says?|said|wrote|writes|notes?|noted|adds?|added|cited|citing|finds?|found|magazine|newspaper)\b"),
+            re(r"^\s*(?:[、和与及][^，。,;；]{0,30}?)?[则也还亦另]?(?:报道|称|指出|援引|表示|的报道|消息称)"),
+            re(r"据[^，。,;；]{0,30}[、和与及]\s*$"),
+        ]
+    });
+    let cjk = name.chars().any(is_cjk);
+    let (hay, needle) = if cjk {
+        (text.to_string(), name.to_string())
+    } else {
+        (text.to_ascii_lowercase(), name.to_ascii_lowercase())
+    };
+    let not_after: &[&str] = NOT_A_NAME_AFTER
+        .iter()
+        .find(|(n, _)| *n == name)
+        .map_or(&[], |(_, a)| a);
+    hay.match_indices(&needle).any(|(at, m)| {
+        let end = at + m.len();
+        if !cjk && !ascii_alone(&hay, at, end) {
+            return false;
+        }
+        if not_after.iter().any(|a| text[end..].starts_with(a)) {
+            return false;
+        }
+        let before = text[..at].trim_end();
+        let lower_before = before.to_ascii_lowercase();
+        after_en.is_match(&text[end..])
+            || after_zh.is_match(&text[end..])
+            || ["according to", "according to the", "per", "told"]
+                .iter()
+                .any(|b| {
+                    lower_before.ends_with(b)
+                        && ascii_alone(
+                            &lower_before,
+                            lower_before.len() - b.len(),
+                            lower_before.len(),
+                        )
+                })
+            || before.ends_with('据')
+            || before_zh.is_match(&text[..at])
+    })
 }
 
 /// `text` with every one of `names` (ignoring ASCII case) replaced by
@@ -432,13 +471,19 @@ fn digits_only_in_names(hook: &str, cited: &[String]) -> bool {
     static R: OnceLock<[Regex; 2]> = OnceLock::new();
     let [name, year] = R.get_or_init(|| {
         [
-            re(r"[A-Za-z][A-Za-z.&'’-]*\s?\d+[A-Za-z]*|\d+[A-Za-z]+"),
+            // A capitalised word and its number ("GTA 6"), or letters and
+            // digits glued ("A380", "Q3"); never a lowercase word before a
+            // figure ("by 45").
+            re(r"[A-Z][A-Za-z.&'’-]*\s?\d+[A-Za-z]*|[A-Za-z]+\d+[A-Za-z]*|\d+[A-Za-z]+"),
             re(r"(?:19|20)\d{2}"),
         ]
     });
     let hook = ascii_digits(hook);
     let named = name.replace_all(&hook, |c: &regex::Captures| {
-        if cited.iter().any(|t| t.contains(&c[0])) {
+        let m = c.get(0).expect("match");
+        // A percentage or a dollar figure is never a name ("By 45%").
+        let figure = hook[m.end()..].starts_with(['%', '％']) || hook[..m.start()].ends_with('$');
+        if !figure && cited.iter().any(|t| t.contains(&c[0])) {
             String::new()
         } else {
             c[0].to_string()
@@ -462,7 +507,17 @@ fn digits_only_in_names(hook: &str, cited: &[String]) -> bool {
     !has_digit(&rest)
 }
 
-/// `names`, for a name that is also an ordinary word: only where the line
+/// "affair" in its personal sense: "had an affair", "a second affair", "an
+/// affair with"; not "a muted affair" or "current affairs".
+fn personal_affair(text: &str) -> Option<String> {
+    static R: OnceLock<Regex> = OnceLock::new();
+    let r = R.get_or_init(|| {
+        re(r"(?i)(?:\b(?:an|another|second|secret|romantic|alleged|extramarital|had|having)\s+affair\b|\baffair\s+with\b)")
+    });
+    r.find(text).map(|m| m.as_str().to_string())
+}
+
+/// `names`, for a name that is also an ordinary word (case-sensitive): only where the line
 /// attributes to it ("Fortune reports", "according to The Economist").
 fn names_attributed(text: &str, name: &str) -> bool {
     static AFTER: OnceLock<Regex> = OnceLock::new();
@@ -789,7 +844,7 @@ fn zh_years(text: &str) -> Vec<i32> {
 fn relative_en_re() -> &'static Regex {
     static R: OnceLock<Regex> = OnceLock::new();
     R.get_or_init(|| {
-        re(r"(?i)(?:next\s+(?:week|month|quarter|year|few\s+\w+|several\s+\w+)|(?:over|in|during|within)\s+the\s+(?:next|coming)\s+(?:\w+\s+)?(?:days|weeks|months|quarters|years)|in\s+(?:the\s+)?coming\s+(?:days|weeks|months|quarters)|(?:later\s+)?this\s+(?:week|month|quarter|year)|last\s+(?:week|month|quarter|year)|later\s+today|today|tonight|tomorrow|yesterday|soon|shortly|in\s+the\s+(?:days|weeks|months|quarters|years)\s+ahead|(?:days|weeks|months)\s+ahead|in\s+the\s+near\s+term|near[- ]term|by\s+(?:the\s+)?(?:year[- ]end|end\s+of\s+the\s+year)|later\s+in\s+the\s+year)")
+        re(r"(?i)(?:next\s+(?:week|month|quarter|year|few\s+\w+|several\s+\w+)|(?:over|in|during|within)\s+the\s+(?:next|coming)\s+(?:\w+\s+)?(?:days|weeks|months|quarters|years)|in\s+(?:the\s+)?coming\s+(?:days|weeks|months|quarters)|(?:later\s+)?this\s+(?:week|month|quarter|year)|last\s+(?:week|month)|later\s+today|today|tonight|tomorrow|yesterday|soon|shortly|in\s+the\s+(?:days|weeks|months|quarters|years)\s+ahead|(?:days|weeks|months)\s+ahead|in\s+the\s+near\s+term|near[- ]term|by\s+(?:the\s+)?(?:year[- ]end|end\s+of\s+the\s+year)|later\s+in\s+the\s+year)")
     })
 }
 
@@ -1243,11 +1298,10 @@ fn check_line(pack: &Pack, line: &Line, lang: Lang) -> Vec<String> {
         .collect();
     let (both, watch) = (both_n, watch_n);
     for o in &cited_outlets {
-        if !outlet_names(o, lang)
-            .iter()
-            .any(|n| names_any_case(&watch, n))
-        {
-            bad.push(format!("does not name {o}, the outlet of a cited item"));
+        if !outlet_names(o, lang).iter().any(|n| attributes(&watch, n)) {
+            bad.push(format!(
+                "does not attribute to {o}, the outlet of a cited item (\"{o} reports\", \"据{o}报道\")"
+            ));
         }
     }
     for (name, _, _) in OUTLET_NAMES {
@@ -1262,6 +1316,16 @@ fn check_line(pack: &Pack, line: &Line, lang: Lang) -> Vec<String> {
             }
         });
         if named {
+            bad.push(format!("names {name}, which no cited item is from"));
+        }
+    }
+    // The mover-news brands too, where the line attributes to them: many
+    // are also ordinary words or companies ("Nasdaq", "Morningstar").
+    for (host, name) in super::pack::MOVER_OUTLETS {
+        if cited_outlets.contains(name) || OUTLET_NAMES.iter().any(|(n, _, _)| n == name) {
+            continue;
+        }
+        if attributes(&both, name) || attributes(&both, host) {
             bad.push(format!("names {name}, which no cited item is from"));
         }
     }
@@ -1322,6 +1386,9 @@ fn check_line(pack: &Pack, line: &Line, lang: Lang) -> Vec<String> {
         if has_word(&both, w) {
             bad.push(format!("a personal allegation: {w}"));
         }
+    }
+    if let Some(m) = personal_affair(&both) {
+        bad.push(format!("a personal allegation: {m}"));
     }
     for w in PERSONAL_ZH {
         if both.contains(w) {
@@ -1445,7 +1512,7 @@ fn advice_words(text: &str, analyst_cited: bool) -> Vec<String> {
     let [trade, target, neutral, side] = R.get_or_init(|| {
         [
             re(r"(?i)(?:buying|buys|buy|selling|sells|sell)"),
-            re(r"(?i)(?:(?:stock|share)\s+targets?|targets?\s+(?:to|of)\s+\$|targets?\s+(?:on|for)\s+(?:the\s+)?(?:stock|shares|company)|targets?)"),
+            re(r"(?i)(?:(?:stock|share)\s+targets?|targets?\s+(?:to|of)\s+\$\d[\d.,]*(?:\s*(?:billion|million|bn|b|m))?|targets?\s+(?:on|for)\s+(?:the\s+)?(?:stock|shares|company)|targets?)"),
             re(r"(?i)neutral"),
             re(r"(?i)(?:upside|downside)"),
         ]
@@ -2061,9 +2128,11 @@ mod tests {
         assert!(outlet_names("The Wall Street Journal", En).contains(&"WSJ".to_string()));
         assert!(!outlet_names("The Wall Street Journal", En).contains(&"华尔街日报".to_string()));
         assert!(outlet_names("The Wall Street Journal", Zh).contains(&"华尔街日报".to_string()));
+        // A host only with its top-level domain (round 4: "fool" and
+        // "investing" are ordinary words).
         assert_eq!(
             outlet_names("marketscreener.com", Zh),
-            ["marketscreener.com", "marketscreener"]
+            ["marketscreener.com"]
         );
         // Every allowlisted outlet has a row.
         for (_, name) in crate::ipo::news::OUTLETS {
@@ -2966,7 +3035,10 @@ mod tests {
 
         let (p, i) = get("premarket_2026-11-12-update", "NVDA");
         let f = check(&p, &i);
-        assert!(refused(&f, "en: a personal allegation: affair"), "{f:?}");
+        assert!(
+            refused(&f, "en: a personal allegation: second affair"),
+            "{f:?}"
+        );
         assert!(refused(&f, "zh: a personal allegation: 婚外情"), "{f:?}");
         assert!(
             refused(
@@ -3029,5 +3101,143 @@ mod tests {
         let f = check(&p, &i);
         assert!(f.is_empty(), "{f:?}");
         assert!(i.en.watch.split_whitespace().count() <= WATCH_WORDS_EN);
+    }
+
+    /// Round 4 review inputs (M1, M2, L1, L2, L4, L5, L6).
+    #[test]
+    fn the_round_four_probe_inputs() {
+        use EvidenceKind::*;
+        let mk = |host: &str| {
+            run_one_pack("AAPL", "2026-11-12", &[
+                (News, Some(host), "Apple said it expects revenue of $4.2 billion and will report on November 19, 2026.", None),
+                (ReportDate, None, "Apple's report date is confirmed for November 19, 2026 (earnings calendar).", Some("2026-11-19")),
+            ])
+        };
+        let both = |p: &Pack, hook: &str, en: &str, zh: &str, cites: &[&str]| {
+            check(
+                p,
+                &insight(
+                    line(hook, en, cites),
+                    line("业绩指引成为下一道考验", zh, cites),
+                ),
+            )
+        };
+        let zh_ok_for = |name: &str| {
+            format!("据{name}报道，苹果预计营收42亿美元，11月19日的财报将检验这一预期。")
+        };
+        // M1: an ordinary word is not attribution.
+        for (host, name, en) in [
+            ("nasdaq.com", "Nasdaq", "Apple, listed on the Nasdaq, expects revenue of $4.2 billion before its November 19 report."),
+            ("investing.com", "Investing.com", "Apple expects revenue of $4.2 billion, investing heavily before its November 19 report."),
+            ("fool.com", "The Motley Fool", "Apple expects revenue of $4.2 billion, and no fool would miss its November 19 report."),
+        ] {
+            let p = mk(host);
+            let f = both(&p, "Guidance sets the next test", en, &zh_ok_for(name), &["e2", "e3"]);
+            assert!(refused(&f, "en: does not attribute"), "{host}: {f:?}");
+            // In an attributing frame it passes.
+            let framed = format!("{name} reports Apple expects revenue of $4.2 billion before its November 19 report.");
+            let f = both(&p, "Guidance sets the next test", &framed, &zh_ok_for(name), &["e2", "e3"]);
+            assert!(f.is_empty(), "{host}: {f:?}");
+        }
+        // The host with its domain, never the bare word.
+        let p = mk("fool.com");
+        assert!(both(
+            &p,
+            "Guidance sets the next test",
+            "Fool.com reports Apple expects revenue of $4.2 billion before its November 19 report.",
+            &zh_ok_for("fool.com"),
+            &["e2", "e3"]
+        )
+        .is_empty());
+        let f = both(
+            &p,
+            "Guidance sets the next test",
+            "Fool reports Apple expects revenue of $4.2 billion before its November 19 report.",
+            &zh_ok_for("fool.com"),
+            &["e2", "e3"],
+        );
+        assert!(refused(&f, "en: does not attribute"), "{f:?}");
+        // Other frames: according to, 称, a list.
+        let p = mk("benzinga.com");
+        assert!(both(&p, "Guidance sets the next test", "According to Benzinga, Apple expects revenue of $4.2 billion before its November 19 report.", "Benzinga称，苹果预计营收42亿美元，11月19日的财报将检验这一预期。", &["e2", "e3"]).is_empty());
+        // M2: a mover brand that no cited item is from.
+        let r = run_one_pack("AAPL", "2026-11-12", &[
+            (News, Some("reuters.com"), "Apple said it expects revenue of $4.2 billion and will report on November 19, 2026.", None),
+            (ReportDate, None, "Apple's report date is confirmed for November 19, 2026 (earnings calendar).", Some("2026-11-19")),
+        ]);
+        let f = both(&r, "Guidance sets the next test", "Benzinga and Reuters report Apple expects revenue of $4.2 billion before its November 19 report.", &zh_ok_for("路透社"), &["e2", "e3"]);
+        assert!(
+            refused(&f, "en: names Benzinga, which no cited item is from"),
+            "{f:?}"
+        );
+        let f = both(&r, "Guidance sets the next test", "Reuters reports Apple, listed on the Nasdaq, expects revenue of $4.2 billion before its November 19 report.", &zh_ok_for("路透社"), &["e2", "e3"]);
+        assert!(f.is_empty(), "{f:?}");
+        // L1: a hook figure never passes as a name.
+        let q = run_one_pack(
+            "AMD",
+            "2026-11-06",
+            &[(
+                News,
+                Some("fool.com"),
+                "AMD's Q3 revenue rose by 45% year over year to $13.38 billion.",
+                None,
+            )],
+        );
+        let f = both(&q, "Q3 revenue rose by 45%", "Fool.com reports AMD's Q3 revenue rose by 45% year over year to $13.38 billion, a pace the next report will test.", "据fool.com报道，AMD第三季度营收同比增长45%，达到133.8亿美元，下次财报将检验这一增速。", &["e2"]);
+        assert!(refused(&f, "en: hook has a digit"), "{f:?}");
+        let f = both(&q, "Q3 revenue growth in focus", "Fool.com reports AMD's Q3 revenue rose by 45% year over year to $13.38 billion, a pace the next report will test.", "据fool.com报道，AMD第三季度营收同比增长45%，达到133.8亿美元，下次财报将检验这一增速。", &["e2"]);
+        assert!(f.is_empty(), "{f:?}");
+        // L2: "affair" only in its personal sense.
+        let p = mk("reuters.com");
+        let f = both(
+            &p,
+            "A muted affair before the report",
+            "Reuters reports Apple expects revenue of $4.2 billion before its November 19 report.",
+            &zh_ok_for("路透社"),
+            &["e2", "e3"],
+        );
+        assert!(f.is_empty(), "{f:?}");
+        let f = both(&p, "Guidance sets the next test", "Reuters reports a state of affairs where Apple expects revenue of $4.2 billion before November 19.", &zh_ok_for("路透社"), &["e2", "e3"]);
+        assert!(f.is_empty(), "{f:?}");
+        let f = both(&p, "Guidance sets the next test", "Reuters reports the CEO had an affair, and Apple expects revenue of $4.2 billion before November 19.", &zh_ok_for("路透社"), &["e2", "e3"]);
+        assert!(refused(&f, "en: a personal allegation: an affair"), "{f:?}");
+        // L4: past periods pass in both languages; forward ones do not.
+        assert_eq!(relative_time("revenue rose from last quarter"), None);
+        assert_eq!(
+            relative_time("revenue rose from the prior quarter and a year earlier"),
+            None
+        );
+        assert_eq!(
+            relative_time("营收高于上一季度和上季度，也高于去年同期和去年"),
+            None
+        );
+        assert!(relative_time("revenue will rise next quarter").is_some());
+        assert!(relative_time("下季度营收").is_some());
+        // L5: "target to $250" is refused by the word rule.
+        assert!(
+            refused_wording("Morgan Stanley raised its target to $250", false)
+                .iter()
+                .any(|w| w.contains("$250"))
+        );
+        // L6: a quarter without 第 in a Chinese hook is a fiscal label.
+        let t = run_one_pack(
+            "AMD",
+            "2026-11-06",
+            &[(
+                News,
+                Some("fool.com"),
+                "AMD's third quarter revenue rose by 45% year over year to $13.38 billion.",
+                None,
+            )],
+        );
+        let f = both(&t, "Third-quarter revenue in focus", "Fool.com reports AMD's third quarter revenue rose by 45% year over year to $13.38 billion, a pace the next report will test.", "据fool.com报道，AMD第三季度营收同比增长45%，达到133.8亿美元，下次财报将检验这一增速。", &["e2"]);
+        assert!(f.is_empty(), "{f:?}");
+        let mut i = insight(line("Third-quarter revenue in focus", "Fool.com reports AMD's third quarter revenue rose by 45% year over year to $13.38 billion, a pace the next report will test.", &["e2"]), line("三季度营收成焦点", "据fool.com报道，AMD第三季度营收同比增长45%，达到133.8亿美元，下次财报将检验这一增速。", &["e2"]));
+        i.ticker = "AMD".into();
+        let f = check(&t, &i);
+        assert!(f.is_empty(), "{f:?}");
+        i.zh.hook = "四季度营收成焦点".into();
+        let f = check(&t, &i);
+        assert!(refused(&f, "zh: fiscal label 四季度"), "{f:?}");
     }
 }

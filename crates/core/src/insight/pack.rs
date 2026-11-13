@@ -63,7 +63,28 @@ pub const AGGREGATORS: &[&str] = &[
     "twitter.com",
     "facebook.com",
     "youtube.com",
+    "news.yahoo.com",
+    "linkedin.com",
+    "threads.net",
+    "tiktok.com",
+    "instagram.com",
+    "medium.com",
+    "substack.com",
+    "bsky.app",
+    "flipboard.com",
+    "newsbreak.com",
+    "t.me",
 ];
+
+/// Whether `host` is one of `AGGREGATORS` or under one ("ca.finance.yahoo.com",
+/// "m.youtube.com", "old.reddit.com", "google.co.uk").
+pub fn is_aggregator(host: &str) -> bool {
+    let google = host == "google.com" || host.starts_with("google.") || host.contains(".google.");
+    google
+        || AGGREGATORS
+            .iter()
+            .any(|a| host == *a || host.ends_with(&format!(".{a}")))
+}
 
 /// An earnings calendar row's status (`earnings_calendar.status`; quarantined
 /// rows are never read).
@@ -377,7 +398,7 @@ fn pack(i: &PackInputs, m: &Mover) -> Option<Pack> {
 /// or search host (`AGGREGATORS`), which is not an outlet.
 pub fn outlet_name(url: &str) -> Option<String> {
     let host = host_of(url.trim());
-    if host.is_empty() || AGGREGATORS.contains(&host.as_str()) {
+    if host.is_empty() || is_aggregator(&host) {
         return None;
     }
     Some(
@@ -1215,5 +1236,40 @@ mod tests {
             )],
         )]);
         assert!(smci.packs("2026-11-12").is_empty());
+    }
+
+    /// Round 4, L3: aggregators and social sites match by suffix.
+    #[test]
+    fn aggregators_match_by_suffix() {
+        for host in [
+            "ca.finance.yahoo.com",
+            "uk.finance.yahoo.com",
+            "news.yahoo.com",
+            "m.youtube.com",
+            "old.reddit.com",
+            "google.co.uk",
+            "news.google.com",
+            "www.linkedin.com",
+            "threads.net",
+            "www.tiktok.com",
+            "instagram.com",
+            "medium.com",
+            "someone.substack.com",
+            "bsky.app",
+            "flipboard.com",
+            "newsbreak.com",
+            "t.me",
+        ] {
+            assert_eq!(outlet_name(&format!("https://{host}/a")), None, "{host}");
+        }
+        // A real outlet is not caught by a suffix.
+        assert_eq!(
+            outlet_name("https://www.reuters.com/a").as_deref(),
+            Some("Reuters")
+        );
+        assert_eq!(
+            outlet_name("https://www.fool.com/a").as_deref(),
+            Some("The Motley Fool")
+        );
     }
 }

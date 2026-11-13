@@ -154,8 +154,11 @@ the ids of the evidence items the line rests on.
   short list of private-life words as a backstop.
 - An unconfirmed report date is never the company's own: in Chinese not
   "公司预计于…", but "财报日期暂定为…（未经公司确认）" or "市场预计其于…".
-- An outlet is named as the pack gives it, in both languages; any case,
-  the host or the host without its domain is also accepted. Chinese
+- An outlet is named as the pack gives it, in both languages, inside an
+  attributing frame ("X reports", "according to X", "据X报道", "X称"); any
+  case, or the host with its top-level domain, is also accepted. An
+  ordinary word that happens to be a brand ("listed on the Nasdaq") is not
+  attribution. Chinese
   figures use 万 and 亿, never 百万.
 
 Lead's calls after the builder check:
@@ -196,7 +199,13 @@ Lead's calls after the builder check:
   the like). It applies even when the evidence itself uses the word.
 - Length limits; the Chinese line contains Chinese; no markup or links.
 - Only the judge can catch (code lets these through on purpose, after the
-  third review): a reordered consensus phrase ("above the expectations of
+  third and fourth reviews): the same figure given a different meaning (a
+  revenue figure stated as a buyback): code confirms that the judge's
+  quoted words are verbatim and that the line's money and percentage
+  figures sit inside them, but not that the words mean what the line says;
+  a named person tied to alleged wrongdoing or an investigation (the
+  judge's `no_personal_allegation` flag; code refuses only a short list of
+  private-life words); a reordered consensus phrase ("above the expectations of
   analysts"); 持有 read as "holds shares" when it is advice
   ("投资者可继续持有股份至11月19日"); a bare "target" in a line that does
   not cite the analyst item ("after Morgan Stanley lifted its target");

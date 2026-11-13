@@ -302,12 +302,13 @@ pub fn support_confirmed(pack: &Pack, claims: &[Claim]) -> bool {
     })
 }
 
-/// Whether every number and date in `line` appears in the evidence the
-/// judge confirmed for it: in its quoted spans, or in the full text (and
-/// date) of an item a confirmed claim names, so a span that leaves out the
-/// item's period ("For the fourth quarter of 2026, …") still counts. One
-/// easy claim cannot carry a line whose figures its item never states. The
-/// names of the line's cited outlets ("24/7 Wall St.") are left out.
+/// Whether every figure and date in `line` is backed by the evidence the
+/// judge confirmed for it. Money amounts, per-share figures and percentages
+/// must sit inside a quoted support span (round 4: one claim must not carry
+/// every figure of its item). Dates and years may come from the full text
+/// (or date) of an item a confirmed claim names, so a span that leaves out
+/// the item's period ("For the fourth quarter of 2026, …") still counts.
+/// The names of the line's cited outlets ("24/7 Wall St.") are left out.
 fn figures_supported(pack: &Pack, line: &Line, claims: &[Claim], lang: Lang) -> bool {
     let claims = fact_claims(pack, claims);
     let named: Vec<&super::Evidence> = pack
@@ -323,11 +324,27 @@ fn figures_supported(pack: &Pack, line: &Line, claims: &[Claim], lang: Lang) -> 
         .flat_map(|o| outlet_names(o, lang))
         .collect();
     let text = scrub(&format!("{} {}", line.hook, line.watch), &outlets);
-    let mut texts: Vec<&str> = claims.iter().map(|c| c.support.as_str()).collect();
-    texts.extend(named.iter().map(|e| e.text.as_str()));
+    let spans: Vec<&str> = claims.iter().map(|c| c.support.as_str()).collect();
+    let mut full: Vec<&str> = spans.clone();
+    full.extend(named.iter().map(|e| e.text.as_str()));
+    // A bare year from a named item's text ("2026" in "fourth-quarter 2026").
+    let year_in_named = |raw: &str| {
+        raw.len() == 4
+            && (raw.starts_with("19") || raw.starts_with("20"))
+            && raw.chars().all(|c| c.is_ascii_digit())
+            && named.iter().any(|e| {
+                e.text.match_indices(raw).any(|(at, m)| {
+                    !e.text[..at].ends_with(|c: char| c.is_ascii_alphanumeric())
+                        && !e.text[at + m.len()..].starts_with(|c: char| c.is_ascii_alphanumeric())
+                })
+            })
+    };
+    let numbers_ok = match numbers_from(&text, lang, &spans) {
+        Ok(()) => true,
+        Err(bad) => bad.iter().all(|raw| year_in_named(raw)),
+    };
     let dates: Vec<chrono::NaiveDate> = named.iter().filter_map(|e| e.date).collect();
-    numbers_from(&text, lang, &texts).is_ok()
-        && dates_not_in(&text, year_of(pack), &dates, &texts).is_empty()
+    numbers_ok && dates_not_in(&text, year_of(pack), &dates, &full).is_empty()
 }
 
 /// The final answer for one mover: every flag true, at least one claim of
@@ -908,5 +925,49 @@ mod tests {
             &q,
             &[claim("It lists on November 19", "e2", "November 19")]
         ));
+    }
+
+    /// Round 4, M3: one claim that quotes no figure no longer carries every
+    /// figure of its item; money, per-share figures and percentages must be
+    /// inside a quoted span. A year may still come from the named item.
+    #[test]
+    fn money_and_percent_figures_need_a_quoted_span() {
+        let p = pack("Apple said it expects third quarter revenue of $4.2 billion and a $1.0 billion buyback.");
+        let mut i = insight("AAPL");
+        i.en.watch = "Reuters reports revenue of $4.2 billion and a $1.0 billion buyback.".into();
+        i.zh.watch = "据路透社报道，营收42亿美元，回购10亿美元。".into();
+        let mut v = verdict();
+        let vague = claim(
+            "Apple expects revenue",
+            "e2",
+            "said it expects third quarter revenue",
+        );
+        v.en_claims = vec![vague.clone()];
+        v.zh_claims = vec![vague];
+        assert!(support_confirmed(&p, &v.en_claims));
+        assert!(!passed(&p, &i, &v));
+        // Quoting the figures passes.
+        let quoted = claim(
+            "revenue and buyback",
+            "e2",
+            "revenue of $4.2 billion and a $1.0 billion buyback",
+        );
+        v.en_claims = vec![quoted.clone()];
+        v.zh_claims = vec![quoted];
+        assert!(passed(&p, &i, &v));
+        // A year from the named item's full text is fine.
+        let q = pack("For the fourth quarter of 2026, AMD expects revenue to be approximately $17 billion, plus or minus 3%.");
+        let mut i = insight("AAPL");
+        i.en.watch = "The company guided fourth-quarter 2026 revenue to approximately $17 billion, plus or minus 3%.".into();
+        i.zh.watch = "公司预计2026年第四季度营收约为170亿美元，上下浮动3%。".into();
+        let span = claim(
+            "Q4 guidance",
+            "e2",
+            "AMD expects revenue to be approximately $17 billion, plus or minus 3%",
+        );
+        let mut v = verdict();
+        v.en_claims = vec![span.clone()];
+        v.zh_claims = vec![span];
+        assert!(passed(&q, &i, &v));
     }
 }
