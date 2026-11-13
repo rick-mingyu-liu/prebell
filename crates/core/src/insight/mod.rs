@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 
 pub mod check;
 pub mod pack;
+pub mod write;
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
