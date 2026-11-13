@@ -6,14 +6,14 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
-use super::check::{dates_not_in, numbers_from, year_of};
+use super::check::{dates_not_in, numbers_from, outlet_names, scrub, year_of};
 use super::write::movers_json;
 use super::{Insight, Line, Pack};
 use crate::ipo::news::visible;
 use crate::numbers::Lang;
 use crate::providers::{LlmProvider, ProviderError};
 
-pub const JUDGE_VERSION: &str = "insight-judge/v1";
+pub const JUDGE_VERSION: &str = "insight-judge/v2";
 
 /// Shortest support, in letters and digits, that can confirm a claim: a
 /// single common word confirms nothing.
@@ -38,6 +38,11 @@ pub struct Verdict {
     pub no_advice: bool,
     pub formal: bool,
     pub same_meaning: bool,
+    /// No allegation about a named person's private life, and no person
+    /// named in connection with alleged wrongdoing or an investigation.
+    /// Absent (false) in verdicts from before judge v2.
+    #[serde(default)]
+    pub no_personal_allegation: bool,
     pub notes: String,
 }
 
@@ -45,14 +50,15 @@ const SYSTEM: &str = r#"You check short readings of big stock movers that anothe
 
 For each mover you get its evidence items (each with an id) and the lines written about it: an English hook and sentence ("en") and a Chinese hook and sentence ("zh").
 
-1. Split each language's hook and sentence into the factual claims they make (a figure, a date, an event, a plan, who said what). For each claim give the id of the evidence item that supports it and copy the exact words from that item's text that support it: a verbatim span, character for character, in the evidence's own language, long enough to show the claim (not a single word). If no item supports a claim, or the words say something different from the claim (another figure, another subject, another direction), set that language's "*_supported" to false.
-2. PreBell's own framing of why something matters is allowed only when it follows from a supported claim. A fact taken from a news item must be attributed in the line to that item's outlet; if it is not, or it is attributed to another outlet, set that language's "*_supported" to false.
+1. Split each language's hook and sentence into the factual claims they make (a figure, a date, an event, a plan, who said what). Attribution ("Reuters reports", "据路透社报道") is checked by code: do not list it as a claim. For each claim give the id of the evidence item that supports it and copy the exact words from that item's text that support it: a verbatim span, character for character, in the evidence's own language, long enough to show the claim (not a single word). If no item supports a claim, or the words say something different from the claim (another figure, another subject, another direction), set that language's "*_supported" to false.
+2. Each "news" or "analyst_action" item has "role": "reason for the move": PreBell's brief gives it as a reason the stock moved, so a hook that ties the move to it ("Margin contraction behind the drop") is supported by that item. PreBell's own framing of why something matters is allowed only when it follows from a supported claim. A report date the evidence marks "not confirmed by the company" must not be stated as the company's own expectation (as in "英伟达预计于11月17日发布财报"); if it is, set that language's "*_supported" to false. A fact taken from a news item must be attributed in the line to that item's outlet; if it is not, or it is attributed to another outlet, set that language's "*_supported" to false.
 3. Set "no_advice" to false if a line gives investment advice of any kind, a rating, a price target or a prediction of where the price goes.
 4. Set "formal" to false if the tone is informal, promotional or sensational.
 5. Set "same_meaning" to false if the Chinese lines do not say the same thing as the English ones (a different figure, date, outlet or claim).
+6. Set "no_personal_allegation" to false if a line repeats an allegation about a named person's private life, or names a person in connection with alleged wrongdoing or an investigation. Stating the company-level fact ("the board opened an independent investigation") is fine, and so is naming an executive for what they said in their role.
 
 Use only the evidence given, never what you remember. Reply with JSON only, in this shape, one verdict per mover:
-{"verdicts":[{"ticker":"...","en_claims":[{"claim":"...","evidence_id":"e2","support":"exact words"}],"zh_claims":[{"claim":"...","evidence_id":"e2","support":"exact words"}],"en_supported":true,"zh_supported":true,"no_advice":true,"formal":true,"same_meaning":true,"notes":"one short sentence"}]}"#;
+{"verdicts":[{"ticker":"...","en_claims":[{"claim":"...","evidence_id":"e2","support":"exact words"}],"zh_claims":[{"claim":"...","evidence_id":"e2","support":"exact words"}],"en_supported":true,"zh_supported":true,"no_advice":true,"formal":true,"same_meaning":true,"no_personal_allegation":true,"notes":"one short sentence"}]}"#;
 
 /// The insights that have a pack, with it.
 fn pairs<'a>(packs: &'a [Pack], insights: &'a [Insight]) -> Vec<(&'a Pack, &'a Insight)> {
@@ -126,6 +132,7 @@ pub fn parse(reply: &Value, insights: &[Insight]) -> Vec<Verdict> {
             no_advice: flag("no_advice"),
             formal: flag("formal"),
             same_meaning: flag("same_meaning"),
+            no_personal_allegation: flag("no_personal_allegation"),
             notes: it
                 .get("notes")
                 .and_then(Value::as_str)
@@ -212,10 +219,55 @@ fn long_enough(support: &str) -> bool {
     alnum >= MIN_SUPPORT && (telling >= 2 || support.chars().any(|c| c.is_ascii_digit()))
 }
 
+/// Whether a claim only states the attribution: its support is a name of
+/// the named item's outlet ("StockStory", "据StockStory报道"). The outlet is
+/// a field, not in the item's text, and code checks attribution itself, so
+/// such a claim is ignored rather than failed.
+fn attribution_claim(pack: &Pack, c: &Claim) -> bool {
+    let Some(outlet) = pack
+        .evidence
+        .iter()
+        .find(|e| e.id == c.evidence_id)
+        .and_then(|e| e.outlet.as_deref())
+    else {
+        return false;
+    };
+    let support = c
+        .support
+        .trim()
+        .trim_matches(|ch: char| {
+            ch.is_ascii_punctuation() && ch != '\'' || "，。、（）".contains(ch)
+        })
+        .trim();
+    let support = support
+        .strip_prefix('据')
+        .and_then(|s| s.strip_suffix("报道"))
+        .unwrap_or(support);
+    let lower = support.to_ascii_lowercase();
+    let support = lower
+        .strip_suffix(" reports")
+        .or_else(|| lower.strip_suffix(" reported"))
+        .unwrap_or(&lower)
+        .trim();
+    [Lang::En, Lang::Zh]
+        .iter()
+        .flat_map(|l| outlet_names(outlet, *l))
+        .any(|n| n.to_ascii_lowercase() == support)
+}
+
+/// The claims that state a fact, not only the attribution.
+fn fact_claims<'a>(pack: &Pack, claims: &'a [Claim]) -> Vec<&'a Claim> {
+    claims
+        .iter()
+        .filter(|c| !attribution_claim(pack, c))
+        .collect()
+}
+
 /// True when every claim's `support` is found verbatim in the named
-/// evidence item of this pack.
+/// evidence item of this pack. A claim that only states the attribution is
+/// ignored.
 pub fn support_confirmed(pack: &Pack, claims: &[Claim]) -> bool {
-    claims.iter().all(|c| {
+    fact_claims(pack, claims).iter().all(|c| {
         let support = norm(&c.support);
         long_enough(&support)
             && pack
@@ -226,19 +278,37 @@ pub fn support_confirmed(pack: &Pack, claims: &[Claim]) -> bool {
     })
 }
 
-/// Whether every number and date in `line` appears in the support the judge
-/// quoted for it, so one easy claim cannot carry a line whose figures it
-/// never quoted.
+/// Whether every number and date in `line` appears in the evidence the
+/// judge confirmed for it: in its quoted spans, or in the full text (and
+/// date) of an item a confirmed claim names, so a span that leaves out the
+/// item's period ("For the fourth quarter of 2026, …") still counts. One
+/// easy claim cannot carry a line whose figures its item never states. The
+/// names of the line's cited outlets ("24/7 Wall St.") are left out.
 fn figures_supported(pack: &Pack, line: &Line, claims: &[Claim], lang: Lang) -> bool {
-    let text = format!("{} {}", line.hook, line.watch);
-    let spans: Vec<&str> = claims.iter().map(|c| c.support.as_str()).collect();
-    numbers_from(&text, lang, &spans).is_ok()
-        && dates_not_in(&text, year_of(pack), &[], &spans).is_empty()
+    let claims = fact_claims(pack, claims);
+    let named: Vec<&super::Evidence> = pack
+        .evidence
+        .iter()
+        .filter(|e| claims.iter().any(|c| c.evidence_id == e.id))
+        .collect();
+    let outlets: Vec<String> = pack
+        .evidence
+        .iter()
+        .filter(|e| line.cites.contains(&e.id) || named.iter().any(|n| n.id == e.id))
+        .filter_map(|e| e.outlet.as_deref())
+        .flat_map(|o| outlet_names(o, lang))
+        .collect();
+    let text = scrub(&format!("{} {}", line.hook, line.watch), &outlets);
+    let mut texts: Vec<&str> = claims.iter().map(|c| c.support.as_str()).collect();
+    texts.extend(named.iter().map(|e| e.text.as_str()));
+    let dates: Vec<chrono::NaiveDate> = named.iter().filter_map(|e| e.date).collect();
+    numbers_from(&text, lang, &texts).is_ok()
+        && dates_not_in(&text, year_of(pack), &dates, &texts).is_empty()
 }
 
-/// The final answer for one mover: every flag true, at least one claim per
-/// language, support confirmed for both, and every number and date of each
-/// line within that language's confirmed support.
+/// The final answer for one mover: every flag true, at least one claim of
+/// fact per language, support confirmed for both, and every number and date
+/// of each line within the evidence its confirmed claims name.
 pub fn passed(pack: &Pack, insight: &Insight, v: &Verdict) -> bool {
     v.ticker == pack.ticker
         && insight.ticker == pack.ticker
@@ -247,8 +317,9 @@ pub fn passed(pack: &Pack, insight: &Insight, v: &Verdict) -> bool {
         && v.no_advice
         && v.formal
         && v.same_meaning
-        && !v.en_claims.is_empty()
-        && !v.zh_claims.is_empty()
+        && v.no_personal_allegation
+        && !fact_claims(pack, &v.en_claims).is_empty()
+        && !fact_claims(pack, &v.zh_claims).is_empty()
         && support_confirmed(pack, &v.en_claims)
         && support_confirmed(pack, &v.zh_claims)
         && figures_supported(pack, &insight.en, &v.en_claims, Lang::En)
@@ -346,6 +417,7 @@ mod tests {
             no_advice: true,
             formal: true,
             same_meaning: true,
+            no_personal_allegation: true,
             notes: String::new(),
         }
     }
@@ -355,7 +427,8 @@ mod tests {
             "en_claims": [{"claim": "a $1.0 billion buyback", "evidence_id": "e2", "support": "announced a $1.0 billion buyback"}],
             "zh_claims": [{"claim": "10亿美元回购", "evidence_id": "e2", "support": "a $1.0 billion buyback"}],
             "en_supported": true, "zh_supported": true,
-            "no_advice": true, "formal": true, "same_meaning": true, "notes": "ok"})
+            "no_advice": true, "formal": true, "same_meaning": true,
+            "no_personal_allegation": true, "notes": "ok"})
     }
 
     struct Canned(Value);
@@ -509,12 +582,13 @@ mod tests {
     fn passed_needs_every_flag_and_confirmed_support_in_both_languages() {
         let p = pack(TEXT);
         assert!(passed(&p, &insight("AAPL"), &verdict()));
-        let flags: [fn(&mut Verdict); 5] = [
+        let flags: [fn(&mut Verdict); 6] = [
             |v| v.en_supported = false,
             |v| v.zh_supported = false,
             |v| v.no_advice = false,
             |v| v.formal = false,
             |v| v.same_meaning = false,
+            |v| v.no_personal_allegation = false,
         ];
         for f in flags {
             let mut v = verdict();
@@ -649,5 +723,128 @@ mod tests {
         assert!(passed(&p, &i, &v));
         v.en_claims.pop();
         assert!(!passed(&p, &i, &v));
+    }
+
+    /// A stored trial record: its "post ticker", pack, lines and each
+    /// judge's verdict.
+    type RunRecord = (
+        String,
+        Pack,
+        Insight,
+        std::collections::BTreeMap<String, Option<Verdict>>,
+    );
+
+    /// Records from trial run 2 (2026-11-13), as stored: pack, lines and
+    /// each judge's verdict.
+    fn run_two() -> Vec<RunRecord> {
+        include_str!("testdata/run2_records.jsonl")
+            .lines()
+            .map(|l| {
+                let v: Value = serde_json::from_str(l).unwrap();
+                let verdicts = v["judges"]
+                    .as_object()
+                    .unwrap()
+                    .iter()
+                    .map(|(name, j)| {
+                        let mut verdict: Option<Verdict> =
+                            serde_json::from_value(j["verdict"].clone()).unwrap();
+                        // Run 2 predates the personal-allegation flag.
+                        if let Some(v) = verdict.as_mut() {
+                            v.no_personal_allegation = true;
+                        }
+                        (name.clone(), verdict)
+                    })
+                    .collect();
+                (
+                    format!(
+                        "{} {}",
+                        v["post"].as_str().unwrap(),
+                        v["ticker"].as_str().unwrap()
+                    ),
+                    serde_json::from_value(v["pack"].clone()).unwrap(),
+                    serde_json::from_value(v["insight"].clone()).unwrap(),
+                    verdicts,
+                )
+            })
+            .collect()
+    }
+
+    /// Trial run 2: true lines whose every flag the judge set true, failed
+    /// by the confirmation code. Attribution listed as a claim (FICO, NRG),
+    /// the digits of "24/7 Wall St." (SKYD), a span that leaves out the
+    /// item's period (AMD), and "6座" for "six" (NRG) now pass.
+    #[test]
+    fn the_trial_run_two_verdicts_are_confirmed() {
+        let records = run_two();
+        let get = |key: &str, judge: &str| {
+            let (_, p, i, vs) = records
+                .iter()
+                .find(|r| r.0 == key)
+                .unwrap_or_else(|| panic!("{key}"));
+            (p.clone(), i.clone(), vs[judge].clone().unwrap())
+        };
+        for (key, judge) in [
+            ("premarket_2026-11-05 FICO", "deepseek"),
+            ("premarket_2026-11-09-update NRG", "deepseek"),
+            ("premarket_2026-11-09-update NRG", "claude"),
+            ("recap_2026-11-10 SKYD", "claude"),
+            ("recap_2026-11-10 SKYD", "deepseek"),
+            ("recap_2026-11-06 AMD", "deepseek"),
+        ] {
+            let (p, i, v) = get(key, judge);
+            assert!(passed(&p, &i, &v), "{key} {judge}");
+        }
+        // The attribution claim is ignored, not failed.
+        let (p, _, v) = get("premarket_2026-11-05 FICO", "deepseek");
+        let attribution = v
+            .en_claims
+            .iter()
+            .find(|c| c.support == "StockStory")
+            .unwrap();
+        assert!(attribution_claim(&p, attribution));
+        assert!(support_confirmed(&p, std::slice::from_ref(attribution)));
+        // A verdict of attribution claims only has no claim of fact.
+        let mut only = v.clone();
+        only.en_claims.retain(|c| attribution_claim(&p, c));
+        assert!(!passed(
+            &p,
+            &get("premarket_2026-11-05 FICO", "deepseek").1,
+            &only
+        ));
+        // A number in no item a claim names still fails: AMD's line with a
+        // figure the guidance item never states.
+        let (p, mut i, v) = get("recap_2026-11-06 AMD", "deepseek");
+        i.en.watch = i.en.watch.replace("$17 billion", "$19 billion");
+        assert!(!passed(&p, &i, &v));
+        // A judge "no" stays a no: Claude's on FICO (it said nothing linked
+        // the margin to the drop) and on the affair line.
+        let (p, i, v) = get("premarket_2026-11-05 FICO", "claude");
+        assert!(!passed(&p, &i, &v));
+        let (p, i, mut v) = get("premarket_2026-11-12-update NVDA", "deepseek");
+        assert!(passed(&p, &i, &v));
+        v.no_personal_allegation = false;
+        assert!(!passed(&p, &i, &v));
+    }
+
+    #[test]
+    fn the_v2_prompts_carry_the_run_two_rules() {
+        let (system, user) = prompt(&[pack(TEXT)], &[insight("AAPL")]);
+        for want in [
+            "do not list it as a claim",
+            "reason for the move",
+            "no_personal_allegation",
+            "英伟达预计于11月17日发布财报",
+        ] {
+            assert!(system.contains(want), "{want}");
+        }
+        let v: Value = serde_json::from_str(&user).unwrap();
+        assert_eq!(v["movers"][0]["evidence"][1]["role"], "reason for the move");
+        assert!(v["movers"][0]["evidence"][0].get("role").is_none());
+        // A missing flag reads as "no".
+        let v = parse(
+            &json!({"verdicts": [{"ticker": "AAPL", "no_advice": true}]}),
+            &[insight("AAPL")],
+        );
+        assert!(!v[0].no_personal_allegation);
     }
 }

@@ -38,7 +38,6 @@ pub const MOVER_OUTLETS: &[(&str, &str)] = &[
     ("tikr.com", "TIKR"),
     ("fool.com", "The Motley Fool"),
     ("tradingkey.com", "TradingKey"),
-    ("stocktwits.com", "Stocktwits"),
     ("chartmill.com", "ChartMill"),
     ("zacks.com", "Zacks"),
     ("nasdaq.com", "Nasdaq"),
@@ -47,10 +46,10 @@ pub const MOVER_OUTLETS: &[(&str, &str)] = &[
     ("morningstar.com", "Morningstar"),
 ];
 
-/// Search and aggregator hosts: not outlets. A reason from one goes into
-/// the pack with no outlet, a line may not cite it, and it does not make a
-/// mover eligible ("Google reports Axon lowered its guidance" must not be
-/// possible).
+/// Search, aggregator and social hosts: not outlets. A reason from one
+/// goes into the pack with no outlet, a line may not cite it, and it does
+/// not make a mover eligible ("Google reports Axon lowered its guidance" and
+/// "Stocktwits reports …" must not be possible).
 pub const AGGREGATORS: &[&str] = &[
     "google.com",
     "news.google.com",
@@ -58,6 +57,12 @@ pub const AGGREGATORS: &[&str] = &[
     "finance.yahoo.com",
     "yahoo.com",
     "bing.com",
+    "stocktwits.com",
+    "reddit.com",
+    "x.com",
+    "twitter.com",
+    "facebook.com",
+    "youtube.com",
 ];
 
 /// An earnings calendar row's status (`earnings_calendar.status`; quarantined
@@ -1165,6 +1170,13 @@ mod tests {
             "finance.yahoo.com",
             "yahoo.com",
             "bing.com",
+            // Social platforms, after trial run 2 (SMCI's only reason).
+            "stocktwits.com",
+            "reddit.com",
+            "x.com",
+            "twitter.com",
+            "facebook.com",
+            "youtube.com",
         ] {
             assert_eq!(outlet_name(&format!("https://{host}/a")), None, "{host}");
         }
@@ -1193,5 +1205,15 @@ mod tests {
             ],
         )]);
         assert!(f.packs("2026-11-06").is_empty());
+        let smci = Fixture::new(vec![mover(
+            "SMCI",
+            -11.3,
+            vec![reason(
+                "https://stocktwits.com/news-articles/markets/equity/x",
+                "Supermicro",
+                "the DOJ is investigating whether entities linked to Alice Huang were involved in efforts to smuggle Supermicro products into China",
+            )],
+        )]);
+        assert!(smci.packs("2026-11-12").is_empty());
     }
 }

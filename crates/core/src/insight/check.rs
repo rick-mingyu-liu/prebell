@@ -146,6 +146,14 @@ const RELATIVE_ZH: &[&str] = &[
 /// Hedge words a line citing an unconfirmed report date must hold.
 const HEDGE_EN: &[&str] = &["expected", "scheduled", "unconfirmed"];
 const HEDGE_ZH: &[&str] = &["预计", "预期", "暂定", "未确认"];
+/// Chinese hedges that govern an unconfirmed date: 预计 counts only as 市场预计
+/// (the market's, not the company's, "英伟达预计于11月17日"); 市场预期 is consensus wording.
+const DATE_HEDGE_ZH: &[&str] = &["暂定", "未经公司确认", "未确认", "市场预计"];
+
+/// Allegations about a person's private life: refused whatever the
+/// evidence says (a line names the company-level fact instead).
+const PERSONAL_EN: &[&str] = &["affair", "mistress", "extramarital"];
+const PERSONAL_ZH: &[&str] = &["婚外情", "出轨", "情妇", "绯闻"];
 
 /// `(English name as in ipo::news::OUTLETS, other English forms, Chinese forms)`.
 /// The zh line may name an outlet in either script.
@@ -406,7 +414,7 @@ fn names_any_case(text: &str, name: &str) -> bool {
 /// `text` with every one of `names` (ignoring ASCII case) replaced by
 /// "Outlet", so an outlet's name ("24/7 Wall St.", "247wallst.com") is not
 /// read as a number or a date.
-fn scrub(text: &str, names: &[String]) -> String {
+pub(crate) fn scrub(text: &str, names: &[String]) -> String {
     let mut names: Vec<&String> = names.iter().collect();
     names.sort_by_key(|n| std::cmp::Reverse(n.len()));
     let mut out = text.to_string();
@@ -418,18 +426,39 @@ fn scrub(text: &str, names: &[String]) -> String {
 }
 
 /// Whether every digit in `hook` sits in a name a cited item writes the
-/// same way ("GTA 6", "A380"); any other digit is a figure.
+/// same way ("GTA 6", "A380") or in a year a cited item names ("2027
+/// growth view"); any other digit is a figure.
 fn digits_only_in_names(hook: &str, cited: &[String]) -> bool {
-    static R: OnceLock<Regex> = OnceLock::new();
-    let r = R.get_or_init(|| re(r"[A-Za-z][A-Za-z.&'’-]*\s?\d+[A-Za-z]*|\d+[A-Za-z]+"));
+    static R: OnceLock<[Regex; 2]> = OnceLock::new();
+    let [name, year] = R.get_or_init(|| {
+        [
+            re(r"[A-Za-z][A-Za-z.&'’-]*\s?\d+[A-Za-z]*|\d+[A-Za-z]+"),
+            re(r"(?:19|20)\d{2}"),
+        ]
+    });
     let hook = ascii_digits(hook);
-    let rest = r.replace_all(&hook, |c: &regex::Captures| {
+    let named = name.replace_all(&hook, |c: &regex::Captures| {
         if cited.iter().any(|t| t.contains(&c[0])) {
             String::new()
         } else {
             c[0].to_string()
         }
     });
+    let in_cited = |y: &str| {
+        cited.iter().any(|t| {
+            t.match_indices(y)
+                .any(|(at, m)| ascii_alone(t, at, at + m.len()))
+        })
+    };
+    let years: Vec<(usize, usize)> = find_alone(year, &named)
+        .into_iter()
+        .filter(|m| in_cited(m.as_str()))
+        .map(|m| (m.start(), m.end()))
+        .collect();
+    let mut rest = named.into_owned();
+    for (s, e) in years.into_iter().rev() {
+        rest.replace_range(s..e, "");
+    }
     !has_digit(&rest)
 }
 
@@ -948,6 +977,21 @@ fn clause_start(text: &str, at: usize) -> usize {
     })
 }
 
+/// The 预计 or 预期 before an unconfirmed date (within eight characters, in
+/// its clause) that makes the company, not the market, the one expecting it.
+fn company_expects(text: &str, raw: &str) -> Option<String> {
+    let at = text.find(raw)?;
+    let before = &text[clause_start(text, at)..at];
+    let chars: Vec<char> = before.chars().collect();
+    let window: String = chars[chars.len().saturating_sub(8)..].iter().collect();
+    ["预计", "预期"].iter().find_map(|w| {
+        window
+            .match_indices(w)
+            .any(|(i, _)| !window[..i].ends_with("市场"))
+            .then(|| window.clone())
+    })
+}
+
 /// Whether a hedge word governs the date written as `raw` in `text`: one
 /// of the six words before it in its own clause, or of the three after it
 /// ("expected to report results on November 20", "a report scheduled for
@@ -984,8 +1028,8 @@ fn hedge_governs(text: &str, raw: &str, lang: Lang) -> bool {
                 let chars: Vec<char> = before.chars().collect();
                 chars[chars.len().saturating_sub(8)..].iter().collect()
             };
-            let a: String = after.chars().take(6).collect();
-            HEDGE_ZH.iter().any(|w| b.contains(w) || a.contains(w))
+            let a: String = after.chars().take(8).collect();
+            DATE_HEDGE_ZH.iter().any(|w| b.contains(w) || a.contains(w))
         }
     }
 }
@@ -1250,10 +1294,29 @@ fn check_line(pack: &Pack, line: &Line, lang: Lang) -> Vec<String> {
                 if !hedge_governs(&watch, &raw, lang) {
                     unhedged = true;
                 }
+                if lang == Lang::Zh {
+                    if let Some(who) = company_expects(&watch, &raw) {
+                        bad.push(format!(
+                            "an unconfirmed report date written as the company's own expectation: {who}"
+                        ));
+                    }
+                }
             }
         }
         if unhedged || !dated && !hedged_in(&watch) {
             bad.push("an unconfirmed report date is not hedged in its clause".to_string());
+        }
+    }
+
+    // A private-life allegation about a named person, whatever the evidence.
+    for w in PERSONAL_EN {
+        if has_word(&both, w) {
+            bad.push(format!("a personal allegation: {w}"));
+        }
+    }
+    for w in PERSONAL_ZH {
+        if both.contains(w) {
+            bad.push(format!("a personal allegation: {w}"));
         }
     }
 
@@ -2403,10 +2466,17 @@ mod tests {
             &["e2", "e7"],
         );
         assert!(refused(&f, "not hedged"), "{f:?}");
-        for w in ["预计", "预期", "暂定", "未确认"] {
+        // After trial run 2, 预计 and 预期 hedge a date only with 市场 as
+        // their subject: alone they read as the company's own expectation.
+        for w in ["暂定", "未确认", "未经公司确认", "市场预计"] {
             let watch =
                 format!("据路透社报道，苹果营收42亿美元，{w}1月29日公布的财报将检验这一数字。");
             assert!(zh(&watch, &["e2", "e7"]).is_empty(), "{watch}");
+        }
+        for w in ["预计", "预期"] {
+            let watch =
+                format!("据路透社报道，苹果营收42亿美元，{w}1月29日公布的财报将检验这一数字。");
+            assert!(!zh(&watch, &["e2", "e7"]).is_empty(), "{watch}");
         }
         // A confirmed date needs no hedge.
         assert!(en(&en_ok().watch, &["e2", "e5"]).is_empty());
@@ -2552,8 +2622,9 @@ mod tests {
                 "据路透社报道，苹果预计营收42亿美元，并将于11月20日公布财报。",
                 &["e2", "e11"],
             ),
+            // Since trial run 2: 预计 alone reads as the company's own date.
             (
-                false,
+                true,
                 HZ,
                 "据路透社报道，苹果营收42亿美元，预计于11月20日公布财报。",
                 &["e2", "e11"],
@@ -2648,9 +2719,16 @@ mod tests {
                 "据路透社报道，苹果预计营收42亿美元，11月19日的财报将检验这一预期。",
                 &["e2", "e5"],
             ),
-            // L2: 合并 does not split the hedge from its date.
+            // L2: 合并 does not split the hedge from its date (since trial
+            // run 2 the hedge is 暂定, not the company's own 预计).
             (
                 false,
+                HZ,
+                "据路透社报道，苹果营收42亿美元，财报暂定合并后于11月20日公布。",
+                &["e2", "e11"],
+            ),
+            (
+                true,
                 HZ,
                 "据路透社报道，苹果营收42亿美元，苹果预计合并后于11月20日公布财报。",
                 &["e2", "e11"],
@@ -2848,5 +2926,66 @@ mod tests {
                 "{w}"
             );
         }
+    }
+
+    /// Trial run 2: a year a cited item names may stand in a hook (ANET);
+    /// a private-life allegation is refused (NVDA); in Chinese an
+    /// unconfirmed date may not be the company's own 预计 (NVDA).
+    #[test]
+    fn the_trial_run_two_lines() {
+        let records: Vec<serde_json::Value> = include_str!("testdata/run2_records.jsonl")
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+        let get = |post: &str, ticker: &str| -> (Pack, Insight) {
+            let r = records
+                .iter()
+                .find(|r| r["post"] == post && r["ticker"] == ticker)
+                .unwrap();
+            (
+                serde_json::from_value(r["pack"].clone()).unwrap(),
+                serde_json::from_value(r["insight"].clone()).unwrap(),
+            )
+        };
+        let (p, i) = get("recap_2026-11-12", "ANET");
+        assert_eq!(i.en.hook, "Guidance raised, 2027 growth view given");
+        let f = check(&p, &i);
+        assert!(f.is_empty(), "{f:?}");
+        let mut other = i.clone();
+        other.en.hook = "Guidance raised, 2028 growth view given".into();
+        assert!(refused(&check(&p, &other), "en: hook has a digit"));
+
+        let (p, i) = get("premarket_2026-11-12-update", "NVDA");
+        let f = check(&p, &i);
+        assert!(refused(&f, "en: a personal allegation: affair"), "{f:?}");
+        assert!(refused(&f, "zh: a personal allegation: 婚外情"), "{f:?}");
+        assert!(
+            refused(
+                &f,
+                "zh: an unconfirmed report date written as the company's own expectation"
+            ),
+            "{f:?}"
+        );
+
+        let (p, mut i) = get("recap_2026-11-09", "NVDA");
+        assert!(i.zh.watch.contains("英伟达预计于11月17日发布财报"));
+        let f = check(&p, &i);
+        assert!(
+            refused(
+                &f,
+                "zh: an unconfirmed report date written as the company's own expectation"
+            ),
+            "{f:?}"
+        );
+        i.zh.watch = "据FinanceFeeds报道,董事会已展开独立调查,财报日期暂定为11月17日（未经公司确认），在此之前调查是否出现结论是需要跟踪的要点。".into();
+        let f = check(&p, &i);
+        assert!(f.is_empty(), "{f:?}");
+        i.zh.watch = "据FinanceFeeds报道,董事会已展开独立调查,市场预计其于11月17日发布财报（未经公司确认），调查是否出现结论是需要跟踪的要点。".into();
+        let f = check(&p, &i);
+        assert!(f.is_empty(), "{f:?}");
+        // "6座" for "six" passes the number check.
+        let (p, i) = get("premarket_2026-11-09-update", "NRG");
+        assert!(i.zh.watch.contains("6座"));
+        assert!(check(&p, &i).is_empty());
     }
 }

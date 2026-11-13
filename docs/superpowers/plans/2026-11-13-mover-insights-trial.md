@@ -315,3 +315,13 @@ Run 1 (13 posts, 37 eligible movers, 29 lines written, 3 passing the code checks
 - **Relative time in Chinese**: 接下来 only with a duration (接下来几周, 接下来数月), 今年 only in 今年晚些时候, 今年底, 今年内.
 - **The tool's progress line** names each post's three commonest refusal reasons.
 
+## Changes after trial run 2 (2026-11-13, the lead's rulings)
+
+Run 2 (35 eligible movers, 20 lines written, 19 passing the code checks, judge passes Claude 11 and DeepSeek 14, $0.37 for the whole trial so far) is kept in `tools/insight-trial/out-v2/`. The writing was good; most judge rejections were the confirmation code.
+
+- **Confirmation** (`judge::passed`): a claim whose support is only the named item's outlet ("StockStory") is ignored, not failed, and the judge prompt says attribution is checked by code; a number, date or label in the line may be in the full text (or date) of an item a confirmed claim names, not only in the quoted span; cited outlets' names ("24/7 Wall St.") are kept out of that check; a Chinese "6座" for "six" passes as in `check`.
+- **Judge v2** (`insight-judge/v2`): news and analyst-action items carry `"role": "reason for the move"` in both prompts, so a hook may tie the move to them; a new flag `no_personal_allegation` must be true; an unconfirmed report date stated as the company's own expectation is unsupported.
+- **Writer v3** (`insight-writer/v3`): the same role; unconfirmed dates phrased as not the company's ("is expected to report on <date>, a date the company has not confirmed"; "财报日期暂定为11月17日（未经公司确认）", "市场预计其于…"); never repeat an allegation about a named person's private life or name a person in connection with alleged wrongdoing or an investigation (the lead's call, for the owner to confirm).
+- **Code**: in a Chinese clause with an unconfirmed date, 预计 or 预期 is refused unless its subject is 市场; 暂定, 未经公司确认 and 未确认 hedge it. A backstop refusal list for private-life allegations (affair, mistress, extramarital, 婚外情, 出轨, 情妇, 绯闻). Social platforms (stocktwits.com, reddit.com, x.com, twitter.com, facebook.com, youtube.com) join the aggregators. A hook may hold a year a cited item names ("2027 growth view").
+- **Tool**: a judge reply that fails to parse is asked for once more, within the budget, and recorded as `retried`.
+

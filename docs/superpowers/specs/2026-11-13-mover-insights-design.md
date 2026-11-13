@@ -105,8 +105,9 @@ else, each item with an id:
   1: they made filler, and the brief has its own macro section).
 - each news item names its outlet: the 25 allowlisted outlets by name,
   common mover-news sites by their brand (Seeking Alpha, Benzinga,
-  TipRanks, …), any other site by its host. An aggregator or search page
-  (Google, Yahoo Finance, MSN, Bing) is not an outlet: its item has no
+  TipRanks, …), any other site by its host. An aggregator, search page or
+  social platform (Google, Yahoo Finance, MSN, Bing, Stocktwits, Reddit, X,
+  Facebook, YouTube) is not an outlet: its item has no
   outlet, cannot be cited for a fact and does not make a mover eligible.
 
 The prompt tells the writer to use only the pack and not what it
@@ -142,6 +143,17 @@ the ids of the evidence items the line rests on.
   would confirm or change the picture; never a market-wide or macro event.
   If the evidence offers nothing of that kind, the mover gets no line.
   Formal register. No advice, no price prediction.
+- News items are the reasons PreBell's brief gives for the move, so a
+  hook may tie the move to one.
+- People (the lead's call after trial run 2, for Rick to confirm): a line
+  never repeats an allegation about a named person's private life, and
+  never names a person in connection with alleged wrongdoing or an
+  investigation; it may state the company-level fact ("the board opened
+  an independent investigation"). Naming an executive for what they said
+  in their role is fine. The judge has a flag for it, and code refuses a
+  short list of private-life words as a backstop.
+- An unconfirmed report date is never the company's own: in Chinese not
+  "公司预计于…", but "财报日期暂定为…（未经公司确认）" or "市场预计其于…".
 - An outlet is named as the pack gives it, in both languages; any case,
   the host or the host without its domain is also accepted. Chinese
   figures use 万 and 亿, never 百万.
