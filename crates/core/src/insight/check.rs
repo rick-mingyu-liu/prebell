@@ -13,9 +13,9 @@ use crate::ipo::news::visible;
 use crate::numbers::{self, Lang};
 
 pub const HOOK_WORDS_EN: usize = 8;
-pub const HOOK_CHARS_ZH: usize = 14;
+pub const HOOK_CHARS_ZH: usize = 20;
 pub const WATCH_WORDS_EN: usize = 40;
-pub const WATCH_CHARS_ZH: usize = 80;
+pub const WATCH_CHARS_ZH: usize = 100;
 
 /// Advice, rating, target, consensus and prediction wording, refused even
 /// when the evidence uses it. Regex fragments matched as whole words,
@@ -123,7 +123,10 @@ const RELATIVE_ZH: &[&str] = &[
     "下个季度",
     "本季度",
     "明年",
-    "今年",
+    "今年晚些时候",
+    "今年底",
+    "今年年底",
+    "今年内",
     "去年",
     "今天",
     "今日",
@@ -133,7 +136,6 @@ const RELATIVE_ZH: &[&str] = &[
     "不久",
     "稍后",
     "晚些时候",
-    "接下来",
     "年内",
     "上周",
     "上月",
@@ -218,7 +220,21 @@ fn row(outlet: &str) -> Option<&'static OutletRow> {
 /// English name or host in both languages.
 pub fn outlet_names(outlet: &str, lang: Lang) -> Vec<String> {
     let Some((name, en, zh)) = row(outlet) else {
-        return vec![outlet.to_string()];
+        // A brand outside the table, or a bare host: its name, and its host
+        // with and without the top-level domain ("stocktitan.net",
+        // "stocktitan"), in both languages.
+        let mut out = vec![outlet.to_string()];
+        if let Some(host) = super::pack::outlet_host(outlet) {
+            let bare = host
+                .rsplit_once('.')
+                .map_or(host.clone(), |(b, _)| b.to_string());
+            for n in [host, bare] {
+                if !out.iter().any(|o| o.eq_ignore_ascii_case(&n)) {
+                    out.push(n);
+                }
+            }
+        }
+        return out;
     };
     let mut out: Vec<String> = Vec::new();
     if lang == Lang::Zh {
@@ -374,6 +390,47 @@ fn names(text: &str, name: &str) -> bool {
         text.match_indices(name)
             .any(|(at, m)| ascii_alone(text, at, at + m.len()))
     }
+}
+
+/// `names` ignoring ASCII case: a cited outlet may be written "Seeking
+/// Alpha", "Stocktitan.net" or "Benzinga.com".
+fn names_any_case(text: &str, name: &str) -> bool {
+    if name.chars().any(is_cjk) {
+        return names(text, name);
+    }
+    let (t, n) = (text.to_ascii_lowercase(), name.to_ascii_lowercase());
+    t.match_indices(&n)
+        .any(|(at, m)| ascii_alone(&t, at, at + m.len()))
+}
+
+/// `text` with every one of `names` (ignoring ASCII case) replaced by
+/// "Outlet", so an outlet's name ("24/7 Wall St.", "247wallst.com") is not
+/// read as a number or a date.
+fn scrub(text: &str, names: &[String]) -> String {
+    let mut names: Vec<&String> = names.iter().collect();
+    names.sort_by_key(|n| std::cmp::Reverse(n.len()));
+    let mut out = text.to_string();
+    for n in names {
+        let r = re(&format!("(?i){}", regex::escape(n)));
+        out = r.replace_all(&out, "Outlet").into_owned();
+    }
+    out
+}
+
+/// Whether every digit in `hook` sits in a name a cited item writes the
+/// same way ("GTA 6", "A380"); any other digit is a figure.
+fn digits_only_in_names(hook: &str, cited: &[String]) -> bool {
+    static R: OnceLock<Regex> = OnceLock::new();
+    let r = R.get_or_init(|| re(r"[A-Za-z][A-Za-z.&'’-]*\s?\d+[A-Za-z]*|\d+[A-Za-z]+"));
+    let hook = ascii_digits(hook);
+    let rest = r.replace_all(&hook, |c: &regex::Captures| {
+        if cited.iter().any(|t| t.contains(&c[0])) {
+            String::new()
+        } else {
+            c[0].to_string()
+        }
+    });
+    !has_digit(&rest)
 }
 
 /// `names`, for a name that is also an ordinary word: only where the line
@@ -709,7 +766,7 @@ fn relative_en_re() -> &'static Regex {
 
 fn relative_zh_re() -> &'static Regex {
     static R: OnceLock<Regex> = OnceLock::new();
-    R.get_or_init(|| re(r"未来(?:几|数)(?:天|周|个月|月|个季度|季度|年)|近(?:几|数)(?:天|周|个月)|接下来几(?:天|周|个月)|短期内|年底前|年末前"))
+    R.get_or_init(|| re(r"未来(?:几|数)(?:天|周|个月|月|个季度|季度|年)|近(?:几|数)(?:天|周|个月)|接下来(?:几|数)(?:天|周|个月|月|个季度|季度)|短期内|年底前|年末前"))
 }
 
 fn relative_time(text: &str) -> Option<String> {
@@ -1000,9 +1057,6 @@ fn check_line(pack: &Pack, line: &Line, lang: Lang) -> Vec<String> {
             }
         }
     }
-    if has_digit(&hook) {
-        bad.push("hook has a digit".to_string());
-    }
     if let Some(m) = worded_figures(&hook).first() {
         bad.push(format!("hook has a figure in words: {m}"));
     }
@@ -1034,6 +1088,33 @@ fn check_line(pack: &Pack, line: &Line, lang: Lang) -> Vec<String> {
         bad.push("cites only an analyst action".to_string());
     }
     let cited_text: Vec<String> = cited.iter().map(|e| ascii_digits(&e.text)).collect();
+    if has_digit(&hook) && !digits_only_in_names(&hook, &cited_text) {
+        bad.push("hook has a digit".to_string());
+    }
+    // A news item with no outlet comes from an aggregator or search page
+    // (Google, Yahoo Finance): it has no one to attribute a fact to.
+    if cited.iter().any(|e| {
+        matches!(e.kind, EvidenceKind::News | EvidenceKind::AnalystAction) && e.outlet.is_none()
+    }) {
+        bad.push(
+            "cites a news item with no outlet (an aggregator), which cannot carry a fact"
+                .to_string(),
+        );
+    }
+    // Chinese figures use 万 and 亿.
+    if re(r"\d\s*(?:百万|千万)").is_match(&ascii_digits(&both)) {
+        bad.push("a figure in 百万 or 千万: write it in 万 or 亿".to_string());
+    }
+    // The cited outlets' names, which hold digits ("24/7 Wall St.") or
+    // dots, are left out of the number, date and label checks.
+    let outlet_forms: Vec<String> = cited
+        .iter()
+        .filter_map(|e| e.outlet.as_deref())
+        .flat_map(|o| outlet_names(o, lang))
+        .collect();
+    let (both_n, watch_n) = (both.clone(), watch.clone());
+    let both = scrub(&both, &outlet_forms);
+    let watch = scrub(&watch, &outlet_forms);
 
     // 3. Numbers, never from an analyst action (its target or rating).
     let number_texts: Vec<&str> = cited
@@ -1107,8 +1188,12 @@ fn check_line(pack: &Pack, line: &Line, lang: Lang) -> Vec<String> {
         .filter(|e| matches!(e.kind, EvidenceKind::News | EvidenceKind::AnalystAction))
         .filter_map(|e| e.outlet.as_deref())
         .collect();
+    let (both, watch) = (both_n, watch_n);
     for o in &cited_outlets {
-        if !outlet_names(o, lang).iter().any(|n| names(&watch, n)) {
+        if !outlet_names(o, lang)
+            .iter()
+            .any(|n| names_any_case(&watch, n))
+        {
             bad.push(format!("does not name {o}, the outlet of a cited item"));
         }
     }
@@ -1553,16 +1638,17 @@ mod tests {
         let f = en(line("Guidance sets the next test", &watch, &["e2"]));
         assert!(refused(&f, "words"), "{f:?}");
 
+        // 21 characters (trial run 1 raised the limit from 14 to 20).
         let f = zh(line(
-            "苹果业绩指引成为下一道重要考验",
+            "苹果业绩指引成为下一道重要考验而且值得关注",
             &zh_ok().watch,
             &["e2", "e5"],
         ));
         assert!(refused(&f, "hook"), "{f:?}");
-        let watch = format!("据路透社报道，苹果预计营收42亿美元{}。", "并且".repeat(40));
+        let watch = format!("据路透社报道，苹果预计营收42亿美元{}。", "并且".repeat(45));
         let f = zh(line("业绩指引成为下一道考验", &watch, &["e2"]));
         assert!(refused(&f, "characters"), "{f:?}");
-        // Eight words and fourteen characters are fine.
+        // Eight words and twenty characters are fine.
         assert!(en(line(
             "One two three four five six seven eight",
             &en_ok().watch,
@@ -1570,11 +1656,17 @@ mod tests {
         ))
         .is_empty());
         assert!(zh(line(
-            "苹果业绩指引成为下一道重要考",
+            "苹果业绩指引成为下一道重要考验而且值得关",
             &zh_ok().watch,
             &["e2", "e5"]
         ))
         .is_empty());
+        // Run 1: a Chinese line of more than 80 characters with Latin names
+        // now fits.
+        let long = "据路透社报道，Rocket Lab预计营收42亿美元，并计划推进Neutron首飞，11月19日的财报将检验这一预期以及该时间表是否有变化，这一点值得公司内外持续密切跟踪。";
+        assert!(long.chars().count() > 80, "{}", long.chars().count());
+        let f = zh(line("亏损扩大，关注Neutron进度", long, &["e2", "e5"]));
+        assert!(f.is_empty(), "{f:?}");
     }
 
     fn long_hook() -> Line {
@@ -1899,7 +1991,7 @@ mod tests {
         assert!(outlet_names("The Wall Street Journal", Zh).contains(&"华尔街日报".to_string()));
         assert_eq!(
             outlet_names("marketscreener.com", Zh),
-            ["marketscreener.com"]
+            ["marketscreener.com", "marketscreener"]
         );
         // Every allowlisted outlet has a row.
         for (_, name) in crate::ipo::news::OUTLETS {
@@ -2603,5 +2695,158 @@ mod tests {
             }
         }
         assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+    }
+
+    /// A pack as trial run 1 stored it (2026-11), outlets named by the
+    /// current `outlet_name` from each item's host, and no macro events.
+    fn run_one_pack(
+        ticker: &str,
+        date: &str,
+        items: &[(EvidenceKind, Option<&str>, &str, Option<&str>)],
+    ) -> Pack {
+        let mut evidence = vec![ev(
+            "e1",
+            EvidenceKind::Move,
+            &format!("{ticker} moved in premarket trading on {date}."),
+            None,
+            Some(date),
+        )];
+        for (k, (kind, host, text, day)) in items.iter().enumerate() {
+            let outlet =
+                host.and_then(|h| crate::insight::pack::outlet_name(&format!("https://{h}/a")));
+            let mut e = ev(&format!("e{}", k + 2), *kind, text, None, *day);
+            e.outlet = outlet;
+            evidence.push(e);
+        }
+        Pack {
+            ticker: ticker.into(),
+            name: ticker.into(),
+            evidence,
+        }
+    }
+
+    /// Trial run 1 (2026-11-13): lines refused for flaws in the rules, as the
+    /// writer wrote them (the macro-event clauses, whose items are gone, cut).
+    #[test]
+    fn the_trial_run_one_lines() {
+        use EvidenceKind::*;
+        let check_both = |p: &Pack, en: (&str, &str), zh: (&str, &str), cites: &[&str]| {
+            check(
+                p,
+                &insight(line(en.0, en.1, cites), line(zh.0, zh.1, cites)),
+            )
+        };
+        // Outlets outside the 25: a brand, a host, a host without its domain.
+        let skyd = run_one_pack("SKYD", "2026-11-10", &[
+            (News, Some("247wallst.com"), "CFO Dennis Cinelli said that will create a $200 million drag to Q4 2026 adjusted earnings before interest, taxes, depreciation and amortization", None),
+            (ReportDate, None, "Skydance reported results on November 9, 2026 (earnings calendar).", Some("2026-11-09")),
+        ]);
+        assert_eq!(skyd.evidence[1].outlet.as_deref(), Some("24/7 Wall St."));
+        let f = check_both(&skyd,
+            ("Guided EBITDA drag in focus", "247wallst.com reports CFO Dennis Cinelli said a $200 million drag will hit Q4 2026 adjusted EBITDA, so the size of that hit in the quarter's reported results is what to track."),
+            ("EBITDA拖累成为焦点", "据247wallst.com报道，首席财务官Dennis Cinelli称将对2026年第四季度调整后EBITDA造成2亿美元拖累，该影响在季度业绩中的体现是跟踪重点。"),
+            &["e2"]);
+        assert!(f.is_empty(), "{f:?}");
+        let tpl = run_one_pack("TPL", "2026-11-05", &[
+            (News, Some("stocktitan.net"), "The Company reported net income of $167.4 million for the third quarter of 2026 compared to net income of $153.9 million for the second quarter of 2026.", None),
+        ]);
+        let f = check_both(&tpl,
+            ("Sequential growth in revenue and income", "Stocktitan.net reports third-quarter 2026 net income of $167.4 million versus $153.9 million in the second quarter, so whether that growth holds is the point to track."),
+            ("营收与利润环比增长", "据stocktitan.net报道，2026年第三季度净利润为1.674亿美元，第二季度为1.539亿美元，该增长能否延续是跟踪重点。"),
+            &["e2"]);
+        assert!(f.is_empty(), "{f:?}");
+        let abnb = run_one_pack("ABNB", "2026-11-06", &[
+            (News, Some("seekingalpha.com"), "beat on both the top- and bottom-line with 19% revenue growth and a profit of $3.16 per share coming in better than Wall Street expected and encouraging an upbeat outlook for the remainder of the year", None),
+        ]);
+        let f = check_both(&abnb,
+            ("Earnings beat lifts Airbnb premarket", "Seeking Alpha reports an upbeat outlook for the remainder of the year, so whether that outlook holds at the next report is the point to track."),
+            ("财报超预期带动爱彼迎盘前上扬", "据seekingalpha.com报道，公司对今年剩余时间给出乐观展望，该展望能否兑现是跟踪重点。"),
+            &["e2"]);
+        assert!(f.is_empty(), "{f:?}");
+        let nbis = run_one_pack("NBIS", "2026-11-11", &[
+            (News, Some("benzinga.com"), "The rally followed strong results from rival AI infrastructure provider CoreWeave Inc.", None),
+        ]);
+        let f = check_both(&nbis,
+            ("Nebius follows CoreWeave's results higher", "Benzinga.com reports the rally followed strong results from rival CoreWeave, so whether Nebius's own results support that read-across is the point to track."),
+            ("Nebius随CoreWeave业绩走高", "据Benzinga报道，涨势源于竞争对手CoreWeave的强劲业绩，Nebius自身业绩能否印证这一联动是跟踪重点。"),
+            &["e2"]);
+        assert!(f.is_empty(), "{f:?}");
+        // A digit in a hook that is part of a cited name.
+        let ttwo = run_one_pack("TTWO", "2026-11-10", &[
+            (News, Some("tradingview.com"), "Take-Two CEO Strauss Zelnick said GTA 6 preorders have significantly exceeded initial expectations.", None),
+            (ReportDate, None, "Take-Two Interactive reported results on November 9, 2026 (earnings calendar).", Some("2026-11-09")),
+        ]);
+        let f = check_both(&ttwo,
+            ("GTA 6 preorder strength in focus", "tradingview.com reports CEO Strauss Zelnick said GTA 6 preorders have significantly exceeded initial expectations, making further preorder commentary after results on November 9 the item to track."),
+            ("GTA 6预购表现受关注", "据tradingview.com报道，CEO Strauss Zelnick称GTA 6预购大幅超出最初预期，11月9日财报之后的预购相关表态是后续跟踪重点。"),
+            &["e2", "e3"]);
+        assert!(f.is_empty(), "{f:?}");
+        let f = check_both(&ttwo,
+            ("GTA 7 preorder strength in focus", "tradingview.com reports CEO Strauss Zelnick said GTA 6 preorders have significantly exceeded initial expectations."),
+            ("GTA 6预购表现受关注", "据tradingview.com报道，CEO Strauss Zelnick称GTA 6预购大幅超出最初预期。"),
+            &["e2"]);
+        assert!(refused(&f, "en: hook has a digit"), "{f:?}");
+        // An aggregator is no outlet: a line may not rest a fact on it.
+        let axon = run_one_pack(
+            "AXON",
+            "2026-11-06",
+            &[(
+                News,
+                Some("google.com"),
+                "lowering its 2026 revenue guidance amid drone deployment delays",
+                None,
+            )],
+        );
+        assert_eq!(axon.evidence[1].outlet, None);
+        let f = check_both(&axon,
+            ("Guidance cut weighs on Axon", "Google reports Axon lowered its 2026 revenue guidance amid drone deployment delays, so progress on those deployments is the item to track."),
+            ("下调指引拖累Axon", "据google.com报道，Axon因无人机部署延迟下调了2026年营收指引，这些部署的进展值得跟踪。"),
+            &["e2"]);
+        assert!(refused(&f, "en: cites a news item with no outlet"), "{f:?}");
+        assert!(refused(&f, "zh: cites a news item with no outlet"), "{f:?}");
+        // Chinese figures in 万 and 亿, never 百万.
+        let rklb = run_one_pack(
+            "RKLB",
+            "2026-11-10",
+            &[
+                (
+                    News,
+                    Some("stocktitan.net"),
+                    "Net loss widened to $79.677 million from $18.257 million a year earlier.",
+                    None,
+                ),
+                (
+                    News,
+                    Some("stocktitan.net"),
+                    "Rocket Lab targets Neutron's first launch for no earlier than 2027.",
+                    None,
+                ),
+            ],
+        );
+        let en_rklb = ("Wider loss, Neutron timing in focus", "Stock Titan reports Rocket Lab targets Neutron's first launch for no earlier than 2027, so any change to that timing matters alongside a net loss that widened to $79.677 million from $18.257 million.");
+        let f = check_both(&rklb, en_rklb,
+            ("亏损扩大，关注Neutron进度", "据stocktitan.net报道，Rocket Lab目标最早于2027年进行Neutron首飞，净亏损从18.257百万美元扩大至79.677百万美元，该时间表若有变化值得跟踪。"),
+            &["e2", "e3"]);
+        assert!(refused(&f, "zh: a figure in 百万"), "{f:?}");
+        let f = check_both(&rklb, en_rklb,
+            ("亏损扩大，关注Neutron进度", "据Stock Titan报道，Rocket Lab目标最早于2027年进行Neutron首飞，净亏损从1825.7万美元扩大至7967.7万美元，该时间表若有变化值得跟踪。"),
+            &["e2", "e3"]);
+        assert!(f.is_empty(), "{f:?}");
+        // Relative time: a plain 接下来 and a 今年 that mirrors "the remainder
+        // of the year" pass; with a duration, or later this year, they do not.
+        assert_eq!(relative_time("据seekingalpha.com报道，NRG同意以40亿美元向LS Power出售六座天然气发电资产，接下来可关注11月9日的财报。"), None);
+        assert_eq!(relative_time("公司对今年剩余时间给出乐观展望"), None);
+        for w in [
+            "接下来几周",
+            "接下来数月",
+            "今年晚些时候",
+            "今年底",
+            "今年内",
+        ] {
+            assert!(
+                relative_time(&format!("苹果营收42亿美元，{w}值得关注。")).is_some(),
+                "{w}"
+            );
+        }
     }
 }

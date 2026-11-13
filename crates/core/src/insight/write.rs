@@ -7,7 +7,7 @@ use super::check::{HOOK_CHARS_ZH, HOOK_WORDS_EN, WATCH_CHARS_ZH, WATCH_WORDS_EN}
 use super::{Insight, Line, Pack};
 use crate::providers::{LlmProvider, ProviderError};
 
-pub const WRITER_VERSION: &str = "insight-writer/v1";
+pub const WRITER_VERSION: &str = "insight-writer/v2";
 
 /// The packs as the models read them: no URLs.
 pub(crate) fn movers_json(packs: &[Pack]) -> Vec<Value> {
@@ -32,12 +32,17 @@ pub(crate) fn movers_json(packs: &[Pack]) -> Vec<Value> {
 /// (system, user) for one writer call over `packs`.
 pub fn prompt(packs: &[Pack]) -> (String, String) {
     let system = format!(
-        r#"You write PreBell's short reading of big stock movers in a daily US market brief. For each mover you write a hook (a few words) and one sentence on what to track next and why it matters. The reading is PreBell's own, in a formal, neutral register.
+        r#"You write PreBell's short reading of big stock movers in a daily US market brief. For each mover you write a hook (a few words) and one sentence on what to track next for this company and why it matters. The reading is PreBell's own, in a formal, neutral register.
+
+What to track:
+- It must be specific to this company and come from its evidence: a figure or target the company gave, a stated plan or timetable, a problem the evidence names, or its report date. Never a market-wide or macro event.
+- Say what would confirm or change the picture. Restating the result and adding "is worth tracking" is not an insight. In this spirit (do not copy): "…so whether expenses keep outgrowing revenue is the point to track"; "…targets Neutron's first launch for no earlier than 2027, so any change to that timing matters".
+- If the evidence offers nothing of that kind, leave the mover out.
 
 Rules:
 1. Use only the evidence given for that mover. Never use what you remember about the company, the market or the news.
-2. Every number and every date you write must appear in an evidence item you cite, as the same figure and precision. Write figures in digits, never in words ("10%", not "ten percent"; "70%", not "七十" or "百分之七十"). In Chinese, convert the unit naturally: "$4.2 billion" may be written "42亿美元". Write a date as a calendar date from the evidence ("November 19", "11月19日"), never a weekday, a bare day or a month alone. The hook has no numbers at all.
-3. A fact from a "news" or "analyst_action" item is attributed in the sentence to that item's "outlet" by name ("Reuters reports ...", "据路透社报道……"). A fact from a "company_figure" or "company_guidance" item is stated as the company's ("the company guided ...", "公司预计……").
+2. Every number and every date you write must appear in an evidence item you cite, as the same figure and precision. Write figures in digits, never in words ("10%", not "ten percent"; "70%", not "七十" or "百分之七十"). In Chinese, convert the unit naturally with 万 and 亿: "$4.2 billion" is "42亿美元" and "$79.677 million" is "7967.7万美元", never "79.677百万美元". Write a date as a calendar date from the evidence ("November 19", "11月19日"), never a weekday, a bare day or a month alone. The hook has no numbers at all.
+3. A fact from a "news" or "analyst_action" item is attributed in the sentence to that item's "outlet", written exactly as given, in both languages ("Seeking Alpha reports ...", "据Seeking Alpha报道……"; for Reuters, "据路透社报道" is also fine). An item whose "outlet" is null cannot be cited. A fact from a "company_figure" or "company_guidance" item is stated as the company's ("the company guided ...", "公司预计……").
 4. An analyst action may be mentioned (a named firm upgraded, downgraded or initiated coverage), but never its rating word, a price target or any figure from it, and never "analysts expect", analysts' or the Street's estimates, or the consensus ("分析师预期", "一致预期"). The thing to track must come from another item: a company figure, a stated plan or a dated event.
 5. No advice of any kind (buy, sell, hold, should, recommend, position, exposure, 建议, 买入, 仓位, 配置 and the like), no prediction of where a price goes (upside, could climb, 有望上涨), no rating words. No relative time words ("next week", "this quarter", "soon", "today", "下周", "明年", "近期"): name the date from the evidence instead. A fiscal label ("Q3", "fiscal 2027", "第三季度") only when a cited item states it.
 6. A report date marked "Expected report date, not confirmed by the company" must be hedged in the same clause as the date: "expected to report on November 20" or "scheduled for November 20" in English, "预计于11月20日" or "暂定于11月20日" in Chinese.
@@ -201,7 +206,14 @@ mod tests {
     #[test]
     fn the_system_prompt_states_the_limits() {
         let (system, _) = prompt(&[pack("AAPL")]);
-        for want in ["8 words", "40 words", "14", "80", "JSON only", "outlet"] {
+        for want in [
+            "8 words",
+            "40 words",
+            "20 characters",
+            "100 characters",
+            "JSON only",
+            "outlet",
+        ] {
             assert!(system.contains(want), "{want}");
         }
     }

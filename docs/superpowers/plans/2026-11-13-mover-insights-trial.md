@@ -18,7 +18,7 @@ This is Plan 1 of 3. Plan 2 (the Worker's `insight` step in shadow mode) and Pla
 - No new dependency in `crates/core/Cargo.toml`. The tool has its own `Cargo.toml` and `Cargo.lock` and declares an empty `[workspace]`.
 - House rule: the model never supplies a number, a date or a fact. Every number in a line must pass `numbers::check` against the pack; every date must be a date in the pack.
 - The writer is always Claude (`claude-sonnet-5-5`, effort `low`). Judges compared: Claude (`claude-sonnet-5-5`) and DeepSeek (the provider default in `crates/core/src/deepseek.rs`).
-- Limits, verbatim from the spec: hook at most 8 English words / 14 Chinese characters, no digits; watch line one sentence, at most 40 English words / 80 Chinese characters.
+- Limits, verbatim from the spec: hook at most 8 English words / 20 Chinese characters (14 before trial run 1), no digits except in a name a cited item writes the same way; watch line one sentence, at most 40 English words / 100 Chinese characters (80 before trial run 1).
 - Labels on the page later: "Watch next" / "后续关注" (not used in this plan, but do not name anything "what to watch" in user-facing strings).
 - A line rejected in either language is dropped in both.
 - Keys come only from `--dev-vars PATH` or the environment, stay in memory, and are never printed, logged or written. Default spend cap `--budget 3.0` (USD) across runs, enforced before each call.
@@ -84,7 +84,6 @@ pub struct PackInputs<'a> {
     pub themes: &'a [crate::facts::Theme],
     pub checks: &'a [crate::earnings::facts::EarningsFacts], // PreBell's published checks, any ticker
     pub calendar: &'a [(String, chrono::NaiveDate, ReportStatus)],  // (ticker, report date, status) rows near trading_date
-    pub macro_events: &'a [(chrono::NaiveDate, String)], // (date, event name), next seven days
 }
 /// Packs for the eligible movers only, in mover order.
 pub fn packs(i: &PackInputs) -> Vec<Pack>;
@@ -98,7 +97,7 @@ pub enum ReportStatus { Reported, Confirmed, Unconfirmed } // earnings_calendar.
 ```
 
 Decisions the implementer cannot make alone:
-- Evidence order per pack: Move, then each news reason (News or AnalystAction; `text` is the reason's `quote`, `outlet` from `outlet_name`), then for a matching earnings check (same ticker, `filing_date` within 3 calendar days before or on `trading_date`, and `accepted_at` before the premarket post's `as_of_utc`, or before the regular-session close for a recap): one `CompanyFigure` per verified headline metric, its `text` written by code from the verified fields ("Revenue: $18.52 billion, reported for Q1 of fiscal 2027.": metric label, `fmt_value` of the value and unit, the period from `fiscal_period`, the word "reported") and the verbatim `quote` kept in `Evidence.quote`; and one `CompanyGuidance` per guidance `Note` whose verbatim `quote` names its period (`names_period`: a quarter, a half, a fiscal or calendar year, "full year"), text = `quote` (`summary_en` is model-written and never used; a note without a period is left out); then Theme (when the mover is a member of a theme), ReportDate (calendar rows for the ticker within 100 days: "<name> reported results on <date>", "<name>'s report date is confirmed for <date>", or for an unconfirmed row "Expected report date, not confirmed by the company: <date>" with `unconfirmed` set), MacroEvent (each event in the next seven days). An identical text is stored once per outlet (two outlets carrying it are two items).
+- Evidence order per pack: Move, then each news reason (News or AnalystAction; `text` is the reason's `quote`, `outlet` from `outlet_name`), then for a matching earnings check (same ticker, `filing_date` within 3 calendar days before or on `trading_date`, and `accepted_at` before the premarket post's `as_of_utc`, or before the regular-session close for a recap): one `CompanyFigure` per verified headline metric, its `text` written by code from the verified fields ("Revenue: $18.52 billion, reported for Q1 of fiscal 2027.": metric label, `fmt_value` of the value and unit, the period from `fiscal_period`, the word "reported") and the verbatim `quote` kept in `Evidence.quote`; and one `CompanyGuidance` per guidance `Note` whose verbatim `quote` names its period (`names_period`: a quarter, a half, a fiscal or calendar year, "full year"), text = `quote` (`summary_en` is model-written and never used; a note without a period is left out); then Theme (when the mover is a member of a theme), ReportDate (calendar rows for the ticker within 100 days: "<name> reported results on <date>", "<name>'s report date is confirmed for <date>", or for an unconfirmed row "Expected report date, not confirmed by the company: <date>" with `unconfirmed` set), and no MacroEvent (removed after trial run 1; the enum variant stays so stored trial lines still parse). An identical text is stored once per outlet (two outlets carrying it are two items).
 - Eligible means: at least one `News`, `CompanyFigure` or `CompanyGuidance` item. `AnalystAction`, `Theme`, `ReportDate`, `MacroEvent` and `Move` alone do not make a mover eligible.
 - `is_analyst_action` (revised after review): reads the reason's quote and summary, not its headline. Unambiguous rating wording counts alone (`price target`, `price objective`, `initiated/started coverage`, `to buy from hold`, `overweight`, `equal-weight`, `sector weight`, `buy rating` and the like); words with other meanings (`upgrade`, `downgrade`, `outperform`, `target`, `upside`, `rating`) count only beside a named broker or "analyst", and a broker that is the mover itself does not count.
 - Strip the invisible characters `ipo::news::visible` strips from every `text` before storing it (widen that function to `pub(crate)` if it is private; do not copy its character list).
@@ -303,4 +302,16 @@ The review came back "fix first" (4 high, 9 medium, 10 low findings). The interf
 - **The $3 cap covers `run` and `seed` together**: `seed` plans from the real `lines.jsonl` and, when the expected cost passes what is left, seeds a fixed-seed random sample of whole posts that fits, saying which and how many wrong lines and controls that sends (`--plan` prints the same). The per-call cap is unchanged.
 - **Scoring**: a control counts as a flip only when that judge passed the line in `run`; consistent rejections are reported apart. The report gives the number of judge-passed lines labelled and calls the bar "not yet assessable" below 50 (the offline trial has 37 eligible movers; the rest come from the shadow stage), with the trial's own part of the bar on its own line.
 - **Re-runs** retry any judge call that failed, not only one the budget stopped. The tool pins its build directory to `tools/insight-trial/target` in its own `.cargo/config.toml`.
+
+## Changes after trial run 1 (2026-11-13, the lead's rulings; plan Task 7 step 3)
+
+Run 1 (13 posts, 37 eligible movers, 29 lines written, 3 passing the code checks, $0.15) is kept in `tools/insight-trial/out-v1/`. Almost every refusal came from the rules, not the writing:
+
+- **Outlets**: `pack::MOVER_OUTLETS` names the common mover-news hosts (Seeking Alpha, Benzinga, TipRanks, TradingView, Stock Titan, StockStory, FinanceFeeds, Quiver Quantitative, 24/7 Wall St., TIKR, The Motley Fool, TradingKey, Stocktwits, ChartMill, and a few more) after `ipo::news::OUTLETS`; a line names a cited outlet by its display name in any case, or by its host with or without the top-level domain, in both languages; an outlet's name is left out of the number and date checks. `pack::AGGREGATORS` (google.com, news.google.com, msn.com, finance.yahoo.com, yahoo.com, bing.com) are not outlets: their items have no outlet, cannot be cited, and do not make a mover eligible.
+- **No macro events** in packs or `PackInputs`; the tool ignores `events.json`, and `fetch-facts.sh` no longer writes it.
+- **Writer v2** (`insight-writer/v2`): the thing to track is specific to the company and from its evidence, says what would confirm or change the picture, and the mover is omitted otherwise; outlets are named as given; Chinese figures use 万 and 亿 (the check refuses 百万 and 千万).
+- **Limits** for Chinese: hook 20 characters, watch line 100.
+- **A hook digit** is allowed inside a name a cited item writes the same way ("GTA 6").
+- **Relative time in Chinese**: 接下来 only with a duration (接下来几周, 接下来数月), 今年 only in 今年晚些时候, 今年底, 今年内.
+- **The tool's progress line** names each post's three commonest refusal reasons.
 

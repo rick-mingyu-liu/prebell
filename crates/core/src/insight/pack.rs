@@ -22,8 +22,43 @@ use crate::Lang;
 const CHECK_DAYS: i64 = 3;
 /// Calendar rows this many days either side of the trading date.
 const REPORT_DAYS: i64 = 100;
-/// Macro releases this many days ahead.
-const MACRO_DAYS: i64 = 7;
+/// Display names for the hosts mover news most often comes from, beyond
+/// `ipo::news::OUTLETS` (whose names win). Built from the hosts of the
+/// stored mover reasons of 2026-11-04 to 2026-11-12, plus a few common ones.
+pub const MOVER_OUTLETS: &[(&str, &str)] = &[
+    ("seekingalpha.com", "Seeking Alpha"),
+    ("benzinga.com", "Benzinga"),
+    ("tipranks.com", "TipRanks"),
+    ("tradingview.com", "TradingView"),
+    ("stocktitan.net", "Stock Titan"),
+    ("stockstory.org", "StockStory"),
+    ("financefeeds.com", "FinanceFeeds"),
+    ("quiverquant.com", "Quiver Quantitative"),
+    ("247wallst.com", "24/7 Wall St."),
+    ("tikr.com", "TIKR"),
+    ("fool.com", "The Motley Fool"),
+    ("tradingkey.com", "TradingKey"),
+    ("stocktwits.com", "Stocktwits"),
+    ("chartmill.com", "ChartMill"),
+    ("zacks.com", "Zacks"),
+    ("nasdaq.com", "Nasdaq"),
+    ("investing.com", "Investing.com"),
+    ("thestreet.com", "TheStreet"),
+    ("morningstar.com", "Morningstar"),
+];
+
+/// Search and aggregator hosts: not outlets. A reason from one goes into
+/// the pack with no outlet, a line may not cite it, and it does not make a
+/// mover eligible ("Google reports Axon lowered its guidance" must not be
+/// possible).
+pub const AGGREGATORS: &[&str] = &[
+    "google.com",
+    "news.google.com",
+    "msn.com",
+    "finance.yahoo.com",
+    "yahoo.com",
+    "bing.com",
+];
 
 /// An earnings calendar row's status (`earnings_calendar.status`; quarantined
 /// rows are never read).
@@ -60,8 +95,6 @@ pub struct PackInputs<'a> {
     pub checks: &'a [EarningsFacts],
     /// (ticker, report date, status) rows near `trading_date`.
     pub calendar: &'a [(String, NaiveDate, ReportStatus)],
-    /// (date, event name), the next seven days.
-    pub macro_events: &'a [(NaiveDate, String)],
 }
 
 /// Packs for the eligible movers only, in mover order.
@@ -321,31 +354,11 @@ fn pack(i: &PackInputs, m: &Mover) -> Option<Pack> {
         }
     }
 
-    // A recap is written after the close: today's releases are behind it.
-    let first = match i.session {
-        Session::Premarket => td,
-        Session::Recap => td + Duration::days(1),
-    };
-    for (d, name) in i
-        .macro_events
-        .iter()
-        .filter(|(d, _)| *d >= first && *d <= td + Duration::days(MACRO_DAYS))
-    {
-        push(
-            &mut ev,
-            EvidenceKind::MacroEvent,
-            &format!("{} on {}.", name.trim(), long_date(*d)),
-            None,
-            None,
-            Some(*d),
-        );
-    }
-
-    let eligible = ev.iter().any(|e| {
-        matches!(
-            e.kind,
-            EvidenceKind::News | EvidenceKind::CompanyFigure | EvidenceKind::CompanyGuidance
-        )
+    // News from an aggregator (no outlet) does not count.
+    let eligible = ev.iter().any(|e| match e.kind {
+        EvidenceKind::News => e.outlet.is_some(),
+        EvidenceKind::CompanyFigure | EvidenceKind::CompanyGuidance => true,
+        _ => false,
     });
     eligible.then(|| Pack {
         ticker,
@@ -354,19 +367,32 @@ fn pack(i: &PackInputs, m: &Mover) -> Option<Pack> {
     })
 }
 
-/// The outlet's English name: from `ipo::news::OUTLETS` when the host is
-/// listed, else the host without "www.".
+/// The outlet's display name: from `ipo::news::OUTLETS`, then
+/// `MOVER_OUTLETS`, else the host without "www.". `None` for an aggregator
+/// or search host (`AGGREGATORS`), which is not an outlet.
 pub fn outlet_name(url: &str) -> Option<String> {
     let host = host_of(url.trim());
-    if host.is_empty() {
+    if host.is_empty() || AGGREGATORS.contains(&host.as_str()) {
         return None;
     }
     Some(
         OUTLETS
             .iter()
+            .chain(MOVER_OUTLETS)
             .find(|(h, _)| *h == host)
             .map_or(host.clone(), |(_, name)| name.to_string()),
     )
+}
+
+/// The host an outlet name stands for, when it is a listed or
+/// host-named outlet ("Seeking Alpha" -> "seekingalpha.com").
+pub fn outlet_host(outlet: &str) -> Option<String> {
+    OUTLETS
+        .iter()
+        .chain(MOVER_OUTLETS)
+        .find(|(_, name)| *name == outlet)
+        .map(|(h, _)| h.to_string())
+        .or_else(|| outlet.contains('.').then(|| outlet.to_ascii_lowercase()))
 }
 
 /// Brokers and research firms whose name makes a rating word or a target an
@@ -606,7 +632,6 @@ mod tests {
         themes: Vec<Theme>,
         checks: Vec<crate::earnings::facts::EarningsFacts>,
         calendar: Vec<(String, NaiveDate, ReportStatus)>,
-        macro_events: Vec<(NaiveDate, String)>,
         session: Session,
     }
 
@@ -617,7 +642,6 @@ mod tests {
                 themes: vec![],
                 checks: vec![],
                 calendar: vec![],
-                macro_events: vec![],
                 session: Session::Premarket,
             }
         }
@@ -635,7 +659,6 @@ mod tests {
                 themes: &self.themes,
                 checks: &self.checks,
                 calendar: &self.calendar,
-                macro_events: &self.macro_events,
             })
         }
     }
@@ -667,7 +690,6 @@ mod tests {
         let mut f = Fixture::new(vec![mover("ANET", -5.1, vec![])]);
         f.themes = vec![theme("ANET")];
         f.calendar = vec![("ANET".into(), d("2026-11-04"), ReportStatus::Unconfirmed)];
-        f.macro_events = vec![(d("2026-11-03"), "October jobs report".into())];
         assert!(f.packs("2026-10-31").is_empty());
     }
 
@@ -687,7 +709,6 @@ mod tests {
             ("AAPL".into(), d("2026-10-30"), ReportStatus::Reported),
             ("MSFT".into(), d("2026-10-29"), ReportStatus::Reported),
         ];
-        f.macro_events = vec![(d("2026-11-06"), "October jobs report".into())];
         let p = f.packs("2026-10-31");
         assert_eq!(p.len(), 1);
         use EvidenceKind::*;
@@ -702,8 +723,7 @@ mod tests {
                 CompanyFigure,
                 CompanyGuidance,
                 Theme,
-                ReportDate,
-                MacroEvent
+                ReportDate
             ]
         );
         let texts: Vec<&str> = p[0].evidence.iter().map(|e| e.text.as_str()).collect();
@@ -731,9 +751,6 @@ mod tests {
             "{}",
             report.text
         );
-        let event = &p[0].evidence[9];
-        assert_eq!(event.date, Some(d("2026-11-06")));
-        assert!(event.text.contains("October jobs report"));
     }
 
     /// Review H1, with Cisco's stored check (2026-11-12): a table row's
@@ -1117,5 +1134,64 @@ mod tests {
             "AAPL Inc (AAPL) fell 4.20% in premarket trading on November 12, 2026."
         );
         assert_eq!(p[0].evidence[0].date, Some(d("2026-11-12")));
+    }
+
+    /// Trial run 1: brands for the hosts in the stored reasons, and no
+    /// outlet (and no eligibility) for an aggregator.
+    #[test]
+    fn mover_news_hosts_have_brands_and_aggregators_none() {
+        for (host, name) in [
+            ("seekingalpha.com", "Seeking Alpha"),
+            ("benzinga.com", "Benzinga"),
+            ("tipranks.com", "TipRanks"),
+            ("tradingview.com", "TradingView"),
+            ("stocktitan.net", "Stock Titan"),
+            ("stockstory.org", "StockStory"),
+            ("financefeeds.com", "FinanceFeeds"),
+            ("investors.com", "Investor's Business Daily"),
+            ("247wallst.com", "24/7 Wall St."),
+            ("marketwatch.com", "MarketWatch"),
+        ] {
+            assert_eq!(
+                outlet_name(&format!("https://www.{host}/a")).as_deref(),
+                Some(name),
+                "{host}"
+            );
+        }
+        for host in [
+            "google.com",
+            "news.google.com",
+            "msn.com",
+            "finance.yahoo.com",
+            "yahoo.com",
+            "bing.com",
+        ] {
+            assert_eq!(outlet_name(&format!("https://{host}/a")), None, "{host}");
+        }
+        assert_eq!(
+            outlet_host("Seeking Alpha").as_deref(),
+            Some("seekingalpha.com")
+        );
+        assert_eq!(
+            outlet_host("marketscreener.com").as_deref(),
+            Some("marketscreener.com")
+        );
+        let f = Fixture::new(vec![mover(
+            "AXON",
+            -12.86,
+            vec![
+                reason(
+                    "https://www.google.com/x",
+                    "Axon",
+                    "lowering its 2026 revenue guidance amid drone deployment delays",
+                ),
+                reason(
+                    "https://finance.yahoo.com/y",
+                    "Axon",
+                    "reported third-quarter results",
+                ),
+            ],
+        )]);
+        assert!(f.packs("2026-11-06").is_empty());
     }
 }

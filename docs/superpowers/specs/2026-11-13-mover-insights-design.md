@@ -101,7 +101,13 @@ else, each item with an id:
 - dated events PreBell already stores: the company's next or latest report
   date from the earnings calendar with its status (reported, confirmed,
   or "Expected report date, not confirmed by the company"; quarantined
-  dates are left out), and the macro releases of the next seven days.
+  dates are left out). Macro releases are not in a mover's pack (trial run
+  1: they made filler, and the brief has its own macro section).
+- each news item names its outlet: the 25 allowlisted outlets by name,
+  common mover-news sites by their brand (Seeking Alpha, Benzinga,
+  TipRanks, …), any other site by its host. An aggregator or search page
+  (Google, Yahoo Finance, MSN, Bing) is not an outlet: its item has no
+  outlet, cannot be cited for a fact and does not make a mover eligible.
 
 The prompt tells the writer to use only the pack and not what it
 remembers.
@@ -126,12 +132,19 @@ One call per post covers every eligible mover in both languages. Per
 mover: `hook_en`, `watch_en`, `hook_zh`, `watch_zh`, and for each language
 the ids of the evidence items the line rests on.
 
-- Hook: at most about eight words (about 14 Chinese characters), no
-  numbers.
-- Watch line: one sentence, at most about 40 words (about 80 Chinese
-  characters). It names something concrete to track (a figure the company
-  gave, a dated event, a stated plan) and may say why it matters. Formal
-  register. No advice, no price prediction.
+- Hook: at most eight words (20 characters in Chinese, raised from 14
+  after trial run 1 for lines carrying Latin names), no numbers except in
+  a name a cited item writes the same way ("GTA 6").
+- Watch line: one sentence, at most 40 words (100 characters in Chinese,
+  raised from 80). It names something specific to this company to track,
+  from its evidence (a figure or target the company gave, a stated plan or
+  timetable, a problem the evidence names, its report date), and says what
+  would confirm or change the picture; never a market-wide or macro event.
+  If the evidence offers nothing of that kind, the mover gets no line.
+  Formal register. No advice, no price prediction.
+- An outlet is named as the pack gives it, in both languages; any case,
+  the host or the host without its domain is also accepted. Chinese
+  figures use 万 and 亿, never 百万.
 
 Lead's calls after the builder check:
 

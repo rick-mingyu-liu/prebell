@@ -21,6 +21,8 @@ pub enum EvidenceKind {
     CompanyGuidance,
     Theme,
     ReportDate,
+    /// No longer put in packs (trial run 1: a macro release is not a
+    /// mover's own thing to track); kept so stored trial lines still parse.
     MacroEvent,
 }
 
