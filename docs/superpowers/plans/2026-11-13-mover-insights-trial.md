@@ -294,3 +294,13 @@ The review came back "fix first" (4 high, 9 medium, 10 low findings). The interf
 - **Re-runs**: `run` skips posts already complete unless `--fresh` and finishes a part-done post without paying for its writer again; labels and seeds made for older text are left out of the score.
 - **The page** shows the whole pack with the cited items marked, and keys saved choices by the line's text and writer version. `report.md` has a "Limits of this trial" section (today's calendar and macro rows are used for past posts).
 
+## Changes after the second review (2026-11-13, the lead's rulings)
+
+- **Refusals target advice senses, not bare words**: "buy" and "sell" are refused as ratings, imperatives and advice to investors and allowed in deals ("agreed to sell"); "target" is refused next to a price, the stock or "$", or beside a cited analyst action, and allowed in plans ("targets a launch", "margin target"); "hold" as before. Consensus wording is refused in both languages (analysts' or Street estimates, beat or missed estimates, market estimates, consensus, 分析师预期, 市场预期, 一致预期). `check::refused_wording` is public and pinned against every stored mover reason of 2026-11-04 to 2026-11-12 (`insight/testdata/reasons_2026_11.tsv`).
+- **An unconfirmed date is hedged in its own clause**, in both languages.
+- **Evidence text**: Markdown links keep only their text and bare URLs are dropped, so no URL reaches a model; the move names its trading date.
+- **Seeds must be wrong**: a replaced number differs from the original by at least 5% at the line's own precision, in both languages; a range's two ends are never swapped with each other; a flip is skipped when the line already holds both words of the pair. A kind that could only make a true line is recorded as skipped and counted, never sent.
+- **The $3 cap covers `run` and `seed` together**: `seed` plans from the real `lines.jsonl` and, when the expected cost passes what is left, seeds a fixed-seed random sample of whole posts that fits, saying which and how many wrong lines and controls that sends (`--plan` prints the same). The per-call cap is unchanged.
+- **Scoring**: a control counts as a flip only when that judge passed the line in `run`; consistent rejections are reported apart. The report gives the number of judge-passed lines labelled and calls the bar "not yet assessable" below 50 (the offline trial has 37 eligible movers; the rest come from the shadow stage), with the trial's own part of the bar on its own line.
+- **Re-runs** retry any judge call that failed, not only one the budget stopped. The tool pins its build directory to `tools/insight-trial/target` in its own `.cargo/config.toml`.
+

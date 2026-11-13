@@ -153,9 +153,9 @@ Lead's calls after the builder check:
   ("next week", "下周") are refused, because code cannot check them. A
   fiscal label ("Q3", "fiscal 2027") must appear in a cited evidence
   item. A line that cites or writes a report date the company has not
-  confirmed must hedge it ("expected", "scheduled", "unconfirmed"; 预计,
-  预期, 暂定, 未确认), or it is refused (lead's ruling after the review of
-  PR #67).
+  confirmed must hedge it in the date's own clause ("expected",
+  "scheduled", "unconfirmed"; 预计, 预期, 暂定, 未确认), or it is refused
+  (lead's rulings after the reviews of PR #67).
 
 ### Code checks (before the judge)
 
@@ -170,6 +170,10 @@ Lead's calls after the builder check:
   sell, should, will rise, target price, rating words, 建议买入, 看涨 and
   the like). It applies even when the evidence itself uses the word.
 - Length limits; the Chinese line contains Chinese; no markup or links.
+- Added after the second review: the refusal list targets advice senses,
+  not bare words ("agreed to sell" and "targets a launch" pass; "a buy",
+  "price target" and "investors may wish to buy" do not), and refuses
+  comparisons with analysts' or the Street's estimates or the consensus.
 - Added after the review of PR #67: no number from an analyst action
   (its target or rating); figures in words and dates that cannot be
   anchored (weekdays, a bare day, a month alone) are refused; the judge's
