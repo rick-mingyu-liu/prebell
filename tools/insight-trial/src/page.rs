@@ -259,6 +259,7 @@ pub(crate) mod tests {
             no_advice: true,
             formal: true,
             same_meaning: true,
+            no_personal_allegation: true,
             notes: String::new(),
         }
     }
@@ -274,6 +275,7 @@ pub(crate) mod tests {
             verdict: Some(verdict(ticker, p)),
             passed: p,
             error: None,
+            retried: false,
         };
         Record {
             post: post.into(),

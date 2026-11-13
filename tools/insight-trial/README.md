@@ -76,8 +76,10 @@ or lower `--budget` by what the earlier folder spent.
 Re-runs keep what was paid for: `run` skips a post already complete in
 `out/lines.jsonl`, and finishes one a budget stop left part-done by calling
 only its missing judges; `seed` skips a post already in `out/seeded.jsonl`.
-A judge call that failed for any reason (the budget, a network error, a
-reply that would not parse) is made again on a re-run. `seed` writes a post
+A judge reply that fails to parse is asked for once more at once, within
+the budget, and the result is marked `retried`. A judge call that still
+failed for any reason (the budget, a network error, a reply that would not
+parse) is made again on a re-run. `seed` writes a post
 only when all its calls are done: a post the budget cuts part-way is not
 written (its finished calls stay in the ledger) and is redone on a re-run.
 `--fresh` redoes everything. `--plan` (on `run` and `seed`) prints the calls

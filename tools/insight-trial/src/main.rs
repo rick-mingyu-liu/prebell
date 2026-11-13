@@ -43,7 +43,7 @@ use prebell_core::insight::pack::{packs, PackInputs, ReportStatus};
 use prebell_core::insight::write::{self, WRITER_VERSION};
 use prebell_core::insight::{check, Insight, Pack};
 use prebell_core::llm::{api_key_var, llm_from_env};
-use prebell_core::providers::{Http, LlmProvider};
+use prebell_core::providers::{Http, LlmProvider, ProviderError};
 use prebell_core::recap::RecapFacts;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -244,6 +244,9 @@ pub(crate) struct JudgeResult {
     /// The judge call failed, or (`NOT_RUN`) the budget stopped it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// The first reply failed to parse and the call was made again.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub retried: bool,
 }
 
 impl JudgeResult {
@@ -303,19 +306,26 @@ pub(crate) fn stop_message(b: &Budget) -> String {
     )
 }
 
-/// One judge's verdicts on `insights`, or why its call failed. `Err` only
-/// when the budget stopped the call.
+/// One judge's verdicts on `insights`, or why its call failed, and whether
+/// the call was made twice. A reply that fails to parse is asked for once
+/// more, within the budget (trial run 2: Claude's reply for one post failed
+/// with "trailing characters"). `Err` only when the budget stopped a call.
 async fn judge_one(
     m: &Models,
     llm: &dyn LlmProvider,
     packs: &[Pack],
     insights: &[Insight],
-) -> Result<Result<Vec<Verdict>, String>, BudgetStop> {
-    let r = judge::judge(llm, packs, insights).await;
+) -> Result<(Result<Vec<Verdict>, String>, bool), BudgetStop> {
+    let mut r = judge::judge(llm, packs, insights).await;
+    let mut retried = false;
+    if matches!(r, Err(ProviderError::Parse(_))) && !m.budget.exceeded.get() {
+        retried = true;
+        r = judge::judge(llm, packs, insights).await;
+    }
     if r.is_err() && m.budget.exceeded.get() {
         return Err(BudgetStop);
     }
-    Ok(r.map_err(|e| e.to_string()))
+    Ok((r.map_err(|e| e.to_string()), retried))
 }
 
 /// The answer of one judge on one mover. `sent` is false for a mover the
@@ -331,6 +341,7 @@ pub(crate) fn judge_result(
             verdict: None,
             passed: false,
             error: Some(e.clone()),
+            retried: false,
         },
         (Ok(vs), Some(i)) if sent => {
             let verdict = vs.iter().find(|v| v.ticker == pack.ticker).cloned();
@@ -338,12 +349,14 @@ pub(crate) fn judge_result(
                 passed: verdict.as_ref().is_some_and(|v| judge::passed(pack, i, v)),
                 verdict,
                 error: None,
+                retried: false,
             }
         }
         _ => JudgeResult {
             verdict: None,
             passed: false,
             error: None,
+            retried: false,
         },
     }
 }
@@ -451,21 +464,20 @@ pub(crate) async fn run_post(
         } else {
             judge_one(m, llm.as_ref(), packs, &to_judge).await
         };
-        let r = match r {
+        let (r, retried) = match r {
             Ok(r) => r,
             Err(BudgetStop) => {
                 stopped = true;
-                Err(NOT_RUN.to_string())
+                (Err(NOT_RUN.to_string()), false)
             }
         };
         let per_mover = packs
             .iter()
             .map(|p| {
                 let sent = to_judge.iter().any(|i| i.ticker == p.ticker);
-                (
-                    p.ticker.clone(),
-                    judge_result(&r, p, insights.get(&p.ticker), sent),
-                )
+                let mut j = judge_result(&r, p, insights.get(&p.ticker), sent);
+                j.retried = retried && sent;
+                (p.ticker.clone(), j)
             })
             .collect();
         results.insert(name.clone(), per_mover);
@@ -877,7 +889,7 @@ pub(crate) async fn seed(m: &Models, out: &Path, fresh: bool) -> Result<(), Stri
         for call in &p.calls {
             let (packs, insights) = call_items(&p, call);
             for (name, llm) in &m.judges {
-                let r = judge_one(m, llm.as_ref(), &packs, &insights)
+                let (r, retried) = judge_one(m, llm.as_ref(), &packs, &insights)
                     .await
                     .map_err(|_| {
                         format!(
@@ -887,9 +899,9 @@ pub(crate) async fn seed(m: &Models, out: &Path, fresh: bool) -> Result<(), Stri
                         )
                     })?;
                 for (&k, (pack, insight)) in call.iter().zip(packs.iter().zip(&insights)) {
-                    rows[k]
-                        .judges
-                        .insert(name.clone(), judge_result(&r, pack, Some(insight), true));
+                    let mut j = judge_result(&r, pack, Some(insight), true);
+                    j.retried = retried;
+                    rows[k].judges.insert(name.clone(), j);
                 }
             }
         }
@@ -1232,7 +1244,7 @@ pub(crate) mod tests {
         json!({"verdicts": [{"ticker": "AAPL",
             "en_claims": [{"claim": "revenue of $4.2 billion", "evidence_id": "e2", "support": "expects revenue of $4.2 billion"}],
             "zh_claims": [{"claim": "营收42亿美元", "evidence_id": "e2", "support": "expects revenue of $4.2 billion"}],
-            "en_supported": ok, "zh_supported": true, "no_advice": true, "formal": true, "same_meaning": true, "notes": ""}]})
+            "en_supported": ok, "zh_supported": true, "no_advice": true, "formal": true, "same_meaning": true, "no_personal_allegation": true, "notes": ""}]})
     }
 
     fn inputs(posts: Vec<(&str, Post)>) -> Inputs {
@@ -1443,7 +1455,8 @@ pub(crate) mod tests {
             JudgeResult {
                 verdict: None,
                 passed: false,
-                error: None
+                error: None,
+                retried: false,
             }
         );
         assert!(!r.published_if["claude"]);
@@ -1738,5 +1751,47 @@ pub(crate) mod tests {
             "; refused for: zh: hook has N characters (at most N) (2), en: does not name benzinga.com, the outlet of a cited item (1), en: does not name seekingalpha.com, the outlet of a cited item (1)"
         );
         assert_eq!(top_refusals(&rs[3..]), "");
+    }
+
+    /// Trial run 2, item 5: a judge reply that fails to parse is asked for
+    /// once more and recorded as retried. Claude's provider fails on text
+    /// after the JSON ("trailing characters at line 3 column 1"), the run-2
+    /// error.
+    #[tokio::test]
+    async fn a_judge_reply_that_fails_to_parse_is_retried_once() {
+        let out = tmp("parse-retry");
+        let trailing = json!({"model": CLAUDE_MODEL, "stop_reason": "end_turn",
+            "content": [{"type": "text", "text": format!("{}\n\nNote: all claims checked.", judge_reply(true))}],
+            "usage": {"input_tokens": 1000, "output_tokens": 200}})
+        .to_string();
+        let writer = Mock::new(vec![claude_body(&writer_reply(CLEAN), 200)]);
+        let judge = Mock::new(vec![trailing.clone(), claude_body(&judge_reply(true), 200)]);
+        let m = mock_models(budget(&out, 3.0), &writer, &[("claude", &judge)]);
+        let (n, p) = one_post("2026-11-12");
+        let i = inputs(vec![(&n, p)]);
+        run(&i, &m, &out, false).await.unwrap();
+        assert_eq!(judge.calls.get(), 2);
+        let lines: Vec<Record> = read_jsonl(&out.join("lines.jsonl"));
+        let j = &lines[0].judges["claude"];
+        assert!(j.passed && j.retried, "{j:?}");
+
+        // Twice unparseable: an error, retried, and no third call.
+        let out2 = tmp("parse-retry-2");
+        let writer = Mock::new(vec![claude_body(&writer_reply(CLEAN), 200)]);
+        let judge = Mock::new(vec![trailing.clone(), trailing]);
+        let m = mock_models(budget(&out2, 3.0), &writer, &[("claude", &judge)]);
+        run(&i, &m, &out2, false).await.unwrap();
+        assert_eq!(judge.calls.get(), 2);
+        let lines: Vec<Record> = read_jsonl(&out2.join("lines.jsonl"));
+        let j = &lines[0].judges["claude"];
+        assert!(
+            j.retried
+                && j.error
+                    .as_deref()
+                    .is_some_and(|e| e.contains("trailing characters at line 3 column 1")),
+            "{j:?}"
+        );
+        fs::remove_dir_all(out).unwrap();
+        fs::remove_dir_all(out2).unwrap();
     }
 }

@@ -565,6 +565,7 @@ mod tests {
             verdict: Some(verdict(ticker, p)),
             passed: p,
             error: None,
+            retried: false,
         }
     }
 
@@ -763,6 +764,7 @@ mod tests {
                 verdict: None,
                 passed: false,
                 error: Some("http status 500".into()),
+                retried: false,
             },
         );
         records[1].judges.insert(
@@ -771,6 +773,7 @@ mod tests {
                 verdict: None,
                 passed: false,
                 error: None,
+                retried: false,
             },
         );
         let mut seeds = seeded(&records[0]);
@@ -780,6 +783,7 @@ mod tests {
                 verdict: None,
                 passed: false,
                 error: Some("parse error".into()),
+                retried: false,
             },
         );
         seeds[1].original_passed.insert("claude".into(), false);
