@@ -88,6 +88,11 @@ html:lang(zh-Hans) .site-nav { font-variant-caps: normal; }
   .ix-sep + .ix { border-left: 0; }
   .ix-sep { display: inline; padding: 0.2em 0; background: linear-gradient(var(--rule), var(--rule)) center / 1px 100% no-repeat; }
 }
+/* Forced colours (Windows High Contrast) drop gradient backgrounds, which would remove the dividers:
+   paint them in the theme's text colour instead. */
+@media (forced-colors: active) {
+  .ix-sep { forced-color-adjust: none; background-image: linear-gradient(CanvasText, CanvasText); }
+}
 
 .sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
 

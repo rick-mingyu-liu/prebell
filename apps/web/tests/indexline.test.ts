@@ -100,4 +100,19 @@ describe("IndexLine markup", () => {
     expect(html).toMatch(/^<p class="index-line"><span class="ix">/);
     expect(html.match(/<span class="ix-sep"[^>]*> <\/span><(span|time) class="ix/g)).toHaveLength(2);
   });
+
+  it("ends on an index, with no trailing separator, when the as-of time cannot be read", async () => {
+    const { renderToStaticMarkup } = await import("react-dom/server");
+    const { default: IndexLine } = await import("../src/components/IndexLine");
+    const html = renderToStaticMarkup(IndexLine({ line: { ...line!, asOfUtc: "garbage" }, locale: "en" }));
+    expect(html).not.toContain("<time");
+    expect(html.match(/<span class="ix"/g)).toHaveLength(2);
+    expect(html.match(/class="ix-sep"/g)).toHaveLength(1);
+    expect(html).toMatch(/<\/span><\/p>$/);
+  });
+
+  it("keeps the dividers in forced-colours mode, where gradient backgrounds are dropped", () => {
+    const css = readFileSync(new URL("../src/app/globals.css", import.meta.url), "utf8");
+    expect(css).toMatch(/@media \(forced-colors: active\) \{\s*\.ix-sep \{ forced-color-adjust: none; background-image: linear-gradient\(CanvasText, CanvasText\); \}/);
+  });
 });
