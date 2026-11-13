@@ -36,13 +36,14 @@ pub fn prompt(packs: &[Pack]) -> (String, String) {
 
 Rules:
 1. Use only the evidence given for that mover. Never use what you remember about the company, the market or the news.
-2. Every number and every date you write must appear in an evidence item you cite, copied in the same form (the same figure, unit and precision). The hook has no numbers at all.
+2. Every number and every date you write must appear in an evidence item you cite, as the same figure and precision. Write figures in digits, never in words ("10%", not "ten percent"; "70%", not "七十" or "百分之七十"). In Chinese, convert the unit naturally: "$4.2 billion" may be written "42亿美元". Write a date as a calendar date from the evidence ("November 19", "11月19日"), never a weekday, a bare day or a month alone. The hook has no numbers at all.
 3. A fact from a "news" or "analyst_action" item is attributed in the sentence to that item's "outlet" by name ("Reuters reports ...", "据路透社报道……"). A fact from a "company_figure" or "company_guidance" item is stated as the company's ("the company guided ...", "公司预计……").
-4. An analyst action may be mentioned (a named firm upgraded, downgraded or initiated coverage), but never its rating word or a price target, and never "analysts expect". The thing to track must come from another item: a company figure, a stated plan or a dated event.
-5. No advice of any kind (buy, sell, hold, should, recommend, 建议, 买入 and the like), no prediction of where a price goes, no rating words. No relative time words ("next week", "soon", "tomorrow", "下周", "近期"): name the date from the evidence instead. A fiscal label ("Q3", "fiscal 2027") only when a cited item states it.
-6. Limits: the English hook at most {HOOK_WORDS_EN} words, the English sentence one sentence of at most {WATCH_WORDS_EN} words; the Chinese hook at most {HOOK_CHARS_ZH} characters, the Chinese sentence one sentence of at most {WATCH_CHARS_ZH} characters. No Markdown, links or line breaks.
-7. The Chinese hook and sentence say the same thing as the English ones, in natural simplified Chinese. Each language lists the ids of the evidence items its line rests on in "cites".
-8. Leave a mover out when its evidence gives nothing concrete to track.
+4. An analyst action may be mentioned (a named firm upgraded, downgraded or initiated coverage), but never its rating word, a price target or any figure from it, and never "analysts expect" or the consensus. The thing to track must come from another item: a company figure, a stated plan or a dated event.
+5. No advice of any kind (buy, sell, hold, should, recommend, position, exposure, 建议, 买入, 仓位, 配置 and the like), no prediction of where a price goes (upside, could climb, 有望上涨), no rating words. No relative time words ("next week", "this quarter", "soon", "today", "下周", "明年", "近期"): name the date from the evidence instead. A fiscal label ("Q3", "fiscal 2027", "第三季度") only when a cited item states it.
+6. A report date marked "Expected report date, not confirmed by the company" must be hedged in the sentence: "expected" or "scheduled" in English, "预计" or "暂定" in Chinese.
+7. Limits: the English hook at most {HOOK_WORDS_EN} words, the English sentence one sentence of at most {WATCH_WORDS_EN} words; the Chinese hook at most {HOOK_CHARS_ZH} characters, the Chinese sentence one sentence of at most {WATCH_CHARS_ZH} characters. One clause chain: no semicolons. No Markdown, links or line breaks.
+8. The Chinese hook and sentence say the same thing as the English ones, in natural simplified Chinese. Each language lists the ids of the evidence items its line rests on in "cites".
+9. Leave a mover out when its evidence gives nothing concrete to track.
 
 Reply with JSON only, in this shape:
 {{"insights":[{{"ticker":"...","en":{{"hook":"...","watch":"...","cites":["e2"]}},"zh":{{"hook":"...","watch":"...","cites":["e2"]}}}}]}}"#
@@ -85,10 +86,12 @@ pub fn parse(reply: &Value, packs: &[Pack]) -> Vec<Result<Insight, String>> {
                 .iter()
                 .find(|p| p.ticker.eq_ignore_ascii_case(t.trim()))
                 .ok_or(format!("{t}: not one of the movers"))?;
-            if seen.contains(&pack.ticker.as_str()) {
+            // Errors name the mover as its pack does ("NVDA", not "nvda").
+            let t = pack.ticker.as_str();
+            if seen.contains(&t) {
                 return Err(format!("{t}: repeated"));
             }
-            seen.push(&pack.ticker);
+            seen.push(t);
             let en = line(it.get("en")).ok_or(format!("{t}: missing or incomplete en"))?;
             let zh = line(it.get("zh")).ok_or(format!("{t}: missing or incomplete zh"))?;
             Ok(Insight {
@@ -132,6 +135,8 @@ mod tests {
                     outlet: None,
                     url: None,
                     date: Some("2026-11-12".parse().unwrap()),
+                    quote: None,
+                    unconfirmed: false,
                 },
                 Evidence {
                     id: "e2".into(),
@@ -140,6 +145,8 @@ mod tests {
                     outlet: Some("Reuters".into()),
                     url: Some("https://www.reuters.com/secret-path".into()),
                     date: None,
+                    quote: None,
+                    unconfirmed: false,
                 },
             ],
         }
@@ -223,6 +230,32 @@ mod tests {
         assert!(r[1].as_ref().unwrap_err().contains("TSLA"));
         assert!(r[2].as_ref().unwrap_err().contains("repeated"));
         assert_eq!(r[3].as_ref().unwrap().ticker, "NVDA");
+    }
+
+    #[test]
+    fn errors_name_the_mover_as_its_pack_does() {
+        // Review L5: "nvda" in the reply is NVDA's mover.
+        let packs = [pack("AAPL"), pack("NVDA")];
+        let mut no_zh = item("nvda");
+        no_zh.as_object_mut().unwrap().remove("zh");
+        let r = parse(&json!({"insights": [no_zh, item("NVDA")]}), &packs);
+        assert_eq!(r[0].as_ref().unwrap_err(), "NVDA: missing or incomplete zh");
+        assert_eq!(r[1].as_ref().unwrap_err(), "NVDA: repeated");
+    }
+
+    #[test]
+    fn the_prompt_states_the_review_rules() {
+        let (system, _) = prompt(&[pack("AAPL")]);
+        for want in [
+            "42亿美元",
+            "never in words",
+            "no semicolons",
+            "Expected report date, not confirmed by the company",
+            "\"expected\" or \"scheduled\"",
+            "never its rating word, a price target or any figure from it",
+        ] {
+            assert!(system.contains(want), "{want}");
+        }
     }
 
     #[test]

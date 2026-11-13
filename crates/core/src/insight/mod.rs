@@ -37,6 +37,15 @@ pub struct Evidence {
     pub outlet: Option<String>,
     pub url: Option<String>,
     pub date: Option<chrono::NaiveDate>,
+    /// The verbatim source sentence when `text` is written by code from
+    /// verified fields (`CompanyFigure`). Shown to people, never used to
+    /// allow a number or confirm support.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quote: Option<String>,
+    /// A `ReportDate` the company has not confirmed: a line citing it must
+    /// hedge it (`check`).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub unconfirmed: bool,
 }
 
 /// Everything the writer and the judge see for one mover.
