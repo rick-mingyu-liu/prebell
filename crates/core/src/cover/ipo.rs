@@ -13,7 +13,7 @@
 //! every other cover: one share card serves both languages.
 
 use super::graphic::{
-    caption_and_close, label, label_width, open_svg, rect, text, CAPTION, GAP, GREY, INK,
+    caption_and_close, label, label_width, open_svg, rect, text, CAPTION, CHAR_W, GAP, GREY, INK,
     LABEL_SIZE, MARGIN,
 };
 use crate::ipo::milestone::{IpoArticleFacts, Milestone};
@@ -58,15 +58,31 @@ fn drawn_text(svg: &str) -> String {
         .join("\n")
 }
 
-/// A positive, finite price.
-fn positive(v: Option<f64>) -> Option<f64> {
-    v.filter(|v| v.is_finite() && *v > 0.0)
+/// A price in whole cents, as the labels print it.
+fn cents(v: f64) -> i128 {
+    (v * 100.0).round() as i128
 }
 
-/// A range with a low end below its high end.
+/// A finite price of at least a cent (a smaller one would print "$0.00").
+fn positive(v: Option<f64>) -> Option<f64> {
+    v.filter(|v| v.is_finite() && cents(*v) > 0)
+}
+
+/// A range whose low end prints below its high end.
 fn range(lo: Option<f64>, hi: Option<f64>) -> Option<(f64, f64)> {
     let (lo, hi) = (positive(lo)?, positive(hi)?);
-    (lo < hi).then_some((lo, hi))
+    (cents(lo) < cents(hi)).then_some((lo, hi))
+}
+
+/// Whether two ranges print the same.
+fn same_range(a: (f64, f64), b: (f64, f64)) -> bool {
+    (cents(a.0), cents(a.1)) == (cents(b.0), cents(b.1))
+}
+
+/// The width budgeted for `s` in the small caps of the caption and row
+/// labels (11 px, 1.5 px letter spacing).
+fn small_caps_width(s: &str) -> f64 {
+    s.chars().count() as f64 * (11.0 / LABEL_SIZE * CHAR_W + 1.5)
 }
 
 fn en(v: f64) -> String {
@@ -124,22 +140,28 @@ fn band(out: &mut String, s: &Scale, (lo, hi): (f64, f64), y: f64, fill: &str, w
 
 /// `range_set`: the cover's range as one ink band.
 fn range_set(f: &IpoArticleFacts) -> Option<String> {
-    let (lo, hi) = range(f.num("price_low"), f.num("price_high"))?;
+    let r = range(f.num("price_low"), f.num("price_high"))?;
+    one_band(r, &format!("IPO PRICE RANGE, {}", per(f)))
+}
+
+/// One range as an ink band, under `caption`.
+fn one_band((lo, hi): (f64, f64), caption: &str) -> Option<String> {
     let s = Scale::new(lo, hi, &[&en(lo), &en(hi)])?;
     let mut out = open_svg();
     band(&mut out, &s, (lo, hi), 230.0, INK, 700);
-    Some(caption_and_close(
-        out,
-        &format!("IPO PRICE RANGE, {}", per(f)),
-    ))
+    Some(caption_and_close(out, caption))
 }
 
 /// `range_changed`: the previous filing's range in grey above the cover's
-/// new range in ink, on one scale, each named above its band.
+/// new range in ink, on one scale, each named above its band. A change of
+/// the share count alone keeps the range: one ink band, "UNCHANGED".
 fn range_changed(f: &IpoArticleFacts) -> Option<String> {
     let p = f.previous.as_ref()?;
     let old = range(p.price_low, p.price_high)?;
     let new = range(f.num("price_low"), f.num("price_high"))?;
+    if same_range(old, new) {
+        return one_band(new, &format!("IPO PRICE RANGE, UNCHANGED, {}", per(f)));
+    }
     let labels = [en(old.0), en(old.1), en(new.0), en(new.1)];
     let refs: Vec<&str> = labels.iter().map(String::as_str).collect();
     let s = Scale::new(old.0.min(new.0), old.1.max(new.1), &refs)?;
@@ -149,7 +171,9 @@ fn range_changed(f: &IpoArticleFacts) -> Option<String> {
         (old, 204.0, GREY, 500, "PREVIOUS RANGE"),
         (new, 270.0, INK, 700, "NEW RANGE"),
     ] {
-        text(&mut out, s.x(r.0), y - GAP, &attrs, name);
+        // Above the band's start, moved in when it would cross the right margin.
+        let x = s.x(r.0).min(WIDTH - MARGIN - small_caps_width(name));
+        text(&mut out, x, y - GAP, &attrs, name);
         band(&mut out, &s, r, y, fill, weight);
     }
     Some(caption_and_close(
@@ -234,6 +258,10 @@ fn listed(f: &IpoArticleFacts) -> Option<String> {
     const BAR_W: f64 = 84.0;
     const PLOT_TOP: f64 = 180.0;
     const PLOT_BOTTOM: f64 = 296.0;
+    // A value label wider than its slot would run into its neighbour's.
+    if bars.iter().any(|b| label_width(&en(b.1)) > SLOT - GAP) {
+        return None;
+    }
     let left = (WIDTH - SLOT * bars.len() as f64) / 2.0;
     let max = bars.iter().map(|b| b.1).fold(0.0, f64::max);
     let mut out = open_svg();
@@ -308,7 +336,6 @@ mod tests {
     use super::*;
     use crate::cover::card::{card_svg, render_png};
     use crate::cover::graphic::tests::{rects, texts};
-    use crate::cover::graphic::CHAR_W;
     use crate::ipo::milestone::{CoverFact, Previous, Session};
     use regex::Regex;
 
@@ -552,6 +579,100 @@ mod tests {
         assert_eq!(ipo_graphic(&f), None);
         f.previous = previous(Some(70.0), None);
         assert_eq!(ipo_graphic(&f), None);
+    }
+
+    /// A share-count change alone: the S-1/A of 2026-11-14 keeps $70.00–$78.00.
+    fn shares_only() -> IpoArticleFacts {
+        let mut f = anthropic();
+        f.milestone = Milestone::RangeChanged;
+        f.previous = previous(Some(70.0), Some(78.0));
+        f
+    }
+
+    #[test]
+    fn a_share_count_change_alone_draws_the_kept_range_once() {
+        let svg = ipo_graphic(&shares_only()).unwrap();
+        assert_in_frame(&svg);
+        assert_eq!(figures(&svg), ["$70.00", "$78.00"]);
+        let bands: Vec<_> = rects(&svg).into_iter().filter(|r| r.4 != PAPER).collect();
+        assert_eq!(bands.len(), 1);
+        assert_eq!(bands[0].4, INK);
+        assert!(
+            svg.contains(">IPO PRICE RANGE, UNCHANGED, PER SHARE<"),
+            "{svg}"
+        );
+        assert!(!svg.contains("NEW RANGE") && !svg.contains("PREVIOUS RANGE"));
+        // The same as the range_set band, under its own caption.
+        assert_eq!(
+            svg.replace(", UNCHANGED,", ","),
+            ipo_graphic(&anthropic()).unwrap()
+        );
+        // Equal in cents counts as kept.
+        let mut f = shares_only();
+        f.previous = previous(Some(70.001), Some(77.998));
+        assert!(ipo_graphic(&f).unwrap().contains("UNCHANGED"));
+        let mut ads = shares_only();
+        ads.security = "ads".into();
+        assert!(ipo_graphic(&ads)
+            .unwrap()
+            .contains(">IPO PRICE RANGE, UNCHANGED, PER ADS<"));
+    }
+
+    #[test]
+    fn prices_that_print_alike_or_as_zero_give_no_graphic() {
+        // Ends less than a cent apart would print "$70.00" twice.
+        let mut f = anthropic();
+        for c in &mut f.cover {
+            match c.kind.as_str() {
+                "price_low" => c.value_num = Some(70.001),
+                "price_high" => c.value_num = Some(70.004),
+                _ => {}
+            }
+        }
+        assert_eq!(ipo_graphic(&f), None);
+        // A sub-cent price would print "$0.00".
+        let mut f = priced();
+        f.cover[0].value_num = Some(0.004);
+        assert_eq!(ipo_graphic(&f), None);
+        let mut f = listed();
+        f.session.as_mut().unwrap().open = Some(0.001);
+        assert_eq!(ipo_graphic(&f), None);
+        let mut f = range_changed();
+        f.previous = previous(Some(0.001), Some(78.0));
+        assert_eq!(ipo_graphic(&f), None);
+    }
+
+    #[test]
+    fn listed_values_too_wide_for_their_slots_give_no_graphic() {
+        let mut f = listed();
+        f.session.as_mut().unwrap().close = 1e9;
+        assert_eq!(ipo_graphic(&f), None);
+        // The widest that fits: 11 characters at 10 px within a 120 px slot.
+        let mut f = listed();
+        f.session.as_mut().unwrap().close = 99_999.99;
+        assert_in_frame(&ipo_graphic(&f).unwrap());
+    }
+
+    #[test]
+    fn a_row_label_near_the_right_edge_is_moved_in() {
+        // The old range high above a much lower new one: "PREVIOUS RANGE"
+        // starts near the right end of the scale.
+        let mut f = range_changed();
+        f.previous = previous(Some(25.8), Some(26.0));
+        for c in &mut f.cover {
+            match c.kind.as_str() {
+                "price_low" => c.value_num = Some(10.0),
+                "price_high" => c.value_num = Some(12.0),
+                _ => {}
+            }
+        }
+        let svg = ipo_graphic(&f).unwrap();
+        assert_in_frame(&svg);
+        let label = anchored(&svg)
+            .into_iter()
+            .find(|t| t.4 == "PREVIOUS RANGE")
+            .unwrap();
+        assert!(extent(&label).1 <= 616.0, "{label:?}");
     }
 
     #[test]

@@ -66,7 +66,7 @@ Both `en` and `zh` are written `published` in one D1 batch (one transaction), so
 | `summary` | One line. |
 | `body_md` | The whole article, rendered by code (shape below). |
 | `cover_line1` | EN `Anthropic IPO`; ZH `Anthropic IPO` (`name_zh` when set). |
-| `cover_line2` | The milestone with its figure, by code: EN `Price range $70.00–$78.00`; ZH `价格区间 70.00–78.00美元`. Others: `Filed for IPO` / `递交IPO申请`, `New price range $X–$Y` / `新价格区间 X–Y美元`, `Priced at $X` / `定价 X美元`, `First day close $X` / `首日收盘 X美元`, `IPO withdrawn` / `撤回IPO申请`. |
+| `cover_line2` | The milestone with its figure, by code: EN `Price range $70.00–$78.00`; ZH `价格区间 70.00–78.00美元`. Others: `Filed for IPO` / `递交IPO申请`, `New price range $X–$Y` / `新价格区间 X–Y美元` (when only the share count changed, the range is kept: `Price range $X–$Y` / `价格区间 X–Y美元`), `Priced at $X` / `定价 X美元`, `First day close $X` / `首日收盘 X美元`, `IPO withdrawn` / `撤回IPO申请`. |
 
 ### `sources`
 

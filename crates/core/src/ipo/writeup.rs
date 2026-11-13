@@ -398,6 +398,13 @@ fn capital(s: &str) -> String {
 pub fn cover_lines(f: &IpoArticleFacts, lang: Lang) -> [String; 2] {
     let first = format!("{} IPO", name_of(f, lang));
     let lo_hi = f.num("price_low").zip(f.num("price_high"));
+    // The previous range prints the same as this one (in cents).
+    let kept = f
+        .previous
+        .as_ref()
+        .and_then(|p| p.price_low.zip(p.price_high))
+        .zip(lo_hi)
+        .is_some_and(|((a, b), (c, d))| (cents(a), cents(b)) == (cents(c), cents(d)));
     let second = match (f.milestone, lang) {
         (Milestone::Filed, _) => pick(lang, "Filed for IPO", "递交IPO申请").to_string(),
         (Milestone::RangeSet, Lang::En) => lo_hi.map_or("Price range set".into(), |(a, b)| {
@@ -406,6 +413,15 @@ pub fn cover_lines(f: &IpoArticleFacts, lang: Lang) -> [String; 2] {
         (Milestone::RangeSet, Lang::Zh) => lo_hi.map_or("公布价格区间".into(), |(a, b)| {
             format!("价格区间 {}", range(a, b, lang))
         }),
+        // A share-count change alone keeps the range: worded as `range_set`.
+        (Milestone::RangeChanged, Lang::En) if kept => lo_hi
+            .map_or("Price range kept".into(), |(a, b)| {
+                format!("Price range {}", range(a, b, lang))
+            }),
+        (Milestone::RangeChanged, Lang::Zh) if kept => lo_hi
+            .map_or("价格区间不变".into(), |(a, b)| {
+                format!("价格区间 {}", range(a, b, lang))
+            }),
         (Milestone::RangeChanged, Lang::En) => lo_hi.map_or("New price range".into(), |(a, b)| {
             format!("New price range {}", range(a, b, lang))
         }),
@@ -2608,6 +2624,41 @@ pub(crate) mod tests {
             section(&z, 0).ends_with("此前公司已于2026年6月1日保密提交1份注册草案（DRS表格）。"),
             "{}",
             section(&z, 0)
+        );
+    }
+
+    #[test]
+    fn a_share_count_change_alone_keeps_the_range_on_the_cover_lines() {
+        let mut st = real_state();
+        with_amendment(
+            &mut st,
+            "0001628280-26-080006",
+            "2026-11-14",
+            70.0,
+            78.0,
+            900e6,
+        );
+        let r = latest(&st, "anthropic").unwrap();
+        let f = bundle(&st, &anthropic(), &r, at());
+        assert_eq!(f.milestone, Milestone::RangeChanged);
+        assert_eq!(
+            cover_lines(&f, Lang::En),
+            ["Anthropic IPO", "Price range $70.00–$78.00"]
+        );
+        assert_eq!(
+            cover_lines(&f, Lang::Zh),
+            ["Anthropic IPO", "价格区间 70.00–78.00美元"]
+        );
+        // A moved range is still "new".
+        let mut moved = f.clone();
+        moved.previous.as_mut().unwrap().price_high = Some(80.0);
+        assert_eq!(
+            cover_lines(&moved, Lang::En)[1],
+            "New price range $70.00–$78.00"
+        );
+        assert_eq!(
+            cover_lines(&moved, Lang::Zh)[1],
+            "新价格区间 70.00–78.00美元"
         );
     }
 

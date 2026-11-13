@@ -510,20 +510,21 @@ async fn backfill_cover(
             if post.cover_key.is_some() || post.published_at.is_none() {
                 continue;
             }
-            // Only a live write-up: a half-built one gets its cover from its build.
-            if !store
-                .get_translation(id, "en")
-                .await?
-                .is_some_and(|x| x.status == "published")
-            {
-                continue;
-            }
+            // Read first, so a given-up write-up costs no translation read.
             let counter = format!("covers/{}.attempts", post.slug);
             let tried: u32 = match store.get_facts(&counter).await? {
                 Some(n) => n.trim().parse().unwrap_or(COVER_TRIES),
                 None => 0,
             };
             if tried >= COVER_TRIES {
+                continue;
+            }
+            // Only a live write-up: a half-built one gets its cover from its build.
+            if !store
+                .get_translation(id, "en")
+                .await?
+                .is_some_and(|x| x.status == "published")
+            {
                 continue;
             }
             // Counted first, so a pass that dies here still counts.
