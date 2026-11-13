@@ -1,6 +1,9 @@
 # Mover insights: a hook and a "what to watch" line on big movers
 
-Status: design, awaiting Rick's approval. Nothing is built.
+Status: approved by Rick on 2026-11-13 ("approved", shown the summary with
+the spend and unattended publishing marked as his decisions). A builder's
+read-through then raised five questions; each is settled below and marked
+"lead's call after the builder check". Nothing is built.
 
 ## Why
 
@@ -99,10 +102,17 @@ remembers.
 
 ### Which movers
 
-A mover is eligible when its pack has at least one verified news reason or
-a reported-results entry. A mover with only a theme fallback or no news
-gets no insight: there is nothing to ground a reading in. At most the
+A mover is eligible when its pack has at least one verified news reason,
+or PreBell has published an earnings check for the report that moved it.
+A mover with only a theme fallback, only a link to a SEC filing, or no
+news gets no insight: there is nothing to ground a reading in. At most the
 eight movers a brief already lists (four up, four down).
+
+Lead's call after the builder check: "reported results" means PreBell has
+an earnings check for that report, because only then does the pack hold
+figures and guidance. A mover with both a news reason and a report gets
+its earnings check looked up too (one D1 read by ticker and report date;
+`Fallback.post_slug` is only set when there is no news reason).
 
 ### What the writer returns
 
@@ -112,19 +122,44 @@ the ids of the evidence items the line rests on.
 
 - Hook: at most about eight words (about 14 Chinese characters), no
   numbers.
-- Watch line: one sentence, at most about 35 words (about 70 Chinese
+- Watch line: one sentence, at most about 40 words (about 80 Chinese
   characters). It names something concrete to track (a figure the company
   gave, a dated event, a stated plan) and may say why it matters. Formal
-  register. No advice, no price prediction, no "analysts expect" unless an
-  evidence item says so and is cited.
+  register. No advice, no price prediction.
+
+Lead's calls after the builder check:
+
+- **Attribution.** The reading is PreBell's; the facts under it are not.
+  A fact that comes from a news item is attributed to its outlet by name
+  in the line ("Reuters reports …", "据路透社报道…"), as the IPO news items
+  already are. A fact from the company's own release or filing is stated
+  as the company's ("the company guided …"). Code checks that the outlet's
+  name appears whenever a cited item is a news item. An outlet's mistake
+  is then reported as that outlet's, not stated by PreBell.
+- **Analyst actions.** Upgrades, downgrades and initiations are verified
+  mover reasons today. A line may say that a named firm upgraded,
+  downgraded or initiated coverage, attributed like any news fact. It
+  never repeats the rating word ("Buy", "Overweight") or a price target,
+  and "analysts expect" is not allowed. The thing to watch must be
+  something else in the pack (a company figure, plan or dated event). A
+  mover whose pack holds only an analyst action gets no insight.
+- **Dates.** A date in a line must be a date in the pack. Relative times
+  ("next week", "下周") are refused, because code cannot check them. A
+  fiscal label ("Q3", "fiscal 2027") must appear in a cited evidence
+  item.
 
 ### Code checks (before the judge)
 
-- Every number and date passes the existing `numbers::check` against the
-  pack.
+- Every number passes the existing `numbers::check` against the pack.
+  That function skips dates, clock times and fiscal labels on purpose, so
+  this feature adds its own date check in both languages (see Dates
+  above).
+- When a cited evidence item is a news item, its outlet's name is in the
+  line.
 - Cited evidence ids exist and belong to this mover.
 - A refusal list of advice and prediction wording in both languages (buy,
-  sell, should, will rise, target price, 建议买入, 看涨 and the like).
+  sell, should, will rise, target price, rating words, 建议买入, 看涨 and
+  the like). It applies even when the evidence itself uses the word.
 - Length limits; the Chinese line contains Chinese; no markup or links.
 
 A mover whose line fails a check is dropped; the writer is not asked
@@ -152,6 +187,21 @@ on the same lines, and the one that agrees better with Rick's own labels,
 and catches more of a seeded set of deliberately wrong lines, becomes the
 judge. Setting: `INSIGHT_JUDGE_PROVIDER`.
 
+Lead's calls after the builder check:
+
+- **The writer is always Claude.** The step has its own setting
+  (`INSIGHT_WRITER_PROVIDER`, default `claude`) and does not follow the
+  site-wide `LLM_PROVIDER`. If the site is switched to DeepSeek as a
+  fallback, or the Anthropic key is missing, the insight step skips; it
+  does not write with DeepSeek.
+- **Rick's labels.** The offline tool writes one local page listing lines
+  in random order with the judges' verdicts hidden: every line a judge
+  dropped or the two judges disagreed on, plus judge-passed lines, about
+  60 in all (about 20 minutes of Rick's time). Each line shows its
+  evidence and three choices (fine, wrong fact, reads as advice or is not
+  formal). The page saves the labels to a file the tool reads back to
+  score the judges. Rick may change the number.
+
 ### Where it runs
 
 - A new job step, `insight`, queued after a premarket brief, a premarket
@@ -174,8 +224,11 @@ judge. Setting: `INSIGHT_JUDGE_PROVIDER`.
 ### On the page
 
 - Brief and recap pages: under each eligible mover, the hook, then the
-  line, labelled "What to watch" / "后续关注". The existing English reason
-  stays as it is. The home page's "Top movers" shows the hook.
+  line, labelled "Watch next" / "后续关注". (The premarket brief already
+  has a section headed "What to watch" / "今日关注", so the per-mover label
+  must not repeat it; wording for Rick to confirm with the screenshots.)
+  The existing English reason stays as it is. The home page's "Top
+  movers" shows the hook.
 - A mover without an insight looks exactly as it does today.
 - A small label near the first insight on a page says the lines are
   PreBell's reading, generated automatically. Wording for Rick to approve
@@ -212,9 +265,9 @@ and styles (with screenshots at phone and desktop widths, both languages);
 the seeded wrong-line set; how the offline tool prints its table; how
 attempts are counted.
 
-## Open questions for Rick
+## Rick's decisions
 
-1. Approve the model spend (estimate above), starting with the offline
-   trial.
+1. The model spend (estimate above), starting with the offline trial:
+   approved, 2026-11-13.
 2. After the shadow stage passes, lines publish with no human reading each
-   one. That is the point of the judge, and it is also the risk.
+   one: approved, 2026-11-13.
