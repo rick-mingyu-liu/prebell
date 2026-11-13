@@ -5,7 +5,7 @@
 use std::cell::Cell;
 
 use async_trait::async_trait;
-use prebell_core::cover::card::{CardStore, CoverPost};
+use prebell_core::cover::card::{CardStore, CoverPost, IpoName};
 use prebell_core::digest::{DigestStore, PostLink};
 use prebell_core::facts::NewsReason;
 use prebell_core::store::{PostRow, ReportRow, RunRow, Store, TranslationRow};
@@ -602,10 +602,11 @@ struct ReportRec {
 /// `?2`, for the `cards` job (`?1` is the limit). The date bound reads
 /// `idx_posts_trading_date`, so the rows read stay flat as history grows. A
 /// revised post counts from its update, which gave it a new cover key. The
-/// kicker's ticker: an earnings check's filing ticker, or an IPO write-up's
-/// symbol from its IPO's watch row (`ipo:<ipo_slug>:...`), when it has one.
+/// kicker's names: an earnings check's filing ticker, and an IPO write-up's
+/// company name and symbol from its IPO's watch row (`ipo:<ipo_slug>:...`).
 pub(crate) const COVER_POSTS: &str =
-    "SELECT p.cover_key, p.trading_date, COALESCE(f.ticker, w.symbol) AS ticker FROM posts p \
+    "SELECT p.cover_key, p.trading_date, p.content_type, f.ticker, \
+     w.name AS ipo_name, w.symbol AS ipo_symbol FROM posts p \
      LEFT JOIN earnings_filings f ON f.run_key = p.run_key \
      LEFT JOIN ipo_watch w ON p.content_type = 'ipo' \
      AND w.slug = substr(p.run_key, 5, instr(substr(p.run_key, 5), ':') - 1) \
@@ -616,7 +617,10 @@ pub(crate) const COVER_POSTS: &str =
 struct CoverPostRec {
     cover_key: String,
     trading_date: String,
+    content_type: String,
     ticker: Option<String>,
+    ipo_name: Option<String>,
+    ipo_symbol: Option<String>,
 }
 
 #[async_trait(?Send)]
@@ -633,6 +637,10 @@ impl CardStore for D1Store {
         Ok(rows
             .into_iter()
             .map(|r| CoverPost {
+                ipo: (r.content_type == "ipo").then_some(IpoName {
+                    name: r.ipo_name,
+                    symbol: r.ipo_symbol,
+                }),
                 cover_key: r.cover_key,
                 trading_date: r.trading_date,
                 ticker: r.ticker,

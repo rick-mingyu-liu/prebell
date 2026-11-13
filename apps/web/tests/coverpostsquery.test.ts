@@ -7,8 +7,8 @@ import { migrations } from "./d1";
 /**
  * The share cards' query lives in the generator (`COVER_POSTS` in crates/generator/src/store.rs), which
  * has no SQLite in its tests, so it is checked here against the real schema and the IPO preview seeds:
- * the card's kicker ticker is an earnings check's filing ticker or an IPO write-up's symbol from its IPO's
- * watch row, and the posts are read through idx_posts_trading_date.
+ * the card's kicker names an earnings check's filing ticker, or an IPO write-up's company name and symbol
+ * from its IPO's watch row, and the posts are read through idx_posts_trading_date.
  */
 const dir = fileURLToPath(new URL("../../../migrations/", import.meta.url));
 const db = fileURLToPath(new URL("../../../db/", import.meta.url));
@@ -37,16 +37,17 @@ function database() {
 }
 
 describe("COVER_POSTS", () => {
-  it("names an IPO write-up's symbol as its card's ticker, and an earnings check's filing ticker", () => {
+  it("names an IPO write-up's company and symbol, and an earnings check's filing ticker", () => {
     expect(COVER_POSTS).toContain("ipo_watch");
-    const rows = database().prepare(COVER_POSTS).all({ 1: 30, 2: "2026-10-29" }) as { cover_key: string; ticker: string | null }[];
-    expect(Object.fromEntries(rows.map((r) => [r.cover_key, r.ticker]))).toEqual({
-      "covers/anthropic-ipo-price-range-2026-11-10.svg": "ANT",
-      "covers/recap-2026-11-11.svg": null,
-      "covers/amd-q3.svg": "AMD",
-      "covers/harbor-bio-ipo-filing-2026-11-09.svg": "HRBO",
-      // An IPO no longer tracked: the date alone.
-      "covers/gone-ipo-filing-2026-11-09.svg": null,
+    type Row = { cover_key: string; content_type: string; ticker: string | null; ipo_name: string | null; ipo_symbol: string | null };
+    const rows = database().prepare(COVER_POSTS).all({ 1: 30, 2: "2026-10-29" }) as Row[];
+    expect(Object.fromEntries(rows.map((r) => [r.cover_key, [r.content_type, r.ticker, r.ipo_name, r.ipo_symbol]]))).toEqual({
+      "covers/anthropic-ipo-price-range-2026-11-10.svg": ["ipo", null, "Anthropic", "ANT"],
+      "covers/recap-2026-11-11.svg": ["recap", null, null, null],
+      "covers/amd-q3.svg": ["earnings", "AMD", null, null],
+      "covers/harbor-bio-ipo-filing-2026-11-09.svg": ["ipo", null, "Harbor Bio", "HRBO"],
+      // An IPO no longer tracked: no name or symbol (its kicker is "IPO" and the date).
+      "covers/gone-ipo-filing-2026-11-09.svg": ["ipo", null, null, null],
     });
   });
 

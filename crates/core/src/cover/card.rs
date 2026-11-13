@@ -150,10 +150,26 @@ pub fn render_png(svg: &str) -> Result<Vec<u8>, String> {
 pub struct CoverPost {
     pub cover_key: String,
     pub trading_date: String,
-    /// The earnings filing's ticker, or an IPO write-up's symbol (its IPO's
-    /// watch row); `None` for briefs and an IPO without a symbol.
+    /// The earnings filing's ticker; `None` for the other posts.
     pub ticker: Option<String>,
+    /// For an IPO write-up: its IPO's name and symbol, from the watch row.
+    pub ipo: Option<IpoName>,
 }
+
+/// An IPO write-up's company as its card's kicker names it. `name` is the
+/// tracked list's display name, the one the write-up itself prints.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct IpoName {
+    pub name: Option<String>,
+    pub symbol: Option<String>,
+}
+
+/// The longest company name the kicker prints. The kicker is right-aligned
+/// at x 1152 in Inter 600 at 26 px with 2 px letter spacing; "PreBell" ends
+/// near x 328. With " IPO · YYYY-MM-DD" after it (about 246 px), 18 of the
+/// widest capital ("W", about 28.5 px) still leave 40 px clear of the
+/// nameplate (a test measures it with the embedded font).
+pub const KICKER_NAME_MAX: usize = 18;
 
 /// What the `cards` job reads and writes (D1 and R2 in production).
 #[async_trait(?Send)]
@@ -180,12 +196,33 @@ fn attempts_key(card: &str) -> String {
     format!("{}.attempts", card.trim_end_matches(".png"))
 }
 
-/// "AAPL · 2026-11-05" ("ANT · 2026-11-10" for an IPO write-up), or the
-/// date alone for a brief.
+/// "AAPL · 2026-11-05" for an earnings check, the date alone for a brief.
+/// An IPO write-up always says "IPO": "ANTHROPIC IPO · 2026-11-10" (the
+/// name uppercased, when it is printable ASCII, which the card fonts cover,
+/// and at most `KICKER_NAME_MAX` characters), else "ANT IPO · 2026-11-10"
+/// (the symbol, on the same terms), else "IPO · 2026-11-10".
 fn kicker(p: &CoverPost) -> String {
+    let date = &p.trading_date;
+    if let Some(ipo) = &p.ipo {
+        let printable = |s: &&String| {
+            let s = s.trim();
+            !s.is_empty()
+                && s.chars().count() <= KICKER_NAME_MAX
+                && s.bytes().all(|b| (0x20..0x7f).contains(&b))
+        };
+        return match ipo
+            .name
+            .as_ref()
+            .filter(printable)
+            .or(ipo.symbol.as_ref().filter(printable))
+        {
+            Some(n) => format!("{} IPO · {date}", n.trim().to_ascii_uppercase()),
+            None => format!("IPO · {date}"),
+        };
+    }
     match &p.ticker {
-        Some(t) => format!("{t} · {}", p.trading_date),
-        None => p.trading_date.clone(),
+        Some(t) => format!("{t} · {date}"),
+        None => date.clone(),
     }
 }
 
@@ -298,6 +335,7 @@ mod tests {
             cover_key: "covers/x.svg".into(),
             trading_date: "2026-11-05".into(),
             ticker: Some("BRK.B".into()),
+            ipo: None,
         };
         assert_eq!(kicker(&p), "BRK.B · 2026-11-05");
         assert!(card_svg(&cover(), "A<B")
@@ -377,7 +415,97 @@ mod tests {
             cover_key: format!("covers/{stem}.svg"),
             trading_date: "2026-11-05".into(),
             ticker: None,
+            ipo: None,
         }
+    }
+
+    fn ipo_post(name: Option<&str>, symbol: Option<&str>) -> CoverPost {
+        CoverPost {
+            cover_key: "covers/anthropic-ipo-price-range-2026-11-10.svg".into(),
+            trading_date: "2026-11-10".into(),
+            ticker: None,
+            ipo: Some(IpoName {
+                name: name.map(Into::into),
+                symbol: symbol.map(Into::into),
+            }),
+        }
+    }
+
+    #[test]
+    fn an_ipo_kicker_names_the_company_then_the_symbol_and_always_says_ipo() {
+        let k = |n, s| kicker(&ipo_post(n, s));
+        assert_eq!(
+            k(Some("Anthropic"), Some("ANT")),
+            "ANTHROPIC IPO · 2026-11-10"
+        );
+        assert_eq!(
+            k(Some("AT&T Mobility"), None),
+            "AT&T MOBILITY IPO · 2026-11-10"
+        );
+        // 18 characters is the longest name printed; 19 falls back to the symbol.
+        assert_eq!(
+            k(Some("Northwind Robotics"), Some("NWRB")),
+            "NORTHWIND ROBOTICS IPO · 2026-11-10"
+        );
+        assert_eq!(
+            k(Some("Birkenstock Holding"), Some("BIRK")),
+            "BIRK IPO · 2026-11-10"
+        );
+        // A name the ASCII-only card fonts cannot print: the symbol.
+        assert_eq!(
+            k(Some("Société Générale"), Some("GLE")),
+            "GLE IPO · 2026-11-10"
+        );
+        assert_eq!(k(Some("北风机器人"), Some("NWRB")), "NWRB IPO · 2026-11-10");
+        // Neither: the word and the date.
+        assert_eq!(k(Some("Société Générale"), None), "IPO · 2026-11-10");
+        assert_eq!(k(None, None), "IPO · 2026-11-10");
+        assert_eq!(k(Some("  "), Some("")), "IPO · 2026-11-10");
+        // Escaped like any kicker.
+        assert!(card_svg(&cover(), &k(Some("A<B"), None))
+            .unwrap()
+            .contains(">A&lt;B IPO · 2026-11-10</text>"));
+    }
+
+    /// The width of `s` in `font` at `size` px with `spacing` px after each character.
+    fn width(font: &[u8], s: &str, size: f64, spacing: f64) -> f64 {
+        let face = ttf_parser::Face::parse(font, 0).unwrap();
+        let em = f64::from(face.units_per_em());
+        s.chars()
+            .map(|c| {
+                let g = face.glyph_index(c).unwrap();
+                f64::from(face.glyph_hor_advance(g).unwrap()) * size / em + spacing
+            })
+            .sum()
+    }
+
+    #[test]
+    fn the_longest_ipo_kicker_stays_clear_of_the_nameplate() {
+        let plate_end = 118.0 + width(FONTS[3], "PreBell", 64.0, -1.3);
+        // The widest name the rule lets through: every character the widest capital.
+        let widest = (0x20u8..0x7f)
+            .map(|b| (b as char).to_ascii_uppercase())
+            .max_by(|a, b| {
+                width(FONTS[1], &a.to_string(), 26.0, 2.0).total_cmp(&width(
+                    FONTS[1],
+                    &b.to_string(),
+                    26.0,
+                    2.0,
+                ))
+            })
+            .unwrap();
+        let name: String = std::iter::repeat_n(widest, KICKER_NAME_MAX).collect();
+        let k = kicker(&ipo_post(Some(&name), None));
+        assert!(k.starts_with(&name), "{k}");
+        let start = 1152.0 - width(FONTS[1], &k, 26.0, 2.0);
+        assert!(
+            start - plate_end >= 40.0,
+            "{k}: starts at {start}, nameplate ends at {plate_end}"
+        );
+        // One more would come too close: the limit is as long as it can be.
+        let longer: String = std::iter::repeat_n(widest, KICKER_NAME_MAX + 1).collect();
+        let k = format!("{longer} IPO · 2026-11-10");
+        assert!(1152.0 - width(FONTS[1], &k, 26.0, 2.0) - plate_end < 40.0);
     }
     /// 2026-11-06 09:00 ET.
     fn now() -> DateTime<Utc> {

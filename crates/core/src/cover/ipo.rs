@@ -723,7 +723,7 @@ mod tests {
     #[test]
     fn every_ipo_cover_renders_as_a_share_card() {
         for (name, f) in all() {
-            let svg = card_svg(&ipo_graphic(&f).unwrap(), "ANT · 2026-11-10").unwrap();
+            let svg = card_svg(&ipo_graphic(&f).unwrap(), "ANTHROPIC IPO · 2026-11-10").unwrap();
             let png = render_png(&svg).unwrap_or_else(|e| panic!("{name}: {e}"));
             assert_eq!(&png[..8], b"\x89PNG\r\n\x1a\n", "{name}");
             // Every character printed has a glyph in every embedded font.
