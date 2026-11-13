@@ -90,12 +90,18 @@ else, each item with an id:
 - its verified news reasons: title, outlet URL, the verbatim quote and the
   English summary (`NewsReason`);
 - when the mover reported results and PreBell has an earnings check for
-  that report: the check's headline figures and its guidance and outlook
-  quotes, verbatim;
+  that report, out before the post (before a brief's facts were built, or
+  before the close a recap describes): the check's verified headline
+  figures, each written by code from its verified value, unit and fiscal
+  period ("Revenue: $18.52 billion, reported for Q1 of fiscal 2027.", the
+  verbatim quote kept beside it for people), and its guidance quotes,
+  verbatim, but only those whose own quote names the period they apply to
+  (a guidance note has no period field, and its summary is model-written);
 - the theme group it moved with, when the facts have one;
 - dated events PreBell already stores: the company's next or latest report
-  date from the earnings calendar, and the macro releases of the next
-  seven days.
+  date from the earnings calendar with its status (reported, confirmed,
+  or "Expected report date, not confirmed by the company"; quarantined
+  dates are left out), and the macro releases of the next seven days.
 
 The prompt tells the writer to use only the pack and not what it
 remembers.
@@ -146,7 +152,10 @@ Lead's calls after the builder check:
 - **Dates.** A date in a line must be a date in the pack. Relative times
   ("next week", "下周") are refused, because code cannot check them. A
   fiscal label ("Q3", "fiscal 2027") must appear in a cited evidence
-  item.
+  item. A line that cites or writes a report date the company has not
+  confirmed must hedge it ("expected", "scheduled", "unconfirmed"; 预计,
+  预期, 暂定, 未确认), or it is refused (lead's ruling after the review of
+  PR #67).
 
 ### Code checks (before the judge)
 
@@ -161,6 +170,10 @@ Lead's calls after the builder check:
   sell, should, will rise, target price, rating words, 建议买入, 看涨 and
   the like). It applies even when the evidence itself uses the word.
 - Length limits; the Chinese line contains Chinese; no markup or links.
+- Added after the review of PR #67: no number from an analyst action
+  (its target or rating); figures in words and dates that cannot be
+  anchored (weekdays, a bare day, a month alone) are refused; the judge's
+  quoted support must cover every number and date in the line.
 
 A mover whose line fails a check is dropped; the writer is not asked
 again.

@@ -55,10 +55,12 @@ pub enum EvidenceKind { Move, News, AnalystAction, CompanyFigure, CompanyGuidanc
 pub struct Evidence {
     pub id: String,                 // "e1", "e2", … unique within a pack
     pub kind: EvidenceKind,
-    pub text: String,               // what the model reads; verbatim source text for News/AnalystAction/Company*
+    pub text: String,               // what the model reads; verbatim source text for News/AnalystAction/CompanyGuidance, code-written for CompanyFigure
     pub outlet: Option<String>,     // English outlet name, News and AnalystAction only
     pub url: Option<String>,
     pub date: Option<chrono::NaiveDate>,
+    pub quote: Option<String>,      // the verbatim source when `text` is code-written (CompanyFigure); serialised only when present
+    pub unconfirmed: bool,          // a ReportDate the company has not confirmed; serialised only when true
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -77,10 +79,11 @@ pub struct Insight { pub ticker: String, pub en: Line, pub zh: Line }
 pub struct PackInputs<'a> {
     pub session: crate::cover::Session,
     pub trading_date: chrono::NaiveDate,
+    pub as_of_utc: chrono::DateTime<chrono::Utc>,     // when the post's facts were built
     pub movers: &'a [crate::facts::Mover],            // gainers then losers, as listed
     pub themes: &'a [crate::facts::Theme],
     pub checks: &'a [crate::earnings::facts::EarningsFacts], // PreBell's published checks, any ticker
-    pub calendar: &'a [(String, chrono::NaiveDate)],  // (ticker, report date) rows near trading_date
+    pub calendar: &'a [(String, chrono::NaiveDate, ReportStatus)],  // (ticker, report date, status) rows near trading_date
     pub macro_events: &'a [(chrono::NaiveDate, String)], // (date, event name), next seven days
 }
 /// Packs for the eligible movers only, in mover order.
@@ -89,12 +92,15 @@ pub fn packs(i: &PackInputs) -> Vec<Pack>;
 pub fn outlet_name(url: &str) -> Option<String>;
 /// True when a news reason is an analyst rating action (upgrade, downgrade, initiation, price target).
 pub fn is_analyst_action(r: &crate::facts::NewsReason) -> bool;
+/// Whether a guidance quote itself names the period it applies to.
+pub fn names_period(quote: &str) -> bool;
+pub enum ReportStatus { Reported, Confirmed, Unconfirmed } // earnings_calendar.status; quarantined rows are never read
 ```
 
 Decisions the implementer cannot make alone:
-- Evidence order per pack: Move, then each news reason (News or AnalystAction; `text` is the reason's `quote`, `outlet` from `outlet_name`), then for a matching earnings check (same ticker, `filing_date` within 3 calendar days before or on `trading_date`): one `CompanyFigure` per verified headline metric (text = the figure's `quote`) and one `CompanyGuidance` per guidance `Note` (text = `quote`), then Theme (when the mover is a member of a theme), ReportDate (calendar rows for the ticker within 100 days), MacroEvent (each event in the next seven days).
+- Evidence order per pack: Move, then each news reason (News or AnalystAction; `text` is the reason's `quote`, `outlet` from `outlet_name`), then for a matching earnings check (same ticker, `filing_date` within 3 calendar days before or on `trading_date`, and `accepted_at` before the premarket post's `as_of_utc`, or before the regular-session close for a recap): one `CompanyFigure` per verified headline metric, its `text` written by code from the verified fields ("Revenue: $18.52 billion, reported for Q1 of fiscal 2027.": metric label, `fmt_value` of the value and unit, the period from `fiscal_period`, the word "reported") and the verbatim `quote` kept in `Evidence.quote`; and one `CompanyGuidance` per guidance `Note` whose verbatim `quote` names its period (`names_period`: a quarter, a half, a fiscal or calendar year, "full year"), text = `quote` (`summary_en` is model-written and never used; a note without a period is left out); then Theme (when the mover is a member of a theme), ReportDate (calendar rows for the ticker within 100 days: "<name> reported results on <date>", "<name>'s report date is confirmed for <date>", or for an unconfirmed row "Expected report date, not confirmed by the company: <date>" with `unconfirmed` set), MacroEvent (each event in the next seven days). An identical text is stored once per outlet (two outlets carrying it are two items).
 - Eligible means: at least one `News`, `CompanyFigure` or `CompanyGuidance` item. `AnalystAction`, `Theme`, `ReportDate`, `MacroEvent` and `Move` alone do not make a mover eligible.
-- `is_analyst_action`: case-insensitive match on the reason's title, quote or summary for `upgrad`, `downgrad`, `initiat(es|ed|ing) coverage`, `price target`, `raises target`, `cuts target`, `overweight`, `underweight`, `outperform`, `underperform`.
+- `is_analyst_action` (revised after review): reads the reason's quote and summary, not its headline. Unambiguous rating wording counts alone (`price target`, `price objective`, `initiated/started coverage`, `to buy from hold`, `overweight`, `equal-weight`, `sector weight`, `buy rating` and the like); words with other meanings (`upgrade`, `downgrade`, `outperform`, `target`, `upside`, `rating`) count only beside a named broker or "analyst", and a broker that is the mover itself does not count.
 - Strip the invisible characters `ipo::news::visible` strips from every `text` before storing it (widen that function to `pub(crate)` if it is private; do not copy its character list).
 
 - [ ] **Step 1: Write the failing tests** in `pack.rs`: `eligible_with_a_news_reason`, `not_eligible_with_only_a_theme_fallback`, `not_eligible_with_only_an_analyst_action`, `a_mover_with_news_and_a_report_gets_its_check_figures_and_guidance`, `a_check_older_than_three_days_is_left_out`, `outlet_name_uses_the_list_then_the_host` (asserts `reuters.com` → `"Reuters"`, `https://www.marketscreener.com/x` → `"marketscreener.com"`), `analyst_actions_are_recognised` (an upgrade title is, an earnings title is not), `evidence_ids_are_unique_and_ordered`, `invisible_characters_are_stripped` (input `"on \u{200b}the Nasdaq"` → `"on the Nasdaq"`).
@@ -198,7 +204,7 @@ pub fn parse(reply: &serde_json::Value, insights: &[Insight]) -> Vec<Verdict>;
 /// True when every claim's `support` is found verbatim in the named evidence item of this pack.
 pub fn support_confirmed(pack: &Pack, claims: &[Claim]) -> bool;
 /// The final answer for one mover: every flag true, at least one claim per language, and support confirmed for both.
-pub fn passed(pack: &Pack, v: &Verdict) -> bool;
+pub fn passed(pack: &Pack, insight: &Insight, v: &Verdict) -> bool; // also: every number and date of each line within that language's confirmed support
 pub async fn judge(llm: &dyn LlmProvider, packs: &[Pack], insights: &[Insight]) -> Result<Vec<Verdict>, ProviderError>;
 ```
 
@@ -232,7 +238,7 @@ Decisions:
 
 Decisions:
 - `http.rs` is the recording HTTP layer, spend cap, price table, ledger and key loading from `tools/llm-eval/src/main.rs` on branch `eval/claude-vs-deepseek` (`git show eval/claude-vs-deepseek:tools/llm-eval/src/main.rs`): copy `prices`, `deepseek_peak`, `Call`, `Budget`, `read_ledger`, `RecordingHttp`, `read_usage`, `price_call`, `load_keys`, unchanged apart from module visibility. Copy that crate's `Cargo.toml` dependencies.
-- CLI: `cargo run --release -- run --facts DIR --out DIR --dev-vars PATH [--budget 3.0] [--only SUBSTR]`. `--facts` holds files named as `fetch-facts.sh` saves them: `premarket_<date>.json`, `recap_<date>.json`, `earnings_<TICKER>_<accession>.json`, plus `calendar.json` (`[[ticker, "YYYY-MM-DD"], …]`) and `events.json` (`[["YYYY-MM-DD", name], …]`).
+- CLI: `cargo run --release -- run --facts DIR --out DIR --dev-vars PATH [--budget 3.0] [--only SUBSTR]`. `--facts` holds files named as `fetch-facts.sh` saves them: `premarket_<date>.json`, `recap_<date>.json`, `earnings_<TICKER>_<accession>.json`, plus `calendar.json` (`[[ticker, "YYYY-MM-DD", status], …]`, every status but quarantined) and `events.json` (`[["YYYY-MM-DD", name], …]`).
 - For each brief or recap bundle: build `PackInputs` (every `earnings_*` bundle as `checks`), `packs`, one writer call, `check` each insight, then one judge call per judge provider over the insights that passed `check`, `passed` per mover. A post with no eligible mover makes no call.
 - `fetch-facts.sh` (read-only): lists `facts_r2_key` for posts with `content_type IN ('premarket','recap')` and `trading_date >= date('now','-14 day')`, and for `content_type='earnings'` in the last 21 days, with `wrangler d1 execute prebell --remote --json`, saves each with `wrangler r2 object get prebell-facts/<key> --remote --file`, and writes `calendar.json` and `events.json` from the calendar and macro-events tables (read their schemas in `migrations/0003_earnings.sql` and `0008_macro_events.sql`). It runs from `crates/generator` so wrangler finds its config.
 - The budget is checked before every call; when it would be passed the tool stops, keeps what it has written and exits non-zero with a message naming the spend so far.
@@ -273,3 +279,18 @@ This task spends money (approved by Rick, 2026-11-13) and is run by the lead or 
 - [ ] **Step 2:** `cargo run --release -- run --facts facts --out out --dev-vars <path to the repo's env file> --budget 3.0`, then `seed`, then `page`. Report the spend from `out/spend.jsonl`, how many movers were eligible, how many lines survived `check`, and each judge's pass count.
 - [ ] **Step 3:** Read twenty lines yourself before handing over. If the writer's lines are systematically refused by one rule (for example attribution), fix the prompt, bump `WRITER_VERSION`, and re-run within the budget; record what changed.
 - [ ] **Step 4:** Give Rick `out/label.html`. When `labels.json` comes back, run `score` and bring him `out/report.md` with a recommendation on the judge and on whether to write Plan 2.
+
+## Changes after the review of PR #67 (2026-11-13, the lead's rulings)
+
+The review came back "fix first" (4 high, 9 medium, 10 low findings). The interfaces and rules above are updated where these changed them:
+
+- **Company figures are written by code** from the verified value, unit and fiscal period; the verbatim quote is kept in `Evidence.quote` and never allows a number or confirms support. A table row's quote ("Total revenue 18,517 14,883") holds other periods' cells.
+- **Guidance needs its period in its own quote** (`names_period`); `Note` has no period field and `summary_en` is model-written. The earnings module's stored schema is unchanged.
+- **A check counts only when it was out before the post**: accepted before a premarket post's `as_of_utc`, or before the close a recap describes.
+- **Unconfirmed report dates are included, marked**: `fetch-facts.sh` keeps every status but quarantined, `calendar.json` rows are `[ticker, date, status]`, and a line that cites (or writes) an unconfirmed date must hedge it with `expected`, `scheduled` or `unconfirmed` (en) or `预计`, `预期`, `暂定`, `未确认` (zh) (check rule 9).
+- **Code checks, widened**: numbers never come from an analyst action; M/D dates, bare days, weekdays, Chinese-numeral dates, years with 年 and bare months are checked or refused; figures in words (ten percent, 百分之, 三成, 倍) are refused; fiscal labels include 4Q, H1/H2, "fourth-quarter", 四季度, 上/下半年; more relative-time words in both languages; target, rating, consensus and prediction words are refused in both languages, hyphenated forms included, with only named compounds (sell-off, buy-side, sell-side, buy-back) exempt; "hold", 持有, Fortune and 市场观察 are refused only where they are advice or attribution; semicolons are refused and abbreviations ("St.", "Inc.") are not sentence ends.
+- **The judge's pass** also needs every number and date of each line inside that language's confirmed support spans, and a generic span ("the company said") confirms nothing.
+- **Seeding and scoring**: one row per mover per judge call, the original line sent as a control in another round, a wrong line counted against a judge only when that judge passed its original, failed calls and omitted movers left out and counted, the false-reject rate on controls reported, `outlet_swap` trading two cited outlets so it reaches the judges, and the bar also needs 50 judge-passed lines read. `seed` prints its planned calls and expected cost and refuses to start past the cap.
+- **Re-runs**: `run` skips posts already complete unless `--fresh` and finishes a part-done post without paying for its writer again; labels and seeds made for older text are left out of the score.
+- **The page** shows the whole pack with the cited items marked, and keys saved choices by the line's text and writer version. `report.md` has a "Limits of this trial" section (today's calendar and macro rows are used for past posts).
+
