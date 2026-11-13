@@ -306,7 +306,11 @@ fn worded_figures(text: &str) -> Vec<String> {
 fn hook_count(text: &str) -> Option<String> {
     static R: OnceLock<Regex> = OnceLock::new();
     let r = R.get_or_init(|| re(r"[一二三四五六七八九十两]+[大个项条只点家季]"));
-    r.find(text).map(|m| m.as_str().to_string())
+    r.find_iter(text)
+        // "一个" is the everyday "a"; 第三季度 names a quarter.
+        .filter(|m| m.as_str() != "一个")
+        .find(|m| !(m.as_str().ends_with('季') && text[..m.start()].ends_with('第')))
+        .map(|m| m.as_str().to_string())
 }
 
 fn refused_en() -> &'static [Regex] {
@@ -493,6 +497,32 @@ fn zh_number(s: &str) -> Option<i64> {
     Some(t * 10 + o)
 }
 
+/// Words after "the Nth" that make it a count, not a day of the month:
+/// "the 10th straight quarter", "the 3rd time".
+const COUNT_NOUNS: &[&str] = &[
+    "straight",
+    "consecutive",
+    "quarter",
+    "quarters",
+    "year",
+    "years",
+    "time",
+    "times",
+    "anniversary",
+    "largest",
+    "biggest",
+    "highest",
+    "lowest",
+    "best",
+    "worst",
+    "most",
+    "month",
+    "week",
+    "day",
+    "place",
+    "percentile",
+];
+
 /// A date written in a line: its text, and the calendar date, or `None`
 /// when it does not exist ("November 31") or cannot be anchored ("the
 /// 20th", "Friday", "本月20日").
@@ -545,11 +575,13 @@ fn date_marks(text: &str, year_of: NaiveDate) -> Vec<Mark> {
             // ("on the 20th.", "the 20th of"); "the 10th straight quarter"
             // is a count.
             if k == 6 {
-                let rest = text[e..].trim_start();
-                let day = rest.is_empty()
-                    || rest.starts_with(|c: char| ",.;:!?)，。".contains(c))
-                    || rest.to_ascii_lowercase().starts_with("of ");
-                if !day {
+                let next: String = text[e..]
+                    .trim_start()
+                    .chars()
+                    .take_while(|c| c.is_ascii_alphabetic())
+                    .collect::<String>()
+                    .to_ascii_lowercase();
+                if COUNT_NOUNS.contains(&next.as_str()) {
                     continue;
                 }
             }
@@ -841,21 +873,64 @@ fn written_dates(text: &str, year: Option<NaiveDate>) -> Vec<(String, NaiveDate)
         .collect()
 }
 
-/// The clause of `text` holding `part`: between commas, semicolons, colons,
-/// sentence ends and the conjunctions that open a new clause ("and", "but",
-/// "while", "whereas", 并, 而, 但). A decimal point is not a boundary.
-fn clause_of(text: &str, part: &str) -> String {
+/// Where the clause holding byte `at` starts: after the last comma,
+/// semicolon, colon, sentence end or clause-opening conjunction before it
+/// ("and", "but", "while", "whereas"; 并, 而, 但 only before 将, 于 or 在, so
+/// 合并 is one word). A decimal point is not a boundary.
+fn clause_start(text: &str, at: usize) -> usize {
     static R: OnceLock<Regex> = OnceLock::new();
     let r = R.get_or_init(|| {
-        re(r"[,，;；:：。!?！？、]|\.(?:\s|$)|\s(?:and|but|while|whereas)\s|并|而|但")
+        re(r"[,，;；:：。!?！？、]|\.(?:\s|$)|\s(?:and|but|while|whereas)\s|[并而但][将于在]")
     });
-    let at = text.find(part).unwrap_or(0);
-    let start = r.find_iter(&text[..at]).last().map_or(0, |m| m.end());
-    let end = r
-        .find_iter(&text[at + part.len().min(text.len() - at)..])
-        .next()
-        .map_or(text.len(), |m| at + part.len() + m.start());
-    text[start..end].to_string()
+    r.find_iter(&text[..at]).last().map_or(0, |m| {
+        if m.as_str().starts_with(['并', '而', '但']) {
+            m.start() + '并'.len_utf8()
+        } else {
+            m.end()
+        }
+    })
+}
+
+/// Whether a hedge word governs the date written as `raw` in `text`: one
+/// of the six words before it in its own clause, or of the three after it
+/// ("expected to report results on November 20", "a report scheduled for
+/// November 20", "November 20, an expected date"); in Chinese, within eight
+/// characters before it in its clause or six after it ("预计于11月20日",
+/// "财报暂定于11月20日公布"). A hedge about something else earlier in the
+/// clause ("Apple's expected revenue … at its November 20 report") does
+/// not count.
+fn hedge_governs(text: &str, raw: &str, lang: Lang) -> bool {
+    let Some(at) = text.find(raw) else {
+        return false;
+    };
+    let before = &text[clause_start(text, at)..at];
+    let after_all = &text[at + raw.len()..];
+    let after = &after_all[..after_all.find(['。', ';', '；']).unwrap_or(after_all.len())];
+    match lang {
+        Lang::En => {
+            let words = |s: &str| -> Vec<String> {
+                s.split(|c: char| !c.is_ascii_alphanumeric())
+                    .filter(|w| !w.is_empty())
+                    .map(str::to_ascii_lowercase)
+                    .collect()
+            };
+            let b = words(before);
+            let a = words(after);
+            b.iter()
+                .rev()
+                .take(6)
+                .chain(a.iter().take(3))
+                .any(|w| HEDGE_EN.contains(&w.as_str()))
+        }
+        Lang::Zh => {
+            let b: String = {
+                let chars: Vec<char> = before.chars().collect();
+                chars[chars.len().saturating_sub(8)..].iter().collect()
+            };
+            let a: String = after.chars().take(6).collect();
+            HEDGE_ZH.iter().any(|w| b.contains(w) || a.contains(w))
+        }
+    }
 }
 
 /// The pack's trading date (its move's date), for dates written without a year.
@@ -1079,7 +1154,7 @@ fn check_line(pack: &Pack, line: &Line, lang: Lang) -> Vec<String> {
             Lang::En => HEDGE_EN.iter().any(|w| has_word(clause, w)),
             Lang::Zh => HEDGE_ZH.iter().any(|w| clause.contains(w)),
         };
-        // Each unconfirmed date the line writes is hedged in its own clause
+        // Each unconfirmed date the line writes has a hedge that governs it
         // ("预计营收…，并将于11月20日公布财报" hedges the revenue, not the
         // date); a line that only cites the item hedges it anywhere.
         let mut unhedged = false;
@@ -1087,7 +1162,7 @@ fn check_line(pack: &Pack, line: &Line, lang: Lang) -> Vec<String> {
         for (raw, d) in written_dates(&watch, year) {
             if unconfirmed.iter().any(|e| e.date == Some(d)) && !firm.contains(&d) {
                 dated = true;
-                if !hedged_in(&clause_of(&watch, &raw)) {
+                if !hedge_governs(&watch, &raw, lang) {
                     unhedged = true;
                 }
             }
@@ -1153,16 +1228,14 @@ pub fn refused_wording(text: &str, analyst_cited: bool) -> Vec<String> {
 }
 
 /// Verbs that make "buy" and "sell" a deal, not advice: "agreed to sell its
-/// Texas factory", "a deal to buy a chip designer".
+/// Texas factory", "a deal to buy a chip designer". Not "will", "would" or
+/// "plan": "investors would buy the shares" is advice.
 const DEAL_WORDS: &[&str] = &[
     "agreed",
     "agree",
     "agrees",
     "agreement",
     "deal",
-    "plans",
-    "plan",
-    "planned",
     "offer",
     "offered",
     "offers",
@@ -1172,9 +1245,6 @@ const DEAL_WORDS: &[&str] = &[
     "decided",
     "intends",
     "intend",
-    "would",
-    "will",
-    "move",
     "talks",
     "seeks",
     "seeking",
@@ -1203,13 +1273,21 @@ const ADVICE_LEAD: &[&str] = &[
     "from",
 ];
 
+/// The words before a rating: "downgraded Apple to", "moved the stock to".
+fn rating_frame() -> &'static Regex {
+    static R: OnceLock<Regex> = OnceLock::new();
+    R.get_or_init(|| {
+        re(r"(?:upgrad|downgrad|cut|lower|rais|mov|reiterat|maintain)\w*\s+(?:[\w.'’-]+\s+){0,3}to\s+$")
+    })
+}
+
 /// "buy", "sell", "target", "neutral", "upside" and "downside" in their
 /// advice, rating or prediction senses, allowed in their plain senses.
 fn advice_words(text: &str, analyst_cited: bool) -> Vec<String> {
     static R: OnceLock<[Regex; 4]> = OnceLock::new();
     let [trade, target, neutral, side] = R.get_or_init(|| {
         [
-            re(r"(?i)(?:buy|buys|buying|sell|sells|selling)"),
+            re(r"(?i)(?:buying|buys|buy|selling|sells|sell)"),
             re(r"(?i)(?:(?:stock|share)\s+targets?|targets?\s+(?:to|of)\s+\$|targets?\s+(?:on|for)\s+(?:the\s+)?(?:stock|shares|company)|targets?)"),
             re(r"(?i)neutral"),
             re(r"(?i)(?:upside|downside)"),
@@ -1267,6 +1345,26 @@ fn advice_words(text: &str, analyst_cited: bool) -> Vec<String> {
                 )
             });
         let deal = before.iter().any(|w| DEAL_WORDS.contains(&w.as_str()));
+        // A rating: "downgraded Apple to sell", "upgraded the stock to buy".
+        let rated_to = rating_frame().is_match(&lower[..m.start()]);
+        // A noun: "a buy", "a compelling buy", "an attractive buy" (an "a"
+        // within three words, with no "to" between), or a buy at a clause
+        // end; and "buying opportunity".
+        let mut noun = false;
+        for w in before.iter().take(3) {
+            if w == "to" {
+                break;
+            }
+            if w == "a" || w == "an" {
+                noun = true;
+                break;
+            }
+        }
+        let word = m.as_str().to_ascii_lowercase();
+        noun |= (word == "buy" || word == "sell")
+            && after.starts_with([',', '.', ';', ':', '!', '?'])
+            && before.first().is_none_or(|w| w != "to");
+        let opportunity = after.starts_with(" opportunit");
         let sentence_start = lower[..m.start()]
             .trim_end()
             .chars()
@@ -1286,7 +1384,13 @@ fn advice_words(text: &str, analyst_cited: bool) -> Vec<String> {
         ]
         .iter()
         .any(|a| after.starts_with(a));
-        if rating || (!deal && (led || sentence_start || object)) {
+        if rating
+            || rated_to
+            || noun
+            || opportunity
+            || analyst_cited
+            || (!deal && (led || sentence_start || object))
+        {
             out.push(m.as_str().to_string());
         }
     }
@@ -2366,6 +2470,122 @@ mod tests {
                 false,
                 HZ,
                 "据路透社报道，苹果营收42亿美元，财报暂定于11月20日公布。",
+                &["e2", "e11"],
+            ),
+        ];
+        let mut wrong = vec![];
+        for (refuse, hook, watch, cites) in en_cases {
+            let f = check(&p, &insight(line(hook, watch, cites), zh_ok()));
+            if f.is_empty() == *refuse {
+                wrong.push(format!("{watch} -> {f:?}"));
+            }
+        }
+        for (refuse, hook, watch, cites) in zh_cases {
+            let f = check(&p, &insight(en_ok(), line(hook, watch, cites)));
+            if f.is_empty() == *refuse {
+                wrong.push(format!("{hook} {watch} -> {f:?}"));
+            }
+        }
+        assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+    }
+
+    /// Round 3 review inputs (M1, M2, L1, L2, L4), as (language, should
+    /// refuse, hook, watch, cites), with an unconfirmed report date on
+    /// November 20 (e11).
+    #[test]
+    fn the_round_three_probe_inputs() {
+        const H: &str = "Guidance sets the next test";
+        const HZ: &str = "业绩指引成为下一道考验";
+        let mut p = review_pack();
+        p.evidence.push(Evidence {
+            id: "e11".into(),
+            kind: EvidenceKind::ReportDate,
+            text: "Expected report date, not confirmed by the company: November 20, 2026.".into(),
+            outlet: None,
+            url: None,
+            date: Some(d("2026-11-20")),
+            quote: None,
+            unconfirmed: true,
+        });
+        let en_cases: &[(bool, &str, &str, &[&str])] = &[
+            // M1: a rating after "upgraded/downgraded … to".
+            (true, H, "CNBC reports Morgan Stanley downgraded Apple to sell, while Reuters reports revenue of $4.2 billion before November 19.", &["e2", "e3", "e5"]),
+            (true, H, "CNBC reports Morgan Stanley upgraded Apple to buy, while Reuters reports revenue of $4.2 billion before November 19.", &["e2", "e3", "e5"]),
+            (true, H, "Reuters reports Apple expects revenue of $4.2 billion, and the stock was downgraded to sell before November 19.", &["e2", "e5"]),
+            // M1: any buy or sell beside a cited analyst action.
+            (true, H, "CNBC reports Morgan Stanley turned to Apple as Reuters reports it will sell more phones before November 19.", &["e2", "e3", "e5"]),
+            // M2: advice the deal words used to hide, and buy as a noun.
+            (true, H, "Reuters reports Apple expects revenue of $4.2 billion, and investors would buy the shares before its November 19 report.", &["e2", "e5"]),
+            (true, H, "Reuters reports Apple expects revenue of $4.2 billion, which investors who plan to buy the stock can test on November 19.", &["e2", "e5"]),
+            (true, H, "Reuters reports the deal and revenue of $4.2 billion create a buying opportunity before November 19.", &["e2", "e5"]),
+            (true, H, "Reuters reports revenue of $4.2 billion, which makes the stock a compelling buy before November 19.", &["e2", "e5"]),
+            (true, H, "Reuters reports revenue of $4.2 billion, an attractive buy before the November 19 report.", &["e2", "e5"]),
+            // Deal senses still pass.
+            (false, H, "Reuters reports Apple agreed to buy a chip designer before its November 19 report.", &["e2", "e5"]),
+            (false, H, "Reuters reports Apple will buy back $1.0 billion of stock before its November 19 report.", &["e2", "e5"]),
+            (false, H, "Reuters reports Apple sells iPhones in Texas, with revenue of $4.2 billion before November 19.", &["e2", "e5"]),
+            (false, H, "Reuters reports Apple signed a deal to sell its Texas factory before its November 19 report.", &["e2", "e5"]),
+            // L1: a bare day mid-clause is refused; a count is not a day.
+            (true, H, "Reuters reports revenue of $4.2 billion before results on the 20th ahead of the CPI.", &["e2"]),
+            (false, H, "Reuters reports revenue of $4.2 billion for the 10th straight quarter before November 19.", &["e2", "e5"]),
+            (false, H, "Reuters reports revenue of $4.2 billion, above $4 billion for the 3rd time, before November 19.", &["e2", "e5"]),
+            // L2: a hedge right after the date's comma counts.
+            (false, H, "Reuters reports revenue of $4.2 billion, and Apple reports on November 20, an expected date.", &["e2", "e11"]),
+            // L4: the hedge must govern the date, not something earlier.
+            (true, H, "Reuters reports Apple's expected revenue of $4.2 billion will be tested at its November 20 report.", &["e2", "e11"]),
+            (false, H, "Reuters reports revenue of $4.2 billion, and Apple is expected to report results on November 20.", &["e2", "e11"]),
+            (false, H, "Reuters reports revenue of $4.2 billion before a report scheduled for November 20.", &["e2", "e11"]),
+        ];
+        let zh_cases: &[(bool, &str, &str, &[&str])] = &[
+            // L2: everyday 一个 and a quarter's name in a hook are fine.
+            (
+                false,
+                "苹果迎来一个关键节点",
+                "据路透社报道，苹果预计营收42亿美元，11月19日的财报将检验这一预期。",
+                &["e2", "e5"],
+            ),
+            (
+                false,
+                "第三季度成为关键",
+                "据路透社报道，苹果预计营收42亿美元，11月19日的财报将检验这一预期。",
+                &["e2", "e5"],
+            ),
+            (
+                true,
+                "苹果三大看点",
+                "据路透社报道，苹果预计营收42亿美元，11月19日的财报将检验这一预期。",
+                &["e2", "e5"],
+            ),
+            // L2: 合并 does not split the hedge from its date.
+            (
+                false,
+                HZ,
+                "据路透社报道，苹果营收42亿美元，苹果预计合并后于11月20日公布财报。",
+                &["e2", "e11"],
+            ),
+            // L4: 预计 about the revenue does not hedge the date.
+            (
+                true,
+                HZ,
+                "据路透社报道，预计营收42亿美元的苹果将于11月20日公布财报。",
+                &["e2", "e11"],
+            ),
+            (
+                true,
+                HZ,
+                "据路透社报道，苹果预计营收42亿美元，并将于11月20日公布财报。",
+                &["e2", "e11"],
+            ),
+            (
+                false,
+                HZ,
+                "据路透社报道，苹果营收42亿美元，财报暂定于11月20日公布。",
+                &["e2", "e11"],
+            ),
+            (
+                false,
+                HZ,
+                "据路透社报道，苹果营收42亿美元，财报于11月20日公布（未确认）。",
                 &["e2", "e11"],
             ),
         ];

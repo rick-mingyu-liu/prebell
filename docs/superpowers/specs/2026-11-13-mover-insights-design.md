@@ -170,6 +170,20 @@ Lead's calls after the builder check:
   sell, should, will rise, target price, rating words, 建议买入, 看涨 and
   the like). It applies even when the evidence itself uses the word.
 - Length limits; the Chinese line contains Chinese; no markup or links.
+- Only the judge can catch (code lets these through on purpose, after the
+  third review): a reordered consensus phrase ("above the expectations of
+  analysts"); 持有 read as "holds shares" when it is advice
+  ("投资者可继续持有股份至11月19日"); a bare "target" in a line that does
+  not cite the analyst item ("after Morgan Stanley lifted its target");
+  also a colon joining a second clause, and an abbreviation hiding a
+  sentence end.
+- Added after the third review: "buy" or "sell" after "upgraded/downgraded
+  … to", as a noun ("a compelling buy"), in "buying opportunity", or in
+  any line citing an analyst action is refused; "will", "would" and "plan"
+  no longer mark a deal; "the Nth" is a day unless a count follows ("the
+  10th straight quarter"); an unconfirmed date's hedge must govern it
+  (within six words before it in its clause or three after; in Chinese
+  eight characters before or six after).
 - Added after the second review: the refusal list targets advice senses,
   not bare words ("agreed to sell" and "targets a launch" pass; "a buy",
   "price target" and "investors may wish to buy" do not), and refuses
