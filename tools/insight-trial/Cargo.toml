@@ -1,0 +1,21 @@
+# Mover insights, offline trial: runs the writer, the code checks and both
+# judges from prebell-core over saved fact bundles, seeds wrong lines, and
+# writes a labelling page and a judge score. Native only and outside the main
+# workspace, so the Worker build and the root Cargo.lock are untouched.
+[package]
+name = "insight-trial"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[dependencies]
+prebell-core = { path = "../../crates/core" }
+async-trait = "0.1"
+chrono = "0.4"
+futures = "0.3"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["macros", "rt", "time"] }
