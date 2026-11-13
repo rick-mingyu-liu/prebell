@@ -263,13 +263,37 @@ fn fact_claims<'a>(pack: &Pack, claims: &'a [Claim]) -> Vec<&'a Claim> {
         .collect()
 }
 
+/// A span shorter than the minimum that still holds a figure or date the
+/// claim itself states ("for $4B" for "The sale price is $4B"): exact, so
+/// it confirms. A short span with no such figure does not.
+fn pins_a_stated_figure(pack: &Pack, support: &str, claim: &str) -> bool {
+    let values = |t: &str| -> Vec<f64> {
+        crate::numbers::extract(t, Lang::En)
+            .iter()
+            .map(|n| n.value.abs())
+            .collect()
+    };
+    let (s, c) = (values(support), values(claim));
+    let figure = s.iter().any(|a| {
+        c.iter()
+            .any(|b| a.max(*b) > 0.0 && (a - b).abs() / a.max(*b) < 0.006)
+    });
+    let date = year_of(pack).is_some_and(|y| {
+        let d = super::check::dates_in(claim, Lang::En, y);
+        super::check::dates_in(support, Lang::En, y)
+            .iter()
+            .any(|x| d.contains(x))
+    });
+    figure || date
+}
+
 /// True when every claim's `support` is found verbatim in the named
 /// evidence item of this pack. A claim that only states the attribution is
 /// ignored.
 pub fn support_confirmed(pack: &Pack, claims: &[Claim]) -> bool {
     fact_claims(pack, claims).iter().all(|c| {
         let support = norm(&c.support);
-        long_enough(&support)
+        (long_enough(&support) || pins_a_stated_figure(pack, &c.support, &c.claim))
             && pack
                 .evidence
                 .iter()
@@ -606,17 +630,19 @@ mod tests {
         assert!(!passed(&p, &insight("AAPL"), &v));
     }
 
-    /// Review Focus 1: a short or rewritten support for a swapped meaning
-    /// fails here. A long verbatim span about the other figure ("revenue of
+    /// Review Focus 1: a rewritten support for a swapped meaning fails
+    /// here. A long verbatim span about the other figure ("revenue of
     /// $4.2 billion" for "a $4.2 billion buyback") is confirmed: catching
     /// that is the judge's job, which the seeded `number_swap` lines measure.
     #[test]
     fn a_short_or_rewritten_support_for_a_swapped_meaning_fails() {
         let p = pack(TEXT);
         let mut v = verdict();
+        // A short span holding the claim's own figure is exact and
+        // confirms (trial run 4, NRG's "for $4B"): the swapped meaning in it
+        // is the judge's to catch.
         v.en_claims = vec![claim("a $4.2 billion buyback", "e2", "$4.2 billion")];
-        assert!(!support_confirmed(&p, &v.en_claims));
-        assert!(!passed(&p, &insight("AAPL"), &v));
+        assert!(support_confirmed(&p, &v.en_claims));
         v.en_claims = vec![claim(
             "a $4.2 billion buyback",
             "e2",
@@ -846,5 +872,41 @@ mod tests {
             &[insight("AAPL")],
         );
         assert!(!v[0].no_personal_allegation);
+    }
+
+    /// Final run (2026-11-13): DeepSeek supported NRG's "The sale price is
+    /// $4B" with "for $4B", exact but under the minimum. A short span is
+    /// accepted when it holds a figure or date the claim states.
+    #[test]
+    fn a_short_exact_span_with_the_claims_figure_confirms() {
+        let p = pack("after saying it agreed to sell six natural gas generation assets to independent power company LS Power for $4B");
+        assert!(support_confirmed(
+            &p,
+            &[claim("The sale price is $4B", "e2", "for $4B")]
+        ));
+        assert!(support_confirmed(
+            &p,
+            &[claim("出售价格为40亿美元", "e2", "for $4B")]
+        ));
+        // Still verbatim in the named item, and still the claim's figure.
+        assert!(!support_confirmed(
+            &p,
+            &[claim("The sale price is $4B", "e1", "for $4B")]
+        ));
+        assert!(!support_confirmed(
+            &p,
+            &[claim("The sale price is $5B", "e2", "for $4B")]
+        ));
+        // A short span with no figure stays refused.
+        assert!(!support_confirmed(
+            &p,
+            &[claim("NRG is selling assets", "e2", "to sell")]
+        ));
+        // A short date span the claim states.
+        let q = pack("Apple will list on the Nasdaq on November 19");
+        assert!(support_confirmed(
+            &q,
+            &[claim("It lists on November 19", "e2", "November 19")]
+        ));
     }
 }
