@@ -41,6 +41,23 @@ env -u CARGO_TARGET_DIR cargo run --release -- run \
     --facts facts --out out --dev-vars ../../crates/generator/.dev.vars --budget 3.0
 ```
 
+Then, in the same directory:
+
+```sh
+# 3. Seeded wrong lines: up to five broken variants of each line that passed
+#    the checks (a swapped number, a flipped direction, a swapped outlet, a
+#    number changed in the Chinese line only, an advice clause), each judged
+#    by both judges. Shares the spend ledger and cap with `run`.
+env -u CARGO_TARGET_DIR cargo run --release -- seed \
+    --out out --dev-vars ../../crates/generator/.dev.vars --budget 3.0
+
+# 4. The labelling page for Rick: out/label.html (no network, verdicts hidden).
+env -u CARGO_TARGET_DIR cargo run --release -- page --out out
+
+# 5. When labels.json comes back from the page's "Save labels" button:
+env -u CARGO_TARGET_DIR cargo run --release -- score --out out --labels ~/Downloads/labels.json
+```
+
 `--dev-vars` names the file that holds the keys: in the main checkout,
 `crates/generator/.dev.vars` (a git worktree has none, so give its full path).
 `--only SUBSTR` keeps the posts whose file name contains it (for example
@@ -57,3 +74,18 @@ spend ledger is kept.
 - `out/posts.jsonl`: per post, how many movers it lists and how many were
   eligible.
 - `out/spend.jsonl`: one line per model call.
+- `out/seeded.jsonl`: one object per wrong variant: `post`, `ticker`, `kind`,
+  the variant `insight`, its `check` result and, when the checks let it
+  through, each judge's answer (a judge "caught" it when it did not pass it).
+- `out/label.html`: about 60 lines in random order (fixed seed): every line a
+  judge said no to or the judges disagreed on, then judge-passed lines at
+  random. `--cards N` changes the number. Choices are kept in the browser's
+  storage; "Save labels" downloads `labels.json`
+  (`[{"post", "ticker", "label"}]`, label `fine`, `wrong_fact` or
+  `advice_or_informal`).
+- `out/report.md` (from `score`): each judge's agreement with Rick's labels
+  (a judge pass counts as "Fine"), the judge-passed lines Rick marked wrong in
+  full, seeded recall overall and by kind, what the code checks refused,
+  eligibility, spend, the judge to choose (higher agreement, ties broken by
+  seeded recall) and whether the bar is met (no judge-passed line marked
+  wrong, seeded recall at least 90%).

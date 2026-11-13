@@ -8,8 +8,15 @@
 //! ours (`http.rs`): it prices each call and enforces a hard spend cap that
 //! spans runs (the ledger is `OUT/spend.jsonl`).
 //!
+//! `seed` makes deliberately wrong variants of the lines that passed the
+//! checks and asks each judge about them; `page` writes the labelling page;
+//! `score` reads the owner's labels back and writes the judge report.
+//!
 //! ```text
 //! cargo run --release -- run --facts DIR --out DIR --dev-vars PATH [--budget 3.0] [--only SUBSTR]
+//! cargo run --release -- seed --out DIR --dev-vars PATH [--budget 3.0]
+//! cargo run --release -- page --out DIR [--cards 60]
+//! cargo run --release -- score --out DIR --labels FILE
 //! cargo run --release -- events-json ROWS.json > events.json
 //! ```
 //!
@@ -17,6 +24,9 @@
 //! request header or key is ever printed or written.
 
 mod http;
+mod page;
+mod score;
+mod seed;
 
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
@@ -441,6 +451,62 @@ pub(crate) async fn run(inputs: &Inputs, m: &Models, out: &Path) -> Result<(), S
     Ok(())
 }
 
+/// `seed`: wrong variants of every line in `lines.jsonl` that passed the
+/// checks, written to `seeded.jsonl` (fresh each run). The variants the
+/// checks let through go to each judge, one call per judge per post; each
+/// variant is sent under its own name ("AAPL-v2") so one call can hold
+/// several variants of one mover.
+pub(crate) async fn seed(m: &Models, out: &Path) -> Result<(), String> {
+    let records: Vec<Record> = read_jsonl(&out.join("lines.jsonl"));
+    let path = out.join("seeded.jsonl");
+    fs::write(&path, "").expect("seeded.jsonl");
+    let all = seed::seed_records(&records);
+    let mut posts: Vec<&str> = all.iter().map(|(s, _)| s.post.as_str()).collect();
+    posts.dedup();
+    for post in posts {
+        let mut rows: Vec<seed::Seeded> = Vec::new();
+        let mut sent: Vec<(usize, Pack, Insight)> = Vec::new();
+        for (s, pack) in all.iter().filter(|(s, _)| s.post == post) {
+            if s.check.is_empty() {
+                let name = format!("{}-v{}", s.ticker, sent.len() + 1);
+                let mut p = pack.clone();
+                p.ticker = name.clone();
+                let mut i = s.insight.clone();
+                i.ticker = name;
+                sent.push((rows.len(), p, i));
+            }
+            rows.push(s.clone());
+        }
+        let packs: Vec<Pack> = sent.iter().map(|(_, p, _)| p.clone()).collect();
+        let insights: Vec<Insight> = sent.iter().map(|(_, _, i)| i.clone()).collect();
+        let verdicts = judge_all(m, &packs, &insights)
+            .await
+            .map_err(|_| stop_message(&m.budget))?;
+        for (row, p, _) in &sent {
+            rows[*row].judges = verdicts
+                .iter()
+                .map(|(name, r)| (name.clone(), judge_result(r, p, true)))
+                .collect();
+        }
+        let caught: Vec<String> = JUDGES
+            .iter()
+            .map(|j| {
+                let n = rows.iter().filter(|r| r.caught(j) == Some(true)).count();
+                format!("{j} caught {n}")
+            })
+            .collect();
+        eprintln!(
+            "{post}: {} seeded, {} refused by the checks, {} (spent ${:.4})",
+            rows.len(),
+            rows.len() - sent.len(),
+            caught.join(", "),
+            m.budget.spent.get()
+        );
+        append_jsonl(&path, &rows);
+    }
+    Ok(())
+}
+
 /// `events-json`: D1 `macro_events` rows (`fetch-facts.sh`) as
 /// `[["YYYY-MM-DD", title], ...]`, titled as the site titles them. Rows the
 /// site does not show (a series without a title) are left out.
@@ -501,7 +567,7 @@ fn live_models(args: &[String], out: &Path) -> Models {
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
     let args: Vec<String> = std::env::args().collect();
-    let usage = "usage: insight-trial run --facts DIR --out DIR --dev-vars PATH [--budget 3.0] [--only SUBSTR]\n       insight-trial events-json ROWS.json";
+    let usage = "usage: insight-trial run --facts DIR --out DIR --dev-vars PATH [--budget 3.0] [--only SUBSTR]\n       insight-trial seed --out DIR --dev-vars PATH [--budget 3.0]\n       insight-trial page --out DIR [--cards 60]\n       insight-trial score --out DIR --labels FILE\n       insight-trial events-json ROWS.json";
     match args.get(1).map(String::as_str) {
         Some("run") => {
             let out = PathBuf::from(need(&args, "--out"));
@@ -525,6 +591,55 @@ async fn main() {
                 eprintln!("{e}");
                 std::process::exit(1);
             }
+        }
+        Some("seed") => {
+            let out = PathBuf::from(need(&args, "--out"));
+            let m = live_models(&args, &out);
+            let r = seed(&m, &out).await;
+            eprintln!(
+                "spent: ${:.4} of ${:.2}",
+                m.budget.spent.get(),
+                m.budget.cap
+            );
+            if let Err(e) = r {
+                eprintln!("{e}");
+                std::process::exit(1);
+            }
+        }
+        Some("page") => {
+            let out = PathBuf::from(need(&args, "--out"));
+            let n = arg(&args, "--cards").map_or(page::CARDS, |v| v.parse().expect("--cards N"));
+            let records: Vec<Record> = read_jsonl(&out.join("lines.jsonl"));
+            let html = page::page(&records, n);
+            fs::write(out.join("label.html"), &html).expect("label.html");
+            eprintln!(
+                "wrote {} with {} lines",
+                out.join("label.html").display(),
+                html.matches("<article class=\"card\"").count()
+            );
+        }
+        Some("score") => {
+            let out = PathBuf::from(need(&args, "--out"));
+            let labels: Vec<score::Label> = parse(
+                "labels",
+                &fs::read_to_string(need(&args, "--labels")).expect("read labels"),
+            );
+            fn optional<T: serde::de::DeserializeOwned>(out: &Path, name: &str) -> Vec<T> {
+                let p = out.join(name);
+                if p.exists() {
+                    read_jsonl(&p)
+                } else {
+                    eprintln!("{} is missing: counted as empty", p.display());
+                    vec![]
+                }
+            }
+            let records: Vec<Record> = read_jsonl(&out.join("lines.jsonl"));
+            let seeded: Vec<seed::Seeded> = optional(&out, "seeded.jsonl");
+            let posts: Vec<Value> = optional(&out, "posts.jsonl");
+            let spend: Vec<Value> = optional(&out, "spend.jsonl");
+            let md = score::report(&records, &posts, &seeded, &spend, &labels);
+            fs::write(out.join("report.md"), &md).expect("report.md");
+            println!("{md}");
         }
         Some("events-json") => {
             let rows = args.get(2).unwrap_or_else(|| {
@@ -818,7 +933,7 @@ pub(crate) mod tests {
         let j = &r.judges["deepseek"];
         assert!(j.verdict.is_some());
         assert!(j.passed);
-        assert_eq!(r.published_if["deepseek"], true);
+        assert!(r.published_if["deepseek"]);
         assert_eq!(r.writer_version, WRITER_VERSION);
         // The raw line has the planned shape, and no key or header anywhere.
         let raw = fs::read_to_string(out.join("lines.jsonl")).unwrap();
@@ -878,7 +993,7 @@ pub(crate) mod tests {
                 error: None
             }
         );
-        assert_eq!(r.published_if["claude"], false);
+        assert!(!r.published_if["claude"]);
         fs::remove_dir_all(out).unwrap();
     }
 
@@ -945,6 +1060,48 @@ pub(crate) mod tests {
         use prebell_core::insight::EvidenceKind::*;
         assert_eq!(kinds, [Move, News, ReportDate, MacroEvent]);
         fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn seed_judges_only_the_variants_the_checks_let_through() {
+        let out = tmp("seed");
+        let writer = Mock::new(vec![claude_body(&writer_reply(CLEAN), 200)]);
+        let judge = Mock::new(vec![deepseek_body(&judge_reply(true))]);
+        let m = mock_models(
+            Rc::new(Budget::new(3.0, out.join("spend.jsonl"))),
+            &writer,
+            &[("deepseek", &judge)],
+        );
+        let i = inputs(vec![(
+            "premarket_2026-11-12",
+            premarket("2026-11-12", vec![mover("AAPL", vec![reuters()])]),
+        )]);
+        run(&i, &m, &out).await.unwrap();
+
+        // The variant judge sees "AAPL-v1" and passes nothing.
+        let mut reply = judge_reply(false);
+        reply["verdicts"][0]["ticker"] = json!("AAPL-v1");
+        judge.replies.borrow_mut().push_back(deepseek_body(&reply));
+        seed(&m, &out).await.unwrap();
+        assert_eq!(judge.calls.get(), 2);
+        let rows: Vec<seed::Seeded> = read_jsonl(&out.join("seeded.jsonl"));
+        let kinds: Vec<seed::Kind> = rows.iter().map(|r| r.kind).collect();
+        // One number in each line and one outlet in the pack: the swaps
+        // change a digit (the checks refuse that), no outlet or direction to swap.
+        assert_eq!(
+            kinds,
+            [
+                seed::Kind::NumberSwap,
+                seed::Kind::ZhOnlyNumber,
+                seed::Kind::FormalAdvice
+            ]
+        );
+        assert!(!rows[0].check.is_empty() && rows[0].judges.is_empty());
+        assert!(!rows[1].check.is_empty() && rows[1].judges.is_empty());
+        assert!(rows[2].check.is_empty());
+        assert_eq!(rows[2].caught("deepseek"), Some(true));
+        assert_eq!(rows[2].ticker, "AAPL");
+        fs::remove_dir_all(out).unwrap();
     }
 
     #[test]
