@@ -1026,6 +1026,11 @@ mod tests {
 
         assert!(en(en_ok()).is_empty());
         assert!(zh(zh_ok()).is_empty());
+        // An invisible character inside the name still names the outlet.
+        let hidden = en_ok().watch.replace("Reuters", "Reu\u{200b}ters");
+        assert!(en(line("Guidance sets the next test", &hidden, &["e2", "e5"])).is_empty());
+        let hidden = zh_ok().watch.replace("路透社", "路\u{200b}透社");
+        assert!(zh(line("业绩指引成为下一道考验", &hidden, &["e2", "e5"])).is_empty());
         assert!(zh(line(
             "业绩指引成为下一道考验",
             "Reuters报道，苹果预计营收42亿美元，11月19日的财报将检验这一预期。",
