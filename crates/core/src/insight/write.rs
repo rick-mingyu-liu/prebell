@@ -7,7 +7,7 @@ use super::check::{HOOK_CHARS_ZH, HOOK_WORDS_EN, WATCH_CHARS_ZH, WATCH_WORDS_EN}
 use super::{EvidenceKind, Insight, Line, Pack};
 use crate::providers::{LlmProvider, ProviderError};
 
-pub const WRITER_VERSION: &str = "insight-writer/v3";
+pub const WRITER_VERSION: &str = "insight-writer/v4";
 
 /// What a news or analyst-action item is to the brief: the reason it gives
 /// for the move.
@@ -49,6 +49,7 @@ What to track:
 - It must be specific to this company and come from its evidence: a figure or target the company gave, a stated plan or timetable, a problem the evidence names, or its report date. Never a market-wide or macro event.
 - Say what would confirm or change the picture. Restating the result and adding "is worth tracking" is not an insight. In this spirit (do not copy): "…so whether expenses keep outgrowing revenue is the point to track"; "…targets Neutron's first launch for no earlier than 2027, so any change to that timing matters".
 - If the evidence offers nothing of that kind, leave the mover out.
+- Vary how sentences close: across one reply, never use the same closing phrase twice, and end on the specific thing (the figure, the plan, the date) rather than a stock phrase such as "is the point to track". Keep it formal and one sentence. These only illustrate variety; do not copy them: "…, which puts the $3.61 billion to $3.63 billion range under test at the next report"; "…, and any slip in the Neutron timetable past 2027 would change that picture"; "…, so a climb back from the 47.2% margin would show the cost growth was temporary".
 - Each "news" or "analyst_action" item has "role": "reason for the move": PreBell's brief gives it as a reason the stock moved, so a hook may tie the move to it ("Margin contraction behind the drop").
 
 People:
@@ -60,7 +61,7 @@ Rules:
 3. A fact from a "news" or "analyst_action" item is attributed in the sentence to that item's "outlet", written exactly as given, in both languages ("Seeking Alpha reports ...", "据Seeking Alpha报道……"; for Reuters, "据路透社报道" is also fine). An item whose "outlet" is null cannot be cited. A fact from a "company_figure" or "company_guidance" item is stated as the company's ("the company guided ...", "公司预计……").
 4. An analyst action may be mentioned (a named firm upgraded, downgraded or initiated coverage), but never its rating word, a price target or any figure from it, and never "analysts expect", analysts' or the Street's estimates, or the consensus ("分析师预期", "一致预期"). The thing to track must come from another item: a company figure, a stated plan or a dated event.
 5. No advice of any kind (buy, sell, hold, should, recommend, position, exposure, 建议, 买入, 仓位, 配置 and the like), no prediction of where a price goes (upside, could climb, 有望上涨), no rating words. No relative time words ("next week", "this quarter", "soon", "today", "下周", "明年", "近期"): name the date from the evidence instead. A fiscal label ("Q3", "fiscal 2027", "第三季度") only when a cited item states it.
-6. A report date marked "Expected report date, not confirmed by the company" is not the company's own date and must be hedged in the same clause: in English "is expected to report on November 17, a date the company has not confirmed" or similar; in Chinese never make the company the subject of 预计 or 预期 ("英伟达预计于11月17日发布财报" is wrong), write "财报日期暂定为11月17日（未经公司确认）" or "市场预计其于11月17日发布财报（未经公司确认）".
+6. A report date marked "Expected report date, not confirmed by the company" is not the company's own date and must be hedged in the same clause, briefly so the line stays within its limit: in English "expected on November 17 (date not confirmed by the company)"; in Chinese never make the company the subject of 预计 or 预期 ("英伟达预计于11月17日发布财报" is wrong), write "财报日期暂定为11月17日（未经公司确认）" or "市场预计其于11月17日发布财报（未经公司确认）".
 7. Limits: the English hook at most {HOOK_WORDS_EN} words, the English sentence one sentence of at most {WATCH_WORDS_EN} words; the Chinese hook at most {HOOK_CHARS_ZH} characters, the Chinese sentence one sentence of at most {WATCH_CHARS_ZH} characters. One clause chain: no semicolons. No Markdown, links or line breaks.
 8. The Chinese hook and sentence say the same thing as the English ones, in natural simplified Chinese. Each language lists the ids of the evidence items its line rests on in "cites".
 9. Leave a mover out when its evidence gives nothing concrete to track.
@@ -279,6 +280,8 @@ mod tests {
             "no semicolons",
             "Expected report date, not confirmed by the company",
             "never make the company the subject of 预计",
+            "never use the same closing phrase twice",
+            "expected on November 17 (date not confirmed by the company)",
             "财报日期暂定为11月17日（未经公司确认）",
             "reason for the move",
             "Never repeat an allegation about a named person's private life",

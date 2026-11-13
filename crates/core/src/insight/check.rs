@@ -888,6 +888,15 @@ fn fiscal_labels(text: &str) -> Vec<(String, Vec<String>)> {
             if latin && !ascii_alone(&text, whole.start(), whole.end()) {
                 continue;
             }
+            // 上一季度 (the prior quarter), 前一季度, 同一季度, 下一季度,
+            // 每一季度, 这一季度 and 该一季度 name no fiscal quarter.
+            if *kind == 'q'
+                && whole.as_str().contains('季')
+                && !whole.as_str().starts_with('第')
+                && text[..whole.start()].ends_with(['上', '前', '同', '下', '每', '这', '该'])
+            {
+                continue;
+            }
             let forms = match kind {
                 'q' => quarter(index(&c[1]) + 1),
                 'h' => half(index(&c[1]) + 1),
@@ -2987,5 +2996,38 @@ mod tests {
         let (p, i) = get("premarket_2026-11-09-update", "NRG");
         assert!(i.zh.watch.contains("6座"));
         assert!(check(&p, &i).is_empty());
+    }
+
+    /// Trial run 3: TPL's "上一季度" (the prior quarter) is no fiscal label;
+    /// NVDA's line fits 40 words with the short English hedge.
+    #[test]
+    fn the_trial_run_three_lines() {
+        let records: Vec<serde_json::Value> = include_str!("testdata/run3_records.jsonl")
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+        let get = |ticker: &str| -> (Pack, Insight) {
+            let r = records.iter().find(|r| r["ticker"] == ticker).unwrap();
+            (
+                serde_json::from_value(r["pack"].clone()).unwrap(),
+                serde_json::from_value(r["insight"].clone()).unwrap(),
+            )
+        };
+        let (p, i) = get("TPL");
+        assert!(i.zh.watch.contains("上一季度为2.461亿美元"));
+        let f = check(&p, &i);
+        assert!(f.is_empty(), "{f:?}");
+        for w in ["上一季度", "前一季度", "同一季度", "下一季度", "每一季度"] {
+            assert!(fiscal_labels(&format!("营收高于{w}")).is_empty(), "{w}");
+        }
+        assert_eq!(fiscal_labels("第一季度营收").len(), 1);
+        assert_eq!(fiscal_labels("一季度营收").len(), 1);
+
+        let (p, mut i) = get("NVDA");
+        assert!(refused(&check(&p, &i), "en: watch line has 45 words"));
+        i.en.watch = "TipRanks reports the board opened an independent investigation while saying there is no reason to believe national security or company secrets were compromised, so any update matters before the report expected on November 17 (date not confirmed by the company).".into();
+        let f = check(&p, &i);
+        assert!(f.is_empty(), "{f:?}");
+        assert!(i.en.watch.split_whitespace().count() <= WATCH_WORDS_EN);
     }
 }
