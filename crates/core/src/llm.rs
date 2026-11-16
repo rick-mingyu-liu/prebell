@@ -81,6 +81,7 @@ fn snippet(s: &str) -> String {
             c if c.is_whitespace() => ' ',
             c if c.is_control() => '?',
             '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}' => '?',
+            '\u{200E}' | '\u{200F}' | '\u{061C}' => '?',
             c => c,
         })
         .collect();
@@ -110,31 +111,50 @@ fn after_fence(s: &str) -> &str {
 
 /// Why the text after a reply's object means the reply must be refused, or `None` when it
 /// reads as a note that can be dropped. Refused: a tail too long to be a note; one that
-/// continues or closes JSON (it opens with `,` `]` `}` `:` `{` `[`, or with a string
-/// followed by `:` or `,`, after any whitespace or invisible characters), so the object was
-/// a fragment or a second value follows; and one that holds a non-empty JSON object
-/// anywhere ("Corrected: {…}", a second fenced block). Arrays and empty objects inside a
-/// note are allowed: notes say "articles [2] and [5]" and "returned {} for none".
+/// continues or closes JSON (after any whitespace, invisible characters and an opening
+/// fence, it starts with `,` `]` `}` `:` `{` `[`, or with a string that completes an object
+/// or array), so the object was a fragment or a second value follows; and one that holds a
+/// non-empty JSON object anywhere ("Corrected: {…}", a second fenced block). Arrays and
+/// empty objects inside a note are allowed: notes say "articles [2] and [5]" and
+/// "returned {} for none".
+///
+/// Known limit: a second answer written as something other than JSON ("Corrected:
+/// {'a': 2}", "{a: 2}", YAML, an object cut off mid-way) reads as a note and is dropped.
+/// The kept object is still checked by its caller like any other reply.
 fn tail_refusal(tail: &str) -> Option<&'static str> {
     const MORE: &str = "more JSON after the reply's object";
     if tail.len() > TAIL_MAX_BYTES {
         return Some("too much text after the reply's object");
     }
-    let lead = tail.trim_start_matches(|c: char| {
+    let invisible = |c: char| {
         c.is_whitespace() || matches!(c, '\u{FEFF}' | '\u{200B}'..='\u{200D}' | '\u{2060}')
-    });
+    };
+    let lead = tail.trim_start_matches(invisible);
+    // A fence that opens a second block, with any label, is looked through.
+    let lead = match lead
+        .strip_prefix("```")
+        .or_else(|| lead.strip_prefix("~~~"))
+    {
+        Some(rest) => rest
+            .trim_start_matches(|c: char| {
+                c.is_ascii_alphanumeric() || matches!(c, '-' | '+' | '.' | '_')
+            })
+            .trim_start_matches(invisible),
+        None => lead,
+    };
     if lead.starts_with([',', ']', '}', ':', '{', '[']) {
         return Some(MORE);
     }
-    if lead.starts_with('"') {
-        let mut values = serde_json::Deserializer::from_str(lead).into_iter::<Value>();
-        if matches!(values.next(), Some(Ok(Value::String(_))))
-            && lead[values.byte_offset()..]
-                .trim_start()
-                .starts_with([':', ','])
-        {
-            return Some(MORE);
-        }
+    // A leading string is the rest of a cut object or array only when an opening brace or
+    // bracket in front of it makes JSON; "\"date\": none found." is a note.
+    if lead.starts_with('"')
+        && ["{", "["].iter().any(|open| {
+            let whole = format!("{open}{lead}");
+            let mut values = serde_json::Deserializer::from_str(&whole).into_iter::<Value>();
+            matches!(values.next(), Some(Ok(_)))
+        })
+    {
+        return Some(MORE);
     }
     for (n, (i, _)) in tail.match_indices('{').enumerate() {
         if n == TAIL_SCAN_STARTS {
@@ -475,6 +495,11 @@ mod tests {
             "{\"a\":1}]",
             "{\"a\":1}\n\"b\": 2}",
             "{\"a\":1}\n\"x\", \"y\"]}",
+            "{\"a\":1}\n\"b\"\n: 2}",
+            // A second fenced block that holds an array, with any label or fence.
+            "```json\n{\"a\":1}\n```\n```json\n[1,2]\n```",
+            "```json\n{\"a\":1}\n```\n```jsonc\n[1,2]\n```",
+            "{\"a\":1}\n~~~\n[1,2]\n~~~",
         ] {
             let m = parse_err(text);
             assert!(
@@ -495,11 +520,25 @@ mod tests {
             "Note: 3 of 7 articles (the {older} ones) were skipped [see above].",
             "\u{201C}Quoted\u{201D} note.",
             "2 articles had no date.",
+            // A quoted word first is a note unless it completes JSON.
+            "\"date\": none found for article 3.",
+            "\"AAPL\": no reason found.",
+            "\"Reuters\", \"Bloomberg\" and \"CNBC\" agreed.",
+            "Tickers {AAPL, MSFT} had no news.",
+            "注：［2］和［5］未注明日期，｛无｝。",
+            // The known limit: a second answer that is not JSON reads as a note.
+            "Corrected: {'a': 2}",
         ] {
             let r = parsed(&format!("{{\"a\":1}}\n\n{note}"));
             assert_eq!(r.value["a"], 1, "{note:?}");
             assert_eq!(r.dropped.as_deref(), Some(note), "{note:?}");
         }
+        // A note inside its own fence is a note too (its opening fence reads as a closing one).
+        let r = parsed("{\"a\":1}\n```\nA note inside its own fence.\n```");
+        assert_eq!(
+            r.dropped.as_deref(),
+            Some("A note inside its own fence. ```")
+        );
     }
 
     #[test]
@@ -518,6 +557,8 @@ mod tests {
     fn control_and_bidi_characters_never_reach_a_log_or_alert() {
         let r = parsed("{\"a\":1}\n\u{1b}[2J\u{202e}gnp.exe \u{7}done\u{2066}x");
         assert_eq!(r.dropped.as_deref(), Some("?[2J?gnp.exe ?done?x"));
+        let r = parsed("{\"a\":1}\nnote\u{200E}\u{200F}\u{061C}end");
+        assert_eq!(r.dropped.as_deref(), Some("note???end"));
         let m = parse_err("{\"a\":1}\n{\"b\":\"\u{1b}[2J\u{202e}\"}");
         assert!(
             !m.chars().any(|c| c.is_control() || c == '\u{202e}'),
