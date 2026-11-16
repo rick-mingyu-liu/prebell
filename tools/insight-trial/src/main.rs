@@ -1769,9 +1769,12 @@ pub(crate) mod tests {
         };
         let mut cut = judge_reply(true).to_string();
         cut.pop();
-        let trailing = reply(cut);
+        let cut_reply = reply(cut);
         let writer = Mock::new(vec![claude_body(&writer_reply(CLEAN), 200)]);
-        let judge = Mock::new(vec![trailing.clone(), claude_body(&judge_reply(true), 200)]);
+        let judge = Mock::new(vec![
+            cut_reply.clone(),
+            claude_body(&judge_reply(true), 200),
+        ]);
         let m = mock_models(budget(&out, 3.0), &writer, &[("claude", &judge)]);
         let (n, p) = one_post("2026-11-12");
         let i = inputs(vec![(&n, p)]);
@@ -1784,7 +1787,7 @@ pub(crate) mod tests {
         // Twice unparseable: an error, retried, and no third call.
         let out2 = tmp("parse-retry-2");
         let writer = Mock::new(vec![claude_body(&writer_reply(CLEAN), 200)]);
-        let judge = Mock::new(vec![trailing.clone(), trailing]);
+        let judge = Mock::new(vec![cut_reply.clone(), cut_reply]);
         let m = mock_models(budget(&out2, 3.0), &writer, &[("claude", &judge)]);
         run(&i, &m, &out2, false).await.unwrap();
         assert_eq!(judge.calls.get(), 2);

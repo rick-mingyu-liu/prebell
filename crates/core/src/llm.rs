@@ -66,10 +66,25 @@ pub fn unknown_provider(provider: &str) -> ProviderError {
 /// How much of a reply's dropped or offending tail goes into a log line or an error.
 const TAIL_SNIPPET_CHARS: usize = 80;
 
-/// `s` on one line (whitespace runs become one space), cut to `TAIL_SNIPPET_CHARS`
-/// characters with its full length noted, for a log line or an error message.
+/// A tail longer than this is refused unread: a note is short, and the scan below stays cheap.
+const TAIL_MAX_BYTES: usize = 4096;
+/// How many `{` in a tail are tried as the start of a JSON object; a tail with more is refused.
+const TAIL_SCAN_STARTS: usize = 32;
+
+/// `s` on one line (whitespace runs become one space; control and bidirectional-override
+/// characters become `?`, since the text reaches logs and alert messages), cut to
+/// `TAIL_SNIPPET_CHARS` characters with its full length noted.
 fn snippet(s: &str) -> String {
-    let flat = s.split_whitespace().collect::<Vec<_>>().join(" ");
+    let clean: String = s
+        .chars()
+        .map(|c| match c {
+            c if c.is_whitespace() => ' ',
+            c if c.is_control() => '?',
+            '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}' => '?',
+            c => c,
+        })
+        .collect();
+    let flat = clean.split_whitespace().collect::<Vec<_>>().join(" ");
     let total = flat.chars().count();
     if total <= TAIL_SNIPPET_CHARS {
         return flat;
@@ -93,24 +108,64 @@ fn after_fence(s: &str) -> &str {
     }
 }
 
+/// Why the text after a reply's object means the reply must be refused, or `None` when it
+/// reads as a note that can be dropped. Refused: a tail too long to be a note; one that
+/// continues or closes JSON (it opens with `,` `]` `}` `:` `{` `[`, or with a string
+/// followed by `:` or `,`, after any whitespace or invisible characters), so the object was
+/// a fragment or a second value follows; and one that holds a non-empty JSON object
+/// anywhere ("Corrected: {…}", a second fenced block). Arrays and empty objects inside a
+/// note are allowed: notes say "articles [2] and [5]" and "returned {} for none".
+fn tail_refusal(tail: &str) -> Option<&'static str> {
+    const MORE: &str = "more JSON after the reply's object";
+    if tail.len() > TAIL_MAX_BYTES {
+        return Some("too much text after the reply's object");
+    }
+    let lead = tail.trim_start_matches(|c: char| {
+        c.is_whitespace() || matches!(c, '\u{FEFF}' | '\u{200B}'..='\u{200D}' | '\u{2060}')
+    });
+    if lead.starts_with([',', ']', '}', ':', '{', '[']) {
+        return Some(MORE);
+    }
+    if lead.starts_with('"') {
+        let mut values = serde_json::Deserializer::from_str(lead).into_iter::<Value>();
+        if matches!(values.next(), Some(Ok(Value::String(_))))
+            && lead[values.byte_offset()..]
+                .trim_start()
+                .starts_with([':', ','])
+        {
+            return Some(MORE);
+        }
+    }
+    for (n, (i, _)) in tail.match_indices('{').enumerate() {
+        if n == TAIL_SCAN_STARTS {
+            return Some(MORE);
+        }
+        let mut values = serde_json::Deserializer::from_str(&tail[i..]).into_iter::<Value>();
+        if matches!(values.next(), Some(Ok(Value::Object(o))) if !o.is_empty()) {
+            return Some(MORE);
+        }
+    }
+    None
+}
+
 /// The JSON object a model replied with, and what followed it.
 #[derive(Debug, PartialEq)]
 pub(crate) struct Reply {
     pub value: Value,
-    /// A one-line snippet of the text dropped after the object (never JSON), for the
-    /// provider's `warn` sink. `None` when nothing followed it.
+    /// A one-line snippet of the note dropped after the object (text `tail_refusal` let
+    /// through), for the provider's `warn` sink. `None` when nothing followed it.
     pub dropped: Option<String>,
 }
 
 /// Reads a model's JSON reply: the first JSON value in `text`, which must be an object,
 /// with or without a Markdown fence (```` ```json ```` or bare ```` ``` ````) around it.
 ///
-/// Text after the object is tolerated and reported in `Reply::dropped`: models sometimes
-/// add a note after the answer (seen live on 2026-11-13 and 2026-11-16 as "trailing
-/// characters at line 3 column 1", which failed the whole call). A second JSON value after
-/// the first is still an error, with a snippet of it in the message: a reply split in two,
-/// or corrected after the fact, must not pass as its first half. Nothing before the object
-/// is tolerated, and truncated JSON still fails.
+/// A note after the object is tolerated and reported in `Reply::dropped`: models sometimes
+/// add one after the answer (seen live on 2026-11-13 and 2026-11-16 as "trailing
+/// characters at line 3 column 1", which failed the whole call). A tail that holds or
+/// continues JSON is still an error (`tail_refusal`), with a snippet of it in the message:
+/// a reply split in two, cut into a fragment, or corrected after the fact must not pass as
+/// its first half. Nothing before the object is tolerated, and truncated JSON still fails.
 pub(crate) fn parse_reply(text: &str) -> Result<Reply, ProviderError> {
     let body = after_fence(text);
     let mut values = serde_json::Deserializer::from_str(body).into_iter::<Value>();
@@ -122,14 +177,11 @@ pub(crate) fn parse_reply(text: &str) -> Result<Reply, ProviderError> {
     if !value.is_object() {
         return Err(ProviderError::Parse("not a JSON object".into()));
     }
-    // What follows the object, past a closing fence and any fence that opens a second block.
+    // What follows the object, past the fence that closes it.
     let tail = body[values.byte_offset()..].trim();
-    let tail = after_fence(tail.strip_prefix("```").map_or(tail, str::trim_start));
-    if tail.starts_with(['{', '[']) {
-        return Err(ProviderError::Parse(format!(
-            "more JSON after the reply's object: {}",
-            snippet(tail)
-        )));
+    let tail = tail.strip_prefix("```").map_or(tail, str::trim_start);
+    if let Some(why) = tail_refusal(tail) {
+        return Err(ProviderError::Parse(format!("{why}: {}", snippet(tail))));
     }
     Ok(Reply {
         value,
@@ -394,9 +446,115 @@ mod tests {
             );
             assert!(m.contains("2"), "{text:?}: {m}");
         }
-        // Prose that mentions JSON later is still only a note.
-        let r = parsed("{\"a\":1}\nNote: I left out {\"a\":2}.");
-        assert_eq!(r.dropped.as_deref(), Some("Note: I left out {\"a\":2}."));
+    }
+
+    /// The review's ways around a rule that only looked at how the tail starts: a second
+    /// or corrected answer after prose, a second fence, invisible characters, a list
+    /// marker or a rule, and an object that was only a fragment of the answer.
+    #[test]
+    fn a_tail_that_holds_or_continues_json_is_refused() {
+        for text in [
+            "{\"a\":1}\n\nCorrected: {\"a\":2}",
+            "{\"a\":1}\n\nWait, correction:\n```json\n{\"a\":2}\n```",
+            "{\"a\":1}\n```json\n{\"a\":2}",
+            "```json\n{\"a\":1}\n```\n```javascript\n{\"a\":2}\n```",
+            "```json\n{\"a\":1}\n```\n~~~json\n{\"a\":2}\n~~~",
+            "{\"a\":1}\n\u{FEFF}{\"a\":2}",
+            "{\"a\":1}\n\u{200B}{\"a\":2}",
+            "{\"a\":1}\n\u{FEFF}[1,2]",
+            "{\"a\":1},{\"a\":2}",
+            "{\"a\":1}\n, {\"a\":2}",
+            "{\"a\":1}\n2. {\"a\":2}",
+            "{\"a\":1}\n---\n{\"a\":2}",
+            "{\"a\":1}\nNote: I left out {\"a\":2}.",
+            "{\"a\":1}\nCorrected: [{\"a\":2}]",
+            // Fragments: the object closed early and its rest follows.
+            "{\"items\":[{\"t\":\"A\"}]}\n,{\"t\":\"B\"}]}",
+            "{\"items\":[{\"t\":\"A\"}]}, \"more\": [{\"t\":\"B\"}]}",
+            "{\"a\":1}}",
+            "{\"a\":1}]",
+            "{\"a\":1}\n\"b\": 2}",
+            "{\"a\":1}\n\"x\", \"y\"]}",
+        ] {
+            let m = parse_err(text);
+            assert!(
+                m.starts_with("more JSON after the reply's object: "),
+                "{text:?}: {m}"
+            );
+        }
+    }
+
+    #[test]
+    fn notes_with_brackets_quotes_and_empty_braces_are_still_notes() {
+        for note in [
+            "Note: articles [2] and [5] were undated.",
+            "Note: items is [] because none matched.",
+            "\"Reuters\" piece skipped.",
+            "Note: returned {} for none.",
+            "Note: article id=\"3\" had no date [1,2].",
+            "Note: 3 of 7 articles (the {older} ones) were skipped [see above].",
+            "\u{201C}Quoted\u{201D} note.",
+            "2 articles had no date.",
+        ] {
+            let r = parsed(&format!("{{\"a\":1}}\n\n{note}"));
+            assert_eq!(r.value["a"], 1, "{note:?}");
+            assert_eq!(r.dropped.as_deref(), Some(note), "{note:?}");
+        }
+    }
+
+    #[test]
+    fn a_tail_too_long_or_too_brace_heavy_to_be_a_note_is_refused() {
+        let long = format!("{{\"a\":1}}\n{}", "word ".repeat(TAIL_MAX_BYTES / 5 + 1));
+        assert!(parse_err(&long).starts_with("too much text after the reply's object: "));
+        let at_cap = format!("{{\"a\":1}}\n{}", "w".repeat(TAIL_MAX_BYTES));
+        assert!(parsed(&at_cap).dropped.is_some());
+        let braces = format!("{{\"a\":1}}\nsee {}", "{x} ".repeat(TAIL_SCAN_STARTS + 1));
+        assert!(parse_err(&braces).starts_with("more JSON after the reply's object: "));
+        let few = format!("{{\"a\":1}}\nsee {}", "{x} ".repeat(TAIL_SCAN_STARTS));
+        assert!(parsed(&few).dropped.is_some());
+    }
+
+    #[test]
+    fn control_and_bidi_characters_never_reach_a_log_or_alert() {
+        let r = parsed("{\"a\":1}\n\u{1b}[2J\u{202e}gnp.exe \u{7}done\u{2066}x");
+        assert_eq!(r.dropped.as_deref(), Some("?[2J?gnp.exe ?done?x"));
+        let m = parse_err("{\"a\":1}\n{\"b\":\"\u{1b}[2J\u{202e}\"}");
+        assert!(
+            !m.chars().any(|c| c.is_control() || c == '\u{202e}'),
+            "{m:?}"
+        );
+    }
+
+    thread_local! {
+        static WARNED: RefCell<Vec<String>> = const { RefCell::new(vec![]) };
+    }
+    fn record_warn(m: &str) {
+        WARNED.with(|w| w.borrow_mut().push(m.to_string()));
+    }
+
+    /// `llm_from_env` hands its `warn` to both providers: a dropped note reaches it.
+    #[tokio::test]
+    async fn the_warn_sink_reaches_both_providers() {
+        let note = "{\"a\":1}\n\nNote: checked.";
+        let claude = serde_json::json!({"content": [{"type": "text", "text": note}],
+            "stop_reason": "end_turn"})
+        .to_string();
+        let deepseek = serde_json::json!({"choices": [{"finish_reason": "stop",
+            "message": {"content": note}}]})
+        .to_string();
+        for (provider, body) in [("claude", claude), ("deepseek", deepseek)] {
+            WARNED.with(|w| w.borrow_mut().clear());
+            let llm =
+                llm_from_env(provider, fake(&body), "k".into(), None, None, record_warn).unwrap();
+            assert_eq!(llm.complete_json("s", "u").await.unwrap()["a"], 1);
+            assert_eq!(
+                WARNED.with(|w| w.borrow().clone()),
+                [format!(
+                    "{provider} reply: ignored text after the JSON object: Note: checked."
+                )],
+                "{provider}"
+            );
+        }
     }
 
     #[test]
