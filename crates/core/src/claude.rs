@@ -1,4 +1,4 @@
-use crate::llm::strip_fence;
+use crate::llm::{dropped_note, parse_reply};
 use crate::providers::{Http, LlmProvider, ProviderError};
 use async_trait::async_trait;
 use serde_json::{json, Value};
@@ -39,7 +39,8 @@ pub struct Claude<H> {
     pub model: String,
     /// `output_config.effort` to send; `None` omits `output_config`.
     pub effort: Option<&'static str>,
-    /// Sink for HTTP error diagnostics (core has no logger; the generator passes `console_warn!`).
+    /// Sink for HTTP error diagnostics and for text dropped after a reply's JSON (core has
+    /// no logger; the generator passes `console_warn!`).
     pub warn: fn(&str),
 }
 
@@ -154,12 +155,11 @@ impl<H: Http> LlmProvider for Claude<H> {
             .and_then(|b| b.get("text"))
             .and_then(Value::as_str)
             .ok_or(ProviderError::Empty)?;
-        let parsed: Value = serde_json::from_str(strip_fence(text))
-            .map_err(|e| ProviderError::Parse(e.to_string()))?;
-        if !parsed.is_object() {
-            return Err(ProviderError::Parse("not a JSON object".into()));
+        let reply = parse_reply(text)?;
+        if let Some(dropped) = &reply.dropped {
+            (self.warn)(&dropped_note("claude", dropped));
         }
-        Ok(parsed)
+        Ok(reply.value)
     }
 }
 
@@ -260,6 +260,51 @@ mod tests {
             .complete_json("s", "u")
             .await;
         assert!(matches!(r, Err(ProviderError::Parse(_))));
+    }
+
+    /// The live failure of 2026-11-13 and 2026-11-16: the object, a blank line, a note.
+    #[tokio::test]
+    async fn a_note_after_the_json_is_ignored_and_warned() {
+        WARNED.with(|w| w.borrow_mut().clear());
+        let b = wrap("{\"a\":1}\n\nNote: all claims checked.", "end_turn");
+        let r = cl(fake(200, &b))
+            .with_warn(record_warn)
+            .complete_json("s", "u")
+            .await;
+        assert_eq!(r.unwrap()["a"], 1);
+        assert_eq!(
+            WARNED.with(|w| w.borrow().clone()),
+            ["claude reply: ignored text after the JSON object: Note: all claims checked."]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_second_json_object_is_a_parse_error() {
+        WARNED.with(|w| w.borrow_mut().clear());
+        let b = wrap("{\"a\":1}\n\n{\"a\":2}", "end_turn");
+        let r = cl(fake(200, &b))
+            .with_warn(record_warn)
+            .complete_json("s", "u")
+            .await;
+        assert_eq!(
+            r,
+            Err(ProviderError::Parse(
+                "more JSON after the reply's object: {\"a\":2}".into()
+            ))
+        );
+        assert!(WARNED.with(|w| w.borrow().is_empty()));
+    }
+
+    #[tokio::test]
+    async fn a_clean_reply_warns_nothing() {
+        WARNED.with(|w| w.borrow_mut().clear());
+        let b = wrap("{\"a\":1}", "end_turn");
+        let r = cl(fake(200, &b))
+            .with_warn(record_warn)
+            .complete_json("s", "u")
+            .await;
+        assert_eq!(r.unwrap()["a"], 1);
+        assert!(WARNED.with(|w| w.borrow().is_empty()));
     }
 
     #[tokio::test]
