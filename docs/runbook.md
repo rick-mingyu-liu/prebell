@@ -60,6 +60,8 @@ Where a failure shows up depends on which call failed.
 
 Every HTTP error of 400 or above also writes one line to `wrangler tail` with the error type and request id, never the key or the body: `claude http <status>: error.type=<type> request_id=<id>`. Quote the `request_id` to Anthropic support.
 
+A note after the JSON is not an error. Models sometimes add text after their answer; until 2026-11-16 that failed the call (`parse error: trailing characters at line 3 column 1`, which cost the IPO news sweep of 2026-11-16 and three judge replies in the mover-insights trial). The reply's first JSON object is now used and the rest is dropped, with one line to `wrangler tail`: `<provider> reply: ignored text after the JSON object: <first 80 characters>`. `wrangler tail` only shows live output, so that line is lost unless someone is watching; turning on Workers Logs (`[observability]` in `wrangler.toml`) would keep it, and is the owner's call. The root-cause fix is the API's structured outputs (`output_config.format` with a JSON schema per call, supported by `claude-sonnet-5-5`), which guarantees the reply is exactly one object; it needs a schema for every prompt and is not done.
+
 The `<error>` part:
 
 | Error | Meaning |
@@ -73,6 +75,8 @@ The `<error>` part:
 | `http status 529` / `5xx` | Anthropic overloaded or unavailable; usually clears on a later tick. |
 | `parse error: truncated` | The reply hit `max_tokens` (16000) or the model's context window (`model_context_window_exceeded`). It is never used as partial JSON. |
 | `parse error: refusal: <category>` | The model declined the request. Facts are only saved after a successful EN draft, so a refused build leaves nothing in R2 to inspect; tell the developer the date and category. |
+| `parse error: more JSON after the reply's object: <snippet>` | The reply held a second JSON value after its answer (a split or self-corrected reply). It is refused whole; the snippet is the first 80 characters of what followed. |
+| `parse error: EOF while parsing …`, `parse error: expected value …` | The reply was cut short or was not JSON. |
 | `parse error: stop_reason: <x>` | The turn ended unfinished in some other way. It is never used. |
 | `parse error: ...` (other) | The reply was not a JSON object. |
 

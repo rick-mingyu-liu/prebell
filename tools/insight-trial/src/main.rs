@@ -307,9 +307,9 @@ pub(crate) fn stop_message(b: &Budget) -> String {
 }
 
 /// One judge's verdicts on `insights`, or why its call failed, and whether
-/// the call was made twice. A reply that fails to parse is asked for once
-/// more, within the budget (trial run 2: Claude's reply for one post failed
-/// with "trailing characters"). `Err` only when the budget stopped a call.
+/// the call was made twice. A reply that fails to parse (one cut short,
+/// say) is asked for once more, within the budget. `Err` only when the
+/// budget stopped a call.
 async fn judge_one(
     m: &Models,
     llm: &dyn LlmProvider,
@@ -1754,16 +1754,22 @@ pub(crate) mod tests {
     }
 
     /// Trial run 2, item 5: a judge reply that fails to parse is asked for
-    /// once more and recorded as retried. Claude's provider fails on text
-    /// after the JSON ("trailing characters at line 3 column 1"), the run-2
-    /// error.
+    /// once more and recorded as retried. The run-2 failure itself, a note
+    /// after the JSON ("trailing characters at line 3 column 1"), now parses
+    /// in the provider (`llm::parse_reply`), so the unparseable reply here is
+    /// one cut short.
     #[tokio::test]
     async fn a_judge_reply_that_fails_to_parse_is_retried_once() {
         let out = tmp("parse-retry");
-        let trailing = json!({"model": CLAUDE_MODEL, "stop_reason": "end_turn",
-            "content": [{"type": "text", "text": format!("{}\n\nNote: all claims checked.", judge_reply(true))}],
-            "usage": {"input_tokens": 1000, "output_tokens": 200}})
-        .to_string();
+        let reply = |text: String| {
+            json!({"model": CLAUDE_MODEL, "stop_reason": "end_turn",
+                "content": [{"type": "text", "text": text}],
+                "usage": {"input_tokens": 1000, "output_tokens": 200}})
+            .to_string()
+        };
+        let mut cut = judge_reply(true).to_string();
+        cut.pop();
+        let trailing = reply(cut);
         let writer = Mock::new(vec![claude_body(&writer_reply(CLEAN), 200)]);
         let judge = Mock::new(vec![trailing.clone(), claude_body(&judge_reply(true), 200)]);
         let m = mock_models(budget(&out, 3.0), &writer, &[("claude", &judge)]);
@@ -1788,10 +1794,26 @@ pub(crate) mod tests {
             j.retried
                 && j.error
                     .as_deref()
-                    .is_some_and(|e| e.contains("trailing characters at line 3 column 1")),
+                    .is_some_and(|e| e.contains("EOF while parsing")),
             "{j:?}"
         );
+
+        // The run-2 reply, a note after the JSON, parses on the first call.
+        let out3 = tmp("parse-note");
+        let noted = reply(format!(
+            "{}\n\nNote: all claims checked.",
+            judge_reply(true)
+        ));
+        let writer = Mock::new(vec![claude_body(&writer_reply(CLEAN), 200)]);
+        let judge = Mock::new(vec![noted]);
+        let m = mock_models(budget(&out3, 3.0), &writer, &[("claude", &judge)]);
+        run(&i, &m, &out3, false).await.unwrap();
+        assert_eq!(judge.calls.get(), 1);
+        let lines: Vec<Record> = read_jsonl(&out3.join("lines.jsonl"));
+        let j = &lines[0].judges["claude"];
+        assert!(j.passed && !j.retried && j.error.is_none(), "{j:?}");
         fs::remove_dir_all(out).unwrap();
         fs::remove_dir_all(out2).unwrap();
+        fs::remove_dir_all(out3).unwrap();
     }
 }
