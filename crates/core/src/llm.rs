@@ -145,16 +145,30 @@ fn tail_refusal(tail: &str) -> Option<&'static str> {
     if lead.starts_with([',', ']', '}', ':', '{', '[']) {
         return Some(MORE);
     }
-    // A leading string is the rest of a cut object or array only when an opening brace or
-    // bracket in front of it makes JSON; "\"date\": none found." is a note.
-    if lead.starts_with('"')
-        && ["{", "["].iter().any(|open| {
+    // A leading string is the rest of a cut object or array when an opening brace or
+    // bracket in front of the tail makes JSON, or the start of JSON that is not closed
+    // ("\"b\": 2", fields lost off the end of a fragment). The second case counts only when
+    // the string is followed by `:` or `,`, so "\"All claims checked.\"" stays a note, as
+    // does "\"date\": none found.", which no brace turns into JSON or its beginning.
+    if lead.starts_with('"') {
+        let mut first = serde_json::Deserializer::from_str(lead).into_iter::<Value>();
+        let key_or_item = matches!(first.next(), Some(Ok(Value::String(_))))
+            && lead[first.byte_offset()..]
+                .trim_start()
+                .starts_with([':', ',']);
+        if ["{", "["].iter().any(|open| {
             let whole = format!("{open}{lead}");
-            let mut values = serde_json::Deserializer::from_str(&whole).into_iter::<Value>();
-            matches!(values.next(), Some(Ok(_)))
-        })
-    {
-        return Some(MORE);
+            match serde_json::Deserializer::from_str(&whole)
+                .into_iter::<Value>()
+                .next()
+            {
+                Some(Ok(_)) => true,
+                Some(Err(e)) => key_or_item && e.is_eof(),
+                None => false,
+            }
+        }) {
+            return Some(MORE);
+        }
     }
     for (n, (i, _)) in tail.match_indices('{').enumerate() {
         if n == TAIL_SCAN_STARTS {
@@ -496,6 +510,13 @@ mod tests {
             "{\"a\":1}\n\"b\": 2}",
             "{\"a\":1}\n\"x\", \"y\"]}",
             "{\"a\":1}\n\"b\"\n: 2}",
+            // Fragments whose rest is not closed either.
+            "{\"a\":1}\n\"b\": 2",
+            "{\"a\":1}\n\"b\": 2,\n\"c\": [3]",
+            "{\"a\":1}\n\"b\": \"late field\"",
+            "{\"a\":1}\n\"b\", \"c\"",
+            "{\"a\":1}\n\"b\": nul",
+            "{\"a\":1}\n\"x\"]",
             // A second fenced block that holds an array, with any label or fence.
             "```json\n{\"a\":1}\n```\n```json\n[1,2]\n```",
             "```json\n{\"a\":1}\n```\n```jsonc\n[1,2]\n```",
@@ -524,6 +545,10 @@ mod tests {
             "\"date\": none found for article 3.",
             "\"AAPL\": no reason found.",
             "\"Reuters\", \"Bloomberg\" and \"CNBC\" agreed.",
+            "\"All claims checked.\"",
+            "\"date\": null for article 3.",
+            "\"Reuters\", the wire service, confirmed it.",
+            "\"AAPL\": none, \"MSFT\": none.",
             "Tickers {AAPL, MSFT} had no news.",
             "注：［2］和［5］未注明日期，｛无｝。",
             // The known limit: a second answer that is not JSON reads as a note.
