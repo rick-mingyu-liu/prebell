@@ -2181,7 +2181,7 @@ mod tests {
     #[test]
     fn each_step_warms_its_own_pattern_groups() {
         assert_eq!(warm_write(), 5);
-        assert_eq!(warm_check(), 17 + 4);
+        assert_eq!(warm_check(), 18 + 4);
         assert_eq!(warm_judge(), 4 + 1);
     }
 

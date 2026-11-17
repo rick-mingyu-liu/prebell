@@ -150,10 +150,14 @@ the ids of the evidence items the line rests on.
   person, including an allegation, only when it names the outlet that
   reported it, in a reporting frame ("Benzinga reports …", "据Benzinga
   报道……"); never as PreBell's own claim. Naming an executive for what
-  they said in their role is fine. Code has no word list for it: such a
-  claim comes from a cited news item, whose outlet the attribution rule
-  already requires; the judge's `personal_claims_attributed` flag (judge
-  v3) catches a claim that is not attributed.
+  they said in their role is fine. What code catches: a line holding a
+  private-life word (mistress, extramarital, "affair" in its personal
+  sense, 婚外情, 出轨, 情妇, 绯闻) is refused unless the word is not in the
+  hook, a cited news item reports such a claim, and the sentence
+  attributes that item's outlet. What only the judge's
+  `personal_claims_attributed` flag (judge v3) catches: a claim about a
+  person in other words, and a claim placed outside the attributing clause
+  ("Benzinga reports the board may act, and the CEO had an affair").
 - An unconfirmed report date is never the company's own: in Chinese not
   "公司预计于…", but "财报日期暂定为…（未经公司确认）" or "市场预计其于…".
 - An outlet is named as the pack gives it, in both languages, inside an
@@ -205,8 +209,9 @@ Lead's calls after the builder check:
   revenue figure stated as a buyback): code confirms that the judge's
   quoted words are verbatim and that the line's money and percentage
   figures sit inside them, but not that the words mean what the line says;
-  a claim about a named person that is not attributed to its outlet (the
-  judge's `personal_claims_attributed` flag); a reordered consensus phrase ("above the expectations of
+  a claim about a named person that is not attributed to its outlet, beyond
+  the private-life words code checks (the judge's
+  `personal_claims_attributed` flag); a reordered consensus phrase ("above the expectations of
   analysts"); 持有 read as "holds shares" when it is advice
   ("投资者可继续持有股份至11月19日"); a bare "target" in a line that does
   not cite the analyst item ("after Morgan Stanley lifted its target");

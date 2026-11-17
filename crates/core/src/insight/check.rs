@@ -316,7 +316,7 @@ fn wide_words(p: &str) -> String {
 /// `OnceLock` in this file (`insight::tests` counts them); the number.
 pub fn warm() -> usize {
     let day = NaiveDate::from_ymd_opt(2026, 1, 1).expect("valid date");
-    let touch: [fn(NaiveDate); 17] = [
+    let touch: [fn(NaiveDate); 18] = [
         |_| {
             let _ = worded_figures("");
         },
@@ -365,6 +365,9 @@ pub fn warm() -> usize {
         },
         |_| {
             let _ = million_zh();
+        },
+        |_| {
+            let _ = personal_affair("");
         },
     ];
     for t in touch {
@@ -643,6 +646,74 @@ fn digits_only_in_names(hook: &str, cited: &[String]) -> bool {
         rest.replace_range(s..e, "");
     }
     !has_digit(&rest)
+}
+
+/// Private-life words: a line holding one makes a claim about a named
+/// person's private life.
+const PERSONAL_EN: &[&str] = &["mistress", "extramarital"];
+const PERSONAL_ZH: &[&str] = &["婚外情", "出轨", "情妇", "绯闻"];
+
+/// "affair" in its personal sense: "had an affair", "a second affair", "an
+/// affair with"; not "a muted affair" or "current affairs". ASCII only: the
+/// English lines it reads are ASCII words.
+fn personal_affair(text: &str) -> Option<String> {
+    static R: OnceLock<Regex> = OnceLock::new();
+    let r = R.get_or_init(|| {
+        re(r"(?i-u)(?:\b(?:an|another|second|secret|romantic|alleged|extramarital|had|having)\s+affair\b|\baffair\s+with\b)")
+    });
+    r.find(text).map(|m| m.as_str().to_string())
+}
+
+/// The private-life words in `text`, in either language.
+fn personal_words(text: &str) -> Vec<String> {
+    let mut out: Vec<String> = PERSONAL_EN
+        .iter()
+        .filter(|w| has_word(text, w))
+        .map(|w| w.to_string())
+        .collect();
+    out.extend(personal_affair(text));
+    out.extend(
+        PERSONAL_ZH
+            .iter()
+            .filter(|w| text.contains(**w))
+            .map(|w| w.to_string()),
+    );
+    out
+}
+
+/// Rick's people rule (2026-11-17, "Allow it if attributed"), where code
+/// can tell: a line with a private-life word (`PERSONAL_EN`, `PERSONAL_ZH`,
+/// "affair" in its personal sense) is refused unless the word is not in the
+/// hook, a cited news item's text holds a private-life word too, and the
+/// sentence attributes that item's outlet. Code cannot tell whether the
+/// claim sits inside the attributing clause ("Benzinga reports the board
+/// may act, and the CEO had an affair"), nor see a claim about a person in
+/// other words: only the judge's `personal_claims_attributed` flag catches
+/// those.
+fn private_life(hook: &str, watch: &str, cited: &[&Evidence], lang: Lang) -> Vec<String> {
+    let mut bad = Vec::new();
+    if let Some(w) = personal_words(hook).first() {
+        bad.push(format!(
+            "a claim about a person's private life in the hook ({w}): only an attributed sentence may hold one"
+        ));
+    }
+    if let Some(w) = personal_words(watch).first() {
+        let reported = cited.iter().any(|e| {
+            e.kind == EvidenceKind::News
+                && !personal_words(&e.text).is_empty()
+                && e.outlet.as_deref().is_some_and(|o| {
+                    outlet_names(o, lang)
+                        .iter()
+                        .any(|n| attributes(&visible(watch), n))
+                })
+        });
+        if !reported {
+            bad.push(format!(
+                "a claim about a person's private life ({w}) not attributed to the outlet of a cited news item that reports it"
+            ));
+        }
+    }
+    bad
 }
 
 /// `names`, for a name that is also an ordinary word (case-sensitive): only where the line
@@ -1507,11 +1578,9 @@ fn check_line(pack: &Pack, line: &Line, lang: Lang) -> Vec<String> {
         }
     }
 
-    // A claim about a named person, an allegation included, needs no rule
-    // of its own (Rick, 2026-11-17: "Allow it if attributed"): it comes from
-    // a cited news item, and rule 7 already requires that item's outlet in an
-    // attributing frame. The judge's `personal_claims_attributed` flag
-    // covers a claim that is not.
+    // A claim about a person's private life (Rick, 2026-11-17: "Allow it if
+    // attributed"), where code can tell: see `private_life`.
+    bad.extend(private_life(&line.hook, &line.watch, &cited, lang));
 
     // 9. Refusal list.
     let analyst_cited = cited.iter().any(|e| e.kind == EvidenceKind::AnalystAction);
@@ -3029,6 +3098,118 @@ mod tests {
         assert!(f.iter().all(|r| !r.contains("personal")), "{f:?}");
     }
 
+    /// Review M2, the reviewer's probe: what code catches of Rick's people
+    /// rule ("Allow it if attributed"), and what only the judge's
+    /// `personal_claims_attributed` flag can.
+    #[test]
+    fn private_life_claims_pass_code_only_when_attributed_to_their_reporter() {
+        use EvidenceKind::*;
+        let p = run_one_pack("NVDA", "2026-11-12", &[
+            (News, Some("benzinga.com"), "Reports said the chief executive had an extramarital affair and the board may weigh his removal before the November 19, 2026 report.", None),
+            (ReportDate, None, "NVDA's report date is confirmed for November 19, 2026 (earnings calendar).", Some("2026-11-19")),
+        ]);
+        let case = |en: (&str, &str), zh: (&str, &str), cites: &[&str]| {
+            check(
+                &p,
+                &insight(line(en.0, en.1, cites), line(zh.0, zh.1, cites)),
+            )
+        };
+        // Baseline: attributed to the outlet whose item reports it.
+        let f = case(
+            ("Board scrutiny follows the report", "Benzinga reports the chief executive had an extramarital affair, so whether the board acts before the November 19 report is the open question."),
+            ("董事会审视成焦点", "据Benzinga报道，首席执行官有婚外情，董事会是否在11月19日财报前采取行动是关键。"),
+            &["e2", "e3"],
+        );
+        assert!(f.is_empty(), "{f:?}");
+        // P1: the outlet frames one clause and the claim sits in the next.
+        // Code cannot tell the clauses' claims apart: it passes code, and
+        // only the judge's flag catches it.
+        let f = case(
+            ("Board scrutiny follows the report", "Benzinga reports the board may weigh a removal, and the chief executive had an extramarital affair before the November 19 report."),
+            ("董事会审视成焦点", "据Benzinga报道，董事会或考虑撤换，而首席执行官确有婚外情，11月19日财报是关键。"),
+            &["e2", "e3"],
+        );
+        assert!(f.is_empty(), "{f:?}");
+        // P2: the claim as PreBell's own in the hook.
+        let f = case(
+            ("CEO affair puts the board on notice", "Benzinga reports the chief executive had an extramarital affair, so whether the board acts before the November 19 report is the open question."),
+            ("CEO婚外情令董事会承压", "据Benzinga报道，首席执行官有婚外情，董事会是否在11月19日财报前采取行动是关键。"),
+            &["e2", "e3"],
+        );
+        assert!(
+            refused(
+                &f,
+                "zh: a claim about a person's private life in the hook (婚外情)"
+            ),
+            "{f:?}"
+        );
+        // P3: cites only the calendar item; nothing reports the claim.
+        let f = case(
+            ("Board scrutiny before the report", "The chief executive had an extramarital affair, so whether the board acts before the November 19 report is the open question."),
+            ("董事会审视成焦点", "首席执行官有婚外情，董事会是否在11月19日财报前采取行动是关键。"),
+            &["e3"],
+        );
+        assert!(
+            refused(
+                &f,
+                "en: a claim about a person's private life (extramarital) not attributed"
+            ),
+            "{f:?}"
+        );
+        assert!(
+            refused(
+                &f,
+                "zh: a claim about a person's private life (婚外情) not attributed"
+            ),
+            "{f:?}"
+        );
+        // P4: attributed to an outlet no cited item is from.
+        let f = case(
+            ("Board scrutiny before the report", "The Daily Mail reports the chief executive had an extramarital affair, so whether the board acts before the November 19 report is the open question."),
+            ("董事会审视成焦点", "据每日邮报报道，首席执行官有婚外情，董事会是否在11月19日财报前采取行动是关键。"),
+            &["e3"],
+        );
+        assert!(
+            refused(&f, "en: a claim about a person's private life"),
+            "{f:?}"
+        );
+        assert!(
+            refused(&f, "zh: a claim about a person's private life"),
+            "{f:?}"
+        );
+        // P6: vague sourcing.
+        let f = case(
+            ("Board scrutiny before the report", "People familiar say the chief executive had an extramarital affair, so whether the board acts before the November 19 report is the open question."),
+            ("董事会审视成焦点", "知情人士称首席执行官有婚外情，董事会是否在11月19日财报前采取行动是关键。"),
+            &["e3"],
+        );
+        assert!(
+            refused(&f, "en: a claim about a person's private life"),
+            "{f:?}"
+        );
+        assert!(
+            refused(&f, "zh: a claim about a person's private life"),
+            "{f:?}"
+        );
+        // P5 and P7 were refused before and still are.
+        let f = case(
+            ("Board scrutiny before the report", "Reuters reports the chief executive had an extramarital affair, so whether the board acts before the November 19 report is the open question."),
+            ("董事会审视成焦点", "据路透社报道，首席执行官有婚外情，董事会是否在11月19日财报前采取行动是关键。"),
+            &["e3"],
+        );
+        assert!(!f.is_empty());
+        let f = case(
+            ("Benzinga reports board scrutiny", "The chief executive had an extramarital affair, so whether the board acts before the November 19 report is the open question."),
+            ("据Benzinga报道董事会审视", "首席执行官有婚外情，董事会是否在11月19日财报前采取行动是关键。"),
+            &["e2", "e3"],
+        );
+        assert!(!f.is_empty());
+        // "affair" in its other senses is no claim about a person.
+        assert!(
+            personal_words("a muted affair before the report, as current affairs go").is_empty()
+        );
+    }
+
     /// Trial run 1 (2026-11-13): lines refused for flaws in the rules, as the
     /// writer wrote them (the macro-event clauses, whose items are gone, cut).
     #[test]
@@ -3345,9 +3526,13 @@ mod tests {
         assert!(f.is_empty(), "{f:?}");
         let f = both(&p, "Guidance sets the next test", "Reuters reports a state of affairs where Apple expects revenue of $4.2 billion before November 19.", &zh_ok_for("路透社"), &["e2", "e3"]);
         assert!(f.is_empty(), "{f:?}");
-        // Attributed, a claim about a person passes (Rick, 2026-11-17).
+        // A private-life claim the cited item does not report is refused,
+        // attributed or not (review M2): Reuters' item is about guidance.
         let f = both(&p, "Guidance sets the next test", "Reuters reports the CEO had an affair, and Apple expects revenue of $4.2 billion before November 19.", &zh_ok_for("路透社"), &["e2", "e3"]);
-        assert!(f.is_empty(), "{f:?}");
+        assert!(
+            refused(&f, "en: a claim about a person's private life (an affair)"),
+            "{f:?}"
+        );
         // L4: past periods pass in both languages; forward ones do not.
         assert_eq!(relative_time("revenue rose from last quarter"), None);
         assert_eq!(
