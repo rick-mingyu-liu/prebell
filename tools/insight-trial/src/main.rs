@@ -18,7 +18,12 @@
 //! cargo run --release -- seed --out DIR --dev-vars PATH [--budget 3.0] [--fresh] [--plan]
 //! cargo run --release -- page --out DIR [--cards 60]
 //! cargo run --release -- score --out DIR --labels FILE
+//! cargo run --release -- shadow --records DIR --out DIR [--labels FILE]
 //! ```
+//!
+//! `shadow` reads the Worker's shadow-stage records (`fetch-shadow.sh`),
+//! writes them as `lines.jsonl` and writes a cumulative `label.html` with
+//! every line the judge answered for; `score` then reports the bar.
 //!
 //! Keys come from `--dev-vars` (or the environment) and stay in memory: no
 //! request header or key is ever printed or written.
@@ -27,6 +32,7 @@ mod http;
 mod page;
 mod score;
 mod seed;
+mod shadow;
 
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
@@ -988,7 +994,7 @@ fn finish(m: &Models, r: Result<(), String>) {
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
     let args: Vec<String> = std::env::args().collect();
-    let usage = "usage: insight-trial run --facts DIR --out DIR --dev-vars PATH [--budget 3.0] [--only SUBSTR] [--fresh] [--plan]\n       insight-trial seed --out DIR --dev-vars PATH [--budget 3.0] [--fresh] [--plan]\n       insight-trial page --out DIR [--cards 60]\n       insight-trial score --out DIR --labels FILE";
+    let usage = "usage: insight-trial run --facts DIR --out DIR --dev-vars PATH [--budget 3.0] [--only SUBSTR] [--fresh] [--plan]\n       insight-trial seed --out DIR --dev-vars PATH [--budget 3.0] [--fresh] [--plan]\n       insight-trial page --out DIR [--cards 60]\n       insight-trial score --out DIR --labels FILE\n       insight-trial shadow --records DIR --out DIR [--labels FILE]";
     match args.get(1).map(String::as_str) {
         Some("run") => {
             let out = PathBuf::from(need(&args, "--out"));
@@ -1085,6 +1091,28 @@ async fn main() {
             let md = score::report(&records, &posts, &seeded, &spend, &labels);
             fs::write(out.join("report.md"), &md).expect("report.md");
             println!("{md}");
+        }
+        Some("shadow") => {
+            let dir = PathBuf::from(need(&args, "--records"));
+            let out = PathBuf::from(need(&args, "--out"));
+            let labels: Vec<score::Label> = match arg(&args, "--labels") {
+                Some(f) => parse("labels", &fs::read_to_string(f).expect("read labels")),
+                None => vec![],
+            };
+            fs::create_dir_all(&out).expect("--out");
+            let records = shadow::read_records(&dir);
+            let lines = shadow::lines(&records);
+            write_jsonl(&out.join("lines.jsonl"), &lines);
+            let picked = shadow::page_lines(&lines, &labels);
+            fs::write(out.join("label.html"), page::shadow_page(&picked)).expect("label.html");
+            let old = picked.iter().filter(|(_, d)| d.is_some()).count();
+            eprintln!(
+                "{} records, {} lines; wrote {} with {} new lines and {old} labelled before",
+                records.len(),
+                lines.len(),
+                out.join("label.html").display(),
+                picked.len() - old
+            );
         }
         _ => {
             eprintln!("{usage}");

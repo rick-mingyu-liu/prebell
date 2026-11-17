@@ -142,3 +142,42 @@ is sent.
   the trial. The bar's 50 labelled judge-passed lines cannot be reached
   with this trial's 34 eligible movers (final run): the report calls the bar "not yet
   assessable" until they are, and they accumulate through the shadow stage.
+
+## The shadow stage's review
+
+While the Worker runs with `INSIGHTS_MODE = "shadow"`, it stores one record
+per facts bundle in R2: `insights/premarket/<date>.json` (the 8:00 brief),
+`insights/premarket/<date>-update.json` (the 8:35 update) and
+`insights/recap/<date>.json`. No model call is made here.
+
+```sh
+# 1. Save every record from the first shadow day to today (read-only R2 gets
+#    of the three fixed keys per weekday; a done record already saved is
+#    kept, a missing key is skipped).
+tools/insight-trial/fetch-shadow.sh 2026-11-18 "$(date +%F)" tools/insight-trial/shadow
+
+# 2. Every record as lines.jsonl, and a cumulative labelling page.
+cd tools/insight-trial
+env -u CARGO_TARGET_DIR cargo run --release -- shadow \
+    --records shadow --out out-shadow --labels ~/Downloads/labels.json
+
+# 3. The bar, from every label so far.
+env -u CARGO_TARGET_DIR cargo run --release -- score \
+    --out out-shadow --labels ~/Downloads/labels.json
+```
+
+`shadow` shows every line the judge answered for, passed or refused (no
+sampling), verdicts hidden, new ones first in a fixed random order; lines
+labelled before (matched by `line_key`, the writer version and the text)
+are shown at the end, done, with their label, and "Save labels" saves them
+again with the new ones, so one `labels.json` always holds every label.
+Leave `--labels` off the first time. Lines the code checks refused and
+lines the judge has not answered yet (a record still `written`, or a
+failed judge call) are left out. The 8:00 brief and its 8:35 update often
+carry the same mover: the page shows both.
+
+`score` on the shadow folder reports the reading part of the bar: the
+judge-passed lines read, counting a mover once per trading date across the
+brief and its update, and any marked wrong. Below 50 read it says "not yet
+assessable". The bar's seeded-recall part comes from the trial's seed run
+and its own report.
