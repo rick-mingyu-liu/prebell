@@ -115,7 +115,7 @@ fn card(k: usize, r: &Record) -> String {
 <fieldset>{fine}{wrong}{advice}</fieldset>
 </article>"#,
         n = k + 1,
-        key = line_key(i),
+        key = line_key(&r.writer_version, i),
         post = esc(&r.post),
         ticker = esc(&r.ticker),
         name = esc(&r.pack.name),
@@ -259,7 +259,7 @@ pub(crate) mod tests {
             no_advice: true,
             formal: true,
             same_meaning: true,
-            no_personal_allegation: true,
+            personal_claims_attributed: true,
             notes: String::new(),
         }
     }
@@ -412,7 +412,7 @@ pub(crate) mod tests {
         assert!(html.contains("Source text: Total revenue 18,517 14,883"));
         assert_eq!(html.matches("<li class=\"cited\">").count(), 1);
         // Saved choices are keyed by the line, so a new line starts blank.
-        let key = line_key(r.insight.as_ref().unwrap());
+        let key = line_key(&r.writer_version, r.insight.as_ref().unwrap());
         assert!(html.contains(&format!("data-key=\"{key}\"")));
         assert!(html.contains("return c.dataset.key;"));
         assert!(html.contains("key: c.dataset.key"));

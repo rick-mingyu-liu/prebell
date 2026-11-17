@@ -145,13 +145,15 @@ the ids of the evidence items the line rests on.
   Formal register. No advice, no price prediction.
 - News items are the reasons PreBell's brief gives for the move, so a
   hook may tie the move to one.
-- People (the lead's call after trial run 2, for Rick to confirm): a line
-  never repeats an allegation about a named person's private life, and
-  never names a person in connection with alleged wrongdoing or an
-  investigation; it may state the company-level fact ("the board opened
-  an independent investigation"). Naming an executive for what they said
-  in their role is fine. The judge has a flag for it, and code refuses a
-  short list of private-life words as a backstop.
+- People (Rick, 2026-11-17: "Allow it if attributed"; this replaces the
+  lead's rule of 2026-11-13): a line may repeat a claim about a named
+  person, including an allegation, only when it names the outlet that
+  reported it, in a reporting frame ("Benzinga reports …", "据Benzinga
+  报道……"); never as PreBell's own claim. Naming an executive for what
+  they said in their role is fine. Code has no word list for it: such a
+  claim comes from a cited news item, whose outlet the attribution rule
+  already requires; the judge's `personal_claims_attributed` flag (judge
+  v3) catches a claim that is not attributed.
 - An unconfirmed report date is never the company's own: in Chinese not
   "公司预计于…", but "财报日期暂定为…（未经公司确认）" or "市场预计其于…".
 - An outlet is named as the pack gives it, in both languages, inside an
@@ -203,9 +205,8 @@ Lead's calls after the builder check:
   revenue figure stated as a buyback): code confirms that the judge's
   quoted words are verbatim and that the line's money and percentage
   figures sit inside them, but not that the words mean what the line says;
-  a named person tied to alleged wrongdoing or an investigation (the
-  judge's `no_personal_allegation` flag; code refuses only a short list of
-  private-life words); a reordered consensus phrase ("above the expectations of
+  a claim about a named person that is not attributed to its outlet (the
+  judge's `personal_claims_attributed` flag); a reordered consensus phrase ("above the expectations of
   analysts"); 持有 read as "holds shares" when it is advice
   ("投资者可继续持有股份至11月19日"); a bare "target" in a line that does
   not cite the analyst item ("after Morgan Stanley lifted its target");
@@ -251,6 +252,12 @@ runs both Claude (different prompt from the writer) and DeepSeek as judges
 on the same lines, and the one that agrees better with Rick's own labels,
 and catches more of a seeded set of deliberately wrong lines, becomes the
 judge. Setting: `INSIGHT_JUDGE_PROVIDER`.
+
+Measured in the offline trial (2026-11-17): on Rick's 15 labels Claude
+agreed 15 of 15 and DeepSeek 14 of 15, so Claude is the judge
+(`INSIGHT_JUDGE_PROVIDER` defaults to `claude`); the shadow stage runs one
+judge, strict: a judge reply with any text after its JSON is a failed
+call, never a pass.
 
 Lead's calls after the builder check:
 

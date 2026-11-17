@@ -149,11 +149,6 @@ const HEDGE_ZH: &[&str] = &["预计", "预期", "暂定", "未确认"];
 /// (the market's, not the company's, "英伟达预计于11月17日"); 市场预期 is consensus wording.
 const DATE_HEDGE_ZH: &[&str] = &["暂定", "未经公司确认", "未确认", "市场预计"];
 
-/// Allegations about a person's private life: refused whatever the
-/// evidence says (a line names the company-level fact instead).
-const PERSONAL_EN: &[&str] = &["mistress", "extramarital"];
-const PERSONAL_ZH: &[&str] = &["婚外情", "出轨", "情妇", "绯闻"];
-
 /// `(English name as in ipo::news::OUTLETS, other English forms, Chinese forms)`.
 /// The zh line may name an outlet in either script.
 const OUTLET_NAMES: &[(&str, &[&str], &[&str])] = &[
@@ -505,16 +500,6 @@ fn digits_only_in_names(hook: &str, cited: &[String]) -> bool {
         rest.replace_range(s..e, "");
     }
     !has_digit(&rest)
-}
-
-/// "affair" in its personal sense: "had an affair", "a second affair", "an
-/// affair with"; not "a muted affair" or "current affairs".
-fn personal_affair(text: &str) -> Option<String> {
-    static R: OnceLock<Regex> = OnceLock::new();
-    let r = R.get_or_init(|| {
-        re(r"(?i)(?:\b(?:an|another|second|secret|romantic|alleged|extramarital|had|having)\s+affair\b|\baffair\s+with\b)")
-    });
-    r.find(text).map(|m| m.as_str().to_string())
 }
 
 /// `names`, for a name that is also an ordinary word (case-sensitive): only where the line
@@ -1381,20 +1366,11 @@ fn check_line(pack: &Pack, line: &Line, lang: Lang) -> Vec<String> {
         }
     }
 
-    // A private-life allegation about a named person, whatever the evidence.
-    for w in PERSONAL_EN {
-        if has_word(&both, w) {
-            bad.push(format!("a personal allegation: {w}"));
-        }
-    }
-    if let Some(m) = personal_affair(&both) {
-        bad.push(format!("a personal allegation: {m}"));
-    }
-    for w in PERSONAL_ZH {
-        if both.contains(w) {
-            bad.push(format!("a personal allegation: {w}"));
-        }
-    }
+    // A claim about a named person, an allegation included, needs no rule
+    // of its own (Rick, 2026-11-17: "Allow it if attributed"): it comes from
+    // a cited news item, and rule 7 already requires that item's outlet in an
+    // attributing frame. The judge's `personal_claims_attributed` flag
+    // covers a claim that is not.
 
     // 9. Refusal list.
     let analyst_cited = cited.iter().any(|e| e.kind == EvidenceKind::AnalystAction);
@@ -2881,6 +2857,39 @@ mod tests {
         }
     }
 
+    /// Rick, 2026-11-17 ("Allow it if attributed"): a claim about a named
+    /// person, an allegation included, passes when the line names the outlet
+    /// that reported it in an attributing frame, and fails without one.
+    #[test]
+    fn a_claim_about_a_person_passes_only_when_attributed() {
+        use EvidenceKind::*;
+        let p = run_one_pack("NVDA", "2026-11-12", &[
+            (News, Some("benzinga.com"), "Reports said the chief executive had an extramarital affair and the board may weigh his removal before the November 19, 2026 report.", None),
+            (ReportDate, None, "NVDA's report date is confirmed for November 19, 2026 (earnings calendar).", Some("2026-11-19")),
+        ]);
+        let attributed = insight(
+            line(
+                "Board scrutiny follows the report",
+                "Benzinga reports the chief executive had an extramarital affair, so whether the board acts before the November 19 report is the open question.",
+                &["e2", "e3"],
+            ),
+            line(
+                "董事会审视成焦点",
+                "据Benzinga报道，首席执行官有婚外情，董事会是否在11月19日财报前采取行动是关键。",
+                &["e2", "e3"],
+            ),
+        );
+        let f = check(&p, &attributed);
+        assert!(f.is_empty(), "{f:?}");
+        let mut bare = attributed.clone();
+        bare.en.watch = "The chief executive had an extramarital affair, so whether the board acts before the November 19 report is the open question.".into();
+        bare.zh.watch = "首席执行官有婚外情，董事会是否在11月19日财报前采取行动是关键。".into();
+        let f = check(&p, &bare);
+        assert!(refused(&f, "en:"), "{f:?}");
+        assert!(refused(&f, "zh:"), "{f:?}");
+        assert!(f.iter().all(|r| !r.contains("personal")), "{f:?}");
+    }
+
     /// Trial run 1 (2026-11-13): lines refused for flaws in the rules, as the
     /// writer wrote them (the macro-event clauses, whose items are gone, cut).
     #[test]
@@ -3007,7 +3016,8 @@ mod tests {
     }
 
     /// Trial run 2: a year a cited item names may stand in a hook (ANET);
-    /// a private-life allegation is refused (NVDA); in Chinese an
+    /// a claim about a person is no longer refused by a word list (NVDA,
+    /// Rick 2026-11-17); in Chinese an
     /// unconfirmed date may not be the company's own 预计 (NVDA).
     #[test]
     fn the_trial_run_two_lines() {
@@ -3035,11 +3045,8 @@ mod tests {
 
         let (p, i) = get("premarket_2026-11-12-update", "NVDA");
         let f = check(&p, &i);
-        assert!(
-            refused(&f, "en: a personal allegation: second affair"),
-            "{f:?}"
-        );
-        assert!(refused(&f, "zh: a personal allegation: 婚外情"), "{f:?}");
+        // Rick, 2026-11-17: no word list refuses a claim about a person.
+        assert!(!refused(&f, "personal"), "{f:?}");
         assert!(
             refused(
                 &f,
@@ -3187,7 +3194,7 @@ mod tests {
         assert!(refused(&f, "en: hook has a digit"), "{f:?}");
         let f = both(&q, "Q3 revenue growth in focus", "Fool.com reports AMD's Q3 revenue rose by 45% year over year to $13.38 billion, a pace the next report will test.", "据fool.com报道，AMD第三季度营收同比增长45%，达到133.8亿美元，下次财报将检验这一增速。", &["e2"]);
         assert!(f.is_empty(), "{f:?}");
-        // L2: "affair" only in its personal sense.
+        // L2: "affair" in any sense is left to attribution and the judge.
         let p = mk("reuters.com");
         let f = both(
             &p,
@@ -3199,8 +3206,9 @@ mod tests {
         assert!(f.is_empty(), "{f:?}");
         let f = both(&p, "Guidance sets the next test", "Reuters reports a state of affairs where Apple expects revenue of $4.2 billion before November 19.", &zh_ok_for("路透社"), &["e2", "e3"]);
         assert!(f.is_empty(), "{f:?}");
+        // Attributed, a claim about a person passes (Rick, 2026-11-17).
         let f = both(&p, "Guidance sets the next test", "Reuters reports the CEO had an affair, and Apple expects revenue of $4.2 billion before November 19.", &zh_ok_for("路透社"), &["e2", "e3"]);
-        assert!(refused(&f, "en: a personal allegation: an affair"), "{f:?}");
+        assert!(f.is_empty(), "{f:?}");
         // L4: past periods pass in both languages; forward ones do not.
         assert_eq!(relative_time("revenue rose from last quarter"), None);
         assert_eq!(

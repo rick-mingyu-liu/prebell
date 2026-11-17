@@ -273,14 +273,15 @@ pub(crate) struct Record {
     pub judge_version: String,
 }
 
-/// A line's identity across runs: the writer version and the four texts.
-/// The labelling page keys its saved choices by it, and `score` uses it to
-/// notice labels or seeds made for an older line.
-pub(crate) fn line_key(i: &Insight) -> String {
+/// A line's identity across runs: the version of the writer that wrote it
+/// (the record's own `writer_version`, never the current one) and the four
+/// texts. The labelling page keys its saved choices by it, and `score` uses
+/// it to notice labels or seeds made for an older line.
+pub(crate) fn line_key(writer_version: &str, i: &Insight) -> String {
     // FNV-1a, 64 bits: stable across builds, unlike the std hasher.
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
     for part in [
-        WRITER_VERSION,
+        writer_version,
         &i.en.hook,
         &i.en.watch,
         &i.zh.hook,
@@ -1244,7 +1245,7 @@ pub(crate) mod tests {
         json!({"verdicts": [{"ticker": "AAPL",
             "en_claims": [{"claim": "revenue of $4.2 billion", "evidence_id": "e2", "support": "expects revenue of $4.2 billion"}],
             "zh_claims": [{"claim": "营收42亿美元", "evidence_id": "e2", "support": "expects revenue of $4.2 billion"}],
-            "en_supported": ok, "zh_supported": true, "no_advice": true, "formal": true, "same_meaning": true, "no_personal_allegation": true, "notes": ""}]})
+            "en_supported": ok, "zh_supported": true, "no_advice": true, "formal": true, "same_meaning": true, "personal_claims_attributed": true, "notes": ""}]})
     }
 
     fn inputs(posts: Vec<(&str, Post)>) -> Inputs {
@@ -1609,10 +1610,54 @@ pub(crate) mod tests {
         let i: Insight =
             serde_json::from_value(writer_reply(CLEAN)["insights"][0].clone()).unwrap();
         let mut j = i.clone();
-        assert_eq!(line_key(&i), line_key(&j));
+        assert_eq!(line_key(WRITER_VERSION, &i), line_key(WRITER_VERSION, &j));
         j.zh.watch.push('。');
-        assert_ne!(line_key(&i), line_key(&j));
-        assert_eq!(line_key(&i).len(), 16);
+        assert_ne!(line_key(WRITER_VERSION, &i), line_key(WRITER_VERSION, &j));
+        assert_eq!(line_key(WRITER_VERSION, &i).len(), 16);
+        // The version is part of the key: the same text by another writer
+        // is another line.
+        assert_ne!(
+            line_key("insight-writer/v4", &i),
+            line_key(WRITER_VERSION, &i)
+        );
+    }
+
+    /// Rick's labels of 2026-11-17 were saved for lines written by v4. The
+    /// key is computed with each record's own `writer_version`, so they still
+    /// match after the writer moves on (they did not when the key used the
+    /// current version: every label read as stale).
+    #[test]
+    fn ricks_real_labels_match_their_v4_records() {
+        let records: Vec<Record> = include_str!("../testdata/final_run_lines.jsonl")
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+        let labels: Vec<score::Label> =
+            serde_json::from_str(include_str!("../testdata/labels-rick-2026-11-17.json")).unwrap();
+        assert_ne!(WRITER_VERSION, "insight-writer/v4");
+        let mut matched = 0;
+        for l in &labels {
+            let Some(r) = records
+                .iter()
+                .find(|r| r.post == l.post && r.ticker == l.ticker)
+            else {
+                continue;
+            };
+            assert_eq!(r.writer_version, "insight-writer/v4");
+            let key = line_key(&r.writer_version, r.insight.as_ref().unwrap());
+            assert_eq!(
+                l.key.as_deref(),
+                Some(key.as_str()),
+                "{} {}",
+                l.post,
+                l.ticker
+            );
+            matched += 1;
+        }
+        assert_eq!(matched, 11);
+        // And the score counts them as fresh labels, not stale ones.
+        let s = score::score(&records, &[], &labels);
+        assert_eq!(s.stale_labels, 0);
     }
 
     #[test]

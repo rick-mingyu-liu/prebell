@@ -13,7 +13,7 @@ use crate::ipo::news::visible;
 use crate::numbers::Lang;
 use crate::providers::{LlmProvider, ProviderError};
 
-pub const JUDGE_VERSION: &str = "insight-judge/v2";
+pub const JUDGE_VERSION: &str = "insight-judge/v3";
 
 /// Shortest support, in letters and digits, that can confirm a claim: a
 /// single common word confirms nothing.
@@ -38,11 +38,11 @@ pub struct Verdict {
     pub no_advice: bool,
     pub formal: bool,
     pub same_meaning: bool,
-    /// No allegation about a named person's private life, and no person
-    /// named in connection with alleged wrongdoing or an investigation.
-    /// Absent (false) in verdicts from before judge v2.
+    /// Every claim about a named person in either language, an allegation
+    /// included, is attributed to the outlet that reported it (Rick,
+    /// 2026-11-17). Absent (false) in verdicts from before judge v3.
     #[serde(default)]
-    pub no_personal_allegation: bool,
+    pub personal_claims_attributed: bool,
     pub notes: String,
 }
 
@@ -55,10 +55,10 @@ For each mover you get its evidence items (each with an id) and the lines writte
 3. Set "no_advice" to false if a line gives investment advice of any kind, a rating, a price target or a prediction of where the price goes.
 4. Set "formal" to false if the tone is informal, promotional or sensational.
 5. Set "same_meaning" to false if the Chinese lines do not say the same thing as the English ones (a different figure, date, outlet or claim).
-6. Set "no_personal_allegation" to false if a line repeats an allegation about a named person's private life, or names a person in connection with alleged wrongdoing or an investigation. Stating the company-level fact ("the board opened an independent investigation") is fine, and so is naming an executive for what they said in their role.
+6. Set "personal_claims_attributed" to false if either language makes a claim about a named person, including an allegation, that the line does not attribute to the outlet that reported it, or states as PreBell's own claim. A claim about a named person may stand only when the line names the outlet that reported it ("Benzinga reports …", "据Benzinga报道……"). Naming an executive for what they said in their role, from the company's own release, is not such a claim. With no claim about a named person, set it to true.
 
 Use only the evidence given, never what you remember. Reply with JSON only, in this shape, one verdict per mover:
-{"verdicts":[{"ticker":"...","en_claims":[{"claim":"...","evidence_id":"e2","support":"exact words"}],"zh_claims":[{"claim":"...","evidence_id":"e2","support":"exact words"}],"en_supported":true,"zh_supported":true,"no_advice":true,"formal":true,"same_meaning":true,"no_personal_allegation":true,"notes":"one short sentence"}]}"#;
+{"verdicts":[{"ticker":"...","en_claims":[{"claim":"...","evidence_id":"e2","support":"exact words"}],"zh_claims":[{"claim":"...","evidence_id":"e2","support":"exact words"}],"en_supported":true,"zh_supported":true,"no_advice":true,"formal":true,"same_meaning":true,"personal_claims_attributed":true,"notes":"one short sentence"}]}"#;
 
 /// The insights that have a pack, with it.
 fn pairs<'a>(packs: &'a [Pack], insights: &'a [Insight]) -> Vec<(&'a Pack, &'a Insight)> {
@@ -132,7 +132,7 @@ pub fn parse(reply: &Value, insights: &[Insight]) -> Vec<Verdict> {
             no_advice: flag("no_advice"),
             formal: flag("formal"),
             same_meaning: flag("same_meaning"),
-            no_personal_allegation: flag("no_personal_allegation"),
+            personal_claims_attributed: flag("personal_claims_attributed"),
             notes: it
                 .get("notes")
                 .and_then(Value::as_str)
@@ -358,7 +358,7 @@ pub fn passed(pack: &Pack, insight: &Insight, v: &Verdict) -> bool {
         && v.no_advice
         && v.formal
         && v.same_meaning
-        && v.no_personal_allegation
+        && v.personal_claims_attributed
         && !fact_claims(pack, &v.en_claims).is_empty()
         && !fact_claims(pack, &v.zh_claims).is_empty()
         && support_confirmed(pack, &v.en_claims)
@@ -458,7 +458,7 @@ mod tests {
             no_advice: true,
             formal: true,
             same_meaning: true,
-            no_personal_allegation: true,
+            personal_claims_attributed: true,
             notes: String::new(),
         }
     }
@@ -469,7 +469,7 @@ mod tests {
             "zh_claims": [{"claim": "10亿美元回购", "evidence_id": "e2", "support": "a $1.0 billion buyback"}],
             "en_supported": true, "zh_supported": true,
             "no_advice": true, "formal": true, "same_meaning": true,
-            "no_personal_allegation": true, "notes": "ok"})
+            "personal_claims_attributed": true, "notes": "ok"})
     }
 
     struct Canned(Value);
@@ -629,7 +629,7 @@ mod tests {
             |v| v.no_advice = false,
             |v| v.formal = false,
             |v| v.same_meaning = false,
-            |v| v.no_personal_allegation = false,
+            |v| v.personal_claims_attributed = false,
         ];
         for f in flags {
             let mut v = verdict();
@@ -791,9 +791,9 @@ mod tests {
                     .map(|(name, j)| {
                         let mut verdict: Option<Verdict> =
                             serde_json::from_value(j["verdict"].clone()).unwrap();
-                        // Run 2 predates the personal-allegation flag.
+                        // Run 2 predates the people flag (judge v3).
                         if let Some(v) = verdict.as_mut() {
-                            v.no_personal_allegation = true;
+                            v.personal_claims_attributed = true;
                         }
                         (name.clone(), verdict)
                     })
@@ -865,7 +865,7 @@ mod tests {
         assert!(!passed(&p, &i, &v));
         let (p, i, mut v) = get("premarket_2026-11-12-update NVDA", "deepseek");
         assert!(passed(&p, &i, &v));
-        v.no_personal_allegation = false;
+        v.personal_claims_attributed = false;
         assert!(!passed(&p, &i, &v));
     }
 
@@ -875,7 +875,7 @@ mod tests {
         for want in [
             "do not list it as a claim",
             "reason for the move",
-            "no_personal_allegation",
+            "personal_claims_attributed",
             "英伟达预计于11月17日发布财报",
         ] {
             assert!(system.contains(want), "{want}");
@@ -888,7 +888,30 @@ mod tests {
             &json!({"verdicts": [{"ticker": "AAPL", "no_advice": true}]}),
             &[insight("AAPL")],
         );
-        assert!(!v[0].no_personal_allegation);
+        assert!(!v[0].personal_claims_attributed);
+    }
+
+    /// Rick, 2026-11-17 ("Allow it if attributed"): the judge flags a claim
+    /// about a named person only when it is not attributed to its outlet.
+    #[test]
+    fn the_v3_people_flag_is_the_owners_rule() {
+        assert_eq!(JUDGE_VERSION, "insight-judge/v3");
+        let (system, _) = prompt(&[pack(TEXT)], &[insight("AAPL")]);
+        assert!(!system.contains("no_personal_allegation"), "{system}");
+        assert!(system.contains("including an allegation"), "{system}");
+        assert!(
+            system.contains("names the outlet that reported it"),
+            "{system}"
+        );
+        // The old flag in a reply is not the new one: it reads as "no".
+        let mut old = reply_item("AAPL");
+        old.as_object_mut()
+            .unwrap()
+            .remove("personal_claims_attributed");
+        old["no_personal_allegation"] = json!(true);
+        let v = parse(&json!({ "verdicts": [old] }), &[insight("AAPL")]);
+        assert!(!v[0].personal_claims_attributed);
+        assert!(!passed(&pack(TEXT), &insight("AAPL"), &v[0]));
     }
 
     /// Final run (2026-11-13): DeepSeek supported NRG's "The sale price is

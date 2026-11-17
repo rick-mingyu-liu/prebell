@@ -109,8 +109,7 @@ fn current_key(records: &[Record], post: &str, ticker: &str) -> Option<String> {
     records
         .iter()
         .find(|r| judged(r) && r.post == post && r.ticker == ticker)
-        .and_then(|r| r.insight.as_ref())
-        .map(line_key)
+        .and_then(|r| r.insight.as_ref().map(|i| line_key(&r.writer_version, i)))
 }
 
 /// The trial's own part of the bar: no judge-passed line marked wrong, and
@@ -627,7 +626,7 @@ mod tests {
         Label {
             post: r.post.clone(),
             ticker: r.ticker.clone(),
-            key: Some(line_key(r.insight.as_ref().unwrap())),
+            key: Some(line_key(&r.writer_version, r.insight.as_ref().unwrap())),
             label: label.into(),
         }
     }
@@ -681,7 +680,7 @@ mod tests {
                 .map(|(n, j)| (n.to_string(), j))
                 .collect(),
             original_passed: BTreeMap::from([("claude".into(), true), ("deepseek".into(), true)]),
-            line_key: line_key(r.insight.as_ref().unwrap()),
+            line_key: line_key(&r.writer_version, r.insight.as_ref().unwrap()),
             skipped: false,
             change: Some(format!("{} change", kind.name())),
         }
@@ -920,7 +919,7 @@ mod tests {
             .iter()
             .zip(&records)
             .map(|(l, r)| Label {
-                key: Some(line_key(r.insight.as_ref().unwrap())),
+                key: Some(line_key(&r.writer_version, r.insight.as_ref().unwrap())),
                 ..l.clone()
             })
             .collect();
