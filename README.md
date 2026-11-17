@@ -1,10 +1,19 @@
 # PreBell · 盘前铃
 
-Auto-generated US-market briefs in English and Simplified Chinese: a premarket brief at 8:00 ET, updated at 8:35 ET after the 8:30 economic releases, an after-close recap, and earnings health checks built from SEC filings. Every number in a brief is checked against its source data before publishing.
+US stock market briefs, written and checked by code, published in English and Simplified Chinese at [prebell.site](https://prebell.site) with no human in the loop.
 
-Agents can read the same data through a read-only MCP server at `https://prebell.site/mcp` (`claude mcp add --transport http prebell https://prebell.site/mcp`; see `docs/runbook.md`, "MCP server").
+- **Premarket brief** at 8:00 ET, updated at 8:35 ET after the economic releases, and an **after-close recap**.
+- **Earnings checks** built from companies' SEC filings, minutes after they file.
+- **IPO watch**: large upcoming listings tracked through their SEC filings, with a write-up at each milestone.
+- **MCP server** so AI agents can read the same data:
 
-**Status:** pre-launch. Nothing is deployed yet; see `docs/runbook.md` for the deploy steps.
+```bash
+claude mcp add --transport http prebell https://prebell.site/mcp
+```
+
+Every number in a post is checked against its source data before it publishes; a post whose numbers don't check out is not published.
+
+**Status:** live since November 2026, on Cloudflare's free plan. Operations are in `docs/runbook.md`.
 
 ## Layout
 
