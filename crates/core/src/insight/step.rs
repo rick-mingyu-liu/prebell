@@ -1473,16 +1473,21 @@ mod tests {
         );
     }
 
-    /// The Worker ships with the step off: Rick turns it to shadow.
+    /// The Worker ships in shadow with the first run capped at 10 model
+    /// calls (Rick's go, 2026-11-17): the cap bounds the CPU measurement on
+    /// Workers, and raising it is his call.
     #[test]
-    fn the_worker_ships_with_insights_off() {
+    fn the_worker_ships_in_shadow_capped_at_ten_calls() {
         let toml = include_str!("../../../generator/wrangler.toml");
-        let lines: Vec<&str> = toml
-            .lines()
-            .filter(|l| l.starts_with("INSIGHTS_MODE"))
-            .collect();
-        assert_eq!(lines, [r#"INSIGHTS_MODE = "off""#]);
-        assert_eq!(mode(Some("off")), Ok(Mode::Off));
+        let set =
+            |name: &str| -> Vec<&str> { toml.lines().filter(|l| l.starts_with(name)).collect() };
+        assert_eq!(set("INSIGHTS_MODE"), [r#"INSIGHTS_MODE = "shadow""#]);
+        assert_eq!(mode(Some("shadow")), Ok(Mode::Shadow));
+        assert_eq!(
+            set("INSIGHT_MONTHLY_CALLS"),
+            [r#"INSIGHT_MONTHLY_CALLS = "10""#]
+        );
+        assert_eq!(config(None, None, Some("10")).unwrap().cap, 10);
     }
 
     #[test]
