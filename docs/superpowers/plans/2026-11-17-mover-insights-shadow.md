@@ -29,7 +29,7 @@
 1. **The 8:35 update.** It rewrites the 8:00 post with a new facts bundle. Expected: a second insight record for the update's facts, keyed by its own facts stem; the 8:00 record stays. Test in Task 3.
 2. **A message killed mid-way** (CPU or wall-clock limit after the writer call). Expected: the attempt is already counted, the month's call count already includes the writer call, and the next sweep retries up to the limit without double-counting. Test in Task 3.
 3. **A judge reply with a note after its JSON.** Expected: a failed judge call recorded as such, no line counted as passed. Test in Task 2.
-4. **A post with no eligible mover.** Expected: a record saying so, no model call, no attempts used. Test in Task 3.
+4. **A post with no eligible mover.** Expected: a final `done` record saying so (`skipped_reason`), no model call and no month-count use; the attempt is counted first, as for any try (the lead's ruling, 2026-11-17). Test in Task 3.
 5. **Two messages for the same post at once** (the publish-queued message and a sweep). Expected: one record stands; at worst the calls are paid twice, never two different records under one key. Test in Task 3.
 
 ---

@@ -1358,6 +1358,96 @@ mod tests {
         );
     }
 
+    /// The lead's ruling of 2026-11-17: a `written` 8:00 record is still
+    /// judged after the 8:35 update has published and has its own record,
+    /// whether the update's record is done or also waits for its judge (the
+    /// older one first).
+    #[tokio::test]
+    async fn a_written_800_record_is_judged_beside_the_updates_own_record() {
+        let r = recap_store();
+        run(
+            &r,
+            recap_now(),
+            &Llm::writer(vec![writer_reply()]),
+            &Llm::none(true),
+        )
+        .await;
+        let written = r.record(RECAP_KEY).unwrap();
+        let as_key = |key: &str, stage: Stage| {
+            let mut rec = written.clone();
+            rec.facts_key = key.into();
+            rec.content_type = "premarket".into();
+            rec.stage = stage;
+            serde_json::to_string(&rec).unwrap()
+        };
+        for update_stage in [Stage::Done, Stage::Written] {
+            let m = premarket_store();
+            m.objects.borrow_mut().insert(
+                "insights/premarket/2026-11-12.json".into(),
+                as_key("premarket/2026-11-12.json", Stage::Written),
+            );
+            let update = as_key("premarket/2026-11-12-update.json", update_stage);
+            m.objects.borrow_mut().insert(
+                "insights/premarket/2026-11-12-update.json".into(),
+                update.clone(),
+            );
+            let judge = Llm::judge(vec![judge_reply(), judge_reply()]);
+            let t = run(&m, premarket_now(), &Llm::none(false), &judge).await;
+            assert_eq!(
+                t.line, "insight premarket/2026-11-12.json: judged 3 lines, 3 passed; done",
+                "{update_stage:?}"
+            );
+            assert_eq!(
+                m.record("premarket/2026-11-12.json").unwrap().stage,
+                Stage::Done
+            );
+            // The update's record is untouched by the 8:00 judge stage.
+            assert_eq!(
+                m.objects.borrow()["insights/premarket/2026-11-12-update.json"],
+                update
+            );
+            let t = run(&m, premarket_now(), &Llm::none(false), &judge).await;
+            match update_stage {
+                Stage::Done => assert_eq!(t.line, "insight: nothing to do"),
+                Stage::Written => {
+                    assert!(t
+                        .line
+                        .starts_with("insight premarket/2026-11-12-update.json: judged"));
+                    assert_eq!(
+                        m.record("premarket/2026-11-12-update.json").unwrap().stage,
+                        Stage::Done
+                    );
+                }
+            }
+        }
+    }
+
+    /// The cap's boundary, as the D1 statement keeps it: at cap - 1 one more
+    /// call is claimed, at the cap none, and a second claim at once finds the
+    /// cap.
+    #[tokio::test]
+    async fn at_one_below_the_cap_one_call_is_allowed_and_at_the_cap_none() {
+        let m = recap_store();
+        m.kv.borrow_mut()
+            .insert("insight_calls:2026-11".into(), "299".into());
+        let writer = Llm::writer(vec![writer_reply()]);
+        let t = run(&m, recap_now(), &writer, &Llm::none(true)).await;
+        assert!(t.follow_up, "{t:?}");
+        assert_eq!(writer.calls.get(), 1);
+        assert_eq!(m.calls("2026-11").as_deref(), Some("300"));
+        // Now at the cap: the judge stage makes no call and uses no try.
+        let t = run(&m, recap_now(), &Llm::none(false), &Llm::none(true)).await;
+        assert!(t.line.starts_with("monthly cap of 300"), "{t:?}");
+        assert_eq!(m.record(RECAP_KEY).unwrap().judge_attempts, 0);
+        assert_eq!(m.calls("2026-11").as_deref(), Some("300"));
+        // The claim itself: one below the cap gives the last call, then none.
+        let s = Mem::default();
+        s.kv.borrow_mut().insert("k".into(), "1".into());
+        assert_eq!(s.kv_claim("k", 2, "t").await, Ok(Some(2)));
+        assert_eq!(s.kv_claim("k", 2, "t").await, Ok(None));
+        assert_eq!(s.kv.borrow()["k"], "2");
+    }
+
     /// Review Focus 2: a message killed after the writer call went out. The
     /// attempt and the call are already counted; the next sweep retries,
     /// and the counts grow by what that retry does, nothing more.
