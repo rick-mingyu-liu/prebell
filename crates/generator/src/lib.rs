@@ -627,10 +627,15 @@ async fn queue(batch: MessageBatch<Job>, env: Env, _ctx: Context) -> Result<()> 
         // The insight step's R2 calls and queue sends, which count toward
         // the Free plan's 50 like its fetch.
         let insight = store.reset_insight_ops();
-        console_log!(
-            "subrequests={} d1={d1} insight_ops={insight} job={job}",
-            http.count()
-        );
+        // Every other job's line stays as it was.
+        if job == "insight" {
+            console_log!(
+                "subrequests={} d1={d1} insight_ops={insight} job={job}",
+                http.count()
+            );
+        } else {
+            console_log!("subrequests={} d1={d1} job={job}", http.count());
+        }
         used += http.count() + insight;
         used_d1 += d1;
         msg.ack();

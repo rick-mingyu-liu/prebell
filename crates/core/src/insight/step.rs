@@ -493,6 +493,10 @@ impl Head {
     }
 }
 
+/// Each bundle and its stored record, by head and text: `None`, no record;
+/// `Some(None)`, a record left alone (another version, or unreadable).
+type Found = Vec<(Candidate, Option<Option<(Head, String)>>)>;
+
 /// What this tick last saw of a stored record. A write replaces the record
 /// only when the stored one still matches: never a later stage, a stored
 /// reply or another run's count.
@@ -616,11 +620,12 @@ pub fn warm_judge() -> usize {
 ///   one earnings bundle per mover (at most 8), the cap claim, the writer
 ///   call, a re-read and the write: 20, so 27;
 /// - check: a re-read and a write to count the try, a re-read and the
-///   write: 4, so 11;
+///   write, and up to `ATTEMPT_READS` attempt counters to tell whether
+///   another bundle waits: 7, so 14;
 /// - judge: the month's count, a re-read and a write to count the try, the
 ///   cap claim, the judge call, a re-read and the write of the reply, a
-///   re-read and the final write: 9, so 16;
-/// - verdicts: as check, 11.
+///   re-read and the final write, and the attempt counters: 12, so 19;
+/// - verdicts: as check, 14.
 ///
 /// Plus the follow-up queue send in `jobs::run_job`: 28 at most. Of those,
 /// at most 5 are D1 queries and 1 is a fetch.
@@ -643,7 +648,7 @@ pub async fn insight_tick(
     }
     // Each bundle's record, by its head only: `None`, no record; `Some(None)`,
     // a record of another version or unreadable, left alone like a done one.
-    let mut found: Vec<(Candidate, Option<Option<(Head, String)>>)> = Vec::new();
+    let mut found: Found = Vec::new();
     for c in cands {
         let rec = store
             .get_text(&record_key(&c.facts_key))
@@ -651,28 +656,34 @@ pub async fn insight_tick(
             .map(|t| Head::read(&t).map(|h| (h, t)));
         found.push((c, rec));
     }
-    let waiting = |except: &str| {
-        found
-            .iter()
-            .any(|(c, r)| r.is_none() && c.facts_key != except)
-    };
     // The next step of the oldest unfinished record first; a sweep leaves a
-    // record another message touched within the lease to that message.
-    let open = found.iter().rev().find_map(|(c, r)| match r {
-        Some(Some((h, text))) if h.stage != Stage::Done && !(sweep && leased(&h.at, now)) => {
-            Some((c.facts_key.clone(), text.clone()))
+    // record another message touched within the lease to that message. A
+    // record whose head reads but whose body does not (a shape changed
+    // without a new version) is left alone like one of another version,
+    // and named in the line, so it never stops the bundles behind it.
+    let mut unreadable: Vec<String> = Vec::new();
+    for (c, r) in found.iter().rev() {
+        let Some(Some((h, text))) = r else {
+            continue;
+        };
+        if h.stage == Stage::Done || sweep && leased(&h.at, now) {
+            continue;
         }
-        _ => None,
-    });
-    if let Some((key, text)) = open {
-        let rec: Record = serde_json::from_str(&text).map_err(|e| format!("{key}: {e}"))?;
-        let others = waiting(&key);
-        return match rec.stage {
+        let rec: Record = match serde_json::from_str(text) {
+            Ok(rec) => rec,
+            Err(e) => {
+                unreadable.push(format!("{}: {e}", c.facts_key));
+                continue;
+            }
+        };
+        let others = waiting(store, &found, &c.facts_key).await?;
+        let t = match rec.stage {
             Stage::Replied => check_step(now, store, rec, others).await,
             Stage::Written => judge_step(now, store, judge, cfg, rec, others).await,
             Stage::Judged => verdict_step(now, store, rec, others).await,
             Stage::Done => unreachable!("an open record is not done"),
-        };
+        }?;
+        return Ok(noted(t, &unreadable));
     }
     // Else the write step of the newest bundle without a record.
     let mut read = 0;
@@ -692,10 +703,47 @@ pub async fn insight_tick(
             continue;
         }
         if tried < MAX_ATTEMPTS {
-            return write_step(now, store, writer, cfg, c, tried).await;
+            let t = write_step(now, store, writer, cfg, c, tried).await?;
+            return Ok(noted(t, &unreadable));
         }
     }
-    Ok(tick("insight: nothing to do".into()))
+    Ok(noted(tick("insight: nothing to do".into()), &unreadable))
+}
+
+/// `t` with the unreadable records this tick left alone named in its line.
+fn noted(mut t: Tick, unreadable: &[String]) -> Tick {
+    if !unreadable.is_empty() {
+        t.line = format!(
+            "{}; unreadable record left alone: {}",
+            t.line,
+            unreadable.join("; ")
+        );
+    }
+    t
+}
+
+/// Whether a bundle other than `except` still waits for its write step: no
+/// record, and write tries left (a bundle whose tries are used up waits for
+/// nothing). Reads at most `ATTEMPT_READS` attempt counters.
+async fn waiting(store: &dyn InsightStore, found: &Found, except: &str) -> Result<bool, String> {
+    let mut read = 0;
+    for (c, r) in found {
+        if r.is_some() || c.facts_key == except {
+            continue;
+        }
+        if read == ATTEMPT_READS {
+            break;
+        }
+        read += 1;
+        let tried = match store.get_text(&attempts_key(&c.facts_key)).await? {
+            Some(t) => read_attempts(&t).0,
+            None => 0,
+        };
+        if tried < MAX_ATTEMPTS {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// Closes a record whose code-only step was tried `MAX_ATTEMPTS` times, or
@@ -2049,6 +2097,78 @@ mod tests {
         )
         .await;
         assert!(!t.follow_up, "{t:?}");
+    }
+
+    /// Review R2, the reviewer's wedge probe: a `written` record whose head
+    /// reads but whose body does not is left alone and named in the line;
+    /// the newer bundle behind it still gets written, every tick.
+    #[tokio::test]
+    async fn a_record_with_an_unreadable_body_never_blocks_the_others() {
+        let m = premarket_store();
+        m.posts.borrow_mut()[0] = premarket_post("premarket/2026-11-12.json");
+        m.posts.borrow_mut().push(PostRef {
+            content_type: "recap".into(),
+            trading_date: "2026-11-11".into(),
+            slug: "r".into(),
+            facts_key: "recap/2026-11-11.json".into(),
+        });
+        let bad = r#"{"version":"insight-record/v1","stage":"written","at":"2026-11-11T21:00:00Z","judge_attempts":0,"work_attempts":0,"movers":"not a list"}"#;
+        m.objects
+            .borrow_mut()
+            .insert("insights/recap/2026-11-11.json".into(), bad.into());
+        let writer = Llm::writer(vec![Answer::Value(json!({"insights": []}))]);
+        let t = insight_tick(premarket_now(), &m, &writer, &Llm::none(true), &cfg(), true)
+            .await
+            .unwrap();
+        assert!(
+            t.line
+                .starts_with("insight premarket/2026-11-12.json: 1 eligible, writer replied"),
+            "{t:?}"
+        );
+        assert!(
+            t.line
+                .contains("unreadable record left alone: recap/2026-11-11.json: invalid type"),
+            "{t:?}"
+        );
+        assert_eq!(
+            m.record("premarket/2026-11-12.json").unwrap().stage,
+            Stage::Replied
+        );
+        assert_eq!(m.objects.borrow()["insights/recap/2026-11-11.json"], bad);
+        // And on: the check step of the newer bundle, the bad record untouched.
+        let t = run(&m, premarket_now(), &Llm::none(false), &Llm::none(true)).await;
+        assert!(
+            t.line.starts_with("insight premarket/2026-11-12.json:"),
+            "{t:?}"
+        );
+        assert_eq!(m.objects.borrow()["insights/recap/2026-11-11.json"], bad);
+    }
+
+    /// Review R5: a bundle whose write tries are used up is not waiting, so
+    /// closing a record does not queue a message that only finds nothing to
+    /// do.
+    #[tokio::test]
+    async fn a_given_up_bundle_does_not_count_as_waiting() {
+        let m = recap_store();
+        to_written(&m).await;
+        m.posts.borrow_mut().push(PostRef {
+            content_type: "recap".into(),
+            trading_date: "2026-11-06".into(),
+            slug: "other".into(),
+            facts_key: "recap/2026-11-06-other.json".into(),
+        });
+        m.objects.borrow_mut().insert(
+            attempts_key("recap/2026-11-06-other.json"),
+            "3 2026-11-06T21:00:00Z".into(),
+        );
+        let t = run(
+            &m,
+            recap_now(),
+            &Llm::none(false),
+            &Llm::judge(vec![judge_reply()]),
+        )
+        .await;
+        assert!(t.line.ends_with("3 passed; done") && !t.follow_up, "{t:?}");
     }
 
     /// The lead's CPU ruling: a message killed right after the writer's

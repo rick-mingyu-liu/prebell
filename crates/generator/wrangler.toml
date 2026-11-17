@@ -67,7 +67,11 @@ max_retries = 1
 
 # Mover insights on their own queue, one message at a time, so a writer or
 # judge call never runs beside the briefs and two insight messages never run at
-# once. The queue must exist before a deploy (docs/runbook.md "Mover insights").
+# once. Create it before the first deploy that carries these lines, with the
+# owner's go: `pnpm exec wrangler queues create prebell-insight`. Otherwise that
+# deploy creates it by itself: wrangler 4.154.0 (the pinned version) provisions
+# missing bindings on deploy by default (read from its source, not observed).
+# See docs/runbook.md "Mover insights".
 [[queues.producers]]
 binding = "INSIGHT"
 queue = "prebell-insight"

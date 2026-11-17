@@ -650,16 +650,18 @@ fn digits_only_in_names(hook: &str, cited: &[String]) -> bool {
 
 /// Private-life words: a line holding one makes a claim about a named
 /// person's private life.
-const PERSONAL_EN: &[&str] = &["mistress", "extramarital"];
-const PERSONAL_ZH: &[&str] = &["婚外情", "出轨", "情妇", "绯闻"];
+const PERSONAL_EN: &[&str] = &["mistress", "extramarital", "infidelity"];
+const PERSONAL_ZH: &[&str] = &["婚外情", "婚外恋", "出轨", "情妇", "绯闻", "不正当关系"];
 
-/// "affair" in its personal sense: "had an affair", "a second affair", "an
-/// affair with"; not "a muted affair" or "current affairs". ASCII only: the
-/// English lines it reads are ASCII words.
+/// "affair" in its personal sense: "had an affair", "a second affair",
+/// "his affair", "the CEO's affair", "CEO affair", "an affair with"; not "a
+/// muted affair" or the plural business sense ("current affairs",
+/// "corporate affairs", "affairs of the company"). ASCII word boundaries:
+/// the English lines it reads are ASCII words.
 fn personal_affair(text: &str) -> Option<String> {
     static R: OnceLock<Regex> = OnceLock::new();
     let r = R.get_or_init(|| {
-        re(r"(?i-u)(?:\b(?:an|another|second|secret|romantic|alleged|extramarital|had|having)\s+affair\b|\baffair\s+with\b)")
+        re(r"(?i-u)(?:\b(?:an|another|second|secret|romantic|alleged|extramarital|had|having|his|her|their|the|ceo)\s+affair\b|\b[a-z]+(?:'|’)s\s+affair\b|\baffair\s+with\b)")
     });
     r.find(text).map(|m| m.as_str().to_string())
 }
@@ -685,11 +687,13 @@ fn personal_words(text: &str) -> Vec<String> {
 /// can tell: a line with a private-life word (`PERSONAL_EN`, `PERSONAL_ZH`,
 /// "affair" in its personal sense) is refused unless the word is not in the
 /// hook, a cited news item's text holds a private-life word too, and the
-/// sentence attributes that item's outlet. Code cannot tell whether the
-/// claim sits inside the attributing clause ("Benzinga reports the board
-/// may act, and the CEO had an affair"), nor see a claim about a person in
-/// other words: only the judge's `personal_claims_attributed` flag catches
-/// those.
+/// sentence attributes that item's outlet. The list is narrow by design: a
+/// euphemism ("personal conduct", 私生活风波), other wording for the same
+/// claim, or a claim about a person that is not about private life passes
+/// it, and so does a claim placed outside the attributing clause ("Benzinga
+/// reports the board may act, and the CEO had an affair"). Those are caught
+/// only by the judge's `personal_claims_attributed` flag, which fails
+/// closed: a missing or non-boolean flag reads as false.
 fn private_life(hook: &str, watch: &str, cited: &[&Evidence], lang: Lang) -> Vec<String> {
     let mut bad = Vec::new();
     if let Some(w) = personal_words(hook).first() {
@@ -3143,6 +3147,14 @@ mod tests {
             ),
             "{f:?}"
         );
+        // Since review R3 the English hook is refused on its own too.
+        assert!(
+            refused(
+                &f,
+                "en: a claim about a person's private life in the hook (CEO affair)"
+            ),
+            "{f:?}"
+        );
         // P3: cites only the calendar item; nothing reports the claim.
         let f = case(
             ("Board scrutiny before the report", "The chief executive had an extramarital affair, so whether the board acts before the November 19 report is the open question."),
@@ -3208,6 +3220,71 @@ mod tests {
         assert!(
             personal_words("a muted affair before the report, as current affairs go").is_empty()
         );
+    }
+
+    /// Review R3: the wider wording in both languages is refused when no
+    /// cited item reports it, and the business sense of "affairs" and 事务
+    /// is not a private-life word.
+    #[test]
+    fn wider_private_life_wording_is_caught_and_the_business_sense_is_not() {
+        use EvidenceKind::*;
+        let p = run_one_pack(
+            "NVDA",
+            "2026-11-12",
+            &[(
+                ReportDate,
+                None,
+                "NVDA's report date is confirmed for November 19, 2026 (earnings calendar).",
+                Some("2026-11-19"),
+            )],
+        );
+        let zh_ok = "董事会是否在11月19日财报前采取行动是关键。";
+        let en_ok = "Whether the board acts before the November 19 report is the open question.";
+        for (en, word) in [
+            ("The CEO affair has the board's attention, so whether the board acts before the November 19 report is the open question.", "CEO affair"),
+            ("The chief executive admitted his affair, so whether the board acts before the November 19 report is the open question.", "his affair"),
+            ("The CEO's affair has the board's attention, so whether the board acts before the November 19 report is the open question.", "CEO's affair"),
+            ("The chief executive’s affair has the board's attention, so whether the board acts before the November 19 report is the open question.", "executive’s affair"),
+            ("Reports of infidelity have the board's attention, so whether the board acts before the November 19 report is the open question.", "infidelity"),
+        ] {
+            let f = check(&p, &insight(line("Board scrutiny before the report", en, &["e2"]), line("董事会审视成焦点", zh_ok, &["e2"])));
+            assert!(refused(&f, &format!("en: a claim about a person's private life ({word})")), "{en}: {f:?}");
+        }
+        for (zh, word) in [
+            (
+                "首席执行官承认婚外恋，董事会是否在11月19日财报前采取行动是关键。",
+                "婚外恋",
+            ),
+            (
+                "首席执行官被指有不正当关系，董事会是否在11月19日财报前采取行动是关键。",
+                "不正当关系",
+            ),
+        ] {
+            let f = check(
+                &p,
+                &insight(
+                    line("Board scrutiny before the report", en_ok, &["e2"]),
+                    line("董事会审视成焦点", zh, &["e2"]),
+                ),
+            );
+            assert!(
+                refused(
+                    &f,
+                    &format!("zh: a claim about a person's private life ({word})")
+                ),
+                "{zh}: {f:?}"
+            );
+        }
+        for text in [
+            "a state of affairs the board must address",
+            "its corporate affairs team and public affairs office",
+            "government affairs spending and current affairs",
+            "the affairs of the company are in order",
+            "a muted affair before the report",
+            "公司事务部门负责政府事务",
+        ] {
+            assert!(personal_words(text).is_empty(), "{text}");
+        }
     }
 
     /// Trial run 1 (2026-11-13): lines refused for flaws in the rules, as the

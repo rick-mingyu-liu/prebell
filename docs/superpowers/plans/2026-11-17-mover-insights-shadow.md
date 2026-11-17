@@ -66,7 +66,7 @@ async fn complete_json_strict(&self, system: &str, user: &str) -> Result<Value, 
 
 ### Task 3: The `insight` step in core
 
-**Files:** create `crates/core/src/insight/step.rs`; modify `crates/core/src/insight/mod.rs`, `crates/core/src/schedule.rs` (`JobKind::Insight`, job name `insight`, sent to `JOBS_QUEUE`), `crates/core/src/jobs.rs` (`JobRunner::insight`, `JobRunner::queue_insight`; queue it beside `queue_card_if` when a content job's outcome is `Published` or `PublishedEnOnly`), `crates/core/src/store.rs` (any read the step needs).
+**Files:** create `crates/core/src/insight/step.rs`; modify `crates/core/src/insight/mod.rs`, `crates/core/src/schedule.rs` (`JobKind::Insight`, job name `insight`, sent to its own queue `INSIGHT`, `prebell-insight`, one message at a time: Rick's choice after review M4; the queue is created as a separate step on the owner's go before the deploy that carries it, because wrangler 4.154.0 would otherwise create it on deploy by itself), `crates/core/src/jobs.rs` (`JobRunner::insight`, `JobRunner::queue_insight`; queue it beside `queue_card_if` when a content job's outcome is `Published` or `PublishedEnOnly`), `crates/core/src/store.rs` (any read the step needs).
 
 **Interfaces — Produces:**
 
@@ -103,7 +103,7 @@ Decisions:
 
 **Files:** `crates/generator/src/lib.rs`, `crates/generator/wrangler.toml`.
 
-- Wire `JobRunner::insight` and `queue_insight` (send `{"job":"insight"}` to `JOBS`). Build the writer and judge from their own settings and `ANTHROPIC_API_KEY`; a config error (bad mode, unknown provider) goes through `config_error` with key `config:insight:<date>`.
+- Wire `JobRunner::insight` and `queue_insight` (send `{"job":"insight"}` to `INSIGHT`). Build the writer and judge from their own settings and `ANTHROPIC_API_KEY`; a config error (bad mode, unknown provider) goes through `config_error` with key `config:insight:<date>`.
 - The crons queue one `insight` message per firing during 08:10–09:30 ET and 16:10–17:30 ET on trading days, only when the mode is `shadow` (a cheap sweep: one D1 read when there is nothing to do).
 - `wrangler.toml`: add `INSIGHTS_MODE = "off"` with a comment. Turning it to `shadow` is a deploy-config change and Rick's call.
 - Log each tick's line through `console_log!` and each dropped reply note through the existing warn sink.

@@ -151,13 +151,18 @@ the ids of the evidence items the line rests on.
   reported it, in a reporting frame ("Benzinga reports …", "据Benzinga
   报道……"); never as PreBell's own claim. Naming an executive for what
   they said in their role is fine. What code catches: a line holding a
-  private-life word (mistress, extramarital, "affair" in its personal
-  sense, 婚外情, 出轨, 情妇, 绯闻) is refused unless the word is not in the
-  hook, a cited news item reports such a claim, and the sentence
-  attributes that item's outlet. What only the judge's
-  `personal_claims_attributed` flag (judge v3) catches: a claim about a
-  person in other words, and a claim placed outside the attributing clause
-  ("Benzinga reports the board may act, and the CEO had an affair").
+  private-life word (mistress, extramarital, infidelity, "affair" in its
+  personal sense: "had an affair", "his affair", "the CEO's affair", "CEO
+  affair", "an affair with"; 婚外情, 婚外恋, 出轨, 情妇, 绯闻, 不正当关系) is
+  refused unless the word is not in the hook, a cited news item reports
+  such a claim, and the sentence attributes that item's outlet. The list
+  is narrow by design: a euphemism ("personal conduct", 私生活风波), other
+  wording for the same claim, a claim about a person that is not about
+  private life, and a claim placed outside the attributing clause
+  ("Benzinga reports the board may act, and the CEO had an affair") all
+  pass it. Those are caught only by the judge's
+  `personal_claims_attributed` flag (judge v3), which fails closed: a
+  missing or non-boolean flag reads as false.
 - An unconfirmed report date is never the company's own: in Chinese not
   "公司预计于…", but "财报日期暂定为…（未经公司确认）" or "市场预计其于…".
 - An outlet is named as the pack gives it, in both languages, inside an
