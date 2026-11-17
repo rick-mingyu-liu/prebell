@@ -1666,9 +1666,10 @@ mod tests {
         assert_eq!(s.kv.borrow()["k"], "2");
     }
 
-    /// A record a Friday left open (here `written`, its judge failed until
-    /// the last sweep) is finished by Monday's first sweep: the step looks
-    /// back to the previous trading day, not the calendar day before.
+    /// A record a Friday left open (`replied`, `written` or `judged`: the
+    /// last sweep ended before the next step) is finished by Monday's first
+    /// sweeps: the step looks back to the previous trading day, not the
+    /// calendar day before. The same across a market holiday.
     #[tokio::test]
     async fn a_friday_record_is_finished_on_monday_and_across_a_holiday() {
         for (day, sweep) in [
@@ -1677,16 +1678,37 @@ mod tests {
             // Wednesday 2026-11-25, then Friday 2026-11-27 after Thanksgiving.
             ("2026-11-25", "2026-11-27T13:10:00Z"),
         ] {
-            let m = recap_store();
-            m.posts.borrow_mut()[0].trading_date = day.into();
-            to_written(&m).await;
-            let judge = Llm::judge(vec![judge_reply()]);
-            let t = run(&m, sweep.parse().unwrap(), &Llm::none(false), &judge).await;
-            assert_eq!(
-                t.line, "insight recap/2026-11-06.json: judged 3 lines, 3 passed; done",
-                "{day}"
-            );
-            assert_eq!(m.record(RECAP_KEY).unwrap().stage, Stage::Done);
+            for left in [Stage::Replied, Stage::Written, Stage::Judged] {
+                let m = recap_store();
+                m.posts.borrow_mut()[0].trading_date = day.into();
+                let writer = Llm::writer(vec![writer_reply()]);
+                run(&m, recap_now(), &writer, &Llm::none(true)).await;
+                if left != Stage::Replied {
+                    run(&m, recap_now(), &Llm::none(false), &Llm::none(true)).await;
+                }
+                if left == Stage::Judged {
+                    *m.kill_after.borrow_mut() = Some(JUDGED);
+                    let j = Llm::judge(vec![judge_reply()]);
+                    let killed =
+                        insight_tick(recap_now(), &m, &Llm::none(false), &j, &cfg()).now_or_never();
+                    assert!(killed.is_none());
+                }
+                assert_eq!(m.record(RECAP_KEY).unwrap().stage, left, "{day}");
+                let at: DateTime<Utc> = sweep.parse().unwrap();
+                let judge = Llm::judge(vec![judge_reply()]);
+                let mut last = String::new();
+                for _ in 0..3 {
+                    last = run(&m, at, &Llm::none(false), &judge).await.line;
+                    if m.record(RECAP_KEY).unwrap().stage == Stage::Done {
+                        break;
+                    }
+                }
+                assert_eq!(
+                    last, "insight recap/2026-11-06.json: judged 3 lines, 3 passed; done",
+                    "{day} {left:?}"
+                );
+                assert_eq!(writer.calls.get(), 1);
+            }
         }
         // A record two trading days back is out of the window.
         let m = recap_store();
