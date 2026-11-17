@@ -1,5 +1,6 @@
 //! Bilingual number extraction and the "every number is traceable" check.
 
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::OnceLock;
 
 use regex::Regex;
@@ -32,8 +33,36 @@ pub struct Num {
     pub at: usize,
 }
 
+/// Patterns this module has compiled in this process (`insight::compiled`).
+static COMPILED: AtomicUsize = AtomicUsize::new(0);
+
 fn re(pattern: &str) -> Regex {
+    COMPILED.fetch_add(1, Ordering::Relaxed);
     Regex::new(pattern).expect("valid built-in regex")
+}
+
+pub(crate) fn compiled() -> usize {
+    COMPILED.load(Ordering::Relaxed)
+}
+
+/// Compiles every lazily compiled pattern of this module, so a caller can
+/// pay the compile before it pays for a model call. One entry per
+/// `OnceLock` in this file (`insight::tests` counts them); the number.
+pub fn warm() -> usize {
+    let touch: [fn(); 3] = [
+        || {
+            let _ = number_re();
+        },
+        || {
+            let _ = ignore_res();
+        },
+        // Both of its patterns (`R` and `CHANGE`) at the top of the call.
+        || range_units("", &mut [], &[]),
+    ];
+    for t in touch {
+        t();
+    }
+    4
 }
 
 /// Core numeric token: thousands-grouped first (leftmost-first alternation),

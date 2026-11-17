@@ -3,6 +3,7 @@
 //! attribution, hedged unconfirmed dates and a refusal list of advice,
 //! rating and prediction wording.
 
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::OnceLock;
 
 use chrono::{Datelike, NaiveDate};
@@ -243,8 +244,90 @@ pub fn outlet_names(outlet: &str, lang: Lang) -> Vec<String> {
     out
 }
 
+/// Patterns this module has compiled in this process (`insight::compiled`).
+static COMPILED: AtomicUsize = AtomicUsize::new(0);
+
 fn re(p: &str) -> Regex {
+    COMPILED.fetch_add(1, Ordering::Relaxed);
     Regex::new(p).expect("valid built-in regex")
+}
+
+pub(crate) fn compiled() -> usize {
+    COMPILED.load(Ordering::Relaxed)
+}
+
+/// Compiles every lazily compiled pattern of the code checks, so the
+/// message that runs `check` pays the compile up front. One entry per
+/// `OnceLock` in this file (`insight::tests` counts them); the number.
+pub fn warm() -> usize {
+    let day = NaiveDate::from_ymd_opt(2026, 1, 1).expect("valid date");
+    let touch: [fn(NaiveDate); 17] = [
+        |_| {
+            let _ = worded_figures("");
+        },
+        |_| {
+            let _ = hook_count("");
+        },
+        |_| {
+            let _ = refused_en();
+        },
+        |_| {
+            let _ = advice_hold("");
+        },
+        |_| {
+            let _ = attributes("", "x");
+        },
+        |_| {
+            let _ = digits_only_in_names("", &[]);
+        },
+        |_| {
+            let _ = names_attributed("", "x");
+        },
+        warm_dates,
+        |_| {
+            let _ = bare_months("");
+        },
+        |_| {
+            let _ = zh_years("");
+        },
+        |_| {
+            let _ = relative_en_re();
+        },
+        |_| {
+            let _ = relative_zh_re();
+        },
+        |_| {
+            let _ = fiscal_labels("");
+        },
+        |_| {
+            let _ = clause_start("", 0);
+        },
+        |_| {
+            let _ = rating_frame();
+        },
+        |_| {
+            let _ = advice_words("", false);
+        },
+        |_| {
+            let _ = million_zh();
+        },
+    ];
+    for t in touch {
+        t(day);
+    }
+    touch.len()
+}
+
+/// A figure in 百万 or 千万 (compiled once, not per line).
+fn million_zh() -> &'static Regex {
+    static R: OnceLock<Regex> = OnceLock::new();
+    R.get_or_init(|| re(r"\d\s*(?:百万|千万)"))
+}
+
+/// The date marks alone: what the judge's confirmation (`judge::passed`)
+/// compiles of this file.
+pub(crate) fn warm_dates(day: NaiveDate) {
+    let _ = date_marks("", day);
 }
 
 fn is_cjk(c: char) -> bool {
@@ -453,7 +536,9 @@ pub(crate) fn scrub(text: &str, names: &[String]) -> String {
     names.sort_by_key(|n| std::cmp::Reverse(n.len()));
     let mut out = text.to_string();
     for n in names {
-        let r = re(&format!("(?i){}", regex::escape(n)));
+        // Built per call for the line's own outlets, never cached: not one
+        // of the lazily compiled patterns `warm` covers.
+        let r = Regex::new(&format!("(?i){}", regex::escape(n))).expect("an escaped name");
         out = r.replace_all(&out, "Outlet").into_owned();
     }
     out
@@ -1195,7 +1280,7 @@ fn check_line(pack: &Pack, line: &Line, lang: Lang) -> Vec<String> {
         );
     }
     // Chinese figures use 万 and 亿.
-    if re(r"\d\s*(?:百万|千万)").is_match(&ascii_digits(&both)) {
+    if million_zh().is_match(&ascii_digits(&both)) {
         bad.push("a figure in 百万 or 千万: write it in 万 or 亿".to_string());
     }
     // The cited outlets' names, which hold digits ("24/7 Wall St.") or

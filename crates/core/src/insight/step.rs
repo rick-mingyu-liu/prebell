@@ -5,21 +5,37 @@
 //! every line and verdict is stored in R2 under `insights/`. Readers see
 //! nothing: no table the site reads is written.
 //!
-//! Two stages, each in its own queue message, so a failed judge never loses
-//! or re-pays the writer and the CPU is split: the write stage stores a
-//! `written` record and asks for one more message; the judge stage turns it
-//! into a `done` one. A tick does the judge stage of the oldest `written`
-//! record first, else the write stage of the newest bundle without a record.
+//! A paid reply is stored before any heavy work, so a message killed for CPU
+//! never makes a paid call be paid again, and each message compiles only
+//! the patterns it needs, before it pays (the lead's CPU ruling of
+//! 2026-11-17). A bundle's record goes through these stages, each step in
+//! its own queue message unless noted:
+//!
+//! 1. write (no record yet): build the packs (the pack patterns), claim a
+//!    call, call the writer, store its reply as a `replied` record. No code
+//!    check runs here.
+//! 2. check (`replied`): read the stored reply, run the code checks (the
+//!    check and number patterns), store `written` (or `done` when no line
+//!    passed them).
+//! 3. judge (`written`): compile the confirmation patterns (numbers and
+//!    dates), claim a call, call the judge, store its reply as `judged`,
+//!    then, in the same message, confirm the verdicts and store `done`.
+//! 4. verdicts (`judged`, only when step 3 was killed after storing the
+//!    reply): confirm the stored verdicts and store `done`.
+//!
+//! A tick does the next step of the oldest unfinished record first, else
+//! the write step of the newest bundle without a record.
 //!
 //! Bounded like the share cards: at most `MAX_ATTEMPTS` write tries per
-//! bundle and judge tries per record, each counted before the work it
-//! guards (so a message killed for CPU or wall time still counts), and at
+//! bundle, judge tries per record, and tries of a code-only step on a stored
+//! reply, each counted before the work it guards (so a message killed for CPU or wall time still counts), and at
 //! most the monthly cap of model calls, each counted before it is made. A
 //! failure never alerts and never touches a post.
 
 use async_trait::async_trait;
 use chrono::{DateTime, Duration, NaiveDate, Timelike, Utc};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 use super::judge::{self, Verdict, JUDGE_VERSION};
 use super::pack::{self, PackInputs, ReportStatus};
@@ -207,8 +223,12 @@ fn calls_key(now: DateTime<Utc>) -> String {
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum Stage {
-    /// The writer and the code checks ran; the judge has not answered.
+    /// The writer's reply is stored; the code checks have not run.
+    Replied,
+    /// The code checks ran; the judge has not answered.
     Written,
+    /// The judge's reply is stored; its verdicts are not confirmed yet.
+    Judged,
     /// Final: never overwritten.
     Done,
 }
@@ -247,6 +267,13 @@ pub struct Record {
     pub writer_model: String,
     pub judge_model: String,
     pub movers: Vec<MoverRecord>,
+    /// The writer's reply as it came, stored before anything else ran on it.
+    pub writer_reply: Option<Value>,
+    /// The judge's reply as it came, stored before its verdicts are confirmed.
+    pub judge_reply: Option<Value>,
+    /// Tries of the code-only step on a stored reply (the checks, or the
+    /// confirmation), counted before it runs; 0 again at each new stage.
+    pub work_attempts: u32,
     /// Model calls made for this record.
     pub calls: u32,
     /// Why the record is final without every line judged ("no eligible
@@ -255,6 +282,10 @@ pub struct Record {
 }
 
 impl Record {
+    fn open(&self) -> bool {
+        self.stage != Stage::Done
+    }
+
     /// The movers whose line passed the code checks: what the judge sees.
     fn to_judge(&self) -> (Vec<Pack>, Vec<Insight>) {
         self.movers
@@ -441,7 +472,7 @@ async fn put_new(store: &dyn InsightStore, rec: &Record) -> Result<bool, String>
 async fn put_unless_done(store: &dyn InsightStore, rec: &Record) -> Result<bool, String> {
     let key = record_key(&rec.facts_key);
     let open = match store.get_text(&key).await? {
-        Some(t) => serde_json::from_str::<Record>(&t).is_ok_and(|r| r.stage == Stage::Written),
+        Some(t) => serde_json::from_str::<Record>(&t).is_ok_and(|r| r.open()),
         None => false,
     };
     if !open {
@@ -452,19 +483,42 @@ async fn put_unless_done(store: &dyn InsightStore, rec: &Record) -> Result<bool,
     Ok(true)
 }
 
+/// The patterns the write step compiles, before it pays: the pack builder's.
+pub fn warm_write() -> usize {
+    pack::warm()
+}
+
+/// The patterns the check step compiles: the code checks' and the numbers'.
+pub fn warm_check() -> usize {
+    check::warm() + crate::numbers::warm()
+}
+
+/// The patterns the judge step compiles before it pays, and the verdict
+/// step uses: the numbers' and the date marks (`judge::passed`).
+pub fn warm_judge() -> usize {
+    check::warm_dates(NaiveDate::from_ymd_opt(2026, 1, 1).expect("valid date"));
+    crate::numbers::warm() + 1
+}
+
 /// One `insight` message. `Ok` is a log line and whether to queue another
 /// message; `Err` a store error (logged, never alerted; the next sweep
 /// tries again within the attempt limits).
 ///
 /// Subrequests in the worst case (each D1 query, R2 get or put and model
 /// call is one): the posts query and a record read per bundle of the last
-/// two ET days (at most 6), then either the judge stage (the cap claim, a
-/// re-read and a write to count the try, the judge call, a re-read and the
-/// write: 6, so 13 in all) or the write stage (at most `ATTEMPT_READS`
-/// attempt counters, the month's count, the attempt write, the facts, the
-/// calendar and earnings-check queries, one earnings bundle per mover (at
-/// most 8), the cap claim, the writer call, a re-read and the write: 20, so
-/// 27, and 28 with the follow-up queue send in `jobs::run_job`). Of those,
+/// two ET days (at most 6), then one step:
+/// - write: at most `ATTEMPT_READS` attempt counters, the month's count,
+///   the attempt write, the facts, the calendar and earnings-check queries,
+///   one earnings bundle per mover (at most 8), the cap claim, the writer
+///   call, a re-read and the write: 20, so 27;
+/// - check: a re-read and a write to count the try, a re-read and the
+///   write: 4, so 11;
+/// - judge: the month's count, a re-read and a write to count the try, the
+///   cap claim, the judge call, a re-read and the write of the reply, a
+///   re-read and the final write: 9, so 16;
+/// - verdicts: as check, 11.
+///
+/// Plus the follow-up queue send in `jobs::run_job`: 28 at most. Of those,
 /// at most 5 are D1 queries and 1 is a fetch.
 pub async fn insight_tick(
     now: DateTime<Utc>,
@@ -489,14 +543,19 @@ pub async fn insight_tick(
             .map(|t| serde_json::from_str::<Record>(&t).ok());
         found.push((c, rec));
     }
-    // The judge stage of the oldest written record first.
+    // The next step of the oldest unfinished record first.
     if let Some(rec) = found.iter().rev().find_map(|(_, r)| match r {
-        Some(Some(r)) if r.stage == Stage::Written => Some(r.clone()),
+        Some(Some(r)) if r.open() => Some(r.clone()),
         _ => None,
     }) {
-        return judge_stage(now, store, judge, cfg, rec).await;
+        return match rec.stage {
+            Stage::Replied => check_step(now, store, rec).await,
+            Stage::Written => judge_step(now, store, judge, cfg, rec).await,
+            Stage::Judged => verdict_step(now, store, rec).await,
+            Stage::Done => unreachable!("an open record is not done"),
+        };
     }
-    // Else the write stage of the newest bundle without a record.
+    // Else the write step of the newest bundle without a record.
     let mut read = 0;
     for (c, rec) in &found {
         if rec.is_some() {
@@ -511,13 +570,41 @@ pub async fn insight_tick(
             None => 0,
         };
         if tried < MAX_ATTEMPTS {
-            return write_stage(now, store, writer, cfg, c, tried).await;
+            return write_step(now, store, writer, cfg, c, tried).await;
         }
     }
     Ok(tick("insight: nothing to do".into()))
 }
 
-async fn write_stage(
+/// Closes a record whose code-only step was tried `MAX_ATTEMPTS` times, or
+/// counts one more try; `Ok(None)` when it may go on.
+async fn count_work(
+    now: DateTime<Utc>,
+    store: &dyn InsightStore,
+    rec: &mut Record,
+    what: &str,
+) -> Result<Option<Tick>, String> {
+    let key = rec.facts_key.clone();
+    if rec.work_attempts >= MAX_ATTEMPTS {
+        rec.stage = Stage::Done;
+        rec.skipped_reason = Some(format!("{what} did not finish in {MAX_ATTEMPTS} tries"));
+        rec.at = iso(now);
+        put_unless_done(store, rec).await?;
+        return Ok(Some(tick(format!(
+            "insight {key}: {what} given up after {MAX_ATTEMPTS} tries"
+        ))));
+    }
+    rec.work_attempts += 1;
+    rec.at = iso(now);
+    if !put_unless_done(store, rec).await? {
+        return Ok(Some(tick(format!(
+            "insight {key}: record already finished by another run"
+        ))));
+    }
+    Ok(None)
+}
+
+async fn write_step(
     now: DateTime<Utc>,
     store: &dyn InsightStore,
     writer: &dyn LlmProvider,
@@ -534,6 +621,7 @@ async fn write_stage(
         .put_text(&attempts_key(key), &(tried + 1).to_string())
         .await?;
     let attempt = format!("attempt {} of {MAX_ATTEMPTS}", tried + 1);
+    warm_write();
     let Some(json) = store.get_text(key).await? else {
         return Ok(tick(format!("insight {key}: facts missing; {attempt}")));
     };
@@ -578,6 +666,11 @@ async fn write_stage(
         checks: &checks,
         calendar: &calendar,
     });
+    let notes = if notes.is_empty() {
+        String::new()
+    } else {
+        format!(" ({})", notes.join("; "))
+    };
     let mut rec = Record {
         version: RECORD_VERSION.into(),
         stage: Stage::Done,
@@ -591,16 +684,26 @@ async fn write_stage(
         judge_version: JUDGE_VERSION.into(),
         writer_model: cfg.writer_model.into(),
         judge_model: cfg.judge_model.into(),
-        movers: vec![],
+        movers: packs
+            .into_iter()
+            .map(|p| MoverRecord {
+                ticker: p.ticker.clone(),
+                pack: p,
+                insight: None,
+                write_error: None,
+                check: vec![],
+                verdict: None,
+                judge_error: None,
+                passed: false,
+            })
+            .collect(),
+        writer_reply: None,
+        judge_reply: None,
+        work_attempts: 0,
         calls: 0,
         skipped_reason: None,
     };
-    let notes = if notes.is_empty() {
-        String::new()
-    } else {
-        format!(" ({})", notes.join("; "))
-    };
-    if packs.is_empty() {
+    if rec.movers.is_empty() {
         rec.skipped_reason = Some("no eligible mover".into());
         let line = if put_new(store, &rec).await? {
             format!("insight {key}: no eligible mover; done{notes}")
@@ -612,18 +715,51 @@ async fn write_stage(
     if !claim_call(now, store, cfg.cap).await? {
         return capped(now, store, cfg.cap).await;
     }
-    rec.calls = 1;
-    let items = match write::write(writer, &packs).await {
-        Ok(items) => items,
+    let packs: Vec<Pack> = rec.movers.iter().map(|m| m.pack.clone()).collect();
+    let (system, user) = write::prompt(&packs);
+    let reply = match writer.complete_json(&system, &user).await {
+        Ok(v) => v,
         Err(e) => {
             return Ok(tick(format!(
                 "insight {key}: writer call failed: {e}; {attempt}{notes}"
             )))
         }
     };
+    // Stored as it came, before any check runs on it: a message killed from
+    // here on never makes the writer be paid again.
+    rec.stage = Stage::Replied;
+    rec.writer_reply = Some(reply);
+    rec.calls = 1;
+    if !put_new(store, &rec).await? {
+        return Ok(tick(format!(
+            "insight {key}: record already written by another run"
+        )));
+    }
+    Ok(Tick {
+        line: format!(
+            "insight {key}: {} eligible, writer replied; checks queued{notes}",
+            rec.movers.len()
+        ),
+        follow_up: true,
+    })
+}
+
+/// The code checks over a stored writer reply.
+async fn check_step(
+    now: DateTime<Utc>,
+    store: &dyn InsightStore,
+    mut rec: Record,
+) -> Result<Tick, String> {
+    let key = rec.facts_key.clone();
+    if let Some(t) = count_work(now, store, &mut rec, "the code checks").await? {
+        return Ok(t);
+    }
+    warm_check();
+    let packs: Vec<Pack> = rec.movers.iter().map(|m| m.pack.clone()).collect();
+    let reply = rec.writer_reply.clone().unwrap_or(Value::Null);
     let mut insights: Vec<Insight> = Vec::new();
     let mut errors: Vec<(String, String)> = Vec::new();
-    for item in items {
+    for item in write::parse(&reply, &packs) {
         match item {
             Ok(i) => insights.push(i),
             Err(e) => {
@@ -639,44 +775,36 @@ async fn write_stage(
             }
         }
     }
-    rec.movers = packs
-        .into_iter()
-        .map(|p| {
-            let insight = insights.iter().find(|i| i.ticker == p.ticker).cloned();
-            let check = insight
-                .as_ref()
-                .map(|i| check::check(&p, i))
-                .unwrap_or_default();
-            MoverRecord {
-                ticker: p.ticker.clone(),
-                write_error: errors
-                    .iter()
-                    .find(|(t, _)| *t == p.ticker && insight.is_none())
-                    .map(|(_, e)| e.clone()),
-                pack: p,
-                insight,
-                check,
-                verdict: None,
-                judge_error: None,
-                passed: false,
-            }
-        })
-        .collect();
+    for m in rec.movers.iter_mut() {
+        m.insight = insights.iter().find(|i| i.ticker == m.ticker).cloned();
+        m.check = m
+            .insight
+            .as_ref()
+            .map(|i| check::check(&m.pack, i))
+            .unwrap_or_default();
+        m.write_error = errors
+            .iter()
+            .find(|(t, _)| *t == m.ticker && m.insight.is_none())
+            .map(|(_, e)| e.clone());
+    }
     let to_judge = rec.to_judge().1.len();
     if to_judge > 0 {
         rec.stage = Stage::Written;
     } else {
+        rec.stage = Stage::Done;
         rec.skipped_reason = Some("no line passed the code checks".into());
     }
-    if !put_new(store, &rec).await? {
+    rec.work_attempts = 0;
+    rec.at = iso(now);
+    if !put_unless_done(store, &rec).await? {
         return Ok(tick(format!(
-            "insight {key}: record already written by another run"
+            "insight {key}: record already finished by another run"
         )));
     }
     let written = rec.movers.iter().filter(|m| m.insight.is_some()).count();
     Ok(Tick {
         line: format!(
-            "insight {key}: {} eligible, {written} written, {to_judge} passed the checks; {}{notes}",
+            "insight {key}: {} eligible, {written} written, {to_judge} passed the checks; {}",
             rec.movers.len(),
             if to_judge > 0 { "judge queued" } else { "done" }
         ),
@@ -684,7 +812,7 @@ async fn write_stage(
     })
 }
 
-async fn judge_stage(
+async fn judge_step(
     now: DateTime<Utc>,
     store: &dyn InsightStore,
     judge_llm: &dyn LlmProvider,
@@ -702,63 +830,117 @@ async fn judge_stage(
             "insight {key}: judge given up after {MAX_ATTEMPTS} tries"
         )));
     }
-    if !claim_call(now, store, cfg.cap).await? {
+    // At the cap, nothing is tried.
+    if !under_cap(now, store, cfg.cap).await? {
         return capped(now, store, cfg.cap).await;
     }
     // Counted first, in the record itself, so a message killed mid-way still
     // counts; a record another run finished is left alone.
     rec.judge_attempts += 1;
-    rec.calls += 1;
     rec.at = iso(now);
     if !put_unless_done(store, &rec).await? {
         return Ok(tick(format!(
             "insight {key}: record already judged by another run"
         )));
     }
+    // Compiled before the call is claimed and made, so a kill from a cold
+    // compile costs this try, not a call.
+    warm_judge();
+    if !claim_call(now, store, cfg.cap).await? {
+        return capped(now, store, cfg.cap).await;
+    }
+    rec.calls += 1;
     let attempt = format!("judge attempt {} of {MAX_ATTEMPTS}", rec.judge_attempts);
     let (packs, insights) = rec.to_judge();
-    let result = judge::judge(judge_llm, &packs, &insights).await;
-    let sent = |m: &MoverRecord| m.check.is_empty() && m.insight.is_some();
-    let line = match result {
-        Ok(verdicts) => {
-            for m in rec.movers.iter_mut().filter(|m| sent(m)) {
-                let v = verdicts.iter().find(|v| v.ticker == m.ticker).cloned();
-                m.passed = match (&v, &m.insight) {
-                    (Some(v), Some(i)) => judge::passed(&m.pack, i, v),
-                    _ => false,
-                };
-                m.judge_error = v
-                    .is_none()
-                    .then(|| "the judge's reply has no verdict for this mover".to_string());
-                m.verdict = v;
+    let (system, user) = judge::prompt(&packs, &insights);
+    match judge_llm.complete_json_strict(&system, &user).await {
+        Ok(reply) => {
+            // Stored as it came, before its verdicts are confirmed, with the
+            // first confirmation try counted: a kill from here on never makes
+            // the judge be paid again.
+            rec.stage = Stage::Judged;
+            rec.judge_reply = Some(reply);
+            rec.work_attempts = 1;
+            rec.at = iso(now);
+            if !put_unless_done(store, &rec).await? {
+                return Ok(tick(format!(
+                    "insight {key}: record already judged by another run"
+                )));
             }
-            rec.stage = Stage::Done;
-            let passed = rec.movers.iter().filter(|m| m.passed).count();
-            format!(
-                "insight {key}: judged {} lines, {passed} passed; done",
-                insights.len()
-            )
+            confirm(now, store, rec).await
         }
         Err(e) => {
+            let sent = |m: &MoverRecord| m.check.is_empty() && m.insight.is_some();
             for m in rec.movers.iter_mut().filter(|m| sent(m)) {
                 m.judge_error = Some(e.to_string());
             }
-            if rec.judge_attempts >= MAX_ATTEMPTS {
+            let line = if rec.judge_attempts >= MAX_ATTEMPTS {
                 rec.stage = Stage::Done;
                 rec.skipped_reason = Some(format!("the judge failed {MAX_ATTEMPTS} times"));
                 format!("insight {key}: judge call failed: {e}; {attempt}; given up")
             } else {
                 format!("insight {key}: judge call failed: {e}; {attempt}")
+            };
+            rec.at = iso(now);
+            if !put_unless_done(store, &rec).await? {
+                return Ok(tick(format!(
+                    "insight {key}: record already judged by another run"
+                )));
             }
+            Ok(tick(line))
         }
-    };
+    }
+}
+
+/// The confirmation of a stored judge reply, when the judge step was killed
+/// after storing it.
+async fn verdict_step(
+    now: DateTime<Utc>,
+    store: &dyn InsightStore,
+    mut rec: Record,
+) -> Result<Tick, String> {
+    if let Some(t) = count_work(now, store, &mut rec, "the verdict confirmation").await? {
+        return Ok(t);
+    }
+    warm_judge();
+    confirm(now, store, rec).await
+}
+
+/// Confirms the stored judge reply's verdicts and closes the record.
+async fn confirm(
+    now: DateTime<Utc>,
+    store: &dyn InsightStore,
+    mut rec: Record,
+) -> Result<Tick, String> {
+    let key = rec.facts_key.clone();
+    let (_, insights) = rec.to_judge();
+    let reply = rec.judge_reply.clone().unwrap_or(Value::Null);
+    let verdicts = judge::parse(&reply, &insights);
+    let sent = |m: &MoverRecord| m.check.is_empty() && m.insight.is_some();
+    for m in rec.movers.iter_mut().filter(|m| sent(m)) {
+        let v = verdicts.iter().find(|v| v.ticker == m.ticker).cloned();
+        m.passed = match (&v, &m.insight) {
+            (Some(v), Some(i)) => judge::passed(&m.pack, i, v),
+            _ => false,
+        };
+        m.judge_error = v
+            .is_none()
+            .then(|| "the judge's reply has no verdict for this mover".to_string());
+        m.verdict = v;
+    }
+    rec.stage = Stage::Done;
+    rec.work_attempts = 0;
     rec.at = iso(now);
     if !put_unless_done(store, &rec).await? {
         return Ok(tick(format!(
             "insight {key}: record already judged by another run"
         )));
     }
-    Ok(tick(line))
+    let passed = rec.movers.iter().filter(|m| m.passed).count();
+    Ok(tick(format!(
+        "insight {key}: judged {} lines, {passed} passed; done",
+        insights.len()
+    )))
 }
 
 #[cfg(test)]
@@ -804,6 +986,9 @@ mod tests {
         ops: RefCell<Vec<String>>,
         /// Keys written, R2 and kv.
         writes: RefCell<Vec<String>>,
+        /// The message is killed right after the next R2 write whose text
+        /// holds this: the write lands, then nothing more runs.
+        kill_after: RefCell<Option<&'static str>>,
     }
 
     impl Mem {
@@ -847,6 +1032,11 @@ mod tests {
             self.op(format!("r2 put {key}"));
             self.writes.borrow_mut().push(key.into());
             self.objects.borrow_mut().insert(key.into(), text.into());
+            let kill = self.kill_after.borrow().is_some_and(|m| text.contains(m));
+            if kill {
+                self.kill_after.borrow_mut().take();
+                std::future::pending::<()>().await;
+            }
             Ok(())
         }
         async fn calendar_rows(
@@ -1042,6 +1232,18 @@ mod tests {
         insight_tick(now, m, writer, judge, &cfg()).await.unwrap()
     }
 
+    /// The recap's write and check steps: its record waits for the judge.
+    async fn to_written(m: &Mem) {
+        let writer = Llm::writer(vec![writer_reply()]);
+        run(m, recap_now(), &writer, &Llm::none(true)).await;
+        run(m, recap_now(), &Llm::none(false), &Llm::none(true)).await;
+        assert_eq!(m.record(RECAP_KEY).unwrap().stage, Stage::Written);
+    }
+
+    const REPLIED: &str = r#""stage":"replied""#;
+    const WRITTEN: &str = r#""stage":"written""#;
+    const JUDGED: &str = r#""stage":"judged""#;
+
     #[test]
     fn mode_reads_off_shadow_and_refuses_anything_else() {
         assert_eq!(mode(None), Ok(Mode::Off));
@@ -1197,6 +1399,19 @@ mod tests {
         assert_eq!(
             t,
             Tick {
+                line: "insight recap/2026-11-06.json: 5 eligible, writer replied; checks queued"
+                    .into(),
+                follow_up: true,
+            }
+        );
+        let replied = m.record(RECAP_KEY).unwrap();
+        assert_eq!(replied.stage, Stage::Replied);
+        assert!(replied.writer_reply.is_some());
+        assert!(replied.movers.iter().all(|x| x.insight.is_none()));
+        let t = run(&m, recap_now(), &writer, &judge).await;
+        assert_eq!(
+            t,
+            Tick {
                 line: "insight recap/2026-11-06.json: 5 eligible, 3 written, 3 passed the checks; judge queued".into(),
                 follow_up: true,
             }
@@ -1237,6 +1452,7 @@ mod tests {
                 "facts_key",
                 "judge_attempts",
                 "judge_model",
+                "judge_reply",
                 "judge_version",
                 "movers",
                 "post_slug",
@@ -1244,7 +1460,9 @@ mod tests {
                 "stage",
                 "trading_date",
                 "version",
+                "work_attempts",
                 "writer_model",
+                "writer_reply",
                 "writer_version"
             ]
         );
@@ -1282,7 +1500,12 @@ mod tests {
         let none = || Answer::Value(json!({"insights": []}));
         let at_800 = "2026-11-12T13:05:00Z".parse().unwrap();
         run(&m, at_800, &Llm::writer(vec![none()]), &Llm::none(true)).await;
+        run(&m, at_800, &Llm::none(false), &Llm::none(true)).await;
         let base = m.objects.borrow()["insights/premarket/2026-11-12.json"].clone();
+        assert_eq!(
+            m.record("premarket/2026-11-12.json").unwrap().stage,
+            Stage::Done
+        );
         // 8:35: the post row now points at the update's bundle.
         m.posts.borrow_mut()[0] = premarket_post("premarket/2026-11-12-update.json");
         let t = run(
@@ -1318,13 +1541,7 @@ mod tests {
         let m = premarket_store();
         // A written record for the 8:00 bundle, with the recap's lines.
         let r = recap_store();
-        run(
-            &r,
-            recap_now(),
-            &Llm::writer(vec![writer_reply()]),
-            &Llm::none(true),
-        )
-        .await;
+        to_written(&r).await;
         let mut base = r.record(RECAP_KEY).unwrap();
         base.facts_key = "premarket/2026-11-12.json".into();
         base.content_type = "premarket".into();
@@ -1365,13 +1582,7 @@ mod tests {
     #[tokio::test]
     async fn a_written_800_record_is_judged_beside_the_updates_own_record() {
         let r = recap_store();
-        run(
-            &r,
-            recap_now(),
-            &Llm::writer(vec![writer_reply()]),
-            &Llm::none(true),
-        )
-        .await;
+        to_written(&r).await;
         let written = r.record(RECAP_KEY).unwrap();
         let as_key = |key: &str, stage: Stage| {
             let mut rec = written.clone();
@@ -1409,6 +1620,7 @@ mod tests {
             let t = run(&m, premarket_now(), &Llm::none(false), &judge).await;
             match update_stage {
                 Stage::Done => assert_eq!(t.line, "insight: nothing to do"),
+                Stage::Replied | Stage::Judged => unreachable!(),
                 Stage::Written => {
                     assert!(t
                         .line
@@ -1435,7 +1647,10 @@ mod tests {
         assert!(t.follow_up, "{t:?}");
         assert_eq!(writer.calls.get(), 1);
         assert_eq!(m.calls("2026-11").as_deref(), Some("300"));
-        // Now at the cap: the judge stage makes no call and uses no try.
+        // The check step makes no call, at the cap or not.
+        let t = run(&m, recap_now(), &Llm::none(false), &Llm::none(true)).await;
+        assert!(t.line.ends_with("judge queued"), "{t:?}");
+        // Now at the cap: the judge step makes no call and uses no try.
         let t = run(&m, recap_now(), &Llm::none(false), &Llm::none(true)).await;
         assert!(t.line.starts_with("monthly cap of 300"), "{t:?}");
         assert_eq!(m.record(RECAP_KEY).unwrap().judge_attempts, 0);
@@ -1446,6 +1661,132 @@ mod tests {
         assert_eq!(s.kv_claim("k", 2, "t").await, Ok(Some(2)));
         assert_eq!(s.kv_claim("k", 2, "t").await, Ok(None));
         assert_eq!(s.kv.borrow()["k"], "2");
+    }
+
+    /// The lead's CPU ruling: a message killed right after the writer's
+    /// reply is stored is redelivered and goes on from the stored reply; the
+    /// writer is never paid twice.
+    #[tokio::test]
+    async fn a_kill_after_the_writer_reply_is_stored_never_repays_it() {
+        let m = recap_store();
+        *m.kill_after.borrow_mut() = Some(REPLIED);
+        let writer = Llm::writer(vec![writer_reply()]);
+        let killed =
+            insight_tick(recap_now(), &m, &writer, &Llm::none(true), &cfg()).now_or_never();
+        assert!(killed.is_none(), "killed after the reply was stored");
+        let rec = m.record(RECAP_KEY).unwrap();
+        assert_eq!((rec.stage, rec.calls), (Stage::Replied, 1));
+        assert_eq!(rec.writer_reply, Some(replies()["writer"].clone()));
+        // Redelivered: the checks run from the stored reply, no writer call.
+        let t = run(&m, recap_now(), &Llm::none(false), &Llm::none(true)).await;
+        assert!(
+            t.line.ends_with("3 passed the checks; judge queued"),
+            "{t:?}"
+        );
+        assert_eq!(writer.calls.get(), 1);
+        assert_eq!(m.calls("2026-11").as_deref(), Some("1"));
+    }
+
+    /// The same for the judge: killed right after its reply is stored, the
+    /// next delivery confirms the stored verdicts; the judge is never paid
+    /// twice.
+    #[tokio::test]
+    async fn a_kill_after_the_judge_reply_is_stored_never_repays_it() {
+        let m = recap_store();
+        to_written(&m).await;
+        *m.kill_after.borrow_mut() = Some(JUDGED);
+        let judge = Llm::judge(vec![judge_reply()]);
+        let killed =
+            insight_tick(recap_now(), &m, &Llm::none(false), &judge, &cfg()).now_or_never();
+        assert!(killed.is_none(), "killed after the reply was stored");
+        let rec = m.record(RECAP_KEY).unwrap();
+        assert_eq!(
+            (rec.stage, rec.judge_attempts, rec.work_attempts),
+            (Stage::Judged, 1, 1)
+        );
+        assert_eq!(rec.judge_reply, Some(replies()["judge"].clone()));
+        let t = run(&m, recap_now(), &Llm::none(false), &Llm::none(true)).await;
+        assert_eq!(
+            t.line,
+            "insight recap/2026-11-06.json: judged 3 lines, 3 passed; done"
+        );
+        let rec = m.record(RECAP_KEY).unwrap();
+        assert_eq!((rec.stage, rec.calls), (Stage::Done, 2));
+        assert_eq!(judge.calls.get(), 1);
+        assert_eq!(m.calls("2026-11").as_deref(), Some("2"));
+    }
+
+    /// One queue message delivered three times in a row, each delivery
+    /// killed right after it stored its result (the writer's reply, the
+    /// checked lines, the judge's reply), as an unacknowledged message is
+    /// redelivered: each model call is paid once, and a sweep finishes it.
+    #[tokio::test]
+    async fn a_message_delivered_three_times_pays_each_call_once() {
+        let m = recap_store();
+        let writer = Llm::writer(vec![writer_reply()]);
+        let judge = Llm::judge(vec![judge_reply()]);
+        for (marker, stage) in [
+            (REPLIED, Stage::Replied),
+            (WRITTEN, Stage::Written),
+            (JUDGED, Stage::Judged),
+        ] {
+            *m.kill_after.borrow_mut() = Some(marker);
+            let killed = insight_tick(recap_now(), &m, &writer, &judge, &cfg()).now_or_never();
+            assert!(killed.is_none(), "{marker}");
+            assert_eq!(m.record(RECAP_KEY).unwrap().stage, stage);
+        }
+        let t = run(&m, recap_now(), &writer, &judge).await;
+        assert!(t.line.ends_with("3 passed; done"), "{t:?}");
+        assert_eq!((writer.calls.get(), judge.calls.get()), (1, 1));
+        assert_eq!(m.calls("2026-11").as_deref(), Some("2"));
+        assert_eq!(m.attempts(RECAP_KEY).as_deref(), Some("1"));
+        let t = run(&m, recap_now(), &writer, &judge).await;
+        assert_eq!(t.line, "insight: nothing to do");
+    }
+
+    /// A code-only step killed every time (a cold compile over the CPU
+    /// limit) is given up after three tries, without a model call.
+    #[tokio::test]
+    async fn a_check_step_killed_three_times_is_given_up() {
+        let m = recap_store();
+        run(
+            &m,
+            recap_now(),
+            &Llm::writer(vec![writer_reply()]),
+            &Llm::none(true),
+        )
+        .await;
+        for n in 1..=3 {
+            // Killed right after counting its try (the record is rewritten
+            // with the try and still reads `replied`).
+            *m.kill_after.borrow_mut() = Some(REPLIED);
+            let killed = insight_tick(recap_now(), &m, &Llm::none(false), &Llm::none(true), &cfg())
+                .now_or_never();
+            assert!(killed.is_none());
+            assert_eq!(m.record(RECAP_KEY).unwrap().work_attempts, n);
+        }
+        let t = run(&m, recap_now(), &Llm::none(false), &Llm::none(true)).await;
+        assert_eq!(
+            t.line,
+            "insight recap/2026-11-06.json: the code checks given up after 3 tries"
+        );
+        let rec = m.record(RECAP_KEY).unwrap();
+        assert_eq!(rec.stage, Stage::Done);
+        assert_eq!(
+            rec.skipped_reason.as_deref(),
+            Some("the code checks did not finish in 3 tries")
+        );
+        assert_eq!(m.calls("2026-11").as_deref(), Some("1"));
+    }
+
+    /// Each step compiles only the pattern groups it needs, and the steps
+    /// that pay compile theirs before the call (`warm_*`), checked in a
+    /// fresh process per step.
+    #[test]
+    fn each_step_warms_its_own_pattern_groups() {
+        assert_eq!(warm_write(), 5);
+        assert_eq!(warm_check(), 17 + 4);
+        assert_eq!(warm_judge(), 4 + 1);
     }
 
     /// Review Focus 2: a message killed after the writer call went out. The
@@ -1466,20 +1807,22 @@ mod tests {
         assert_eq!(m.attempts(RECAP_KEY).as_deref(), Some("2"));
         assert_eq!(m.calls("2026-11").as_deref(), Some("2"));
         assert_eq!(writer.calls.get(), 2);
-        // The judge stage killed mid-call: its try and its call are counted.
+        run(&m, recap_now(), &writer, &judge).await;
+        // The judge step killed mid-call: its try and the month's call are
+        // counted; the record's `calls` holds the calls whose outcome it has.
         let killed = insight_tick(recap_now(), &m, &writer, &judge, &cfg()).now_or_never();
         assert!(killed.is_none());
         let rec = m.record(RECAP_KEY).unwrap();
         assert_eq!(
             (rec.stage, rec.judge_attempts, rec.calls),
-            (Stage::Written, 1, 2)
+            (Stage::Written, 1, 1)
         );
         assert_eq!(m.calls("2026-11").as_deref(), Some("3"));
         run(&m, recap_now(), &writer, &judge).await;
         let rec = m.record(RECAP_KEY).unwrap();
         assert_eq!(
             (rec.stage, rec.judge_attempts, rec.calls),
-            (Stage::Done, 2, 3)
+            (Stage::Done, 2, 2)
         );
         assert_eq!(m.calls("2026-11").as_deref(), Some("4"));
         assert_eq!((writer.calls.get(), judge.calls.get()), (2, 2));
@@ -1511,6 +1854,7 @@ mod tests {
         let m = recap_store();
         let writer = Llm::writer(vec![writer_reply()]);
         let judge = Llm::judge(vec![refusal(), judge_reply()]);
+        run(&m, recap_now(), &writer, &judge).await;
         run(&m, recap_now(), &writer, &judge).await;
         let t = run(&m, recap_now(), &writer, &judge).await;
         assert!(
@@ -1550,7 +1894,8 @@ mod tests {
             Answer::Fail(ProviderError::Http(500)),
             refusal(),
         ]);
-        for _ in 0..4 {
+        // Write, check, then three judge tries.
+        for _ in 0..5 {
             run(&m, recap_now(), &writer, &judge).await;
         }
         let rec = m.record(RECAP_KEY).unwrap();
@@ -1631,15 +1976,7 @@ mod tests {
         );
         assert_eq!((first.calls.get(), second.calls.get()), (1, 1));
         let rec = m.record(RECAP_KEY).unwrap();
-        assert_ne!(
-            rec.movers
-                .iter()
-                .find_map(|x| x.insight.as_ref())
-                .unwrap()
-                .en
-                .hook,
-            "Another hook entirely"
-        );
+        assert_eq!(rec.writer_reply, Some(replies()["writer"].clone()));
         let puts = m
             .ops
             .borrow()
@@ -1648,6 +1985,7 @@ mod tests {
             .count();
         assert_eq!(puts, 1);
         assert_eq!(m.calls("2026-11").as_deref(), Some("2"));
+        run(&m, recap_now(), &Llm::none(false), &Llm::none(true)).await;
         // Two judges at once: one done record, never overwritten.
         let j1 = Llm::judge(vec![Answer::Later(replies()["judge"].clone())]);
         let j2 = Llm::judge(vec![Answer::Later(json!({"verdicts": []}))]);
@@ -1705,13 +2043,7 @@ mod tests {
         );
         // A judge stage at the cap makes no call and uses no try.
         let m = recap_store();
-        run(
-            &m,
-            recap_now(),
-            &Llm::writer(vec![writer_reply()]),
-            &Llm::none(true),
-        )
-        .await;
+        to_written(&m).await;
         m.kv.borrow_mut()
             .insert("insight_calls:2026-11".into(), "300".into());
         let t = run(&m, recap_now(), &Llm::none(false), &Llm::none(true)).await;
@@ -1837,6 +2169,9 @@ mod tests {
                 writer_model: "m".into(),
                 judge_model: "m".into(),
                 movers: vec![],
+                writer_reply: None,
+                judge_reply: None,
+                work_attempts: 0,
                 calls: 2,
                 skipped_reason: None,
             })

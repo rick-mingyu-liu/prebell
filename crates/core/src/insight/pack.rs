@@ -1,6 +1,7 @@
 //! The evidence pack: what the writer and the judge may use for one mover,
 //! and which movers have enough of it to get an insight.
 
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::OnceLock;
 
 use chrono::{DateTime, Duration, NaiveDate, NaiveTime, TimeZone, Utc};
@@ -16,6 +17,45 @@ use crate::earnings::facts::{EarningsFacts, Metric};
 use crate::facts::{Field, Mover, NewsReason, Theme};
 use crate::ipo::news::{host_of, visible, OUTLETS};
 use crate::Lang;
+
+/// Patterns this module has compiled in this process (`insight::compiled`).
+static COMPILED: AtomicUsize = AtomicUsize::new(0);
+
+fn re(p: &str) -> Regex {
+    COMPILED.fetch_add(1, Ordering::Relaxed);
+    Regex::new(p).expect("valid built-in regex")
+}
+
+pub(crate) fn compiled() -> usize {
+    COMPILED.load(Ordering::Relaxed)
+}
+
+/// Compiles every lazily compiled pattern the pack builder uses, before a
+/// write stage pays for the writer. One entry per `OnceLock` in this file
+/// (`insight::tests` counts them); the number.
+pub fn warm() -> usize {
+    let touch: [fn(); 5] = [
+        || {
+            let _ = names_period("");
+        },
+        || {
+            let _ = plain("");
+        },
+        || {
+            let _ = analyst_strong_re();
+        },
+        || {
+            let _ = analyst_weak_re();
+        },
+        || {
+            let _ = analyst_subject_re();
+        },
+    ];
+    for t in touch {
+        t();
+    }
+    touch.len()
+}
 
 /// An earnings check belongs to a move when it was filed this many calendar
 /// days before the trading date, or on it.
@@ -180,10 +220,9 @@ fn close_utc(d: NaiveDate) -> DateTime<Utc> {
 pub fn names_period(quote: &str) -> bool {
     static R: OnceLock<Regex> = OnceLock::new();
     let re = R.get_or_init(|| {
-        Regex::new(
+        re(
             r"(?i)\b(?:Q[1-4]|[1-4]Q|H[12]|FY\s?\d{2,4}|fiscal\s+(?:year\s+)?(?:20\d{2}|\d{2})|(?:first|second|third|fourth)[- ](?:fiscal[- ])?quarter|(?:first|second)[- ]half|full[- ](?:fiscal[- ])?year|(?:for|in|during|through)\s+(?:calendar\s+|fiscal\s+)?(?:year\s+)?20\d{2})\b",
         )
-        .expect("valid built-in regex")
     });
     re.is_match(&visible(quote))
 }
@@ -207,8 +246,8 @@ pub fn plain(text: &str) -> String {
     static R: OnceLock<[Regex; 2]> = OnceLock::new();
     let [link, url] = R.get_or_init(|| {
         [
-            Regex::new(r#"\[([^\]]*)\]\([^)\s]*(?:\s+"[^"]*")?\)"#).expect("valid built-in regex"),
-            Regex::new(r"\(?https?://[^\s)]+\)?").expect("valid built-in regex"),
+            re(r#"\[([^\]]*)\]\([^)\s]*(?:\s+"[^"]*")?\)"#),
+            re(r"\(?https?://[^\s)]+\)?"),
         ]
     });
     let text = link.replace_all(text, "$1");
@@ -525,10 +564,9 @@ const BROKERS: &[&str] = &[
 fn analyst_strong_re() -> &'static Regex {
     static R: OnceLock<Regex> = OnceLock::new();
     R.get_or_init(|| {
-        Regex::new(
+        re(
             r"(?i)\b(?:price\s+target|price\s+objective|target\s+price|price\s+tgt|(?:initiat|start|resum|launch|assum)\w*\s+(?:its\s+|their\s+)?coverage|coverage\s+(?:with|at)\s+an?\s+[a-z-]+(?:\s+[a-z-]+)?\s+rating|to\s+(?:buy|sell|hold|neutral|overweight|underweight|equal[- ]weight|outperform|underperform|market\s+perform|sector\s+perform|sector\s+weight|peer\s+perform|accumulate|reduce|strong\s+buy)\s+from|(?:overweight|underweight|equal[- ]weight|market[- ]perform|sector[- ]perform|sector[- ]weight|peer[- ]perform)|(?:buy|sell|hold|neutral|outperform|underperform|overweight|underweight)[- ]rat(?:ed|ing)|(?:upgrad|downgrad)\w*\s+(?:the\s+)?(?:stock|shares|company)\s+to)\b",
         )
-        .expect("valid built-in regex")
     })
 }
 
@@ -536,19 +574,15 @@ fn analyst_strong_re() -> &'static Regex {
 fn analyst_weak_re() -> &'static Regex {
     static R: OnceLock<Regex> = OnceLock::new();
     R.get_or_init(|| {
-        Regex::new(
+        re(
             r"(?i)\b(?:upgrad\w*|downgrad\w*|outperform|underperform|targets?|upside|downside|ratings?|reiterat\w*|rated)\b",
         )
-        .expect("valid built-in regex")
     })
 }
 
 fn analyst_subject_re() -> &'static Regex {
     static R: OnceLock<Regex> = OnceLock::new();
-    R.get_or_init(|| {
-        Regex::new(r"(?i)\b(?:analysts?|brokerages?|brokers?|research\s+firm)\b")
-            .expect("valid built-in regex")
-    })
+    R.get_or_init(|| re(r"(?i)\b(?:analysts?|brokerages?|brokers?|research\s+firm)\b"))
 }
 
 /// Whether `text` names a broker (as a whole word) or an analyst. A broker

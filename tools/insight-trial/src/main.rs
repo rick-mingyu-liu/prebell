@@ -48,6 +48,7 @@ use prebell_core::earnings::facts::EarningsFacts;
 use prebell_core::facts::{Mover, PremarketFacts, Theme};
 use prebell_core::insight::judge::{self, Verdict, JUDGE_VERSION};
 use prebell_core::insight::pack::{packs, PackInputs, ReportStatus};
+use prebell_core::insight::step;
 use prebell_core::insight::write::{self, WRITER_VERSION};
 use prebell_core::insight::{check, Insight, Pack};
 use prebell_core::llm::{api_key_var, llm_from_env};
@@ -1119,93 +1120,130 @@ async fn main() {
         Some("time") => {
             let facts = PathBuf::from(need(&args, "--facts"));
             let lines_file = need(&args, "--lines");
-            if let Some(stage) = arg(&args, "--one") {
-                // A child: one stage of one post, in a fresh process.
+            if arg(&args, "--one").is_some() {
+                // A child: one step of one post, in a fresh process.
                 let records: Vec<Record> = read_jsonl(Path::new(&lines_file));
                 let c = timing::case(&facts, &need(&args, "--post"), &records);
-                let written =
-                    arg(&args, "--written").map(|f| fs::read_to_string(f).expect("written"));
-                let (first, warm, line) = timing::measure(&c, &stage, written.as_deref()).await;
+                let state = arg(&args, "--state").map(|f| fs::read_to_string(f).expect("state"));
+                let (first, warm, line, compiled) = timing::measure(&c, state.as_deref()).await;
                 if let Some(save) = arg(&args, "--save") {
-                    if let Some(w) = timing::written_record(&c).await {
-                        fs::write(save, w).expect("save written record");
+                    if let Some(next) = timing::next_state(&c, state.as_deref()).await {
+                        fs::write(save, next).expect("save the next state");
                     }
                 }
                 println!(
                     "{}",
-                    json!({"first_us": first, "warm_us": warm, "line": line})
+                    json!({"first_us": first, "warm_us": warm, "line": line, "compiled": compiled})
                 );
                 return;
             }
-            let mut rows: Vec<(String, Value, Option<Value>)> = Vec::new();
+            const STEPS: [&str; 4] = ["write", "check", "judge", "verdicts"];
+            // Per step: (first call us, warm us, patterns compiled) per post.
+            let mut cols: Vec<Vec<(u128, u128, usize)>> = vec![vec![]; STEPS.len()];
+            println!("| Post | Write | Check | Judge | Verdicts (after a kill) |");
+            println!("|---|---|---|---|---|");
+            let ms = |u: u128| format!("{:.2}", u as f64 / 1000.0);
             for post in timing::posts(&facts) {
-                let tmp = std::env::temp_dir()
-                    .join(format!("insight-time-{}-{post}.json", std::process::id()));
-                let base = [
-                    "time",
-                    "--facts",
-                    facts.to_str().expect("facts path"),
-                    "--lines",
-                    &lines_file,
-                    "--post",
-                    &post,
-                ];
-                let mut w: Vec<&str> = base.to_vec();
-                w.extend(["--one", "write", "--save", tmp.to_str().expect("tmp")]);
-                let write = timing::spawn(&w);
-                let judge = tmp.exists().then(|| {
-                    let mut j: Vec<&str> = base.to_vec();
-                    j.extend(["--one", "judge", "--written", tmp.to_str().expect("tmp")]);
-                    timing::spawn(&j)
-                });
-                let _ = fs::remove_file(&tmp);
-                rows.push((post, write, judge));
-            }
-            let us = |v: &Value, k: &str| v[k].as_u64().unwrap_or(0) as u128;
-            println!("| Post | Write, first call | Write, warm | Judge, first call | Judge, warm | Write stage |");
-            println!("|---|---|---|---|---|---|");
-            let ms = |u: u128| format!("{:.2} ms", u as f64 / 1000.0);
-            let mut cols: [Vec<u128>; 4] = Default::default();
-            for (post, w, j) in &rows {
-                cols[0].push(us(w, "first_us"));
-                cols[1].push(us(w, "warm_us"));
-                let (jf, jw) = match j {
-                    Some(j) => {
-                        cols[2].push(us(j, "first_us"));
-                        cols[3].push(us(j, "warm_us"));
-                        (ms(us(j, "first_us")), ms(us(j, "warm_us")))
-                    }
-                    None => ("no judge stage".into(), String::new()),
+                let tmp = |n: &str| {
+                    std::env::temp_dir().join(format!(
+                        "insight-time-{}-{post}-{n}.json",
+                        std::process::id()
+                    ))
                 };
+                let child = |step: &str, state: Option<&Path>, save: &Path| {
+                    let mut a: Vec<String> = [
+                        "time",
+                        "--facts",
+                        facts.to_str().expect("facts"),
+                        "--lines",
+                        &lines_file,
+                        "--post",
+                        &post,
+                        "--one",
+                        step,
+                        "--save",
+                        save.to_str().expect("tmp"),
+                    ]
+                    .iter()
+                    .map(|s| s.to_string())
+                    .collect();
+                    if let Some(s) = state {
+                        a.extend(["--state".to_string(), s.to_str().expect("tmp").to_string()]);
+                    }
+                    let a: Vec<&str> = a.iter().map(String::as_str).collect();
+                    timing::spawn(&a)
+                };
+                let (s1, s2, s3, sj) = (tmp("replied"), tmp("written"), tmp("done"), tmp("judged"));
+                let mut cells: Vec<String> = Vec::new();
+                let mut push = |k: usize, v: &Value| {
+                    let get = |f: &str| v[f].as_u64().unwrap_or(0);
+                    cols[k].push((
+                        get("first_us") as u128,
+                        get("warm_us") as u128,
+                        get("compiled") as usize,
+                    ));
+                    format!(
+                        "{} / {} ms, {} patterns",
+                        ms(get("first_us") as u128),
+                        ms(get("warm_us") as u128),
+                        get("compiled")
+                    )
+                };
+                let w = child("write", None, &s1);
+                cells.push(push(0, &w));
+                let replied = fs::read_to_string(&s1)
+                    .ok()
+                    .filter(|r| timing::stage_of(r) == Some(step::Stage::Replied));
+                if replied.is_some() {
+                    let ch = child("check", Some(&s1), &s2);
+                    cells.push(push(1, &ch));
+                } else {
+                    cells.push(w["line"].as_str().unwrap_or("").to_string());
+                }
+                let written = fs::read_to_string(&s2)
+                    .ok()
+                    .filter(|r| timing::stage_of(r) == Some(step::Stage::Written));
+                match written {
+                    Some(wr) => {
+                        let j = child("judge", Some(&s2), &s3);
+                        cells.push(push(2, &j));
+                        let records: Vec<Record> = read_jsonl(Path::new(&lines_file));
+                        let c = timing::case(&facts, &post, &records);
+                        fs::write(&sj, timing::judged(&wr, &c.judge)).expect("judged state");
+                        let v = child("verdicts", Some(&sj), &s3);
+                        cells.push(push(3, &v));
+                    }
+                    None => cells.extend(["no line to judge".to_string(), String::new()]),
+                }
+                for f in [&s1, &s2, &s3, &sj] {
+                    let _ = fs::remove_file(f);
+                }
+                while cells.len() < 4 {
+                    cells.push(String::new());
+                }
+                println!("| {post} | {} |", cells.join(" | "));
+            }
+            println!("\nEach cell: first call in a fresh process / warm median of {} runs, and the patterns the first call compiled.\n", timing::WARM_RUNS);
+            println!("| Step | Posts | First call, worst | First call, median | Warm, worst | Warm, median | Patterns compiled |");
+            println!("|---|---|---|---|---|---|---|");
+            for (k, name) in STEPS.iter().enumerate() {
+                let firsts: Vec<u128> = cols[k].iter().map(|x| x.0).collect();
+                let warms: Vec<u128> = cols[k].iter().map(|x| x.1).collect();
+                let pats: Vec<usize> = cols[k].iter().map(|x| x.2).collect();
+                let (fw, fm) = timing::worst_median(&firsts);
+                let (ww, wm) = timing::worst_median(&warms);
                 println!(
-                    "| {post} | {} | {} | {jf} | {jw} | {} |",
-                    ms(us(w, "first_us")),
-                    ms(us(w, "warm_us")),
-                    w["line"].as_str().unwrap_or("")
+                    "| {name} | {} | {} ms | {} ms | {} ms | {} ms | {}-{} |",
+                    cols[k].len(),
+                    ms(fw),
+                    ms(fm),
+                    ms(ww),
+                    ms(wm),
+                    pats.iter().min().unwrap_or(&0),
+                    pats.iter().max().unwrap_or(&0)
                 );
             }
-            println!();
-            for (k, name) in [
-                "Write, first call",
-                "Write, warm",
-                "Judge, first call",
-                "Judge, warm",
-            ]
-            .iter()
-            .enumerate()
-            {
-                let (worst, med) = timing::worst_median(&cols[k]);
-                println!(
-                    "{name}: worst {}, median {} over {} posts",
-                    ms(worst),
-                    ms(med),
-                    cols[k].len()
-                );
-            }
-            println!(
-                "\nNative release build; warm is the median of {} runs. No model call is made.",
-                timing::WARM_RUNS
-            );
+            println!("\nNative release build. No model call is made.");
         }
         _ => {
             eprintln!("{usage}");

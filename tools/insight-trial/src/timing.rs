@@ -207,47 +207,62 @@ fn median(mut v: Vec<u128>) -> u128 {
     v[v.len() / 2]
 }
 
-/// One stage of one post in this process: `(first call, warm median, line)`.
-/// For the judge stage, the written record is made first by a write stage
-/// run in another process (`written`), so this process starts cold.
-pub(crate) async fn measure(c: &Case, stage: &str, written: Option<&str>) -> (u128, u128, String) {
-    let key = record_key(&c.facts_key);
-    let set_written = || {
-        reset_write(c);
-        if let Some(w) = written {
-            c.store
-                .objects
-                .borrow_mut()
-                .insert(key.clone(), w.to_string());
-        }
-    };
-    if stage == "judge" {
-        set_written();
+/// Puts the record `state` (JSON) back in the store, or none.
+fn set_state(c: &Case, state: Option<&str>) {
+    reset_write(c);
+    if let Some(s) = state {
+        c.store
+            .objects
+            .borrow_mut()
+            .insert(record_key(&c.facts_key), s.to_string());
     }
-    let (first, line) = tick_us(c).await;
-    let mut warm = Vec::new();
-    for _ in 0..WARM_RUNS {
-        match stage {
-            "judge" => set_written(),
-            _ => reset_write(c),
-        }
-        warm.push(tick_us(c).await.0);
-    }
-    (first, median(warm), line)
 }
 
-/// The written record a write stage leaves for `c` (after `measure`).
-pub(crate) async fn written_record(c: &Case) -> Option<String> {
-    reset_write(c);
+/// One step of one post in this process, from the record `state` (none: the
+/// write step): `(first call, warm median, line, patterns compiled by the
+/// first call)`. Each step runs in its own process, as each is its own
+/// queue message, so this process starts cold.
+pub(crate) async fn measure(c: &Case, state: Option<&str>) -> (u128, u128, String, usize) {
+    set_state(c, state);
+    let before = prebell_core::insight::compiled();
+    let (first, line) = tick_us(c).await;
+    let compiled = prebell_core::insight::compiled() - before;
+    let mut warm = Vec::new();
+    for _ in 0..WARM_RUNS {
+        set_state(c, state);
+        warm.push(tick_us(c).await.0);
+    }
+    (first, median(warm), line, compiled)
+}
+
+/// The record the step leaves from `state`, for the next step's process.
+pub(crate) async fn next_state(c: &Case, state: Option<&str>) -> Option<String> {
+    set_state(c, state);
     tick_us(c).await;
     let rec = c
         .store
         .objects
         .borrow()
         .get(&record_key(&c.facts_key))
-        .cloned()?;
-    let parsed: step::Record = serde_json::from_str(&rec).ok()?;
-    (parsed.stage == Stage::Written).then_some(rec)
+        .cloned();
+    rec
+}
+
+/// The stage of a record's JSON.
+pub(crate) fn stage_of(json: &str) -> Option<Stage> {
+    serde_json::from_str::<step::Record>(json)
+        .ok()
+        .map(|r| r.stage)
+}
+
+/// A judge step killed right after storing its reply: the record the
+/// verdict step starts from.
+pub(crate) fn judged(written: &str, judge: &Value) -> String {
+    let mut r: step::Record = serde_json::from_str(written).expect("a written record");
+    r.stage = Stage::Judged;
+    r.judge_reply = Some(judge.clone());
+    r.work_attempts = 1;
+    serde_json::to_string(&r).expect("record")
 }
 
 /// The post names in `facts` (briefs and recaps), sorted.
@@ -315,18 +330,24 @@ mod tests {
         c
     }
 
-    /// The timed stages are the real ones: a write stage that leaves a
-    /// written record, then a judge stage that passes the three lines.
+    /// The timed steps are the real ones: write, check, judge and the
+    /// verdict step after a judge killed past its stored reply.
     #[tokio::test]
-    async fn the_timed_ticks_run_both_stages() {
+    async fn the_timed_ticks_run_every_step() {
         let c = fixture_case();
-        let (_, _, line) = measure(&c, "write", None).await;
+        let (_, _, line, _) = measure(&c, None).await;
+        assert!(line.ends_with("writer replied; checks queued"), "{line}");
+        let replied = next_state(&c, None).await.unwrap();
+        assert_eq!(stage_of(&replied), Some(Stage::Replied));
+        let (_, _, line, _) = measure(&c, Some(&replied)).await;
         assert!(
             line.ends_with("3 passed the checks; judge queued"),
             "{line}"
         );
-        let w = written_record(&c).await.expect("a written record");
-        let (_, _, line) = measure(&c, "judge", Some(&w)).await;
+        let written = next_state(&c, Some(&replied)).await.unwrap();
+        let (_, _, line, _) = measure(&c, Some(&written)).await;
+        assert!(line.ends_with("judged 3 lines, 3 passed; done"), "{line}");
+        let (_, _, line, _) = measure(&c, Some(&judged(&written, &c.judge))).await;
         assert!(line.ends_with("judged 3 lines, 3 passed; done"), "{line}");
         assert_eq!(worst_median(&[5, 1, 3]), (5, 3));
     }
