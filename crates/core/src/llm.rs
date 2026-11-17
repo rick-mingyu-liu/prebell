@@ -223,6 +223,17 @@ pub(crate) fn parse_reply(text: &str) -> Result<Reply, ProviderError> {
     })
 }
 
+/// A strict reply's value: text after the object, which `parse_reply` drops
+/// as a note, is an error here.
+pub(crate) fn strict(reply: Reply) -> Result<Value, ProviderError> {
+    match reply.dropped {
+        Some(tail) => Err(ProviderError::Parse(format!(
+            "text after the JSON object: {tail}"
+        ))),
+        None => Ok(reply.value),
+    }
+}
+
 /// The line a provider sends to its `warn` sink when `parse_reply` dropped text.
 pub(crate) fn dropped_note(provider: &str, dropped: &str) -> String {
     format!("{provider} reply: ignored text after the JSON object: {dropped}")

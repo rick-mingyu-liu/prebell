@@ -77,7 +77,9 @@ Re-runs keep what was paid for: `run` skips a post already complete in
 `out/lines.jsonl`, and finishes one a budget stop left part-done by calling
 only its missing judges; `seed` skips a post already in `out/seeded.jsonl`.
 A judge reply that fails to parse is asked for once more at once, within
-the budget, and the result is marked `retried`. A judge call that still
+the budget, and the result is marked `retried`. The judge is strict, as in
+the Worker: a judge reply with any text after its JSON is a failed call
+(retried once the same way), never a pass. A judge call that still
 failed for any reason (the budget, a network error, a reply that would not
 parse) is made again on a re-run. `seed` writes a post
 only when all its calls are done: a post the budget cuts part-way is not

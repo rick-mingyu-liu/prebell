@@ -1846,20 +1846,28 @@ pub(crate) mod tests {
             "{j:?}"
         );
 
-        // The run-2 reply, a note after the JSON, parses on the first call.
+        // The run-2 reply, a note after the JSON: the judge is strict (Plan
+        // 2), so it is a failed call, asked once more like any parse error.
         let out3 = tmp("parse-note");
         let noted = reply(format!(
             "{}\n\nNote: all claims checked.",
             judge_reply(true)
         ));
         let writer = Mock::new(vec![claude_body(&writer_reply(CLEAN), 200)]);
-        let judge = Mock::new(vec![noted]);
+        let judge = Mock::new(vec![noted.clone(), noted]);
         let m = mock_models(budget(&out3, 3.0), &writer, &[("claude", &judge)]);
         run(&i, &m, &out3, false).await.unwrap();
-        assert_eq!(judge.calls.get(), 1);
+        assert_eq!(judge.calls.get(), 2);
         let lines: Vec<Record> = read_jsonl(&out3.join("lines.jsonl"));
         let j = &lines[0].judges["claude"];
-        assert!(j.passed && !j.retried && j.error.is_none(), "{j:?}");
+        assert!(
+            !j.passed
+                && j.retried
+                && j.error
+                    .as_deref()
+                    .is_some_and(|e| e.contains("text after the JSON object")),
+            "{j:?}"
+        );
         fs::remove_dir_all(out).unwrap();
         fs::remove_dir_all(out2).unwrap();
         fs::remove_dir_all(out3).unwrap();

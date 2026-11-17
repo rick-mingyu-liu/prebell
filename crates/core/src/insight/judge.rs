@@ -367,7 +367,9 @@ pub fn passed(pack: &Pack, insight: &Insight, v: &Verdict) -> bool {
         && figures_supported(pack, &insight.zh, &v.zh_claims, Lang::Zh)
 }
 
-/// One judge call over the insights that have a pack, no retry. None, no call.
+/// One judge call over the insights that have a pack, no retry. None, no
+/// call. Strict: a reply with any text after its JSON is a failed call, so
+/// a note that takes back a pass is never dropped (decided 2026-11-16).
 pub async fn judge(
     llm: &dyn LlmProvider,
     packs: &[Pack],
@@ -377,7 +379,7 @@ pub async fn judge(
         return Ok(vec![]);
     }
     let (system, user) = prompt(packs, insights);
-    let reply = llm.complete_json(&system, &user).await?;
+    let reply = llm.complete_json_strict(&system, &user).await?;
     Ok(parse(&reply, insights))
 }
 
@@ -472,10 +474,18 @@ mod tests {
             "personal_claims_attributed": true, "notes": "ok"})
     }
 
+    /// A judge double: strict replies only, as the judge asks for them.
     struct Canned(Value);
     #[async_trait(?Send)]
     impl crate::providers::LlmProvider for Canned {
         async fn complete_json(
+            &self,
+            _: &str,
+            _: &str,
+        ) -> Result<Value, crate::providers::ProviderError> {
+            panic!("the judge asks for strict replies")
+        }
+        async fn complete_json_strict(
             &self,
             _: &str,
             _: &str,
@@ -493,6 +503,81 @@ mod tests {
             _: &str,
         ) -> Result<Value, crate::providers::ProviderError> {
             panic!("no call expected")
+        }
+        async fn complete_json_strict(
+            &self,
+            _: &str,
+            _: &str,
+        ) -> Result<Value, crate::providers::ProviderError> {
+            panic!("no call expected")
+        }
+    }
+
+    /// Review Focus 3 of Plan 2: a pass followed by "On reflection, claim 2
+    /// is not supported" is a failed judge call through either real
+    /// provider, never a pass.
+    #[tokio::test]
+    async fn a_judge_reply_with_a_note_after_its_json_is_a_failed_call() {
+        use crate::providers::{Http, HttpResp, ProviderError};
+        struct Replies(String);
+        #[async_trait(?Send)]
+        impl Http for Replies {
+            async fn get(&self, _: &str, _: &[(&str, &str)]) -> Result<HttpResp, ProviderError> {
+                unreachable!()
+            }
+            async fn post_json(
+                &self,
+                _: &str,
+                _: &[(&str, &str)],
+                _: &Value,
+            ) -> Result<HttpResp, ProviderError> {
+                Ok(HttpResp {
+                    status: 200,
+                    body: self.0.clone(),
+                    set_cookie: None,
+                })
+            }
+        }
+        let text = format!(
+            "{}\n\nOn reflection, claim 2 is not supported.",
+            json!({"verdicts": [reply_item("AAPL")]})
+        );
+        let claude =
+            json!({"content": [{"type": "text", "text": text}], "stop_reason": "end_turn"});
+        let deepseek =
+            json!({"choices": [{"message": {"content": text}, "finish_reason": "stop"}]});
+        for (provider, body) in [("claude", claude), ("deepseek", deepseek)] {
+            let llm = crate::llm::llm_from_env(
+                provider,
+                Replies(body.to_string()),
+                "k".into(),
+                None,
+                Some("low".into()),
+                |_| {},
+            )
+            .unwrap();
+            let r = judge(llm.as_ref(), &[pack(TEXT)], &[insight("AAPL")]).await;
+            assert!(
+                matches!(&r, Err(ProviderError::Parse(m)) if m.starts_with("text after the JSON object")),
+                "{provider}: {r:?}"
+            );
+            // The same reply without the note passes.
+            let clean = body
+                .to_string()
+                .replace("\\n\\nOn reflection, claim 2 is not supported.", "");
+            let llm = crate::llm::llm_from_env(
+                provider,
+                Replies(clean),
+                "k".into(),
+                None,
+                Some("low".into()),
+                |_| {},
+            )
+            .unwrap();
+            let v = judge(llm.as_ref(), &[pack(TEXT)], &[insight("AAPL")])
+                .await
+                .unwrap();
+            assert!(passed(&pack(TEXT), &insight("AAPL"), &v[0]), "{provider}");
         }
     }
 
