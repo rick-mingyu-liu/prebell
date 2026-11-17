@@ -612,23 +612,26 @@ pub fn warm_judge() -> usize {
 /// message; `Err` a store error (logged, never alerted; the next sweep
 /// tries again within the attempt limits).
 ///
-/// Subrequests in the worst case (each D1 query, R2 get or put and model
-/// call is one): the posts query and a record read per bundle of
-/// today and the previous trading day (at most 6), then one step:
+/// Subrequests in the worst case (each D1 query, R2 get or put, model call
+/// and queue send is one, the follow-up send in `jobs::run_job` included):
+/// the posts query and a record read per bundle of today and the previous
+/// trading day (at most 6), then one step and the send:
 /// - write: at most `ATTEMPT_READS` attempt counters, the month's count,
 ///   the attempt write, the facts, the calendar and earnings-check queries,
 ///   one earnings bundle per mover (at most 8), the cap claim, the writer
-///   call, a re-read and the write: 20, so 27;
+///   call, a re-read and the write, the send: 28;
 /// - check: a re-read and a write to count the try, a re-read and the
-///   write, and up to `ATTEMPT_READS` attempt counters to tell whether
-///   another bundle waits: 7, so 14;
+///   write, up to `ATTEMPT_READS` attempt counters to tell whether another
+///   bundle waits, the send: 15;
 /// - judge: the month's count, a re-read and a write to count the try, the
 ///   cap claim, the judge call, a re-read and the write of the reply, a
-///   re-read and the final write, and the attempt counters: 12, so 19;
-/// - verdicts: as check, 14.
+///   re-read and the final write, the attempt counters, the send: 20;
+/// - verdicts: as check, 15.
 ///
-/// Plus the follow-up queue send in `jobs::run_job`: 28 at most. Of those,
-/// at most 5 are D1 queries and 1 is a fetch.
+/// At most 5 are D1 queries and 1 is a fetch. Alert delivery runs after the
+/// step in the same invocation (its 2 D1 queries and up to 20 webhook
+/// posts): after a write message the total can reach exactly 50, and only
+/// when 20 or more alerts are pending.
 pub async fn insight_tick(
     now: DateTime<Utc>,
     store: &dyn InsightStore,
