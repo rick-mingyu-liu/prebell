@@ -77,7 +77,9 @@ Re-runs keep what was paid for: `run` skips a post already complete in
 `out/lines.jsonl`, and finishes one a budget stop left part-done by calling
 only its missing judges; `seed` skips a post already in `out/seeded.jsonl`.
 A judge reply that fails to parse is asked for once more at once, within
-the budget, and the result is marked `retried`. A judge call that still
+the budget, and the result is marked `retried`. The judge is strict, as in
+the Worker: a judge reply with any text after its JSON is a failed call
+(retried once the same way), never a pass. A judge call that still
 failed for any reason (the budget, a network error, a reply that would not
 parse) is made again on a re-run. `seed` writes a post
 only when all its calls are done: a post the budget cuts part-way is not
@@ -140,3 +142,63 @@ is sent.
   the trial. The bar's 50 labelled judge-passed lines cannot be reached
   with this trial's 34 eligible movers (final run): the report calls the bar "not yet
   assessable" until they are, and they accumulate through the shadow stage.
+
+## The shadow stage's review
+
+While the Worker runs with `INSIGHTS_MODE = "shadow"`, it stores one record
+per facts bundle in R2: `insights/premarket/<date>.json` (the 8:00 brief),
+`insights/premarket/<date>-update.json` (the 8:35 update) and
+`insights/recap/<date>.json`. No model call is made here.
+
+```sh
+# 1. Save every record from the first shadow day to today (read-only R2 gets
+#    of the three fixed keys per weekday; a done record already saved is
+#    kept, a missing key is skipped).
+tools/insight-trial/fetch-shadow.sh 2026-11-18 "$(date +%F)" tools/insight-trial/shadow
+
+# 2. Every record as lines.jsonl, and a cumulative labelling page.
+cd tools/insight-trial
+env -u CARGO_TARGET_DIR cargo run --release -- shadow \
+    --records shadow --out out-shadow --labels ~/Downloads/labels.json
+
+# 3. The bar, from every label so far.
+env -u CARGO_TARGET_DIR cargo run --release -- score \
+    --out out-shadow --labels ~/Downloads/labels.json
+```
+
+`shadow` shows every line the judge answered for, passed or refused (no
+sampling), verdicts hidden, new ones first in a fixed random order; lines
+labelled before (matched by `line_key`, the writer version and the text)
+are shown at the end, done, with their label, and "Save labels" saves them
+again with the new ones, so one `labels.json` always holds every label.
+Leave `--labels` off the first time. Lines the code checks refused and
+lines the judge has not answered yet (a record still `written`, or a
+failed judge call) are left out. The 8:00 brief and its 8:35 update often
+carry the same mover: the page shows both.
+
+`score` on the shadow folder reports the reading part of the bar: the
+judge-passed lines read, counting a mover once per trading date across the
+brief and its update, and any marked wrong. Below 50 read it says "not yet
+assessable". The bar's seeded-recall part comes from the trial's seed run
+and its own report.
+
+## CPU timing
+
+The Worker allows 10 ms of CPU per invocation. `time` measures the insight
+step's own work natively, with no model call: for each stored brief and
+recap in `--facts`, it runs the real `insight::step::insight_tick` over an
+in-memory store with the stored replies from `--lines` (the final run's
+lines as the writer's, Claude's verdicts as the judge's): the write stage
+(reading the facts and earnings checks, the packs, the code checks, the
+record) and the judge stage (the judge-support confirmation, the record),
+each first in a fresh process (every regular expression compiled on first
+use, as in a cold isolate) and then warm (the median of 20 runs). It prints
+a table per post, then the worst and the median of each column. Native
+time understates Wasm.
+
+```sh
+env -u CARGO_TARGET_DIR cargo run --release -- time --facts facts --lines out/lines.jsonl
+```
+
+`--dump DIR` also writes each step's starting snapshot for
+`tools/insight-cpu-wasm`, which times the same steps in V8.

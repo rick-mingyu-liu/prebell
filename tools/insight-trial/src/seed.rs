@@ -639,7 +639,7 @@ pub(crate) fn plan(records: &[Record]) -> Vec<PostPlan> {
                 check,
                 judges: BTreeMap::new(),
                 original_passed: original_passed.clone(),
-                line_key: line_key(i),
+                line_key: line_key(&r.writer_version, i),
                 skipped: false,
                 change: None,
             };
@@ -943,7 +943,10 @@ mod tests {
         assert!(!t1.0.original_passed["deepseek"]);
         assert_eq!(
             t1.0.line_key,
-            line_key(records[1].insight.as_ref().unwrap())
+            line_key(
+                &records[1].writer_version,
+                records[1].insight.as_ref().unwrap()
+            )
         );
     }
 

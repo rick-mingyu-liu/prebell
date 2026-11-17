@@ -6,7 +6,7 @@ use crate::providers::{Http, LlmProvider, ProviderError};
 use serde_json::Value;
 
 /// `deepseek-chat` was retired; `deepseek-flash` without thinking is what it served.
-const DEEPSEEK_DEFAULT_MODEL: &str = "deepseek-flash";
+pub const DEEPSEEK_DEFAULT_MODEL: &str = "deepseek-flash";
 
 /// Name of the secret holding the API key for `provider` (the `LLM_PROVIDER` value).
 pub fn api_key_var(provider: &str) -> Option<&'static str> {
@@ -221,6 +221,17 @@ pub(crate) fn parse_reply(text: &str) -> Result<Reply, ProviderError> {
         value,
         dropped: (!tail.is_empty()).then(|| snippet(tail)),
     })
+}
+
+/// A strict reply's value: text after the object, which `parse_reply` drops
+/// as a note, is an error here.
+pub(crate) fn strict(reply: Reply) -> Result<Value, ProviderError> {
+    match reply.dropped {
+        Some(tail) => Err(ProviderError::Parse(format!(
+            "text after the JSON object: {tail}"
+        ))),
+        None => Ok(reply.value),
+    }
 }
 
 /// The line a provider sends to its `warn` sink when `parse_reply` dropped text.

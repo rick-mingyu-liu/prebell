@@ -3,6 +3,7 @@
 //! attribution, hedged unconfirmed dates and a refusal list of advice,
 //! rating and prediction wording.
 
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::OnceLock;
 
 use chrono::{Datelike, NaiveDate};
@@ -149,11 +150,6 @@ const HEDGE_ZH: &[&str] = &["预计", "预期", "暂定", "未确认"];
 /// (the market's, not the company's, "英伟达预计于11月17日"); 市场预期 is consensus wording.
 const DATE_HEDGE_ZH: &[&str] = &["暂定", "未经公司确认", "未确认", "市场预计"];
 
-/// Allegations about a person's private life: refused whatever the
-/// evidence says (a line names the company-level fact instead).
-const PERSONAL_EN: &[&str] = &["mistress", "extramarital"];
-const PERSONAL_ZH: &[&str] = &["婚外情", "出轨", "情妇", "绯闻"];
-
 /// `(English name as in ipo::news::OUTLETS, other English forms, Chinese forms)`.
 /// The zh line may name an outlet in either script.
 const OUTLET_NAMES: &[(&str, &[&str], &[&str])] = &[
@@ -248,8 +244,148 @@ pub fn outlet_names(outlet: &str, lang: Lang) -> Vec<String> {
     out
 }
 
+/// Patterns this module has compiled in this process (`insight::compiled`).
+static COMPILED: AtomicUsize = AtomicUsize::new(0);
+
 fn re(p: &str) -> Regex {
+    COMPILED.fetch_add(1, Ordering::Relaxed);
     Regex::new(p).expect("valid built-in regex")
+}
+
+pub(crate) fn compiled() -> usize {
+    COMPILED.load(Ordering::Relaxed)
+}
+
+/// English figures in words ("ten percent", "doubled"); see `worded_figures`.
+const WORDED_EN: &str = r"(?i)(?:(?:one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred|a\s+half|half)(?:[- ](?:one|two|three|four|five|six|seven|eight|nine))?\s+(?:percent|per\s+cent|percentage\s+points?|basis\s+points?|%|billion|million|trillion|thousand|dollars|times|fold)|a\s+(?:million|billion|trillion)|(?:doubl|tripl|quadrupl|halv)\w*)";
+/// "Hold" as advice or a rating; see `advice_hold`.
+const ADVICE_HOLD: &str = r"(?i)(?:(?:from|rated|rating|investors|continue\s+to|keep|recommend\w*)\s+hold|(?:downgrad\w*|upgrad\w*|cut|lower\w*|rais\w*|mov\w*)\s+(?:\w+\s+){0,3}to\s+hold|hold(?:s|ing)?\s+(?:rating|from|onto|on\s+to|(?:the|their|your|its)\s+(?:stock|shares|positions?|stake)|(?:stock|shares|positions?)))";
+/// Forward relative time in English; see `relative_en_re`.
+const RELATIVE_EN: &str = r"(?i)(?:next\s+(?:week|month|quarter|year|few\s+\w+|several\s+\w+)|(?:over|in|during|within)\s+the\s+(?:next|coming)\s+(?:\w+\s+)?(?:days|weeks|months|quarters|years)|in\s+(?:the\s+)?coming\s+(?:days|weeks|months|quarters)|(?:later\s+)?this\s+(?:week|month|quarter|year)|last\s+(?:week|month)|later\s+today|today|tonight|tomorrow|yesterday|soon|shortly|in\s+the\s+(?:days|weeks|months|quarters|years)\s+ahead|(?:days|weeks|months)\s+ahead|in\s+the\s+near\s+term|near[- ]term|by\s+(?:the\s+)?(?:year[- ]end|end\s+of\s+the\s+year)|later\s+in\s+the\s+year)";
+/// "upgraded … to " before a rating word; see `rating_frame`.
+const RATING_FRAME: &str =
+    r"(?:upgrad|downgrad|cut|lower|rais|mov|reiterat|maintain)\w*\s+(?:[\w.'’-]+\s+){0,3}to\s+$";
+
+/// A word character for the English refusal patterns that is cheap to
+/// compile: an ASCII one or any non-ASCII character. Unicode `\w` costs
+/// most of these patterns' compile time (the CPU ruling of 2026-11-17).
+/// It is a superset of `\w`, so a pattern still matches wherever it did;
+/// it can also match where a non-ASCII character that is not a letter or
+/// digit (a curly quote, a dash) stands in a word's place. No stored line
+/// or evidence text matches differently (`wide_words_match_as_before`).
+const WIDE_WORD: &str = r"0-9A-Za-z_\x{80}-\x{10FFFF}";
+
+/// `p` with every `\w` as `WIDE_WORD`: inside a bracket class its ranges,
+/// outside it a class of its own with case folding off (folding the
+/// non-ASCII range would cost more than `\w`).
+fn wide_words(p: &str) -> String {
+    let mut out = String::with_capacity(p.len());
+    let mut in_class = false;
+    let mut chars = p.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '\\' => {
+                let next = chars.next().expect("no trailing backslash");
+                if next == 'w' {
+                    if in_class {
+                        out.push_str(WIDE_WORD);
+                    } else {
+                        out.push_str(&format!("(?-i:[{WIDE_WORD}])"));
+                    }
+                } else {
+                    out.push('\\');
+                    out.push(next);
+                }
+            }
+            '[' if !in_class => {
+                in_class = true;
+                out.push(c);
+            }
+            ']' if in_class => {
+                in_class = false;
+                out.push(c);
+            }
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
+/// Compiles every lazily compiled pattern of the code checks, so the
+/// message that runs `check` pays the compile up front. One entry per
+/// `OnceLock` in this file (`insight::tests` counts them); the number.
+pub fn warm() -> usize {
+    let day = NaiveDate::from_ymd_opt(2026, 1, 1).expect("valid date");
+    let touch: [fn(NaiveDate); 18] = [
+        |_| {
+            let _ = worded_figures("");
+        },
+        |_| {
+            let _ = hook_count("");
+        },
+        |_| {
+            let _ = refused_en();
+        },
+        |_| {
+            let _ = advice_hold("");
+        },
+        |_| {
+            let _ = attributes("", "x");
+        },
+        |_| {
+            let _ = digits_only_in_names("", &[]);
+        },
+        |_| {
+            let _ = names_attributed("", "x");
+        },
+        warm_dates,
+        |_| {
+            let _ = bare_months("");
+        },
+        |_| {
+            let _ = zh_years("");
+        },
+        |_| {
+            let _ = relative_en_re();
+        },
+        |_| {
+            let _ = relative_zh_re();
+        },
+        |_| {
+            let _ = fiscal_labels("");
+        },
+        |_| {
+            let _ = clause_start("", 0);
+        },
+        |_| {
+            let _ = rating_frame();
+        },
+        |_| {
+            let _ = advice_words("", false);
+        },
+        |_| {
+            let _ = million_zh();
+        },
+        |_| {
+            let _ = personal_affair("");
+        },
+    ];
+    for t in touch {
+        t(day);
+    }
+    touch.len()
+}
+
+/// A figure in 百万 or 千万 (compiled once, not per line).
+fn million_zh() -> &'static Regex {
+    static R: OnceLock<Regex> = OnceLock::new();
+    R.get_or_init(|| re(r"\d\s*(?:百万|千万)"))
+}
+
+/// The date marks alone: what the judge's confirmation (`judge::passed`)
+/// compiles of this file.
+pub(crate) fn warm_dates(day: NaiveDate) {
+    let _ = date_marks("", day);
 }
 
 fn is_cjk(c: char) -> bool {
@@ -294,7 +430,7 @@ fn worded_figures(text: &str) -> Vec<String> {
         [
             re(r"百分之[零〇一二三四五六七八九十百点两]+|[一二三四五六七八九十两]成|[一二三四五六七八九十两半]倍|翻倍|翻番"),
             re(r"[一二三四五六七八九十百千万亿两]+(?:美元|亿|万|%|％|个百分点)"),
-            re(r"(?i)(?:(?:one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred|a\s+half|half)(?:[- ](?:one|two|three|four|five|six|seven|eight|nine))?\s+(?:percent|per\s+cent|percentage\s+points?|basis\s+points?|%|billion|million|trillion|thousand|dollars|times|fold)|a\s+(?:million|billion|trillion)|(?:doubl|tripl|quadrupl|halv)\w*)"),
+            re(&wide_words(WORDED_EN)),
         ]
     });
     let mut out: Vec<String> = zh.find_iter(text).map(|m| m.as_str().to_string()).collect();
@@ -336,7 +472,12 @@ fn hook_count(text: &str) -> Option<String> {
 
 fn refused_en() -> &'static [Regex] {
     static R: OnceLock<Vec<Regex>> = OnceLock::new();
-    R.get_or_init(|| REFUSED_EN.iter().map(|p| re(&format!("(?i){p}"))).collect())
+    R.get_or_init(|| {
+        REFUSED_EN
+            .iter()
+            .map(|p| re(&wide_words(&format!("(?i){p}"))))
+            .collect()
+    })
 }
 
 /// A match of `r` in `text` as whole words. A hyphen does not join words,
@@ -371,9 +512,7 @@ fn has_word(text: &str, word: &str) -> bool {
 /// is fine: "will hold its report", "whether the plan holds", "on hold".
 fn advice_hold(text: &str) -> Option<String> {
     static R: OnceLock<Regex> = OnceLock::new();
-    let r = R.get_or_init(|| {
-        re(r"(?i)(?:(?:from|rated|rating|investors|continue\s+to|keep|recommend\w*)\s+hold|(?:downgrad\w*|upgrad\w*|cut|lower\w*|rais\w*|mov\w*)\s+(?:\w+\s+){0,3}to\s+hold|hold(?:s|ing)?\s+(?:rating|from|onto|on\s+to|(?:the|their|your|its)\s+(?:stock|shares|positions?|stake)|(?:stock|shares|positions?)))")
-    });
+    let r = R.get_or_init(|| re(&wide_words(ADVICE_HOLD)));
     find_alone(r, text).first().map(|m| m.as_str().to_string())
 }
 
@@ -458,7 +597,9 @@ pub(crate) fn scrub(text: &str, names: &[String]) -> String {
     names.sort_by_key(|n| std::cmp::Reverse(n.len()));
     let mut out = text.to_string();
     for n in names {
-        let r = re(&format!("(?i){}", regex::escape(n)));
+        // Built per call for the line's own outlets, never cached: not one
+        // of the lazily compiled patterns `warm` covers.
+        let r = Regex::new(&format!("(?i){}", regex::escape(n))).expect("an escaped name");
         out = r.replace_all(&out, "Outlet").into_owned();
     }
     out
@@ -507,14 +648,76 @@ fn digits_only_in_names(hook: &str, cited: &[String]) -> bool {
     !has_digit(&rest)
 }
 
-/// "affair" in its personal sense: "had an affair", "a second affair", "an
-/// affair with"; not "a muted affair" or "current affairs".
+/// Private-life words: a line holding one makes a claim about a named
+/// person's private life.
+const PERSONAL_EN: &[&str] = &["mistress", "extramarital", "infidelity"];
+const PERSONAL_ZH: &[&str] = &["婚外情", "婚外恋", "出轨", "情妇", "绯闻", "不正当关系"];
+
+/// "affair" in its personal sense: "had an affair", "a second affair",
+/// "his affair", "the CEO's affair", "CEO affair", "an affair with"; not "a
+/// muted affair" or the plural business sense ("current affairs",
+/// "corporate affairs", "affairs of the company"). ASCII word boundaries:
+/// the English lines it reads are ASCII words.
 fn personal_affair(text: &str) -> Option<String> {
     static R: OnceLock<Regex> = OnceLock::new();
     let r = R.get_or_init(|| {
-        re(r"(?i)(?:\b(?:an|another|second|secret|romantic|alleged|extramarital|had|having)\s+affair\b|\baffair\s+with\b)")
+        re(r"(?i-u)(?:\b(?:an|another|second|secret|romantic|alleged|extramarital|had|having|his|her|their|the|ceo)\s+affair\b|\b[a-z]+(?:'|’)s\s+affair\b|\baffair\s+with\b)")
     });
     r.find(text).map(|m| m.as_str().to_string())
+}
+
+/// The private-life words in `text`, in either language.
+fn personal_words(text: &str) -> Vec<String> {
+    let mut out: Vec<String> = PERSONAL_EN
+        .iter()
+        .filter(|w| has_word(text, w))
+        .map(|w| w.to_string())
+        .collect();
+    out.extend(personal_affair(text));
+    out.extend(
+        PERSONAL_ZH
+            .iter()
+            .filter(|w| text.contains(**w))
+            .map(|w| w.to_string()),
+    );
+    out
+}
+
+/// Rick's people rule (2026-11-17, "Allow it if attributed"), where code
+/// can tell: a line with a private-life word (`PERSONAL_EN`, `PERSONAL_ZH`,
+/// "affair" in its personal sense) is refused unless the word is not in the
+/// hook, a cited news item's text holds a private-life word too, and the
+/// sentence attributes that item's outlet. The list is narrow by design: a
+/// euphemism ("personal conduct", 私生活风波), other wording for the same
+/// claim, or a claim about a person that is not about private life passes
+/// it, and so does a claim placed outside the attributing clause ("Benzinga
+/// reports the board may act, and the CEO had an affair"). Those are caught
+/// only by the judge's `personal_claims_attributed` flag, which fails
+/// closed: a missing or non-boolean flag reads as false.
+fn private_life(hook: &str, watch: &str, cited: &[&Evidence], lang: Lang) -> Vec<String> {
+    let mut bad = Vec::new();
+    if let Some(w) = personal_words(hook).first() {
+        bad.push(format!(
+            "a claim about a person's private life in the hook ({w}): only an attributed sentence may hold one"
+        ));
+    }
+    if let Some(w) = personal_words(watch).first() {
+        let reported = cited.iter().any(|e| {
+            e.kind == EvidenceKind::News
+                && !personal_words(&e.text).is_empty()
+                && e.outlet.as_deref().is_some_and(|o| {
+                    outlet_names(o, lang)
+                        .iter()
+                        .any(|n| attributes(&visible(watch), n))
+                })
+        });
+        if !reported {
+            bad.push(format!(
+                "a claim about a person's private life ({w}) not attributed to the outlet of a cited news item that reports it"
+            ));
+        }
+    }
+    bad
 }
 
 /// `names`, for a name that is also an ordinary word (case-sensitive): only where the line
@@ -843,9 +1046,7 @@ fn zh_years(text: &str) -> Vec<i32> {
 
 fn relative_en_re() -> &'static Regex {
     static R: OnceLock<Regex> = OnceLock::new();
-    R.get_or_init(|| {
-        re(r"(?i)(?:next\s+(?:week|month|quarter|year|few\s+\w+|several\s+\w+)|(?:over|in|during|within)\s+the\s+(?:next|coming)\s+(?:\w+\s+)?(?:days|weeks|months|quarters|years)|in\s+(?:the\s+)?coming\s+(?:days|weeks|months|quarters)|(?:later\s+)?this\s+(?:week|month|quarter|year)|last\s+(?:week|month)|later\s+today|today|tonight|tomorrow|yesterday|soon|shortly|in\s+the\s+(?:days|weeks|months|quarters|years)\s+ahead|(?:days|weeks|months)\s+ahead|in\s+the\s+near\s+term|near[- ]term|by\s+(?:the\s+)?(?:year[- ]end|end\s+of\s+the\s+year)|later\s+in\s+the\s+year)")
-    })
+    R.get_or_init(|| re(&wide_words(RELATIVE_EN)))
 }
 
 fn relative_zh_re() -> &'static Regex {
@@ -1210,7 +1411,7 @@ fn check_line(pack: &Pack, line: &Line, lang: Lang) -> Vec<String> {
         );
     }
     // Chinese figures use 万 and 亿.
-    if re(r"\d\s*(?:百万|千万)").is_match(&ascii_digits(&both)) {
+    if million_zh().is_match(&ascii_digits(&both)) {
         bad.push("a figure in 百万 or 千万: write it in 万 or 亿".to_string());
     }
     // The cited outlets' names, which hold digits ("24/7 Wall St.") or
@@ -1381,20 +1582,9 @@ fn check_line(pack: &Pack, line: &Line, lang: Lang) -> Vec<String> {
         }
     }
 
-    // A private-life allegation about a named person, whatever the evidence.
-    for w in PERSONAL_EN {
-        if has_word(&both, w) {
-            bad.push(format!("a personal allegation: {w}"));
-        }
-    }
-    if let Some(m) = personal_affair(&both) {
-        bad.push(format!("a personal allegation: {m}"));
-    }
-    for w in PERSONAL_ZH {
-        if both.contains(w) {
-            bad.push(format!("a personal allegation: {w}"));
-        }
-    }
+    // A claim about a person's private life (Rick, 2026-11-17: "Allow it if
+    // attributed"), where code can tell: see `private_life`.
+    bad.extend(private_life(&line.hook, &line.watch, &cited, lang));
 
     // 9. Refusal list.
     let analyst_cited = cited.iter().any(|e| e.kind == EvidenceKind::AnalystAction);
@@ -1500,9 +1690,7 @@ const ADVICE_LEAD: &[&str] = &[
 /// The words before a rating: "downgraded Apple to", "moved the stock to".
 fn rating_frame() -> &'static Regex {
     static R: OnceLock<Regex> = OnceLock::new();
-    R.get_or_init(|| {
-        re(r"(?:upgrad|downgrad|cut|lower|rais|mov|reiterat|maintain)\w*\s+(?:[\w.'’-]+\s+){0,3}to\s+$")
-    })
+    R.get_or_init(|| re(&wide_words(RATING_FRAME)))
 }
 
 /// "buy", "sell", "target", "neutral", "upside" and "downside" in their
@@ -2881,6 +3069,224 @@ mod tests {
         }
     }
 
+    /// Rick, 2026-11-17 ("Allow it if attributed"): a claim about a named
+    /// person, an allegation included, passes when the line names the outlet
+    /// that reported it in an attributing frame, and fails without one.
+    #[test]
+    fn a_claim_about_a_person_passes_only_when_attributed() {
+        use EvidenceKind::*;
+        let p = run_one_pack("NVDA", "2026-11-12", &[
+            (News, Some("benzinga.com"), "Reports said the chief executive had an extramarital affair and the board may weigh his removal before the November 19, 2026 report.", None),
+            (ReportDate, None, "NVDA's report date is confirmed for November 19, 2026 (earnings calendar).", Some("2026-11-19")),
+        ]);
+        let attributed = insight(
+            line(
+                "Board scrutiny follows the report",
+                "Benzinga reports the chief executive had an extramarital affair, so whether the board acts before the November 19 report is the open question.",
+                &["e2", "e3"],
+            ),
+            line(
+                "董事会审视成焦点",
+                "据Benzinga报道，首席执行官有婚外情，董事会是否在11月19日财报前采取行动是关键。",
+                &["e2", "e3"],
+            ),
+        );
+        let f = check(&p, &attributed);
+        assert!(f.is_empty(), "{f:?}");
+        let mut bare = attributed.clone();
+        bare.en.watch = "The chief executive had an extramarital affair, so whether the board acts before the November 19 report is the open question.".into();
+        bare.zh.watch = "首席执行官有婚外情，董事会是否在11月19日财报前采取行动是关键。".into();
+        let f = check(&p, &bare);
+        assert!(refused(&f, "en:"), "{f:?}");
+        assert!(refused(&f, "zh:"), "{f:?}");
+        assert!(f.iter().all(|r| !r.contains("personal")), "{f:?}");
+    }
+
+    /// Review M2, the reviewer's probe: what code catches of Rick's people
+    /// rule ("Allow it if attributed"), and what only the judge's
+    /// `personal_claims_attributed` flag can.
+    #[test]
+    fn private_life_claims_pass_code_only_when_attributed_to_their_reporter() {
+        use EvidenceKind::*;
+        let p = run_one_pack("NVDA", "2026-11-12", &[
+            (News, Some("benzinga.com"), "Reports said the chief executive had an extramarital affair and the board may weigh his removal before the November 19, 2026 report.", None),
+            (ReportDate, None, "NVDA's report date is confirmed for November 19, 2026 (earnings calendar).", Some("2026-11-19")),
+        ]);
+        let case = |en: (&str, &str), zh: (&str, &str), cites: &[&str]| {
+            check(
+                &p,
+                &insight(line(en.0, en.1, cites), line(zh.0, zh.1, cites)),
+            )
+        };
+        // Baseline: attributed to the outlet whose item reports it.
+        let f = case(
+            ("Board scrutiny follows the report", "Benzinga reports the chief executive had an extramarital affair, so whether the board acts before the November 19 report is the open question."),
+            ("董事会审视成焦点", "据Benzinga报道，首席执行官有婚外情，董事会是否在11月19日财报前采取行动是关键。"),
+            &["e2", "e3"],
+        );
+        assert!(f.is_empty(), "{f:?}");
+        // P1: the outlet frames one clause and the claim sits in the next.
+        // Code cannot tell the clauses' claims apart: it passes code, and
+        // only the judge's flag catches it.
+        let f = case(
+            ("Board scrutiny follows the report", "Benzinga reports the board may weigh a removal, and the chief executive had an extramarital affair before the November 19 report."),
+            ("董事会审视成焦点", "据Benzinga报道，董事会或考虑撤换，而首席执行官确有婚外情，11月19日财报是关键。"),
+            &["e2", "e3"],
+        );
+        assert!(f.is_empty(), "{f:?}");
+        // P2: the claim as PreBell's own in the hook.
+        let f = case(
+            ("CEO affair puts the board on notice", "Benzinga reports the chief executive had an extramarital affair, so whether the board acts before the November 19 report is the open question."),
+            ("CEO婚外情令董事会承压", "据Benzinga报道，首席执行官有婚外情，董事会是否在11月19日财报前采取行动是关键。"),
+            &["e2", "e3"],
+        );
+        assert!(
+            refused(
+                &f,
+                "zh: a claim about a person's private life in the hook (婚外情)"
+            ),
+            "{f:?}"
+        );
+        // Since review R3 the English hook is refused on its own too.
+        assert!(
+            refused(
+                &f,
+                "en: a claim about a person's private life in the hook (CEO affair)"
+            ),
+            "{f:?}"
+        );
+        // P3: cites only the calendar item; nothing reports the claim.
+        let f = case(
+            ("Board scrutiny before the report", "The chief executive had an extramarital affair, so whether the board acts before the November 19 report is the open question."),
+            ("董事会审视成焦点", "首席执行官有婚外情，董事会是否在11月19日财报前采取行动是关键。"),
+            &["e3"],
+        );
+        assert!(
+            refused(
+                &f,
+                "en: a claim about a person's private life (extramarital) not attributed"
+            ),
+            "{f:?}"
+        );
+        assert!(
+            refused(
+                &f,
+                "zh: a claim about a person's private life (婚外情) not attributed"
+            ),
+            "{f:?}"
+        );
+        // P4: attributed to an outlet no cited item is from.
+        let f = case(
+            ("Board scrutiny before the report", "The Daily Mail reports the chief executive had an extramarital affair, so whether the board acts before the November 19 report is the open question."),
+            ("董事会审视成焦点", "据每日邮报报道，首席执行官有婚外情，董事会是否在11月19日财报前采取行动是关键。"),
+            &["e3"],
+        );
+        assert!(
+            refused(&f, "en: a claim about a person's private life"),
+            "{f:?}"
+        );
+        assert!(
+            refused(&f, "zh: a claim about a person's private life"),
+            "{f:?}"
+        );
+        // P6: vague sourcing.
+        let f = case(
+            ("Board scrutiny before the report", "People familiar say the chief executive had an extramarital affair, so whether the board acts before the November 19 report is the open question."),
+            ("董事会审视成焦点", "知情人士称首席执行官有婚外情，董事会是否在11月19日财报前采取行动是关键。"),
+            &["e3"],
+        );
+        assert!(
+            refused(&f, "en: a claim about a person's private life"),
+            "{f:?}"
+        );
+        assert!(
+            refused(&f, "zh: a claim about a person's private life"),
+            "{f:?}"
+        );
+        // P5 and P7 were refused before and still are.
+        let f = case(
+            ("Board scrutiny before the report", "Reuters reports the chief executive had an extramarital affair, so whether the board acts before the November 19 report is the open question."),
+            ("董事会审视成焦点", "据路透社报道，首席执行官有婚外情，董事会是否在11月19日财报前采取行动是关键。"),
+            &["e3"],
+        );
+        assert!(!f.is_empty());
+        let f = case(
+            ("Benzinga reports board scrutiny", "The chief executive had an extramarital affair, so whether the board acts before the November 19 report is the open question."),
+            ("据Benzinga报道董事会审视", "首席执行官有婚外情，董事会是否在11月19日财报前采取行动是关键。"),
+            &["e2", "e3"],
+        );
+        assert!(!f.is_empty());
+        // "affair" in its other senses is no claim about a person.
+        assert!(
+            personal_words("a muted affair before the report, as current affairs go").is_empty()
+        );
+    }
+
+    /// Review R3: the wider wording in both languages is refused when no
+    /// cited item reports it, and the business sense of "affairs" and 事务
+    /// is not a private-life word.
+    #[test]
+    fn wider_private_life_wording_is_caught_and_the_business_sense_is_not() {
+        use EvidenceKind::*;
+        let p = run_one_pack(
+            "NVDA",
+            "2026-11-12",
+            &[(
+                ReportDate,
+                None,
+                "NVDA's report date is confirmed for November 19, 2026 (earnings calendar).",
+                Some("2026-11-19"),
+            )],
+        );
+        let zh_ok = "董事会是否在11月19日财报前采取行动是关键。";
+        let en_ok = "Whether the board acts before the November 19 report is the open question.";
+        for (en, word) in [
+            ("The CEO affair has the board's attention, so whether the board acts before the November 19 report is the open question.", "CEO affair"),
+            ("The chief executive admitted his affair, so whether the board acts before the November 19 report is the open question.", "his affair"),
+            ("The CEO's affair has the board's attention, so whether the board acts before the November 19 report is the open question.", "CEO's affair"),
+            ("The chief executive’s affair has the board's attention, so whether the board acts before the November 19 report is the open question.", "executive’s affair"),
+            ("Reports of infidelity have the board's attention, so whether the board acts before the November 19 report is the open question.", "infidelity"),
+        ] {
+            let f = check(&p, &insight(line("Board scrutiny before the report", en, &["e2"]), line("董事会审视成焦点", zh_ok, &["e2"])));
+            assert!(refused(&f, &format!("en: a claim about a person's private life ({word})")), "{en}: {f:?}");
+        }
+        for (zh, word) in [
+            (
+                "首席执行官承认婚外恋，董事会是否在11月19日财报前采取行动是关键。",
+                "婚外恋",
+            ),
+            (
+                "首席执行官被指有不正当关系，董事会是否在11月19日财报前采取行动是关键。",
+                "不正当关系",
+            ),
+        ] {
+            let f = check(
+                &p,
+                &insight(
+                    line("Board scrutiny before the report", en_ok, &["e2"]),
+                    line("董事会审视成焦点", zh, &["e2"]),
+                ),
+            );
+            assert!(
+                refused(
+                    &f,
+                    &format!("zh: a claim about a person's private life ({word})")
+                ),
+                "{zh}: {f:?}"
+            );
+        }
+        for text in [
+            "a state of affairs the board must address",
+            "its corporate affairs team and public affairs office",
+            "government affairs spending and current affairs",
+            "the affairs of the company are in order",
+            "a muted affair before the report",
+            "公司事务部门负责政府事务",
+        ] {
+            assert!(personal_words(text).is_empty(), "{text}");
+        }
+    }
+
     /// Trial run 1 (2026-11-13): lines refused for flaws in the rules, as the
     /// writer wrote them (the macro-event clauses, whose items are gone, cut).
     #[test]
@@ -3007,7 +3413,8 @@ mod tests {
     }
 
     /// Trial run 2: a year a cited item names may stand in a hook (ANET);
-    /// a private-life allegation is refused (NVDA); in Chinese an
+    /// a claim about a person is no longer refused by a word list (NVDA,
+    /// Rick 2026-11-17); in Chinese an
     /// unconfirmed date may not be the company's own 预计 (NVDA).
     #[test]
     fn the_trial_run_two_lines() {
@@ -3035,11 +3442,8 @@ mod tests {
 
         let (p, i) = get("premarket_2026-11-12-update", "NVDA");
         let f = check(&p, &i);
-        assert!(
-            refused(&f, "en: a personal allegation: second affair"),
-            "{f:?}"
-        );
-        assert!(refused(&f, "zh: a personal allegation: 婚外情"), "{f:?}");
+        // Rick, 2026-11-17: no word list refuses a claim about a person.
+        assert!(!refused(&f, "personal"), "{f:?}");
         assert!(
             refused(
                 &f,
@@ -3187,7 +3591,7 @@ mod tests {
         assert!(refused(&f, "en: hook has a digit"), "{f:?}");
         let f = both(&q, "Q3 revenue growth in focus", "Fool.com reports AMD's Q3 revenue rose by 45% year over year to $13.38 billion, a pace the next report will test.", "据fool.com报道，AMD第三季度营收同比增长45%，达到133.8亿美元，下次财报将检验这一增速。", &["e2"]);
         assert!(f.is_empty(), "{f:?}");
-        // L2: "affair" only in its personal sense.
+        // L2: "affair" in any sense is left to attribution and the judge.
         let p = mk("reuters.com");
         let f = both(
             &p,
@@ -3199,8 +3603,13 @@ mod tests {
         assert!(f.is_empty(), "{f:?}");
         let f = both(&p, "Guidance sets the next test", "Reuters reports a state of affairs where Apple expects revenue of $4.2 billion before November 19.", &zh_ok_for("路透社"), &["e2", "e3"]);
         assert!(f.is_empty(), "{f:?}");
+        // A private-life claim the cited item does not report is refused,
+        // attributed or not (review M2): Reuters' item is about guidance.
         let f = both(&p, "Guidance sets the next test", "Reuters reports the CEO had an affair, and Apple expects revenue of $4.2 billion before November 19.", &zh_ok_for("路透社"), &["e2", "e3"]);
-        assert!(refused(&f, "en: a personal allegation: an affair"), "{f:?}");
+        assert!(
+            refused(&f, "en: a claim about a person's private life (an affair)"),
+            "{f:?}"
+        );
         // L4: past periods pass in both languages; forward ones do not.
         assert_eq!(relative_time("revenue rose from last quarter"), None);
         assert_eq!(
@@ -3239,5 +3648,103 @@ mod tests {
         i.zh.hook = "四季度营收成焦点".into();
         let f = check(&t, &i);
         assert!(refused(&f, "zh: fiscal label 四季度"), "{f:?}");
+    }
+
+    /// Every text the trial stored (lines in both languages, evidence,
+    /// mover reasons), plus the texts of `INSIGHT_EQUIV_CORPUS` (one per
+    /// line) when it is set.
+    fn stored_texts() -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        let mut take = |v: &serde_json::Value| {
+            for i in ["insight", "variant"] {
+                for lang in ["en", "zh"] {
+                    for k in ["hook", "watch"] {
+                        if let Some(t) = v[i][lang][k].as_str() {
+                            out.push(t.to_string());
+                        }
+                    }
+                }
+            }
+            for e in v["pack"]["evidence"].as_array().into_iter().flatten() {
+                for k in ["text", "quote"] {
+                    if let Some(t) = e[k].as_str() {
+                        out.push(t.to_string());
+                    }
+                }
+            }
+        };
+        for l in include_str!("testdata/run2_records.jsonl")
+            .lines()
+            .chain(include_str!("testdata/run3_records.jsonl").lines())
+            .chain(
+                include_str!("../../../../tools/insight-trial/testdata/final_run_lines.jsonl")
+                    .lines(),
+            )
+        {
+            take(&serde_json::from_str(l).unwrap());
+        }
+        let rec: serde_json::Value =
+            serde_json::from_str(include_str!("testdata/shadow/record.json")).unwrap();
+        for m in rec["movers"].as_array().unwrap() {
+            take(m);
+        }
+        for l in include_str!("testdata/reasons_2026_11.tsv").lines().skip(1) {
+            out.push(l.splitn(3, '\t').nth(2).unwrap_or("").to_string());
+        }
+        if let Ok(path) = std::env::var("INSIGHT_EQUIV_CORPUS") {
+            out.extend(
+                std::fs::read_to_string(path)
+                    .unwrap()
+                    .lines()
+                    .map(String::from),
+            );
+        }
+        out
+    }
+
+    /// The CPU ruling's condition for a cheaper pattern: on every stored
+    /// text, and every lowercase prefix of one (`rating_frame` reads the text
+    /// before a word), the new pattern finds exactly what the old one did.
+    #[test]
+    fn wide_words_match_as_before() {
+        let mut pairs: Vec<String> = REFUSED_EN.iter().map(|p| format!("(?i){p}")).collect();
+        pairs.extend([WORDED_EN, ADVICE_HOLD, RELATIVE_EN, RATING_FRAME].map(String::from));
+        let pairs: Vec<(Regex, Regex)> = pairs
+            .iter()
+            .filter(|p| p.contains(r"\w"))
+            .map(|p| (Regex::new(p).unwrap(), Regex::new(&wide_words(p)).unwrap()))
+            .collect();
+        assert_eq!(pairs.len(), 8);
+        let texts = stored_texts();
+        assert!(texts.len() > 250, "{}", texts.len());
+        let spans = |r: &Regex, t: &str| -> Vec<(usize, usize)> {
+            r.find_iter(t).map(|m| (m.start(), m.end())).collect()
+        };
+        let mut compared = 0;
+        for t in &texts {
+            let lower = t.to_ascii_lowercase();
+            let prefixes: Vec<&str> = std::iter::once(t.as_str())
+                .chain(lower.match_indices(' ').map(|(at, _)| &lower[..at + 1]))
+                .collect();
+            for p in prefixes {
+                for (old, new) in &pairs {
+                    assert_eq!(spans(old, p), spans(new, p), "{old} on {p:?}");
+                    compared += 1;
+                }
+            }
+        }
+        assert!(compared > 10_000, "{compared}");
+        // The rewrite itself: a class of its own outside brackets, ranges
+        // inside them.
+        assert_eq!(
+            wide_words(r"a\w+b"),
+            r"a(?-i:[0-9A-Za-z_\x{80}-\x{10FFFF}])+b"
+        );
+        assert_eq!(wide_words(r"[\w.]\s"), r"[0-9A-Za-z_\x{80}-\x{10FFFF}.]\s");
+        // And it still matches where `\w` does, beyond ASCII.
+        let old = Regex::new(&format!("(?i){}", REFUSED_EN[20])).unwrap();
+        let new = Regex::new(&wide_words(&format!("(?i){}", REFUSED_EN[20]))).unwrap();
+        let t = "analysts at Société Générale expect";
+        assert!(old.is_match(t) && new.is_match(t));
     }
 }

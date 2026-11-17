@@ -1,4 +1,4 @@
-use crate::llm::{dropped_note, parse_reply};
+use crate::llm::{dropped_note, parse_reply, strict, Reply};
 use crate::providers::{Http, LlmProvider, ProviderError};
 use async_trait::async_trait;
 use serde_json::{json, Value};
@@ -97,6 +97,22 @@ fn error_summary(status: u16, body: &str) -> String {
 #[async_trait(?Send)]
 impl<H: Http> LlmProvider for Claude<H> {
     async fn complete_json(&self, system: &str, user: &str) -> Result<Value, ProviderError> {
+        let reply = self.reply(system, user).await?;
+        if let Some(dropped) = &reply.dropped {
+            (self.warn)(&dropped_note("claude", dropped));
+        }
+        Ok(reply.value)
+    }
+
+    async fn complete_json_strict(&self, system: &str, user: &str) -> Result<Value, ProviderError> {
+        strict(self.reply(system, user).await?)
+    }
+}
+
+impl<H: Http> Claude<H> {
+    /// One call and its parsed reply, with any note after the JSON kept in
+    /// `Reply::dropped` for the caller to log or refuse.
+    async fn reply(&self, system: &str, user: &str) -> Result<Reply, ProviderError> {
         // No `temperature` (rejected on API version 2026-10-21), `thinking` or betas, so the
         // body stays valid for any configured model. `output_config.effort` is the one
         // model-dependent field: `LLM_EFFORT=none` omits it.
@@ -155,11 +171,7 @@ impl<H: Http> LlmProvider for Claude<H> {
             .and_then(|b| b.get("text"))
             .and_then(Value::as_str)
             .ok_or(ProviderError::Empty)?;
-        let reply = parse_reply(text)?;
-        if let Some(dropped) = &reply.dropped {
-            (self.warn)(&dropped_note("claude", dropped));
-        }
-        Ok(reply.value)
+        parse_reply(text)
     }
 }
 
@@ -276,6 +288,39 @@ mod tests {
             WARNED.with(|w| w.borrow().clone()),
             ["claude reply: ignored text after the JSON object: Note: all claims checked."]
         );
+    }
+
+    /// The judge's case (2026-11-16): a pass, then a change of mind after
+    /// the JSON. Strict replies refuse it; `complete_json` still drops it.
+    #[tokio::test]
+    async fn a_strict_reply_with_a_note_after_its_json_is_an_error() {
+        WARNED.with(|w| w.borrow_mut().clear());
+        let b = wrap(
+            "{\"verdicts\":[]}\n\nOn reflection, claim 2 is not supported.",
+            "end_turn",
+        );
+        let r = cl(fake(200, &b))
+            .with_warn(record_warn)
+            .complete_json_strict("s", "u")
+            .await;
+        assert_eq!(
+            r,
+            Err(ProviderError::Parse(
+                "text after the JSON object: On reflection, claim 2 is not supported.".into()
+            ))
+        );
+        assert!(WARNED.with(|w| w.borrow().is_empty()));
+        let r = cl(fake(200, &b)).complete_json("s", "u").await;
+        assert_eq!(r.unwrap(), json!({"verdicts": []}));
+        // A clean reply passes; a second object is refused in both modes.
+        let clean = wrap("```json\n{\"a\":1}\n```", "end_turn");
+        let r = cl(fake(200, &clean)).complete_json_strict("s", "u").await;
+        assert_eq!(r.unwrap()["a"], 1);
+        let two = wrap("{\"a\":1}\n\n{\"a\":2}", "end_turn");
+        assert!(cl(fake(200, &two))
+            .complete_json_strict("s", "u")
+            .await
+            .is_err());
     }
 
     #[tokio::test]

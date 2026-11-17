@@ -20,6 +20,11 @@ pub const EARNINGS_QUEUE: &str = "EARNINGS";
 pub const EARNINGS_BUILD_QUEUE: &str = "EARNINGS_BUILD";
 /// Queue binding for every other job.
 pub const JOBS_QUEUE: &str = "JOBS";
+/// Queue binding for mover insights (`insight`): one consumer, one message
+/// at a time, so a writer or judge call (30-60 s of wall time) never shares
+/// the briefs' queue and two insight messages never run at once (Rick,
+/// 2026-11-17).
+pub const INSIGHT_QUEUE: &str = "INSIGHT";
 
 /// A content job: a `run::Content` tick that needs the market, news and LLM
 /// providers.
@@ -97,6 +102,11 @@ pub enum JobKind {
     /// `cards`: render at most one missing share card (`cover::card`), in
     /// its own message so its CPU never adds to a build's.
     Cards,
+    /// `insight`: one stage of mover insights (`insight::step`), queued when
+    /// a brief, update or recap publishes and by the sweep windows while
+    /// `INSIGHTS_MODE` is not off. Not in `JOBS` or `CRONS`: the crons
+    /// queue it only through `insight::step::sweep_wanted`.
+    Insight,
 }
 
 impl JobKind {
@@ -115,6 +125,7 @@ impl JobKind {
             "ipo:sweep" => Some(JobKind::Earnings(EarningsStep::IpoSweep)),
             "ipo:article" => Some(JobKind::Earnings(EarningsStep::IpoArticle)),
             "cards" => Some(JobKind::Cards),
+            "insight" => Some(JobKind::Insight),
             _ => None,
         }
     }
@@ -128,6 +139,7 @@ pub fn queue_for(job: &str) -> &'static str {
         }
         Some(JobKind::Earnings(EarningsStep::IpoSweep)) => JOBS_QUEUE,
         Some(JobKind::Earnings(_)) => EARNINGS_QUEUE,
+        Some(JobKind::Insight) => INSIGHT_QUEUE,
         _ => JOBS_QUEUE,
     }
 }
@@ -317,6 +329,24 @@ mod tests {
         )));
     }
 
+    /// Mover insights have their own queue: one message per batch and one at
+    /// a time, bound as `INSIGHT`.
+    #[test]
+    fn the_insight_queue_is_its_own_and_serial() {
+        let c = consumer("prebell-insight");
+        let setting = |k: &str| {
+            c.lines()
+                .find(|l| l.trim_start().starts_with(k))
+                .and_then(|l| l.split('=').nth(1))
+                .map(|v| v.trim().to_string())
+        };
+        assert_eq!(setting("max_batch_size").as_deref(), Some("1"), "{c}");
+        assert_eq!(setting("max_concurrency").as_deref(), Some("1"), "{c}");
+        assert!(WRANGLER.contains(&format!(
+            "binding = \"{INSIGHT_QUEUE}\"\nqueue = \"prebell-insight\""
+        )));
+    }
+
     #[test]
     fn each_cron_maps_to_its_job() {
         let want: [(&str, &[&str]); 2] = [
@@ -380,6 +410,11 @@ mod tests {
         for j in ["premarket", "premarket-update", "recap", "cards", "nope"] {
             assert_eq!(queue_for(j), JOBS_QUEUE, "{j}");
         }
+        assert_eq!(queue_for("insight"), INSIGHT_QUEUE);
+        assert_eq!(JobKind::parse("insight"), Some(JobKind::Insight));
+        // Never queued blindly: an unknown cron queues all of `JOBS`.
+        assert!(!JOBS.contains(&"insight"));
+        assert!(CRONS.iter().all(|(_, jobs)| !jobs.contains(&"insight")));
         let kinds: Vec<JobKind> = JOBS.iter().map(|j| JobKind::parse(j).unwrap()).collect();
         assert_eq!(kinds.len(), 5);
         for (i, k) in kinds.iter().enumerate() {

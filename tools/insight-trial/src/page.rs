@@ -70,7 +70,8 @@ fn esc(s: &str) -> String {
     out
 }
 
-fn card(k: usize, r: &Record) -> String {
+/// One line's card; `done` is the label it already has (pre-selected).
+fn card(k: usize, r: &Record, done: Option<&str>) -> String {
     let i = r.insight.as_ref().expect("judged lines have an insight");
     let mut cites: Vec<&String> = i.en.cites.iter().chain(&i.zh.cites).collect();
     cites.sort();
@@ -102,10 +103,11 @@ fn card(k: usize, r: &Record) -> String {
         })
         .collect();
     let choice = |value: &str, label: &str| {
-        format!("<label><input type=\"radio\" name=\"c{k}\" value=\"{value}\"> {label}</label>")
+        let on = if done == Some(value) { " checked" } else { "" };
+        format!("<label><input type=\"radio\" name=\"c{k}\" value=\"{value}\"{on}> {label}</label>")
     };
     format!(
-        r#"<article class="card" data-post="{post}" data-ticker="{ticker}" data-key="{key}">
+        r#"<article class="card{class}" data-post="{post}" data-ticker="{ticker}" data-key="{key}">
 <header><span class="n">{n}</span> <strong>{ticker}</strong> {name} <span class="post">{post}</span></header>
 <div class="lines">
 <div lang="en"><p class="hook">{en_hook}</p><p>{en_watch}</p></div>
@@ -115,7 +117,8 @@ fn card(k: usize, r: &Record) -> String {
 <fieldset>{fine}{wrong}{advice}</fieldset>
 </article>"#,
         n = k + 1,
-        key = line_key(i),
+        class = if done.is_some() { " done" } else { "" },
+        key = line_key(&r.writer_version, i),
         post = esc(&r.post),
         ticker = esc(&r.ticker),
         name = esc(&r.pack.name),
@@ -213,9 +216,35 @@ pub(crate) fn page(records: &[Record], n: usize) -> String {
     let cards: String = picked
         .iter()
         .enumerate()
-        .map(|(k, r)| card(k, r))
+        .map(|(k, r)| card(k, r, None))
         .collect::<Vec<_>>()
         .join("\n");
+    let intro = format!(
+        "{} lines, in random order. For each, read the English and Chinese lines against the evidence and choose one: <b>Fine</b>; <b>Wrong fact</b> (a claim the evidence does not support, or the two languages differ); <b>Advice or not formal</b>. Choices are kept in this browser; \"Save labels\" downloads <code>labels.json</code>.",
+        picked.len()
+    );
+    html(&intro, &cards)
+}
+
+/// The shadow stage's cumulative page: every line the judge answered for,
+/// new ones first; lines labelled before are shown done, with their label,
+/// and saved again with the new ones, so one `labels.json` holds them all.
+pub(crate) fn shadow_page(lines: &[(&Record, Option<String>)]) -> String {
+    let cards: String = lines
+        .iter()
+        .enumerate()
+        .map(|(k, (r, done))| card(k, r, done.as_deref()))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let old = lines.iter().filter(|(_, d)| d.is_some()).count();
+    let intro = format!(
+        "Shadow stage: {} new lines to read, in random order, then {old} you labelled before (marked, at the end). For each new one, read the English and Chinese lines against the evidence and choose one: <b>Fine</b>; <b>Wrong fact</b> (a claim the evidence does not support, or the two languages differ); <b>Advice or not formal</b>. The brief and its 8:35 update may carry the same mover: both are shown. Choices are kept in this browser; \"Save labels\" downloads <code>labels.json</code> with every label, old and new.",
+        lines.len() - old
+    );
+    html(&intro, &cards)
+}
+
+fn html(intro: &str, cards: &str) -> String {
     format!(
         r#"<!doctype html>
 <html lang="en">
@@ -228,15 +257,14 @@ pub(crate) fn page(records: &[Record], n: usize) -> String {
 <body>
 <main>
 <h1>Mover insight lines</h1>
-<p class="intro">{count} lines, in random order. For each, read the English and Chinese lines against the evidence and choose one: <b>Fine</b>; <b>Wrong fact</b> (a claim the evidence does not support, or the two languages differ); <b>Advice or not formal</b>. Choices are kept in this browser; "Save labels" downloads <code>labels.json</code>.</p>
+<p class="intro">{intro}</p>
 <div class="bar"><button id="save" type="button">Save labels</button><span id="count"></span></div>
 {cards}
 </main>
 <script>{SCRIPT}</script>
 </body>
 </html>
-"#,
-        count = picked.len(),
+"#
     )
 }
 
@@ -259,7 +287,7 @@ pub(crate) mod tests {
             no_advice: true,
             formal: true,
             same_meaning: true,
-            no_personal_allegation: true,
+            personal_claims_attributed: true,
             notes: String::new(),
         }
     }
@@ -412,7 +440,7 @@ pub(crate) mod tests {
         assert!(html.contains("Source text: Total revenue 18,517 14,883"));
         assert_eq!(html.matches("<li class=\"cited\">").count(), 1);
         // Saved choices are keyed by the line, so a new line starts blank.
-        let key = line_key(r.insight.as_ref().unwrap());
+        let key = line_key(&r.writer_version, r.insight.as_ref().unwrap());
         assert!(html.contains(&format!("data-key=\"{key}\"")));
         assert!(html.contains("return c.dataset.key;"));
         assert!(html.contains("key: c.dataset.key"));

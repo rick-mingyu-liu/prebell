@@ -1,0 +1,189 @@
+{
+ "writer": {
+  "insights": [
+   {
+    "ticker": "AMD",
+    "en": {
+     "hook": "Guidance implies a steep revenue step-up",
+     "watch": "The company guided fourth-quarter 2026 revenue to approximately $17 billion, plus or minus 3%, from $13.38 billion in the latest quarter, so delivery against that range at the next report is what would confirm it.",
+     "cites": [
+      "e11",
+      "e4"
+     ]
+    },
+    "zh": {
+     "hook": "指引显示营收将大幅跃升",
+     "watch": "公司预计2026年第四季度营收约为170亿美元，上下浮动3%，而最近一季为133.8亿美元，下次财报能否落在该区间将验证这一判断。",
+     "cites": [
+      "e11",
+      "e4"
+     ]
+    }
+   },
+   {
+    "ticker": "AXON",
+    "en": {
+     "hook": "Revenue forecast cut drives the drop",
+     "watch": "Benzinga reports Axon lowered its 2026 revenue forecast to $3.61 billion-$3.63 billion from $3.67 billion-$3.725 billion, which puts the new range under test at the next report.",
+     "cites": [
+      "e2"
+     ]
+    },
+    "zh": {
+     "hook": "下调营收预测拖累股价",
+     "watch": "据Benzinga报道，Axon将2026年营收预测从36.7亿至37.25亿美元下调至36.1亿至36.3亿美元，下次财报将检验这一新区间。",
+     "cites": [
+      "e2"
+     ]
+    }
+   },
+   {
+    "ticker": "CHTR",
+    "en": {
+     "hook": "Large quarterly loss per share",
+     "watch": "The company reported a GAAP diluted EPS of -$20.50 on $14.92 billion of revenue and expects pro forma 2026 capital expenditures of approximately $13.0 billion, so spending against that figure bears on the loss.",
+     "cites": [
+      "e2",
+      "e3",
+      "e4"
+     ]
+    },
+    "zh": {
+     "hook": "单季每股亏损较大",
+     "watch": "公司报告GAAP摊薄每股收益为-20.50美元，营收149.2亿美元，并预计2026年备考资本支出约为130亿美元，支出是否贴近该数字关系到亏损走向。",
+     "cites": [
+      "e2",
+      "e3",
+      "e4"
+     ]
+    }
+   }
+  ]
+ },
+ "judge": {
+  "verdicts": [
+   {
+    "ticker": "AMD",
+    "en_claims": [
+     {
+      "claim": "AMD guided Q4 2026 revenue to approximately $17 billion, plus or minus 3%",
+      "evidence_id": "e11",
+      "support": "AMD expects revenue to be approximately $17 billion, plus or minus 3%"
+     },
+     {
+      "claim": "Latest quarter revenue was $13.38 billion",
+      "evidence_id": "e4",
+      "support": "Revenue: $13.38 billion, reported for Q3 of fiscal 2026."
+     },
+     {
+      "claim": "Guidance implies a steep revenue step-up",
+      "evidence_id": "e3",
+      "support": "AMD guided for Q4 revenue to grow by 66% year over year to $17 billion"
+     }
+    ],
+    "zh_claims": [
+     {
+      "claim": "公司预计2026年第四季度营收约170亿美元，上下浮动3%",
+      "evidence_id": "e11",
+      "support": "AMD expects revenue to be approximately $17 billion, plus or minus 3%"
+     },
+     {
+      "claim": "最近一季营收133.8亿美元",
+      "evidence_id": "e4",
+      "support": "Revenue: $13.38 billion, reported for Q3 of fiscal 2026."
+     },
+     {
+      "claim": "指引显示营收将大幅跃升",
+      "evidence_id": "e3",
+      "support": "AMD guided for Q4 revenue to grow by 66% year over year to $17 billion"
+     }
+    ],
+    "en_supported": true,
+    "zh_supported": true,
+    "no_advice": true,
+    "formal": true,
+    "same_meaning": true,
+    "notes": "Guidance comes from the company (e11), so no outlet attribution is needed; the lines are consistent.",
+    "personal_claims_attributed": true
+   },
+   {
+    "ticker": "AXON",
+    "en_claims": [
+     {
+      "claim": "Axon lowered its 2026 revenue forecast to $3.61B-$3.63B from $3.67B-$3.725B",
+      "evidence_id": "e2",
+      "support": "Axon lowered its 2026 revenue forecast to $3.61 billion-$3.63 billion from $3.67 billion-$3.725 billion."
+     },
+     {
+      "claim": "Forecast cut drives the drop",
+      "evidence_id": "e2",
+      "support": "Axon lowered its 2026 revenue forecast to $3.61 billion-$3.63 billion"
+     }
+    ],
+    "zh_claims": [
+     {
+      "claim": "Axon将2026年营收预测从36.7亿至37.25亿美元下调至36.1亿至36.3亿美元",
+      "evidence_id": "e2",
+      "support": "Axon lowered its 2026 revenue forecast to $3.61 billion-$3.63 billion from $3.67 billion-$3.725 billion."
+     },
+     {
+      "claim": "下调营收预测拖累股价",
+      "evidence_id": "e2",
+      "support": "Axon lowered its 2026 revenue forecast to $3.61 billion-$3.63 billion"
+     }
+    ],
+    "en_supported": true,
+    "zh_supported": true,
+    "no_advice": true,
+    "formal": true,
+    "same_meaning": true,
+    "notes": "Attributed to Benzinga in both languages, matching the evidence outlet.",
+    "personal_claims_attributed": true
+   },
+   {
+    "ticker": "CHTR",
+    "en_claims": [
+     {
+      "claim": "GAAP diluted EPS of -$20.50",
+      "evidence_id": "e3",
+      "support": "Diluted EPS (GAAP): -$20.50, reported for Q3 of fiscal 2026."
+     },
+     {
+      "claim": "Revenue of $14.92 billion",
+      "evidence_id": "e2",
+      "support": "Revenue: $14.92 billion, reported for Q3 of fiscal 2026."
+     },
+     {
+      "claim": "Expects pro forma 2026 capex of approximately $13.0 billion",
+      "evidence_id": "e4",
+      "support": "Charter expects pro forma full year 2026 capital expenditures, excluding transition capital expenditures, to total approximately $13.0 billion."
+     }
+    ],
+    "zh_claims": [
+     {
+      "claim": "GAAP摊薄每股收益为-20.50美元",
+      "evidence_id": "e3",
+      "support": "Diluted EPS (GAAP): -$20.50, reported for Q3 of fiscal 2026."
+     },
+     {
+      "claim": "营收149.2亿美元",
+      "evidence_id": "e2",
+      "support": "Revenue: $14.92 billion, reported for Q3 of fiscal 2026."
+     },
+     {
+      "claim": "预计2026年备考资本支出约130亿美元",
+      "evidence_id": "e4",
+      "support": "Charter expects pro forma full year 2026 capital expenditures, excluding transition capital expenditures, to total approximately $13.0 billion."
+     }
+    ],
+    "en_supported": true,
+    "zh_supported": true,
+    "no_advice": true,
+    "formal": true,
+    "same_meaning": true,
+    "notes": "All figures match the company data; the capex guidance excludes transition capex, but the lines' wording as 'pro forma' is still acceptable.",
+    "personal_claims_attributed": true
+   }
+  ]
+ }
+}

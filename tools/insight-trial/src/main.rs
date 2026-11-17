@@ -18,7 +18,13 @@
 //! cargo run --release -- seed --out DIR --dev-vars PATH [--budget 3.0] [--fresh] [--plan]
 //! cargo run --release -- page --out DIR [--cards 60]
 //! cargo run --release -- score --out DIR --labels FILE
+//! cargo run --release -- shadow --records DIR --out DIR [--labels FILE]
+//! cargo run --release -- time --facts DIR --lines FILE [--dump DIR]
 //! ```
+//!
+//! `shadow` reads the Worker's shadow-stage records (`fetch-shadow.sh`),
+//! writes them as `lines.jsonl` and writes a cumulative `label.html` with
+//! every line the judge answered for; `score` then reports the bar.
 //!
 //! Keys come from `--dev-vars` (or the environment) and stay in memory: no
 //! request header or key is ever printed or written.
@@ -27,6 +33,8 @@ mod http;
 mod page;
 mod score;
 mod seed;
+mod shadow;
+mod timing;
 
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
@@ -40,6 +48,7 @@ use prebell_core::earnings::facts::EarningsFacts;
 use prebell_core::facts::{Mover, PremarketFacts, Theme};
 use prebell_core::insight::judge::{self, Verdict, JUDGE_VERSION};
 use prebell_core::insight::pack::{packs, PackInputs, ReportStatus};
+use prebell_core::insight::step;
 use prebell_core::insight::write::{self, WRITER_VERSION};
 use prebell_core::insight::{check, Insight, Pack};
 use prebell_core::llm::{api_key_var, llm_from_env};
@@ -273,14 +282,15 @@ pub(crate) struct Record {
     pub judge_version: String,
 }
 
-/// A line's identity across runs: the writer version and the four texts.
-/// The labelling page keys its saved choices by it, and `score` uses it to
-/// notice labels or seeds made for an older line.
-pub(crate) fn line_key(i: &Insight) -> String {
+/// A line's identity across runs: the version of the writer that wrote it
+/// (the record's own `writer_version`, never the current one) and the four
+/// texts. The labelling page keys its saved choices by it, and `score` uses
+/// it to notice labels or seeds made for an older line.
+pub(crate) fn line_key(writer_version: &str, i: &Insight) -> String {
     // FNV-1a, 64 bits: stable across builds, unlike the std hasher.
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
     for part in [
-        WRITER_VERSION,
+        writer_version,
         &i.en.hook,
         &i.en.watch,
         &i.zh.hook,
@@ -987,7 +997,7 @@ fn finish(m: &Models, r: Result<(), String>) {
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
     let args: Vec<String> = std::env::args().collect();
-    let usage = "usage: insight-trial run --facts DIR --out DIR --dev-vars PATH [--budget 3.0] [--only SUBSTR] [--fresh] [--plan]\n       insight-trial seed --out DIR --dev-vars PATH [--budget 3.0] [--fresh] [--plan]\n       insight-trial page --out DIR [--cards 60]\n       insight-trial score --out DIR --labels FILE";
+    let usage = "usage: insight-trial run --facts DIR --out DIR --dev-vars PATH [--budget 3.0] [--only SUBSTR] [--fresh] [--plan]\n       insight-trial seed --out DIR --dev-vars PATH [--budget 3.0] [--fresh] [--plan]\n       insight-trial page --out DIR [--cards 60]\n       insight-trial score --out DIR --labels FILE\n       insight-trial shadow --records DIR --out DIR [--labels FILE]\n       insight-trial time --facts DIR --lines FILE [--dump DIR]";
     match args.get(1).map(String::as_str) {
         Some("run") => {
             let out = PathBuf::from(need(&args, "--out"));
@@ -1084,6 +1094,170 @@ async fn main() {
             let md = score::report(&records, &posts, &seeded, &spend, &labels);
             fs::write(out.join("report.md"), &md).expect("report.md");
             println!("{md}");
+        }
+        Some("shadow") => {
+            let dir = PathBuf::from(need(&args, "--records"));
+            let out = PathBuf::from(need(&args, "--out"));
+            let labels: Vec<score::Label> = match arg(&args, "--labels") {
+                Some(f) => parse("labels", &fs::read_to_string(f).expect("read labels")),
+                None => vec![],
+            };
+            fs::create_dir_all(&out).expect("--out");
+            let records = shadow::read_records(&dir);
+            let lines = shadow::lines(&records);
+            write_jsonl(&out.join("lines.jsonl"), &lines);
+            let picked = shadow::page_lines(&lines, &labels);
+            fs::write(out.join("label.html"), page::shadow_page(&picked)).expect("label.html");
+            let old = picked.iter().filter(|(_, d)| d.is_some()).count();
+            eprintln!(
+                "{} records, {} lines; wrote {} with {} new lines and {old} labelled before",
+                records.len(),
+                lines.len(),
+                out.join("label.html").display(),
+                picked.len() - old
+            );
+        }
+        Some("time") => {
+            let facts = PathBuf::from(need(&args, "--facts"));
+            let lines_file = need(&args, "--lines");
+            if arg(&args, "--one").is_some() {
+                // A child: one step of one post, in a fresh process.
+                let records: Vec<Record> = read_jsonl(Path::new(&lines_file));
+                let c = timing::case(&facts, &need(&args, "--post"), &records);
+                let state = arg(&args, "--state").map(|f| fs::read_to_string(f).expect("state"));
+                let (first, warm, line, compiled) = timing::measure(&c, state.as_deref()).await;
+                if let Some(save) = arg(&args, "--save") {
+                    if let Some(next) = timing::next_state(&c, state.as_deref()).await {
+                        fs::write(save, next).expect("save the next state");
+                    }
+                }
+                println!(
+                    "{}",
+                    json!({"first_us": first, "warm_us": warm, "line": line, "compiled": compiled})
+                );
+                return;
+            }
+            const STEPS: [&str; 4] = ["write", "check", "judge", "verdicts"];
+            // Per step: (first call us, warm us, patterns compiled) per post.
+            let mut cols: Vec<Vec<(u128, u128, usize)>> = vec![vec![]; STEPS.len()];
+            println!("| Post | Write | Check | Judge | Verdicts (after a kill) |");
+            println!("|---|---|---|---|---|");
+            let ms = |u: u128| format!("{:.2}", u as f64 / 1000.0);
+            for post in timing::posts(&facts) {
+                let tmp = |n: &str| {
+                    std::env::temp_dir().join(format!(
+                        "insight-time-{}-{post}-{n}.json",
+                        std::process::id()
+                    ))
+                };
+                let child = |step: &str, state: Option<&Path>, save: &Path| {
+                    let mut a: Vec<String> = [
+                        "time",
+                        "--facts",
+                        facts.to_str().expect("facts"),
+                        "--lines",
+                        &lines_file,
+                        "--post",
+                        &post,
+                        "--one",
+                        step,
+                        "--save",
+                        save.to_str().expect("tmp"),
+                    ]
+                    .iter()
+                    .map(|s| s.to_string())
+                    .collect();
+                    if let Some(s) = state {
+                        a.extend(["--state".to_string(), s.to_str().expect("tmp").to_string()]);
+                    }
+                    let a: Vec<&str> = a.iter().map(String::as_str).collect();
+                    timing::spawn(&a)
+                };
+                let (s1, s2, s3, sj) = (tmp("replied"), tmp("written"), tmp("done"), tmp("judged"));
+                let mut cells: Vec<String> = Vec::new();
+                let mut push = |k: usize, v: &Value| {
+                    let get = |f: &str| v[f].as_u64().unwrap_or(0);
+                    cols[k].push((
+                        get("first_us") as u128,
+                        get("warm_us") as u128,
+                        get("compiled") as usize,
+                    ));
+                    format!(
+                        "{} / {} ms, {} patterns",
+                        ms(get("first_us") as u128),
+                        ms(get("warm_us") as u128),
+                        get("compiled")
+                    )
+                };
+                let dump = |step: &str, state: Option<&str>| {
+                    if let Some(dir) = arg(&args, "--dump") {
+                        let records: Vec<Record> = read_jsonl(Path::new(&lines_file));
+                        let c = timing::case(&facts, &post, &records);
+                        fs::create_dir_all(&dir).expect("--dump");
+                        let f = Path::new(&dir).join(format!("{post}.{step}.json"));
+                        fs::write(f, timing::snapshot(&c, state).to_string()).expect("snapshot");
+                    }
+                };
+                dump("1-write", None);
+                let w = child("write", None, &s1);
+                cells.push(push(0, &w));
+                let replied = fs::read_to_string(&s1)
+                    .ok()
+                    .filter(|r| timing::stage_of(r) == Some(step::Stage::Replied));
+                if let Some(r) = &replied {
+                    dump("2-check", Some(r));
+                    let ch = child("check", Some(&s1), &s2);
+                    cells.push(push(1, &ch));
+                } else {
+                    cells.push(w["line"].as_str().unwrap_or("").to_string());
+                }
+                let written = fs::read_to_string(&s2)
+                    .ok()
+                    .filter(|r| timing::stage_of(r) == Some(step::Stage::Written));
+                match written {
+                    Some(wr) => {
+                        dump("3-judge", Some(&wr));
+                        let j = child("judge", Some(&s2), &s3);
+                        cells.push(push(2, &j));
+                        let records: Vec<Record> = read_jsonl(Path::new(&lines_file));
+                        let c = timing::case(&facts, &post, &records);
+                        let judged = timing::judged(&wr, &c.judge);
+                        dump("4-verdicts", Some(&judged));
+                        fs::write(&sj, judged).expect("judged state");
+                        let v = child("verdicts", Some(&sj), &s3);
+                        cells.push(push(3, &v));
+                    }
+                    None => cells.extend(["no line to judge".to_string(), String::new()]),
+                }
+                for f in [&s1, &s2, &s3, &sj] {
+                    let _ = fs::remove_file(f);
+                }
+                while cells.len() < 4 {
+                    cells.push(String::new());
+                }
+                println!("| {post} | {} |", cells.join(" | "));
+            }
+            println!("\nEach cell: first call in a fresh process / warm median of {} runs, and the patterns the first call compiled.\n", timing::WARM_RUNS);
+            println!("| Step | Posts | First call, worst | First call, median | Warm, worst | Warm, median | Patterns compiled |");
+            println!("|---|---|---|---|---|---|---|");
+            for (k, name) in STEPS.iter().enumerate() {
+                let firsts: Vec<u128> = cols[k].iter().map(|x| x.0).collect();
+                let warms: Vec<u128> = cols[k].iter().map(|x| x.1).collect();
+                let pats: Vec<usize> = cols[k].iter().map(|x| x.2).collect();
+                let (fw, fm) = timing::worst_median(&firsts);
+                let (ww, wm) = timing::worst_median(&warms);
+                println!(
+                    "| {name} | {} | {} ms | {} ms | {} ms | {} ms | {}-{} |",
+                    cols[k].len(),
+                    ms(fw),
+                    ms(fm),
+                    ms(ww),
+                    ms(wm),
+                    pats.iter().min().unwrap_or(&0),
+                    pats.iter().max().unwrap_or(&0)
+                );
+            }
+            println!("\nNative release build. No model call is made.");
         }
         _ => {
             eprintln!("{usage}");
@@ -1244,7 +1418,7 @@ pub(crate) mod tests {
         json!({"verdicts": [{"ticker": "AAPL",
             "en_claims": [{"claim": "revenue of $4.2 billion", "evidence_id": "e2", "support": "expects revenue of $4.2 billion"}],
             "zh_claims": [{"claim": "营收42亿美元", "evidence_id": "e2", "support": "expects revenue of $4.2 billion"}],
-            "en_supported": ok, "zh_supported": true, "no_advice": true, "formal": true, "same_meaning": true, "no_personal_allegation": true, "notes": ""}]})
+            "en_supported": ok, "zh_supported": true, "no_advice": true, "formal": true, "same_meaning": true, "personal_claims_attributed": true, "notes": ""}]})
     }
 
     fn inputs(posts: Vec<(&str, Post)>) -> Inputs {
@@ -1609,10 +1783,54 @@ pub(crate) mod tests {
         let i: Insight =
             serde_json::from_value(writer_reply(CLEAN)["insights"][0].clone()).unwrap();
         let mut j = i.clone();
-        assert_eq!(line_key(&i), line_key(&j));
+        assert_eq!(line_key(WRITER_VERSION, &i), line_key(WRITER_VERSION, &j));
         j.zh.watch.push('。');
-        assert_ne!(line_key(&i), line_key(&j));
-        assert_eq!(line_key(&i).len(), 16);
+        assert_ne!(line_key(WRITER_VERSION, &i), line_key(WRITER_VERSION, &j));
+        assert_eq!(line_key(WRITER_VERSION, &i).len(), 16);
+        // The version is part of the key: the same text by another writer
+        // is another line.
+        assert_ne!(
+            line_key("insight-writer/v4", &i),
+            line_key(WRITER_VERSION, &i)
+        );
+    }
+
+    /// Rick's labels of 2026-11-17 were saved for lines written by v4. The
+    /// key is computed with each record's own `writer_version`, so they still
+    /// match after the writer moves on (they did not when the key used the
+    /// current version: every label read as stale).
+    #[test]
+    fn ricks_real_labels_match_their_v4_records() {
+        let records: Vec<Record> = include_str!("../testdata/final_run_lines.jsonl")
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+        let labels: Vec<score::Label> =
+            serde_json::from_str(include_str!("../testdata/labels-rick-2026-11-17.json")).unwrap();
+        assert_ne!(WRITER_VERSION, "insight-writer/v4");
+        let mut matched = 0;
+        for l in &labels {
+            let Some(r) = records
+                .iter()
+                .find(|r| r.post == l.post && r.ticker == l.ticker)
+            else {
+                continue;
+            };
+            assert_eq!(r.writer_version, "insight-writer/v4");
+            let key = line_key(&r.writer_version, r.insight.as_ref().unwrap());
+            assert_eq!(
+                l.key.as_deref(),
+                Some(key.as_str()),
+                "{} {}",
+                l.post,
+                l.ticker
+            );
+            matched += 1;
+        }
+        assert_eq!(matched, 11);
+        // And the score counts them as fresh labels, not stale ones.
+        let s = score::score(&records, &[], &labels);
+        assert_eq!(s.stale_labels, 0);
     }
 
     #[test]
@@ -1801,20 +2019,28 @@ pub(crate) mod tests {
             "{j:?}"
         );
 
-        // The run-2 reply, a note after the JSON, parses on the first call.
+        // The run-2 reply, a note after the JSON: the judge is strict (Plan
+        // 2), so it is a failed call, asked once more like any parse error.
         let out3 = tmp("parse-note");
         let noted = reply(format!(
             "{}\n\nNote: all claims checked.",
             judge_reply(true)
         ));
         let writer = Mock::new(vec![claude_body(&writer_reply(CLEAN), 200)]);
-        let judge = Mock::new(vec![noted]);
+        let judge = Mock::new(vec![noted.clone(), noted]);
         let m = mock_models(budget(&out3, 3.0), &writer, &[("claude", &judge)]);
         run(&i, &m, &out3, false).await.unwrap();
-        assert_eq!(judge.calls.get(), 1);
+        assert_eq!(judge.calls.get(), 2);
         let lines: Vec<Record> = read_jsonl(&out3.join("lines.jsonl"));
         let j = &lines[0].judges["claude"];
-        assert!(j.passed && !j.retried && j.error.is_none(), "{j:?}");
+        assert!(
+            !j.passed
+                && j.retried
+                && j.error
+                    .as_deref()
+                    .is_some_and(|e| e.contains("text after the JSON object")),
+            "{j:?}"
+        );
         fs::remove_dir_all(out).unwrap();
         fs::remove_dir_all(out2).unwrap();
         fs::remove_dir_all(out3).unwrap();

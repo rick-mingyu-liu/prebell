@@ -65,6 +65,22 @@ max_batch_size = 1
 max_concurrency = 1
 max_retries = 1
 
+# Mover insights on their own queue, one message at a time, so a writer or
+# judge call never runs beside the briefs and two insight messages never run at
+# once. Create it before the first deploy that carries these lines, with the
+# owner's go: `pnpm exec wrangler queues create prebell-insight`. Otherwise that
+# deploy creates it by itself: wrangler 4.154.0 (the pinned version) provisions
+# missing bindings on deploy by default (read from its source, not observed).
+# See docs/runbook.md "Mover insights".
+[[queues.producers]]
+binding = "INSIGHT"
+queue = "prebell-insight"
+
+[[queues.consumers]]
+queue = "prebell-insight"
+max_batch_size = 1
+max_concurrency = 1
+
 [vars]
 # LLM_PROVIDER: "claude" (default; secret ANTHROPIC_API_KEY) or "deepseek" (fallback; secret DEEPSEEK_API_KEY).
 # Optional LLM_MODEL overrides the provider's default model (claude-sonnet-5-5 / deepseek-flash).
@@ -97,3 +113,16 @@ IPO_WATCH_ENABLED = "true"
 # Off means no ipo:article messages (the write-ups are written by code); published
 # write-ups stay. To turn it off, delete this line and deploy.
 IPO_ARTICLES_ENABLED = "true"
+# Mover insights (docs/runbook.md "Mover insights"): off.
+# "off" (or unset) means nothing runs: no insight messages, no reads, no model
+# calls. "shadow" writes and judges a hook and a "watch next" line per big mover
+# after each brief, 8:35 update and recap, stores every line and verdict in R2
+# under insights/ and shows readers nothing; it needs the ANTHROPIC_API_KEY
+# secret and the prebell-insight queue, and spends at most INSIGHT_MONTHLY_CALLS
+# model calls a month (default 300: $2.40 to $6 a month at the trial's measured
+# $0.008 to $0.02 a call). Anything else is a config error, alerted once a day;
+# a bad value still queues one insight message per firing in the sweep windows,
+# so the error is reported. Turning it to "shadow" is Rick's call. Optional:
+# INSIGHT_WRITER_PROVIDER and INSIGHT_JUDGE_PROVIDER ("claude", the default, or
+# "deepseek").
+INSIGHTS_MODE = "off"

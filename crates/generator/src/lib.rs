@@ -4,6 +4,7 @@ mod alerts;
 mod earnings_store;
 mod events_store;
 mod http;
+mod insight_store;
 mod ipo_store;
 mod store;
 
@@ -19,9 +20,10 @@ use prebell_core::earnings::share::Shares;
 use prebell_core::edgar::{Edgar, BUILD_GAP_MS};
 use prebell_core::events::check::{check_tick, mark_checked, missing_table};
 use prebell_core::events::watch::StoreWatch;
+use prebell_core::insight::step::{self as insight_step, Tick};
 use prebell_core::ipo;
 use prebell_core::ipo::store::IpoStore;
-use prebell_core::jobs::{redact, run_job, JobRunner};
+use prebell_core::jobs::{redact, run_job, InsightError, JobRunner};
 use prebell_core::llm::{api_key_var, llm_from_env, unknown_provider};
 use prebell_core::providers::CountingHttp;
 use prebell_core::providers::LlmProvider;
@@ -99,7 +101,8 @@ async fn scheduled(event: ScheduledEvent, env: Env, _ctx: ScheduleContext) {
         console_error!("cron {cron}: not in schedule.rs; queueing every job");
         JOBS
     });
-    let at = now(&env).to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    let fired = now(&env);
+    let at = fired.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
     for job in jobs {
         // Earnings go to their own queues (one consumer, one message at a
         // time each) so a build never delays the premarket brief.
@@ -120,6 +123,24 @@ async fn scheduled(event: ScheduledEvent, env: Env, _ctx: ScheduleContext) {
         {
             Ok(()) => console_log!("cron {cron}: queued {job} job"),
             Err(e) => console_error!("cron {cron}: queue send for {job} failed: {e}"),
+        }
+    }
+    // Mover insights: one sweep message per firing in the windows, only
+    // while INSIGHTS_MODE is not off (off: nothing is queued or read).
+    if insight_step::sweep_wanted(text(&env, "INSIGHTS_MODE").as_deref(), fired) {
+        let sent = match env.queue(queue_for("insight")) {
+            Ok(q) => q
+                .send(Job {
+                    job: "insight".into(),
+                    at: Some(at),
+                })
+                .await
+                .map_err(|e| e.to_string()),
+            Err(e) => Err(e.to_string()),
+        };
+        match sent {
+            Ok(()) => console_log!("cron {cron}: queued insight job"),
+            Err(e) => console_error!("cron {cron}: queue send for insight failed: {e}"),
         }
     }
 }
@@ -498,6 +519,76 @@ impl JobRunner for Runner<'_> {
             .await
             .map_err(|e| e.to_string())
     }
+
+    fn insights_mode(&self) -> Option<String> {
+        text(self.env, "INSIGHTS_MODE")
+    }
+
+    /// One insight stage. Writer and judge have their own settings and key,
+    /// never `LLM_PROVIDER`; a missing key skips before anything is read or
+    /// counted, and never falls back to another provider.
+    async fn insight(&self) -> std::result::Result<Tick, InsightError> {
+        let env = self.env;
+        let cfg = insight_step::config(
+            text(env, "INSIGHT_WRITER_PROVIDER").as_deref(),
+            text(env, "INSIGHT_JUDGE_PROVIDER").as_deref(),
+            text(env, "INSIGHT_MONTHLY_CALLS").as_deref(),
+        )
+        .map_err(InsightError::Config)?;
+        let key = |provider: &str| -> (&'static str, String) {
+            let var = api_key_var(provider).unwrap_or("ANTHROPIC_API_KEY");
+            let v = env.secret(var).map(|v| v.to_string()).unwrap_or_default();
+            (var, v)
+        };
+        let (writer_var, writer_key) = key(cfg.writer);
+        let (judge_var, judge_key) = key(cfg.judge);
+        for (var, k) in [(writer_var, &writer_key), (judge_var, &judge_key)] {
+            if k.is_empty() {
+                return Ok(Tick {
+                    line: format!("insight: secret {var} is not set; skipped"),
+                    follow_up: false,
+                });
+            }
+        }
+        let build = |provider: &str, model: &str, k: String| {
+            llm_from_env(
+                provider,
+                self.http.clone(),
+                k,
+                Some(model.to_string()),
+                Some(insight_step::EFFORT.to_string()),
+                |m| console_warn!("{m}"),
+            )
+            .map_err(|e| InsightError::Config(redact(&e.to_string(), &[&writer_key, &judge_key])))
+        };
+        let writer = build(cfg.writer, cfg.writer_model, writer_key.clone())?;
+        let judge = build(cfg.judge, cfg.judge_model, judge_key.clone())?;
+        // A cron sweep (it carries the firing time) leaves a record another
+        // message touched within the lease to that message.
+        insight_step::insight_tick(
+            now(env),
+            self.store,
+            writer.as_ref(),
+            judge.as_ref(),
+            &cfg,
+            self.fired.is_some(),
+        )
+        .await
+        .map_err(|e| InsightError::Failed(redact(&e, &[&writer_key, &judge_key])))
+    }
+
+    async fn queue_insight(&self) -> std::result::Result<(), String> {
+        self.store.insight_op();
+        self.env
+            .queue(queue_for("insight"))
+            .map_err(|e| e.to_string())?
+            .send(Job {
+                job: "insight".into(),
+                at: None,
+            })
+            .await
+            .map_err(|e| e.to_string())
+    }
 }
 
 #[event(queue)]
@@ -533,8 +624,19 @@ async fn queue(batch: MessageBatch<Job>, env: Env, _ctx: Context) -> Result<()> 
         // Free plan: fetch subrequests and D1 queries this job used (50 each
         // per invocation).
         let d1 = store.reset_queries();
-        console_log!("subrequests={} d1={d1} job={job}", http.count());
-        used += http.count();
+        // The insight step's R2 calls and queue sends, which count toward
+        // the Free plan's 50 like its fetch.
+        let insight = store.reset_insight_ops();
+        // Every other job's line stays as it was.
+        if job == "insight" {
+            console_log!(
+                "subrequests={} d1={d1} insight_ops={insight} job={job}",
+                http.count()
+            );
+        } else {
+            console_log!("subrequests={} d1={d1} job={job}", http.count());
+        }
+        used += http.count() + insight;
         used_d1 += d1;
         msg.ack();
     }

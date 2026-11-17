@@ -7,7 +7,7 @@ use super::check::{HOOK_CHARS_ZH, HOOK_WORDS_EN, WATCH_CHARS_ZH, WATCH_WORDS_EN}
 use super::{EvidenceKind, Insight, Line, Pack};
 use crate::providers::{LlmProvider, ProviderError};
 
-pub const WRITER_VERSION: &str = "insight-writer/v5";
+pub const WRITER_VERSION: &str = "insight-writer/v6";
 
 /// What a news or analyst-action item is to the brief: the reason it gives
 /// for the move.
@@ -53,7 +53,7 @@ What to track:
 - Each "news" or "analyst_action" item has "role": "reason for the move": PreBell's brief gives it as a reason the stock moved, so a hook may tie the move to it ("Margin contraction behind the drop").
 
 People:
-- Never repeat an allegation about a named person's private life, and never name a person in connection with alleged wrongdoing or an investigation. State the company-level fact instead ("the board opened an independent investigation"). If the evidence offers nothing else, leave the mover out. Naming an executive for what they said in their role (a CFO's guidance, a CEO's statement about preorders) is fine.
+- A claim about a named person, including an allegation, may be repeated only when the sentence names the outlet that reported it, in a reporting frame ("Benzinga reports …", "据Benzinga报道……"), and never as PreBell's own claim. Naming an executive for what they said in their role (a CFO's guidance, a CEO's statement about preorders) is fine.
 
 Rules:
 1. Use only the evidence given for that mover. Never use what you remember about the company, the market or the news.
@@ -272,6 +272,16 @@ mod tests {
     }
 
     #[test]
+    fn the_people_rule_is_the_owners() {
+        // Rick, 2026-11-17: "Allow it if attributed". The lead's earlier ban
+        // on naming a person in connection with an allegation is gone.
+        let (system, _) = prompt(&[pack("AAPL")]);
+        assert!(!system.contains("Never repeat an allegation"), "{system}");
+        assert!(!system.contains("never name a person in connection"));
+        assert!(system.contains("including an allegation"));
+    }
+
+    #[test]
     fn the_prompt_states_the_review_rules() {
         let (system, _) = prompt(&[pack("AAPL")]);
         for want in [
@@ -284,7 +294,8 @@ mod tests {
             "expected on November 17 (date not confirmed by the company)",
             "财报日期暂定为11月17日（未经公司确认）",
             "reason for the move",
-            "Never repeat an allegation about a named person's private life",
+            "only when the sentence names the outlet that reported it",
+            "never as PreBell's own claim",
             "分析师预期",
             "never its rating word, a price target or any figure from it",
         ] {
@@ -363,6 +374,6 @@ mod tests {
         ] {
             assert!(system.contains(invented), "{invented}");
         }
-        assert_eq!(WRITER_VERSION, "insight-writer/v5");
+        assert_eq!(WRITER_VERSION, "insight-writer/v6");
     }
 }

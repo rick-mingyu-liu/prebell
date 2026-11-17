@@ -37,6 +37,9 @@ pub(crate) struct JudgeScore<'a> {
     pub unanswered_labels: usize,
     /// Labelled lines it passed.
     pub passed_labelled: usize,
+    /// The same, counting a mover once per trading date across the 8:00
+    /// brief and its 8:35 update: what the bar's 50 counts.
+    pub read: usize,
     /// Lines it passed that the owner marked wrong, with the label.
     pub passed_wrong: Vec<(&'a Record, String)>,
     /// Seeded wrong lines that count (the judge passed the original and
@@ -105,12 +108,21 @@ fn judged(r: &Record) -> bool {
     r.insight.is_some() && r.check.is_empty()
 }
 
+/// What the bar counts a line as: a premarket brief and its 8:35 update
+/// (`premarket_<date>` and `premarket_<date>-update`) are one post.
+fn bar_key(r: &Record) -> (String, String) {
+    let post = match r.post.strip_prefix("premarket_") {
+        Some(rest) => format!("premarket_{}", rest.strip_suffix("-update").unwrap_or(rest)),
+        None => r.post.clone(),
+    };
+    (post, r.ticker.clone())
+}
+
 fn current_key(records: &[Record], post: &str, ticker: &str) -> Option<String> {
     records
         .iter()
         .find(|r| judged(r) && r.post == post && r.ticker == ticker)
-        .and_then(|r| r.insight.as_ref())
-        .map(line_key)
+        .and_then(|r| r.insight.as_ref().map(|i| line_key(&r.writer_version, i)))
 }
 
 /// The trial's own part of the bar: no judge-passed line marked wrong, and
@@ -153,6 +165,7 @@ pub(crate) fn score<'a>(records: &'a [Record], seeded: &[Seeded], labels: &[Labe
                 agree: 0,
                 unanswered_labels: 0,
                 passed_labelled: 0,
+                read: 0,
                 passed_wrong: vec![],
                 seeded: 0,
                 caught: 0,
@@ -164,6 +177,7 @@ pub(crate) fn score<'a>(records: &'a [Record], seeded: &[Seeded], labels: &[Labe
                 controls_of_rejected: 0,
                 rejected_again: 0,
             };
+            let mut read: Vec<(String, String)> = Vec::new();
             for (r, l) in &labelled {
                 let Some(j) = r.judges.get(name) else {
                     continue;
@@ -177,6 +191,9 @@ pub(crate) fn score<'a>(records: &'a [Record], seeded: &[Seeded], labels: &[Labe
                 s.agree += usize::from(j.passed == fine);
                 if j.passed {
                     s.passed_labelled += 1;
+                    if !read.contains(&bar_key(r)) {
+                        read.push(bar_key(r));
+                    }
                     if !fine {
                         s.passed_wrong.push((r, l.label.clone()));
                     }
@@ -211,6 +228,7 @@ pub(crate) fn score<'a>(records: &'a [Record], seeded: &[Seeded], labels: &[Labe
                     None => s.original_rejected += 1,
                 }
             }
+            s.read = read.len();
             s
         })
         .collect();
@@ -224,11 +242,18 @@ pub(crate) fn score<'a>(records: &'a [Record], seeded: &[Seeded], labels: &[Labe
         }
     }
     let c = &judges[best];
+    // The shadow stage has no seeded lines: there the bar's seeded recall is
+    // the trial's (its own report), and this score holds the reading part.
+    let ok = if seeded.is_empty() {
+        c.passed_wrong.is_empty()
+    } else {
+        trial_ok(c)
+    };
     Score {
         chosen: c.name,
-        bar: if c.passed_labelled < READ_BAR {
+        bar: if c.read < READ_BAR {
             Bar::NotYetAssessable
-        } else if trial_ok(c) {
+        } else if ok {
             Bar::Met
         } else {
             Bar::NotMet
@@ -531,6 +556,22 @@ pub(crate) fn report(
         "\nJudge-passed lines Rick labelled for this judge: {}.",
         c.passed_labelled
     );
+    if seeded.is_empty() {
+        // The shadow stage: the reading part of the bar.
+        let _ = writeln!(
+            out,
+            "\nShadow: {} judge-passed lines read (a mover in the 8:00 brief and its 8:35 update counts once) of the {READ_BAR} the bar needs; {} marked wrong.",
+            c.read,
+            c.passed_wrong.len()
+        );
+        let verdict = match s.bar {
+            Bar::NotYetAssessable => "The bar is not yet assessable: fewer than 50 judge-passed lines read.".to_string(),
+            Bar::Met => "The reading part of the bar is met: at least 50 judge-passed lines read, none marked wrong. Its seeded-recall part is measured by the trial's seed run, in the trial's report.".to_string(),
+            Bar::NotMet => format!("The bar is not met: {} judge-passed lines marked wrong.", c.passed_wrong.len()),
+        };
+        let _ = writeln!(out, "\n{verdict}");
+        return out;
+    }
     let _ = writeln!(
         out,
         "\nThe trial's own part of the bar (no judge-passed line marked wrong, seeded recall at least {}): {}: {} judge-passed lines marked wrong, seeded recall {}.",
@@ -544,7 +585,7 @@ pub(crate) fn report(
             let _ = writeln!(
                 out,
                 "\nThe bar is not yet assessable: it needs at least {READ_BAR} judge-passed lines labelled, and this trial has {}. The rest come from the shadow stage.",
-                c.passed_labelled
+                c.read
             );
         }
         Bar::Met => {
@@ -627,7 +668,7 @@ mod tests {
         Label {
             post: r.post.clone(),
             ticker: r.ticker.clone(),
-            key: Some(line_key(r.insight.as_ref().unwrap())),
+            key: Some(line_key(&r.writer_version, r.insight.as_ref().unwrap())),
             label: label.into(),
         }
     }
@@ -681,7 +722,7 @@ mod tests {
                 .map(|(n, j)| (n.to_string(), j))
                 .collect(),
             original_passed: BTreeMap::from([("claude".into(), true), ("deepseek".into(), true)]),
-            line_key: line_key(r.insight.as_ref().unwrap()),
+            line_key: line_key(&r.writer_version, r.insight.as_ref().unwrap()),
             skipped: false,
             change: Some(format!("{} change", kind.name())),
         }
@@ -920,7 +961,7 @@ mod tests {
             .iter()
             .zip(&records)
             .map(|(l, r)| Label {
-                key: Some(line_key(r.insight.as_ref().unwrap())),
+                key: Some(line_key(&r.writer_version, r.insight.as_ref().unwrap())),
                 ..l.clone()
             })
             .collect();

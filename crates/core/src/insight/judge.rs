@@ -13,7 +13,7 @@ use crate::ipo::news::visible;
 use crate::numbers::Lang;
 use crate::providers::{LlmProvider, ProviderError};
 
-pub const JUDGE_VERSION: &str = "insight-judge/v2";
+pub const JUDGE_VERSION: &str = "insight-judge/v3";
 
 /// Shortest support, in letters and digits, that can confirm a claim: a
 /// single common word confirms nothing.
@@ -38,11 +38,11 @@ pub struct Verdict {
     pub no_advice: bool,
     pub formal: bool,
     pub same_meaning: bool,
-    /// No allegation about a named person's private life, and no person
-    /// named in connection with alleged wrongdoing or an investigation.
-    /// Absent (false) in verdicts from before judge v2.
+    /// Every claim about a named person in either language, an allegation
+    /// included, is attributed to the outlet that reported it (Rick,
+    /// 2026-11-17). Absent (false) in verdicts from before judge v3.
     #[serde(default)]
-    pub no_personal_allegation: bool,
+    pub personal_claims_attributed: bool,
     pub notes: String,
 }
 
@@ -55,10 +55,10 @@ For each mover you get its evidence items (each with an id) and the lines writte
 3. Set "no_advice" to false if a line gives investment advice of any kind, a rating, a price target or a prediction of where the price goes.
 4. Set "formal" to false if the tone is informal, promotional or sensational.
 5. Set "same_meaning" to false if the Chinese lines do not say the same thing as the English ones (a different figure, date, outlet or claim).
-6. Set "no_personal_allegation" to false if a line repeats an allegation about a named person's private life, or names a person in connection with alleged wrongdoing or an investigation. Stating the company-level fact ("the board opened an independent investigation") is fine, and so is naming an executive for what they said in their role.
+6. Set "personal_claims_attributed" to false if either language makes a claim about a named person, including an allegation, that the line does not attribute to the outlet that reported it, or states as PreBell's own claim. A claim about a named person may stand only when the line names the outlet that reported it ("Benzinga reports …", "据Benzinga报道……"). Naming an executive for what they said in their role, from the company's own release, is not such a claim. With no claim about a named person, set it to true.
 
 Use only the evidence given, never what you remember. Reply with JSON only, in this shape, one verdict per mover:
-{"verdicts":[{"ticker":"...","en_claims":[{"claim":"...","evidence_id":"e2","support":"exact words"}],"zh_claims":[{"claim":"...","evidence_id":"e2","support":"exact words"}],"en_supported":true,"zh_supported":true,"no_advice":true,"formal":true,"same_meaning":true,"no_personal_allegation":true,"notes":"one short sentence"}]}"#;
+{"verdicts":[{"ticker":"...","en_claims":[{"claim":"...","evidence_id":"e2","support":"exact words"}],"zh_claims":[{"claim":"...","evidence_id":"e2","support":"exact words"}],"en_supported":true,"zh_supported":true,"no_advice":true,"formal":true,"same_meaning":true,"personal_claims_attributed":true,"notes":"one short sentence"}]}"#;
 
 /// The insights that have a pack, with it.
 fn pairs<'a>(packs: &'a [Pack], insights: &'a [Insight]) -> Vec<(&'a Pack, &'a Insight)> {
@@ -132,7 +132,7 @@ pub fn parse(reply: &Value, insights: &[Insight]) -> Vec<Verdict> {
             no_advice: flag("no_advice"),
             formal: flag("formal"),
             same_meaning: flag("same_meaning"),
-            no_personal_allegation: flag("no_personal_allegation"),
+            personal_claims_attributed: flag("personal_claims_attributed"),
             notes: it
                 .get("notes")
                 .and_then(Value::as_str)
@@ -358,7 +358,7 @@ pub fn passed(pack: &Pack, insight: &Insight, v: &Verdict) -> bool {
         && v.no_advice
         && v.formal
         && v.same_meaning
-        && v.no_personal_allegation
+        && v.personal_claims_attributed
         && !fact_claims(pack, &v.en_claims).is_empty()
         && !fact_claims(pack, &v.zh_claims).is_empty()
         && support_confirmed(pack, &v.en_claims)
@@ -367,7 +367,9 @@ pub fn passed(pack: &Pack, insight: &Insight, v: &Verdict) -> bool {
         && figures_supported(pack, &insight.zh, &v.zh_claims, Lang::Zh)
 }
 
-/// One judge call over the insights that have a pack, no retry. None, no call.
+/// One judge call over the insights that have a pack, no retry. None, no
+/// call. Strict: a reply with any text after its JSON is a failed call, so
+/// a note that takes back a pass is never dropped (decided 2026-11-16).
 pub async fn judge(
     llm: &dyn LlmProvider,
     packs: &[Pack],
@@ -377,7 +379,7 @@ pub async fn judge(
         return Ok(vec![]);
     }
     let (system, user) = prompt(packs, insights);
-    let reply = llm.complete_json(&system, &user).await?;
+    let reply = llm.complete_json_strict(&system, &user).await?;
     Ok(parse(&reply, insights))
 }
 
@@ -458,7 +460,7 @@ mod tests {
             no_advice: true,
             formal: true,
             same_meaning: true,
-            no_personal_allegation: true,
+            personal_claims_attributed: true,
             notes: String::new(),
         }
     }
@@ -469,13 +471,21 @@ mod tests {
             "zh_claims": [{"claim": "10亿美元回购", "evidence_id": "e2", "support": "a $1.0 billion buyback"}],
             "en_supported": true, "zh_supported": true,
             "no_advice": true, "formal": true, "same_meaning": true,
-            "no_personal_allegation": true, "notes": "ok"})
+            "personal_claims_attributed": true, "notes": "ok"})
     }
 
+    /// A judge double: strict replies only, as the judge asks for them.
     struct Canned(Value);
     #[async_trait(?Send)]
     impl crate::providers::LlmProvider for Canned {
         async fn complete_json(
+            &self,
+            _: &str,
+            _: &str,
+        ) -> Result<Value, crate::providers::ProviderError> {
+            panic!("the judge asks for strict replies")
+        }
+        async fn complete_json_strict(
             &self,
             _: &str,
             _: &str,
@@ -493,6 +503,81 @@ mod tests {
             _: &str,
         ) -> Result<Value, crate::providers::ProviderError> {
             panic!("no call expected")
+        }
+        async fn complete_json_strict(
+            &self,
+            _: &str,
+            _: &str,
+        ) -> Result<Value, crate::providers::ProviderError> {
+            panic!("no call expected")
+        }
+    }
+
+    /// Review Focus 3 of Plan 2: a pass followed by "On reflection, claim 2
+    /// is not supported" is a failed judge call through either real
+    /// provider, never a pass.
+    #[tokio::test]
+    async fn a_judge_reply_with_a_note_after_its_json_is_a_failed_call() {
+        use crate::providers::{Http, HttpResp, ProviderError};
+        struct Replies(String);
+        #[async_trait(?Send)]
+        impl Http for Replies {
+            async fn get(&self, _: &str, _: &[(&str, &str)]) -> Result<HttpResp, ProviderError> {
+                unreachable!()
+            }
+            async fn post_json(
+                &self,
+                _: &str,
+                _: &[(&str, &str)],
+                _: &Value,
+            ) -> Result<HttpResp, ProviderError> {
+                Ok(HttpResp {
+                    status: 200,
+                    body: self.0.clone(),
+                    set_cookie: None,
+                })
+            }
+        }
+        let text = format!(
+            "{}\n\nOn reflection, claim 2 is not supported.",
+            json!({"verdicts": [reply_item("AAPL")]})
+        );
+        let claude =
+            json!({"content": [{"type": "text", "text": text}], "stop_reason": "end_turn"});
+        let deepseek =
+            json!({"choices": [{"message": {"content": text}, "finish_reason": "stop"}]});
+        for (provider, body) in [("claude", claude), ("deepseek", deepseek)] {
+            let llm = crate::llm::llm_from_env(
+                provider,
+                Replies(body.to_string()),
+                "k".into(),
+                None,
+                Some("low".into()),
+                |_| {},
+            )
+            .unwrap();
+            let r = judge(llm.as_ref(), &[pack(TEXT)], &[insight("AAPL")]).await;
+            assert!(
+                matches!(&r, Err(ProviderError::Parse(m)) if m.starts_with("text after the JSON object")),
+                "{provider}: {r:?}"
+            );
+            // The same reply without the note passes.
+            let clean = body
+                .to_string()
+                .replace("\\n\\nOn reflection, claim 2 is not supported.", "");
+            let llm = crate::llm::llm_from_env(
+                provider,
+                Replies(clean),
+                "k".into(),
+                None,
+                Some("low".into()),
+                |_| {},
+            )
+            .unwrap();
+            let v = judge(llm.as_ref(), &[pack(TEXT)], &[insight("AAPL")])
+                .await
+                .unwrap();
+            assert!(passed(&pack(TEXT), &insight("AAPL"), &v[0]), "{provider}");
         }
     }
 
@@ -629,7 +714,7 @@ mod tests {
             |v| v.no_advice = false,
             |v| v.formal = false,
             |v| v.same_meaning = false,
-            |v| v.no_personal_allegation = false,
+            |v| v.personal_claims_attributed = false,
         ];
         for f in flags {
             let mut v = verdict();
@@ -791,9 +876,9 @@ mod tests {
                     .map(|(name, j)| {
                         let mut verdict: Option<Verdict> =
                             serde_json::from_value(j["verdict"].clone()).unwrap();
-                        // Run 2 predates the personal-allegation flag.
+                        // Run 2 predates the people flag (judge v3).
                         if let Some(v) = verdict.as_mut() {
-                            v.no_personal_allegation = true;
+                            v.personal_claims_attributed = true;
                         }
                         (name.clone(), verdict)
                     })
@@ -865,7 +950,7 @@ mod tests {
         assert!(!passed(&p, &i, &v));
         let (p, i, mut v) = get("premarket_2026-11-12-update NVDA", "deepseek");
         assert!(passed(&p, &i, &v));
-        v.no_personal_allegation = false;
+        v.personal_claims_attributed = false;
         assert!(!passed(&p, &i, &v));
     }
 
@@ -875,7 +960,7 @@ mod tests {
         for want in [
             "do not list it as a claim",
             "reason for the move",
-            "no_personal_allegation",
+            "personal_claims_attributed",
             "英伟达预计于11月17日发布财报",
         ] {
             assert!(system.contains(want), "{want}");
@@ -888,7 +973,30 @@ mod tests {
             &json!({"verdicts": [{"ticker": "AAPL", "no_advice": true}]}),
             &[insight("AAPL")],
         );
-        assert!(!v[0].no_personal_allegation);
+        assert!(!v[0].personal_claims_attributed);
+    }
+
+    /// Rick, 2026-11-17 ("Allow it if attributed"): the judge flags a claim
+    /// about a named person only when it is not attributed to its outlet.
+    #[test]
+    fn the_v3_people_flag_is_the_owners_rule() {
+        assert_eq!(JUDGE_VERSION, "insight-judge/v3");
+        let (system, _) = prompt(&[pack(TEXT)], &[insight("AAPL")]);
+        assert!(!system.contains("no_personal_allegation"), "{system}");
+        assert!(system.contains("including an allegation"), "{system}");
+        assert!(
+            system.contains("names the outlet that reported it"),
+            "{system}"
+        );
+        // The old flag in a reply is not the new one: it reads as "no".
+        let mut old = reply_item("AAPL");
+        old.as_object_mut()
+            .unwrap()
+            .remove("personal_claims_attributed");
+        old["no_personal_allegation"] = json!(true);
+        let v = parse(&json!({ "verdicts": [old] }), &[insight("AAPL")]);
+        assert!(!v[0].personal_claims_attributed);
+        assert!(!passed(&pack(TEXT), &insight("AAPL"), &v[0]));
     }
 
     /// Final run (2026-11-13): DeepSeek supported NRG's "The sale price is

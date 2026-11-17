@@ -213,7 +213,7 @@ The site is the OpenNext Worker in `apps/web` (`wrangler.jsonc`, name `prebell-w
   1. `cd crates/generator && pnpm exec wrangler d1 migrations apply prebell --remote`. Migration `0006_covers.sql` adds `posts.cover_key` and `post_translations.cover_line1` / `cover_line2`, and `0007_post_revised_at.sql` adds `posts.revised_at` (nullable; nothing existing changes), and `0008_macro_events.sql` adds the `macro_events` table (new table only), and `0009_ipo_watch.sql` adds the five IPO watch tables (new tables only; "IPO watch" below). Both Workers read them, so they must run before either deploys: without 0007 every post query fails with a `no such column` error.
   2. `pnpm exec wrangler deploy` in `crates/generator`.
   3. `cd apps/web && pnpm exec opennextjs-cloudflare build && pnpm exec opennextjs-cloudflare deploy`.
-- **One-off for the earnings widening (S&P 500 ∪ Nasdaq-100):** before step 2, create the build queue: `cd crates/generator && pnpm exec wrangler queues create prebell-earnings-build`. A generator deployed without it fails its deploy (the consumer has no queue). No migration is needed. Either Worker can go first.
+- **One-off for the earnings widening (S&P 500 ∪ Nasdaq-100):** before step 2, create the build queue: `cd crates/generator && pnpm exec wrangler queues create prebell-earnings-build`. A deploy without it does not fail: it creates the queue by itself, because wrangler 4.154.0 (pinned then and now) provisions missing bindings on deploy by default. This was read from wrangler's source, not observed on a deploy; see "Mover insights", "Before the first deploy that includes it". Create the queue first so the deploy creates nothing. No migration is needed. Either Worker can go first.
 - **One-off for the data-graphic covers change:** deploy the site (step 3) before the generator (step 2) this one time. The new site serves `.svg` covers and draws them on paper. A new generator deployed first would point posts at `covers/<slug>.svg`, which the old site answers with a 404. Then run the graphics backfill above. Later deploys go back to the order above.
 - **Local preview:** the site's preview uses the generator's local state (`--persist-to ../../crates/generator/.wrangler/state`), so the local D1 needs the migrations too. From `crates/generator`: `pnpm exec wrangler d1 migrations apply prebell --local`, then `pnpm exec wrangler d1 execute prebell --local --file ../../db/seed-preview.sql` and `bash ../../db/load-preview-facts.sh`. Then `cd ../../apps/web && pnpm preview` (add `--port <n>` if 8787 is taken). Without migrations 0006 and 0007 the post queries fail with a `no such column` error. For the IPO watch pages, also apply `0009_ipo_watch.sql` and `db/seed-ipo-preview.sql` (made-up companies and news items besides Anthropic's real filing facts); for `next dev` (which reads `apps/web/.wrangler/state`) run each file with `pnpm exec wrangler d1 execute prebell --local --file <file>` from `apps/web`. Before 0009 is applied the calendar shows no IPOs and the sitemap lists none; an IPO page reads D1 five times and R2 never, the calendar two more reads.
 
@@ -329,6 +329,10 @@ From then on, the first earnings poll from 18:00 ET each Friday, after that day'
 - `DIGEST_ENABLED`: off unless it is exactly `"true"`, with no spaces or newline around it. Unset, `"false"`, `" true"` or any other value means polls never queue a `digest` message, and a stray one logs `job digest: disabled (DIGEST_ENABLED is not true); skipped`. Setting `BUTTONDOWN_API_KEY` alone does not turn it on.
 - `DIGEST_ENABLED = "true"` without the generator's `BUTTONDOWN_API_KEY` secret is a dry run: it gathers next week, renders the email and logs `job digest: 2026-11-09 (draft): dry run, no sender: "Week ahead: Nov 9–13" (3 picks, <n> bytes); BUTTONDOWN_API_KEY is not set`. It sends nothing and writes nothing, so it runs on every poll until 22:00 ET, and the run from 21:55 ET alerts `digest-missed` once.
 - `DIGEST_MODE`: `"draft"` (the default: Rick sends) or `"scheduled"`, which schedules the draft for Sunday 18:00 America/New_York (23:00Z under EST, 22:00Z under EDT, using that Sunday's own offset) once Buttondown confirms it is a draft. Any other `DIGEST_MODE` is a config error: one `error` alert per ET day keyed `config:digest:<date>`, which names the variable and value. Leave it on `"draft"` until Rick asks for automatic sending.
+
+### Known gap: D1 queries and the 50 subrequests
+
+Cloudflare's Workers limits page (https://developers.cloudflare.com/workers/platform/limits/, read 2026-11-17) says "A subrequest is any request a Worker makes using the Fetch API or to Cloudflare services like R2, KV, or D1", and also lists "Subrequests to internal services | 1,000" without saying how the two relate. The generator's alert budget (`alerts::delivery_budget`) counts fetches (and, for the insight step, its R2 calls and queue sends) against 50 and D1 queries against a separate 50, as it did before mover insights. If D1 queries count toward the same 50, an insight write message (28 calls, 5 of them D1), alert delivery's 2 D1 queries and up to 20 webhook posts could reach 50. Not changed yet; noted here until a measurement or Cloudflare settles it.
 
 ### Switching it off
 
@@ -457,6 +461,42 @@ Local preview: after `db/seed-ipo-preview.sql`, `cd crates/generator && pnpm exe
 - The text says only what the covers and the first session state. Nothing about the business, the market, demand or valuation appears except in the quoted news.
 - "The first registration statement to state a price range" is said only when every earlier registration statement was read (not for Anthropic, whose S-1 and first S-1/A were never read).
 - Quotes are as stored by the news sweep; in Chinese they stay in English. Outlet names stay as stored.
+
+## Mover insights
+
+A hook and one "watch next" sentence per big mover, in English and Chinese: written by Claude from an evidence pack, checked by code, then by a strict judge (spec: `docs/superpowers/specs/2026-11-13-mover-insights-design.md`, Plan 2: `docs/superpowers/plans/2026-11-17-mover-insights-shadow.md`). The shadow stage stores every line and verdict in R2; readers see nothing.
+
+### The switch
+
+`INSIGHTS_MODE` in `crates/generator/wrangler.toml` `[vars]`: `"off"` (shipped; unset is the same) or `"shadow"`. Off means nothing runs: no insight message is queued by a publish or a cron, a stray one returns before any read, and no model is called. Any other value is a config error, alerted once per ET day under `config:insight:<date>`; it still queues one insight message per firing in the sweep windows, so the error is reported. Turning it to `shadow` is Rick's call. Before that: the dry run of writer v6 and judge v3 (Plan 2, Task 7), and one CPU measurement on Workers (below).
+
+### Before the first deploy that includes it (owner only)
+
+Create the queue first, as its own step, with the owner's go: `cd crates/generator && pnpm exec wrangler queues create prebell-insight`. Then deploy, so the deploy creates nothing. If the queue is missing, the deploy does not fail; it creates the queue by itself: in wrangler 4.154.0, the version this repo's lockfile pins, `wrangler deploy` provisions bindings by default (`--x-provision` defaults to true), so it skips its pre-upload queue check and creates `prebell-insight` with no prompt (read from wrangler 4.154.0's source, `wrangler-dist/cli.js`; not observed on a deploy). To have a deploy refuse instead, deploy with `--x-provision=false`: it then stops before uploading with "Queue \"prebell-insight\" does not exist" (from the same reading of the source). The queue has one consumer, one message per batch and one at a time, so a writer or judge call never runs beside the briefs and two insight messages never run at once. Queues on the Workers Free plan: 10,000 operations a day across all queues (a delivered message is 3: write, read, delete), per https://developers.cloudflare.com/queues/platform/pricing/; shadow adds about 50 messages a trading day, about 150 operations.
+
+### What runs, and when
+
+After a brief, its 8:35 update or a recap publishes, its job queues an `insight` message; the crons queue one sweep message per firing at 08:10-09:30 and 16:10-17:30 ET on trading days. Each bundle's record goes write (the writer's reply stored as `replied`), check (`written`), judge (the judge's reply stored as `judged`, then `done`), each its own message, so a CPU kill never makes a paid call be paid again. A sweep leaves a record another message wrote in the last 5 minutes alone. Records of today and the previous trading day are picked up, so Friday's are finished on Monday.
+
+### Cost and the cap
+
+At most `INSIGHT_MONTHLY_CALLS` model calls per ET month (default 300: $2.40 to $6 a month at the trial's measured $0.008 to $0.02 a call), each claimed in kv `insight_calls:<YYYY-MM>` before it is made; at the cap the step stops for the month and says so once in the log. Read the count: `pnpm exec wrangler d1 execute prebell --remote --json --command "SELECT key, value FROM kv WHERE key LIKE 'insight_calls:%'"`. Writer and judge are `claude-sonnet-5-5`, effort low (`INSIGHT_WRITER_PROVIDER`, `INSIGHT_JUDGE_PROVIDER`; never `LLM_PROVIDER`), with the `ANTHROPIC_API_KEY` secret; without it the step logs and skips.
+
+### The first measurement on Workers
+
+The step's cold CPU is measured only in V8 under Node (`tools/insight-cpu-wasm`), where its check step takes about twice a share card render's first call. Measure it on Workers before running shadow for good: set `INSIGHT_MONTHLY_CALLS = "10"` (the knob that bounds the first run: two calls a bundle, so about 5 bundles), set `INSIGHTS_MODE = "shadow"`, deploy, and read CPU time per invocation for the `insight` messages in the Workers dashboard (Metrics, CPU time) and the log lines `job insight: …` (`wrangler tail`). If the check step is not tolerated, it is split by language before the cap goes back to 300.
+
+### Records
+
+One per facts bundle, in the `prebell-facts` bucket: `insights/premarket/<date>.json` (the 8:00 brief), `insights/premarket/<date>-update.json` (the 8:35 update), `insights/recap/<date>.json`, beside `insights/<...>.attempts` (write tries and when). Read one: `cd crates/generator && pnpm exec wrangler r2 object get prebell-facts/insights/recap/2026-11-18.json --remote --file /tmp/insight.json`. Its `stage` (`replied`, `written`, `judged`, `done`), per mover its `pack`, `insight`, `check` (the code checks' refusals), `verdict`, `judge_error` and `passed`, and the raw `writer_reply` and `judge_reply`.
+
+### The review page
+
+From the repository root: `tools/insight-trial/fetch-shadow.sh <first shadow day> "$(date +%F)" tools/insight-trial/shadow` (read-only), then in `tools/insight-trial`: `env -u CARGO_TARGET_DIR cargo run --release -- shadow --records shadow --out out-shadow --labels <labels.json>` writes `out-shadow/label.html` (every line the judge answered for, labelled ones shown done), and `… -- score --out out-shadow --labels <labels.json>` reports the bar (50 judge-passed lines read, none wrong). See `tools/insight-trial/README.md`.
+
+### Switching it off
+
+Set `INSIGHTS_MODE = "off"` (or delete the line) and deploy. Messages already queued then return without reading anything; stored records stay in R2.
 
 ## Logos
 

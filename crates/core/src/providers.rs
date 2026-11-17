@@ -265,11 +265,51 @@ pub trait LlmProvider {
         system: &str,
         user: &str,
     ) -> Result<serde_json::Value, ProviderError>;
+    /// As `complete_json`, but a reply with any text after its JSON object is
+    /// `ProviderError::Parse("text after the JSON object: <snippet>")`. The
+    /// insight judge uses it: it is the last check, and a note such as "on
+    /// reflection, claim 2 is not supported" must not be dropped after a pass.
+    ///
+    /// The default is an error, never `complete_json`: a provider that forgets
+    /// to override it must not turn the last check permissive. Test doubles
+    /// that act as a judge implement it.
+    async fn complete_json_strict(
+        &self,
+        _system: &str,
+        _user: &str,
+    ) -> Result<serde_json::Value, ProviderError> {
+        Err(ProviderError::Parse(
+            "strict replies are not supported by this provider".into(),
+        ))
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A provider that implements only `complete_json`, which panics.
+    struct LenientOnly;
+    #[async_trait(?Send)]
+    impl LlmProvider for LenientOnly {
+        async fn complete_json(
+            &self,
+            _: &str,
+            _: &str,
+        ) -> Result<serde_json::Value, ProviderError> {
+            panic!("strict replies must never fall back to complete_json")
+        }
+    }
+
+    #[tokio::test]
+    async fn strict_replies_default_to_an_error_never_to_complete_json() {
+        assert_eq!(
+            LenientOnly.complete_json_strict("s", "u").await,
+            Err(ProviderError::Parse(
+                "strict replies are not supported by this provider".into()
+            ))
+        );
+    }
 
     /// A provider with only the Plan 1 methods.
     struct PremarketOnly;
