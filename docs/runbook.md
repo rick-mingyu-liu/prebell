@@ -468,7 +468,7 @@ A hook and one "watch next" sentence per big mover, in English and Chinese: writ
 
 ### The switch
 
-`INSIGHTS_MODE` in `crates/generator/wrangler.toml` `[vars]`: `"off"` (unset is the same) or `"shadow"`. Since 2026-11-17 it is `"shadow"`, on Rick's go, with `INSIGHT_MONTHLY_CALLS = "10"` for the first measurement on Workers (`docs/decisions.md`, 2026-11-17). Off means nothing runs: no insight message is queued by a publish or a cron, a stray one returns before any read, and no model is called. Any other value is a config error, alerted once per ET day under `config:insight:<date>`; it still queues one insight message per firing in the sweep windows, so the error is reported. Turning it to `shadow` is Rick's call. Before that: the dry run of writer v6 and judge v3 (Plan 2, Task 7), and one CPU measurement on Workers (below).
+`INSIGHTS_MODE` in `crates/generator/wrangler.toml` `[vars]`: `"off"` (unset is the same) or `"shadow"`. Since 2026-11-17 it is `"shadow"`, on Rick's go, with `INSIGHT_MONTHLY_CALLS = "10"` for the first measurement on Workers (`docs/decisions.md`, 2026-11-17). Off means nothing runs: no insight message is queued by a publish or a cron, a stray one returns before any read, and no model is called. Any other value is a config error, alerted once per ET day under `config:insight:<date>`; it still queues one insight message per firing in the sweep windows, so the error is reported. Turning it to `shadow` was Rick's call (2026-11-17, after the dry run of writer v6 and judge v3, Plan 2, Task 7). The first shadow run is the CPU measurement on Workers (below), capped at 10 calls; raising the cap is Rick's call too.
 
 ### Before the first deploy that includes it (owner only)
 

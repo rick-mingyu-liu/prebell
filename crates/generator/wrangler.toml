@@ -116,7 +116,7 @@ IPO_ARTICLES_ENABLED = "true"
 # Mover insights (docs/runbook.md "Mover insights"): shadow since 2026-11-17, on
 # Rick's go, with the first run capped at 10 model calls to measure CPU time
 # on Workers (INSIGHT_MONTHLY_CALLS below; remove that line for the default 300
-# once the measurement is read).
+# only with Rick's word, once the measurement is read).
 # "off" (or unset) means nothing runs: no insight messages, no reads, no model
 # calls. "shadow" writes and judges a hook and a "watch next" line per big mover
 # after each brief, 8:35 update and recap, stores every line and verdict in R2
