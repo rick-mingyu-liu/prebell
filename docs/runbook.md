@@ -458,6 +458,42 @@ Local preview: after `db/seed-ipo-preview.sql`, `cd crates/generator && pnpm exe
 - "The first registration statement to state a price range" is said only when every earlier registration statement was read (not for Anthropic, whose S-1 and first S-1/A were never read).
 - Quotes are as stored by the news sweep; in Chinese they stay in English. Outlet names stay as stored.
 
+## Mover insights
+
+A hook and one "watch next" sentence per big mover, in English and Chinese: written by Claude from an evidence pack, checked by code, then by a strict judge (spec: `docs/superpowers/specs/2026-11-13-mover-insights-design.md`, Plan 2: `docs/superpowers/plans/2026-11-17-mover-insights-shadow.md`). The shadow stage stores every line and verdict in R2; readers see nothing.
+
+### The switch
+
+`INSIGHTS_MODE` in `crates/generator/wrangler.toml` `[vars]`: `"off"` (shipped; unset is the same) or `"shadow"`. Off means nothing runs: no insight message is queued by a publish or a cron, a stray one returns before any read, and no model is called. Any other value is a config error, alerted once per ET day under `config:insight:<date>`; it still queues one insight message per firing in the sweep windows, so the error is reported. Turning it to `shadow` is Rick's call. Before that: the dry run of writer v6 and judge v3 (Plan 2, Task 7), and one CPU measurement on Workers (below).
+
+### Before the first deploy that includes it (owner only)
+
+Create the queue: `cd crates/generator && pnpm exec wrangler queues create prebell-insight`. A generator deployed without it fails its deploy (the `INSIGHT` binding and the consumer have no queue). It has one consumer, one message per batch and one at a time, so a writer or judge call never runs beside the briefs and two insight messages never run at once. Queues on the Workers Free plan: 10,000 operations a day across all queues (a delivered message is 3: write, read, delete), per https://developers.cloudflare.com/queues/platform/pricing/; shadow adds about 50 messages a trading day, about 150 operations.
+
+### What runs, and when
+
+After a brief, its 8:35 update or a recap publishes, its job queues an `insight` message; the crons queue one sweep message per firing at 08:10-09:30 and 16:10-17:30 ET on trading days. Each bundle's record goes write (the writer's reply stored as `replied`), check (`written`), judge (the judge's reply stored as `judged`, then `done`), each its own message, so a CPU kill never makes a paid call be paid again. A sweep leaves a record another message wrote in the last 5 minutes alone. Records of today and the previous trading day are picked up, so Friday's are finished on Monday.
+
+### Cost and the cap
+
+At most `INSIGHT_MONTHLY_CALLS` model calls per ET month (default 300: $2.40 to $6 a month at the trial's measured $0.008 to $0.02 a call), each claimed in kv `insight_calls:<YYYY-MM>` before it is made; at the cap the step stops for the month and says so once in the log. Read the count: `pnpm exec wrangler d1 execute prebell --remote --json --command "SELECT key, value FROM kv WHERE key LIKE 'insight_calls:%'"`. Writer and judge are `claude-sonnet-5-5`, effort low (`INSIGHT_WRITER_PROVIDER`, `INSIGHT_JUDGE_PROVIDER`; never `LLM_PROVIDER`), with the `ANTHROPIC_API_KEY` secret; without it the step logs and skips.
+
+### The first measurement on Workers
+
+The step's cold CPU is measured only in V8 under Node (`tools/insight-cpu-wasm`), where its check step takes about twice a share card render's first call. Measure it on Workers before running shadow for good: set `INSIGHT_MONTHLY_CALLS = "10"` (the knob that bounds the first run: two calls a bundle, so about 5 bundles), set `INSIGHTS_MODE = "shadow"`, deploy, and read CPU time per invocation for the `insight` messages in the Workers dashboard (Metrics, CPU time) and the log lines `job insight: …` (`wrangler tail`). If the check step is not tolerated, it is split by language before the cap goes back to 300.
+
+### Records
+
+One per facts bundle, in the `prebell-facts` bucket: `insights/premarket/<date>.json` (the 8:00 brief), `insights/premarket/<date>-update.json` (the 8:35 update), `insights/recap/<date>.json`, beside `insights/<...>.attempts` (write tries and when). Read one: `cd crates/generator && pnpm exec wrangler r2 object get prebell-facts/insights/recap/2026-11-18.json --remote --file /tmp/insight.json`. Its `stage` (`replied`, `written`, `judged`, `done`), per mover its `pack`, `insight`, `check` (the code checks' refusals), `verdict`, `judge_error` and `passed`, and the raw `writer_reply` and `judge_reply`.
+
+### The review page
+
+From the repository root: `tools/insight-trial/fetch-shadow.sh <first shadow day> "$(date +%F)" tools/insight-trial/shadow` (read-only), then in `tools/insight-trial`: `env -u CARGO_TARGET_DIR cargo run --release -- shadow --records shadow --out out-shadow --labels <labels.json>` writes `out-shadow/label.html` (every line the judge answered for, labelled ones shown done), and `… -- score --out out-shadow --labels <labels.json>` reports the bar (50 judge-passed lines read, none wrong). See `tools/insight-trial/README.md`.
+
+### Switching it off
+
+Set `INSIGHTS_MODE = "off"` (or delete the line) and deploy. Messages already queued then return without reading anything; stored records stay in R2.
+
 ## Logos
 
 Company logos (the white tag on earnings-check covers and the company cards on the earnings calendar) and partner logos are static files in `apps/web/public/logos/`, served as Workers static assets. Pages never fetch a logo from a third party. `apps/web/scripts/build-logos.mjs` (`pnpm logos` in `apps/web`) builds every file, the manifest `apps/web/src/lib/logos.generated.ts` (`COMPANY_LOGOS` ticker -> path with a `?v=` content hash, because `/logos/*` is served immutable for a year; `PARTNER_LOGOS` the same for partner marks; `COMPANY_LOGO_SIZES` ticker -> natural CSS size; read through `companyLogo()` and `companyLogoInfo()` in `src/lib/logos.ts`) and `apps/web/public/logos/LICENSES.md`. Never edit those by hand. It covers every row of `watchlist.tsv` (both tiers), so a rerun picks up new rows. Cards are wide, so a horizontal wordmark is preferred. For each ticker the script takes the first of:

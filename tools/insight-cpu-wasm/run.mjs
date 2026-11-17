@@ -97,9 +97,26 @@ if (args[3] === "--one") {
     idle,
     JSON.stringify({ posts: [], objects: {}, calendar: [], checks: [], kv: {}, writer: null, judge: null, now: "2026-11-13T12:00:00+00:00" }),
   );
+  // An idle sweep on a normal afternoon: six bundles of two days, each with
+  // a done record (the step's own pinned record, about 30 KB), nothing to do.
+  const done = readFileSync(join(here, "../../crates/core/src/insight/testdata/shadow/record.json"), "utf8");
+  const posts = [];
+  const objects = {};
+  for (const d of ["2026-11-12", "2026-11-13"]) {
+    posts.push(["premarket", d, `premarket-${d}`, `premarket/${d}-update.json`], ["recap", d, `recap-${d}`, `recap/${d}.json`]);
+    for (const k of [`premarket/${d}.json`, `premarket/${d}-update.json`, `recap/${d}.json`]) {
+      objects[`insights/${k}`] = done;
+    }
+  }
+  const idle6 = join(tmp, "idle6.json");
+  writeFileSync(
+    idle6,
+    JSON.stringify({ posts, objects, calendar: [], checks: [], kv: {}, writer: null, judge: null, now: "2026-11-13T22:00:00+00:00" }),
+  );
   for (let i = 0; i < 13; i++) {
     add("calibration: no-op call", `run ${i + 1}`, one("noop", null));
     add("calibration: insight tick, nothing to do", `run ${i + 1}`, one("step", idle));
+    add("idle sweep: six done records", `run ${i + 1}`, one("step", idle6));
     add("calibration: share card", `run ${i + 1}`, one("card", cover));
     add("calibration: draft number check", `run ${i + 1}`, one("draft", draft));
   }

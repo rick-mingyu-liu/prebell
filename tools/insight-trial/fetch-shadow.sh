@@ -4,8 +4,8 @@
 #
 #   tools/insight-trial/fetch-shadow.sh 2026-11-18 2026-12-31 tools/insight-trial/shadow
 #
-# For each weekday from FROM to TO it tries the three fixed keys a trading
-# day can have:
+# For each weekday from FROM to TO (both YYYY-MM-DD, at most 400 days apart)
+# it tries the three fixed keys a trading day can have:
 #   insights/premarket/<date>.json         the 8:00 brief
 #   insights/premarket/<date>-update.json  the 8:35 update
 #   insights/recap/<date>.json             the recap
@@ -13,13 +13,26 @@
 # missing key (no post, a holiday, no record yet) is skipped. It never goes
 # through posts.facts_r2_key: after the 8:35 update the post row points at
 # the update's bundle, and the 8:00 record would be missed. A file already
-# saved is fetched again only when its record may still change (stage
-# "written"). Needs wrangler (through npx, from crates/generator) and jq.
+# saved is fetched again unless its record is final (stage "done"), since
+# an open record may still change. Any wrangler error other than a missing
+# key is printed and stops the script. Needs wrangler (through pnpm, from
+# crates/generator) and jq.
 set -euo pipefail
 
-from="${1:?usage: fetch-shadow.sh FROM TO DIR (dates as YYYY-MM-DD)}"
-to="${2:?usage: fetch-shadow.sh FROM TO DIR}"
-out="${3:?usage: fetch-shadow.sh FROM TO DIR}"
+usage="usage: fetch-shadow.sh FROM TO DIR (dates as YYYY-MM-DD)"
+from="${1:?$usage}"
+to="${2:?$usage}"
+out="${3:?$usage}"
+for d in "$from" "$to"; do
+  if ! [[ "$d" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]; then
+    echo "not a YYYY-MM-DD date: $d" >&2
+    exit 2
+  fi
+done
+if [[ "$to" < "$from" ]]; then
+  echo "TO ($to) is before FROM ($from)" >&2
+  exit 2
+fi
 mkdir -p "$out"
 out="$(cd "$out" && pwd)"
 tool="$(cd "$(dirname "$0")" && pwd)"
@@ -36,8 +49,14 @@ weekday() {
 
 saved=0
 missing=0
+days=0
 d="$from"
 while [[ "$d" < "$to" || "$d" == "$to" ]]; do
+  days=$((days + 1))
+  if [ "$days" -gt 400 ]; then
+    echo "more than 400 days from $from to $to; narrow the range" >&2
+    exit 2
+  fi
   if [ "$(weekday "$d")" -le 5 ]; then
     for k in "premarket/$d" "premarket/$d-update" "recap/$d"; do
       key="insights/$k.json"
@@ -46,13 +65,20 @@ while [[ "$d" < "$to" || "$d" == "$to" ]]; do
         continue
       fi
       tmp="$f.part"
-      if npx wrangler r2 object get "prebell-facts/$key" --remote --file "$tmp" >/dev/null 2>&1 && [ -s "$tmp" ]; then
+      err="$f.err"
+      if pnpm exec wrangler r2 object get "prebell-facts/$key" --remote --file "$tmp" >/dev/null 2>"$err" && [ -s "$tmp" ]; then
         mv "$tmp" "$f"
         saved=$((saved + 1))
-      else
-        rm -f "$tmp"
+      elif [ ! -s "$err" ] || grep -qi "does not exist\|not found\|NoSuchKey" "$err"; then
+        # A missing key: wrangler says so, or writes an empty file.
         missing=$((missing + 1))
+      else
+        echo "wrangler failed on $key:" >&2
+        cat "$err" >&2
+        rm -f "$tmp" "$err"
+        exit 1
       fi
+      rm -f "$tmp" "$err"
     done
   fi
   d="$(next_day "$d")"
