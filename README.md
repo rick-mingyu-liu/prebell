@@ -45,3 +45,7 @@ Secrets live in `crates/generator/.dev.vars` locally (git-ignored) and in Wrangl
 - Facts first: EN and ZH are written separately from the same verified facts.
 - Free tier first: Cloudflare Workers Free limits (10 ms CPU, 50 subrequests, 5 crons) shape the design.
 - Only a post's own sources become links; no images or raw HTML from generated text.
+
+## License
+
+MIT. See `LICENSE`.
