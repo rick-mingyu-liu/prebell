@@ -1,10 +1,10 @@
-# Mover Insights, Plan 2: The Shadow Week
+# Mover Insights, Plan 2: The Shadow Stage
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Run mover insights inside the generator after every published premarket brief, premarket update and recap, store every line and verdict in R2, and show readers nothing; then give Rick one page to read at the end of the week.
+**Goal:** Run mover insights inside the generator after every published premarket brief, premarket update and recap, store every line and verdict in R2, and show readers nothing; and give Rick a review page he can open on any day, which adds up until the bar is met.
 
-**Architecture:** A new queue job `insight` reads a just-published post's facts bundle, builds the evidence packs (`insight::pack`), calls the writer and the code checks (`insight::write`, `insight::check`), then the judge (`insight::judge`) in strict mode, and writes one audit record to R2. It runs in its own queue message, is queued when a content job publishes (as `cards` is), and is swept by later firings, bounded by an attempts counter and a monthly call cap. A switch `INSIGHTS_MODE` (`off` | `shadow`) gates it. The trial tool gains a `shadow` command that downloads the week's records and builds the labelling page.
+**Architecture:** A new queue job `insight` reads a just-published post's facts bundle, builds the evidence packs (`insight::pack`), calls the writer and the code checks (`insight::write`, `insight::check`), then the judge (`insight::judge`) in strict mode, and writes one audit record to R2. It runs in its own queue message, is queued when a content job publishes (as `cards` is), and is swept by later firings, bounded by an attempts counter and a monthly call cap. A switch `INSIGHTS_MODE` (`off` | `shadow`) gates it. The trial tool gains a `shadow` command that downloads every record so far and builds a cumulative labelling page.
 
 **Tech Stack:** Rust (`prebell-core`, `prebell-generator` on workers-rs), Cloudflare Queues, D1, R2; the native `tools/insight-trial`.
 
@@ -18,6 +18,7 @@
 - The judge is strict: a judge reply with any text after its JSON is a failed judge call, never a pass (decided 2026-11-16).
 - Spend: at most `INSIGHT_MONTHLY_CALLS` model calls per calendar month (default 300, about $3 at the trial's measured $0.008–0.02 per call), counted in kv `insight_calls:YYYY-MM` before each call. At the cap the step stops for the month and logs once.
 - Cloudflare free plan: the step runs only in its own `insight` queue message, never inside a build; at most 2 model calls per message (one writer, one judge). R2 and D1 reads are bounded (at most 8 movers, at most one earnings bundle per mover).
+- How long shadow runs: the trial gave about 2 judge-passed lines a trading day (14 over 7 days), so the spec's bar of 50 lines read takes about five weeks, not one. Shadow runs until the bar is met or Rick lowers it (the spec makes the bar his to change). Nothing in this plan assumes a one-week end.
 - A failure never alerts, never retries a brief, never changes a post. Attempts are counted in R2 before each try (`insights/<stem>.attempts`, at most 3), as `cover::card` does.
 - People rule, Rick 2026-11-17 ("Allow it if attributed"): a line may repeat a claim about a named person, including an allegation, only when it names the outlet that reported it. This replaces the lead's rule of 2026-11-13.
 - Everything Plan 1's code checks enforce still holds: numbers and dates from cited evidence, outlets named in a reporting frame, no ratings, price targets, consensus wording, advice or relative time.
@@ -53,7 +54,10 @@
 // providers.rs, on LlmProvider
 /// As `complete_json`, but a reply with any text after its JSON object is
 /// `ProviderError::Parse("text after the JSON object: <snippet>")`.
-/// Default: `complete_json` (for test doubles).
+/// The default is an error (`ProviderError::Parse("strict replies are not
+/// supported by this provider")`), never `complete_json`: a provider that
+/// forgets to override it must not turn the last check permissive. Test
+/// doubles that act as a judge implement it.
 async fn complete_json_strict(&self, system: &str, user: &str) -> Result<Value, ProviderError>;
 ```
 
@@ -80,14 +84,18 @@ pub fn record_key(facts_key: &str) -> String;
 pub async fn insight_tick(now, store, writer: &dyn LlmProvider, judge: &dyn LlmProvider, cap: u32) -> Result<String, String>;
 ```
 
-The record (JSON, one per facts bundle): `version`, `post_slug`, `content_type`, `trading_date`, `facts_key`, `at`, `writer_version`, `judge_version`, `writer_model`, `judge_model`, and per eligible mover `{ticker, pack, insight|null, write_error|null, check: [..], verdict|null, judge_error|null, passed}`, plus `calls` and `skipped_reason|null`.
+The record (JSON, one per facts bundle): `version`, `stage` (`written` | `done`), `judge_attempts`, `post_slug`, `content_type`, `trading_date`, `facts_key`, `at`, `writer_version`, `judge_version`, `writer_model`, `judge_model`, and per eligible mover `{ticker, pack, insight|null, write_error|null, check: [..], verdict|null, judge_error|null, passed}`, plus `calls` and `skipped_reason|null`.
 
 Decisions:
 - The pack inputs come from stored data only: the post's facts bundle (R2), the earnings calendar rows for the movers' tickers (D1, one query), and an earnings check bundle for a mover only when `posts` has a published earnings post for that ticker filed within the pack's window (D1 then R2). No network fetch other than the two model calls.
-- Order inside a tick: pick the post; count the attempt; build packs; if none eligible, write the record and stop; check the month's cap for 2 calls; count and call the writer; run `check`; count and call the judge (strict) on the insights that passed `check`; write the record. A record already present (written by a concurrent message) is not overwritten.
+- Two stages, each in its own message, so a failed judge never loses or re-pays the writer and the CPU is split:
+  - **Write stage** (no record yet): pick the post; count the attempt; build packs; if none eligible, write a final record (`stage: "done"`, `skipped_reason`) and stop; check the month's cap; count and call the writer; run `check`; write the record with `stage: "written"` (or `"done"` when no insight passed `check`); queue one more `insight` message.
+  - **Judge stage** (a record with `stage: "written"`): count a judge attempt in the record's own `judge_attempts` (at most 3); check the cap; count and call the judge (strict) on the insights that passed `check`; rewrite the record with verdicts and `stage: "done"`. A failed judge call (a strict refusal, an HTTP error) leaves `stage: "written"` with `judge_error` set, for the next sweep; after 3 it becomes `stage: "done"` with every line `passed: false`.
+  - A tick does the judge stage of the oldest `written` record first, else the write stage of the newest post without a record.
+  - A `done` record is never overwritten. Two messages racing on the write stage may both pay the writer; the second sees the record and does not overwrite it.
 - `TickOutcome` is untouched; the step reports a log line.
 
-- [ ] Tests (in-memory store, mock providers): each Review Focus item; `mode` parsing; the cap stopping before a call and logging once per month; a missing facts bundle using one attempt; the record's JSON shape pinned; the step never writes outside `insights/` and `kv` `insight_calls:*`.
+- [ ] Tests (in-memory store, mock providers): each Review Focus item; a judge failure leaving a `written` record that a later tick completes with exactly one more judge call and no writer call; three judge failures ending in `done` with nothing passed; `mode` parsing; the cap stopping before a call and logging once per month; a missing facts bundle using one attempt; the record's JSON shape pinned; the step never writes outside `insights/` and `kv` `insight_calls:*`.
 
 ### Task 4: The generator
 
@@ -103,12 +111,21 @@ Decisions:
 
 **Files:** `tools/insight-trial/src/main.rs`, `src/page.rs`, `README.md`, a read-only `fetch-shadow.sh`.
 
-- `fetch-shadow.sh FROM TO DIR`: lists `insights/` records for trading dates FROM..TO from R2 via the posts' facts keys (read-only `wrangler` calls), saves them to DIR.
-- `shadow --records DIR --out DIR`: converts records into the tool's `lines.jsonl` shape and writes `label.html` with every judge-passed line (no sampling) plus every line the judge refused, verdicts hidden; `score` then reports the bar (at least 50 judge-passed lines read, none marked wrong).
+- `fetch-shadow.sh FROM TO DIR`: for each trading date FROM..TO, tries the three fixed keys `insights/premarket/<date>.json`, `insights/premarket/<date>-update.json` and `insights/recap/<date>.json` with read-only `wrangler r2 object get` (a missing key is skipped). It must not go through `posts.facts_r2_key`: after the 8:35 update the post row points at the update's facts, and the 8:00 record would be missed.
+- `shadow --records DIR --out DIR [--labels FILE]`: converts every record into the tool's `lines.jsonl` shape and writes a cumulative `label.html` with every judge-passed line (no sampling) plus every line the judge refused, verdicts hidden. Lines already in `--labels` are shown as done, so Rick only reads new ones. The 8:00 brief and its 8:35 update often carry the same mover: when both have a line for one ticker on one date, the page shows both but `score` counts one toward the bar (the update's).
+- `score` reports the bar from all labels so far: judge-passed lines read (counting one per ticker per date for premarket), any marked wrong, and "not yet assessable" below 50.
 - [ ] Tests from a fixture record built by Task 3's code.
 
-### Task 6: Run it (the lead, with Rick's go)
+### Task 6: Measure the step's CPU (builder, no model calls)
 
+The Worker allows 10 ms of CPU per invocation, and the step compiles dozens of regular expressions (pack, checks, judge-support confirmation) that a cold isolate pays for on its first call.
+
+- [ ] A native release timing in `tools/insight-trial` (`time` subcommand): over the 13 stored bundles in `facts/` and the stored final-run lines and verdicts, time the write stage's own work (packs + `check` on the stored insights) and the judge stage's own work (`passed` on the stored verdicts), first call in a fresh process and warm, per post. Print the worst and the median. No model calls.
+- [ ] Report the numbers. Native time understates Wasm; if the worst first-call figure is above about 2 ms native, say so and propose what to cut (lazy statics already compiled once per isolate, fewer patterns, or splitting `check` across messages) before the shadow switch.
+
+### Task 7: Run it (the lead, with Rick's go)
+
+- [ ] Dry-run the new prompts offline first: writer v6 and judge v3 have never been sent to a model (run 1 of the trial passed 3 of 29 lines with untested rules). One `run` of the trial tool into a fresh output folder, about $0.25, inside what is left of the trial's $3 cap ($1.63). Read every line and every refusal before going on.
 - [ ] Merge after review; deploy the generator with `INSIGHTS_MODE = "off"`; confirm nothing changes.
 - [ ] With Rick's go, set `INSIGHTS_MODE = "shadow"` and deploy. Watch the first day's records, calls and CPU time (Workers dashboard) and report.
-- [ ] After five trading days, run `fetch-shadow.sh` and `shadow`, send Rick the page, and score it.
+- [ ] Build the review page for Rick whenever he asks and at least weekly; score it each time; stop shadow only on his word.
