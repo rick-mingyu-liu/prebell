@@ -248,6 +248,48 @@ pub(crate) async fn next_state(c: &Case, state: Option<&str>) -> Option<String> 
     rec
 }
 
+/// The store and replies one step starts from, for `tools/insight-cpu-wasm`
+/// (`time --dump DIR`).
+pub(crate) fn snapshot(c: &Case, state: Option<&str>) -> Value {
+    set_state(c, state);
+    let posts: Vec<(String, String, String, String)> = c
+        .store
+        .posts
+        .iter()
+        .map(|p| {
+            (
+                p.content_type.clone(),
+                p.trading_date.clone(),
+                p.slug.clone(),
+                p.facts_key.clone(),
+            )
+        })
+        .collect();
+    let checks: Vec<(String, String, String, String)> = c
+        .store
+        .checks
+        .iter()
+        .map(|k| {
+            (
+                k.ticker.clone(),
+                k.filing_date.clone(),
+                k.accepted_at.clone(),
+                k.facts_key.clone(),
+            )
+        })
+        .collect();
+    json!({
+        "posts": posts,
+        "objects": *c.store.objects.borrow(),
+        "calendar": c.store.calendar,
+        "checks": checks,
+        "kv": *c.store.kv.borrow(),
+        "writer": c.writer,
+        "judge": c.judge,
+        "now": c.now.to_rfc3339(),
+    })
+}
+
 /// The stage of a record's JSON.
 pub(crate) fn stage_of(json: &str) -> Option<Stage> {
     serde_json::from_str::<step::Record>(json)

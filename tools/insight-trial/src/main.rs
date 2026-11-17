@@ -19,7 +19,7 @@
 //! cargo run --release -- page --out DIR [--cards 60]
 //! cargo run --release -- score --out DIR --labels FILE
 //! cargo run --release -- shadow --records DIR --out DIR [--labels FILE]
-//! cargo run --release -- time --facts DIR --lines FILE
+//! cargo run --release -- time --facts DIR --lines FILE [--dump DIR]
 //! ```
 //!
 //! `shadow` reads the Worker's shadow-stage records (`fetch-shadow.sh`),
@@ -997,7 +997,7 @@ fn finish(m: &Models, r: Result<(), String>) {
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
     let args: Vec<String> = std::env::args().collect();
-    let usage = "usage: insight-trial run --facts DIR --out DIR --dev-vars PATH [--budget 3.0] [--only SUBSTR] [--fresh] [--plan]\n       insight-trial seed --out DIR --dev-vars PATH [--budget 3.0] [--fresh] [--plan]\n       insight-trial page --out DIR [--cards 60]\n       insight-trial score --out DIR --labels FILE\n       insight-trial shadow --records DIR --out DIR [--labels FILE]\n       insight-trial time --facts DIR --lines FILE";
+    let usage = "usage: insight-trial run --facts DIR --out DIR --dev-vars PATH [--budget 3.0] [--only SUBSTR] [--fresh] [--plan]\n       insight-trial seed --out DIR --dev-vars PATH [--budget 3.0] [--fresh] [--plan]\n       insight-trial page --out DIR [--cards 60]\n       insight-trial score --out DIR --labels FILE\n       insight-trial shadow --records DIR --out DIR [--labels FILE]\n       insight-trial time --facts DIR --lines FILE [--dump DIR]";
     match args.get(1).map(String::as_str) {
         Some("run") => {
             let out = PathBuf::from(need(&args, "--out"));
@@ -1189,12 +1189,23 @@ async fn main() {
                         get("compiled")
                     )
                 };
+                let dump = |step: &str, state: Option<&str>| {
+                    if let Some(dir) = arg(&args, "--dump") {
+                        let records: Vec<Record> = read_jsonl(Path::new(&lines_file));
+                        let c = timing::case(&facts, &post, &records);
+                        fs::create_dir_all(&dir).expect("--dump");
+                        let f = Path::new(&dir).join(format!("{post}.{step}.json"));
+                        fs::write(f, timing::snapshot(&c, state).to_string()).expect("snapshot");
+                    }
+                };
+                dump("1-write", None);
                 let w = child("write", None, &s1);
                 cells.push(push(0, &w));
                 let replied = fs::read_to_string(&s1)
                     .ok()
                     .filter(|r| timing::stage_of(r) == Some(step::Stage::Replied));
-                if replied.is_some() {
+                if let Some(r) = &replied {
+                    dump("2-check", Some(r));
                     let ch = child("check", Some(&s1), &s2);
                     cells.push(push(1, &ch));
                 } else {
@@ -1205,11 +1216,14 @@ async fn main() {
                     .filter(|r| timing::stage_of(r) == Some(step::Stage::Written));
                 match written {
                     Some(wr) => {
+                        dump("3-judge", Some(&wr));
                         let j = child("judge", Some(&s2), &s3);
                         cells.push(push(2, &j));
                         let records: Vec<Record> = read_jsonl(Path::new(&lines_file));
                         let c = timing::case(&facts, &post, &records);
-                        fs::write(&sj, timing::judged(&wr, &c.judge)).expect("judged state");
+                        let judged = timing::judged(&wr, &c.judge);
+                        dump("4-verdicts", Some(&judged));
+                        fs::write(&sj, judged).expect("judged state");
                         let v = child("verdicts", Some(&sj), &s3);
                         cells.push(push(3, &v));
                     }

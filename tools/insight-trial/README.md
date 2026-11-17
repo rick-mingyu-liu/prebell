@@ -199,3 +199,6 @@ time understates Wasm.
 ```sh
 env -u CARGO_TARGET_DIR cargo run --release -- time --facts facts --lines out/lines.jsonl
 ```
+
+`--dump DIR` also writes each step's starting snapshot for
+`tools/insight-cpu-wasm`, which times the same steps in V8.

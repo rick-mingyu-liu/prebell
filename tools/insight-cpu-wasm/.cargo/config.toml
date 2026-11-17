@@ -1,0 +1,4 @@
+# Builds into its own target/, not the shared directory an enclosing
+# .cargo/config.toml may set (CARGO_TARGET_DIR still wins: unset it).
+[build]
+target-dir = "target"
