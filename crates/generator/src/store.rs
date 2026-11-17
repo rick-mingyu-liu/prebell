@@ -20,6 +20,9 @@ pub struct D1Store {
     /// D1 queries run since the last `reset_queries` (Free plan: 50 per
     /// invocation; a batch is one).
     pub queries: Cell<usize>,
+    /// R2 reads and writes and queue sends the insight step made since the
+    /// last `reset_insight_ops` (other jobs' R2 calls are not counted here).
+    pub insight_ops: Cell<usize>,
 }
 
 pub(crate) fn s(v: &str) -> JsValue {
@@ -200,6 +203,7 @@ impl D1Store {
             db,
             facts,
             queries: Cell::new(0),
+            insight_ops: Cell::new(0),
         }
     }
 
@@ -211,6 +215,16 @@ impl D1Store {
     /// Returns the queries counted so far and starts again from 0.
     pub fn reset_queries(&self) -> usize {
         self.queries.replace(0)
+    }
+
+    /// Counts one insight-step R2 call or queue send.
+    pub(crate) fn insight_op(&self) {
+        self.insight_ops.set(self.insight_ops.get() + 1);
+    }
+
+    /// Returns the insight-step calls counted so far and starts again from 0.
+    pub fn reset_insight_ops(&self) -> usize {
+        self.insight_ops.replace(0)
     }
 
     pub(crate) async fn first<T: DeserializeOwned>(

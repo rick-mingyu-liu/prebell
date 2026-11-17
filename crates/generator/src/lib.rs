@@ -101,7 +101,8 @@ async fn scheduled(event: ScheduledEvent, env: Env, _ctx: ScheduleContext) {
         console_error!("cron {cron}: not in schedule.rs; queueing every job");
         JOBS
     });
-    let at = now(&env).to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    let fired = now(&env);
+    let at = fired.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
     for job in jobs {
         // Earnings go to their own queues (one consumer, one message at a
         // time each) so a build never delays the premarket brief.
@@ -126,7 +127,7 @@ async fn scheduled(event: ScheduledEvent, env: Env, _ctx: ScheduleContext) {
     }
     // Mover insights: one sweep message per firing in the windows, only
     // while INSIGHTS_MODE is not off (off: nothing is queued or read).
-    if insight_step::sweep_wanted(text(&env, "INSIGHTS_MODE").as_deref(), now(&env)) {
+    if insight_step::sweep_wanted(text(&env, "INSIGHTS_MODE").as_deref(), fired) {
         let sent = match env.queue(queue_for("insight")) {
             Ok(q) => q
                 .send(Job {
@@ -562,12 +563,22 @@ impl JobRunner for Runner<'_> {
         };
         let writer = build(cfg.writer, cfg.writer_model, writer_key.clone())?;
         let judge = build(cfg.judge, cfg.judge_model, judge_key.clone())?;
-        insight_step::insight_tick(now(env), self.store, writer.as_ref(), judge.as_ref(), &cfg)
-            .await
-            .map_err(|e| InsightError::Failed(redact(&e, &[&writer_key, &judge_key])))
+        // A cron sweep (it carries the firing time) leaves a record another
+        // message touched within the lease to that message.
+        insight_step::insight_tick(
+            now(env),
+            self.store,
+            writer.as_ref(),
+            judge.as_ref(),
+            &cfg,
+            self.fired.is_some(),
+        )
+        .await
+        .map_err(|e| InsightError::Failed(redact(&e, &[&writer_key, &judge_key])))
     }
 
     async fn queue_insight(&self) -> std::result::Result<(), String> {
+        self.store.insight_op();
         self.env
             .queue(queue_for("insight"))
             .map_err(|e| e.to_string())?
@@ -613,8 +624,14 @@ async fn queue(batch: MessageBatch<Job>, env: Env, _ctx: Context) -> Result<()> 
         // Free plan: fetch subrequests and D1 queries this job used (50 each
         // per invocation).
         let d1 = store.reset_queries();
-        console_log!("subrequests={} d1={d1} job={job}", http.count());
-        used += http.count();
+        // The insight step's R2 calls and queue sends, which count toward
+        // the Free plan's 50 like its fetch.
+        let insight = store.reset_insight_ops();
+        console_log!(
+            "subrequests={} d1={d1} insight_ops={insight} job={job}",
+            http.count()
+        );
+        used += http.count() + insight;
         used_d1 += d1;
         msg.ack();
     }

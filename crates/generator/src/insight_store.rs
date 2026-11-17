@@ -13,7 +13,8 @@ use crate::store::{int, s, D1Store};
 /// Published briefs and recaps from a trading date on (`idx_posts_trading_date`).
 pub(crate) const INSIGHT_POSTS: &str = "SELECT content_type, trading_date, slug, facts_r2_key \
      FROM posts WHERE content_type IN ('premarket', 'recap') AND trading_date >= ?1 \
-     AND published_at IS NOT NULL ORDER BY trading_date DESC, id DESC";
+     AND published_at IS NOT NULL AND facts_r2_key IS NOT NULL \
+     ORDER BY trading_date DESC, id DESC";
 
 /// The movers' calendar rows in a date range, quarantined ones left out.
 pub(crate) const CALENDAR_ROWS: &str = "SELECT ticker, report_date, status FROM earnings_calendar \
@@ -82,10 +83,12 @@ impl InsightStore for D1Store {
     }
 
     async fn get_text(&self, key: &str) -> Result<Option<String>, String> {
+        self.insight_op();
         Store::get_facts(self, key).await
     }
 
     async fn put_text(&self, key: &str, text: &str) -> Result<(), String> {
+        self.insight_op();
         Store::put_bytes(self, key, text.as_bytes(), "application/json").await
     }
 
@@ -153,6 +156,9 @@ mod tests {
     fn the_queries_read_only_published_rows_of_their_kind() {
         assert!(INSIGHT_POSTS.contains("content_type IN ('premarket', 'recap')"));
         assert!(INSIGHT_POSTS.contains("published_at IS NOT NULL"));
+        // A published post without a facts key (the column allows NULL) is
+        // never read as a row with one.
+        assert!(INSIGHT_POSTS.contains("facts_r2_key IS NOT NULL"));
         assert!(EARNINGS_CHECKS.contains("p.content_type = 'earnings'"));
         assert!(EARNINGS_CHECKS.contains("p.published_at IS NOT NULL"));
         assert!(CALENDAR_ROWS.contains("status <> 'quarantined'"));

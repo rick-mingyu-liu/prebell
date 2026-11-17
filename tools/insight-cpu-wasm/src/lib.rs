@@ -262,7 +262,7 @@ pub extern "C" fn tick() -> u32 {
         let p = p.borrow();
         let (store, w, j, now) = p.as_ref().expect("prepare first");
         let cfg: Config = prebell_core::insight::step::config(None, None, None).expect("config");
-        let r = ready(insight_tick(*now, store, w, j, &cfg));
+        let r = ready(insight_tick(*now, store, w, j, &cfg, false));
         prebell_core::insight::compiled() as u32 + if r.is_ok() { 0 } else { 1_000_000 }
     })
 }

@@ -190,7 +190,7 @@ async fn tick_us(c: &Case) -> (u128, String) {
     let cfg = step::config(None, None, None).expect("config");
     let (w, j) = (Canned(c.writer.clone()), Canned(c.judge.clone()));
     let t = Instant::now();
-    let r = insight_tick(c.now, &c.store, &w, &j, &cfg).await;
+    let r = insight_tick(c.now, &c.store, &w, &j, &cfg, false).await;
     let us = t.elapsed().as_micros();
     (us, r.map(|t| t.line).unwrap_or_else(|e| e))
 }
