@@ -256,6 +256,61 @@ pub(crate) fn compiled() -> usize {
     COMPILED.load(Ordering::Relaxed)
 }
 
+/// English figures in words ("ten percent", "doubled"); see `worded_figures`.
+const WORDED_EN: &str = r"(?i)(?:(?:one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred|a\s+half|half)(?:[- ](?:one|two|three|four|five|six|seven|eight|nine))?\s+(?:percent|per\s+cent|percentage\s+points?|basis\s+points?|%|billion|million|trillion|thousand|dollars|times|fold)|a\s+(?:million|billion|trillion)|(?:doubl|tripl|quadrupl|halv)\w*)";
+/// "Hold" as advice or a rating; see `advice_hold`.
+const ADVICE_HOLD: &str = r"(?i)(?:(?:from|rated|rating|investors|continue\s+to|keep|recommend\w*)\s+hold|(?:downgrad\w*|upgrad\w*|cut|lower\w*|rais\w*|mov\w*)\s+(?:\w+\s+){0,3}to\s+hold|hold(?:s|ing)?\s+(?:rating|from|onto|on\s+to|(?:the|their|your|its)\s+(?:stock|shares|positions?|stake)|(?:stock|shares|positions?)))";
+/// Forward relative time in English; see `relative_en_re`.
+const RELATIVE_EN: &str = r"(?i)(?:next\s+(?:week|month|quarter|year|few\s+\w+|several\s+\w+)|(?:over|in|during|within)\s+the\s+(?:next|coming)\s+(?:\w+\s+)?(?:days|weeks|months|quarters|years)|in\s+(?:the\s+)?coming\s+(?:days|weeks|months|quarters)|(?:later\s+)?this\s+(?:week|month|quarter|year)|last\s+(?:week|month)|later\s+today|today|tonight|tomorrow|yesterday|soon|shortly|in\s+the\s+(?:days|weeks|months|quarters|years)\s+ahead|(?:days|weeks|months)\s+ahead|in\s+the\s+near\s+term|near[- ]term|by\s+(?:the\s+)?(?:year[- ]end|end\s+of\s+the\s+year)|later\s+in\s+the\s+year)";
+/// "upgraded … to " before a rating word; see `rating_frame`.
+const RATING_FRAME: &str =
+    r"(?:upgrad|downgrad|cut|lower|rais|mov|reiterat|maintain)\w*\s+(?:[\w.'’-]+\s+){0,3}to\s+$";
+
+/// A word character for the English refusal patterns that is cheap to
+/// compile: an ASCII one or any non-ASCII character. Unicode `\w` costs
+/// most of these patterns' compile time (the CPU ruling of 2026-11-17).
+/// It is a superset of `\w`, so a pattern still matches wherever it did;
+/// it can also match where a non-ASCII character that is not a letter or
+/// digit (a curly quote, a dash) stands in a word's place. No stored line
+/// or evidence text matches differently (`wide_words_match_as_before`).
+const WIDE_WORD: &str = r"0-9A-Za-z_\x{80}-\x{10FFFF}";
+
+/// `p` with every `\w` as `WIDE_WORD`: inside a bracket class its ranges,
+/// outside it a class of its own with case folding off (folding the
+/// non-ASCII range would cost more than `\w`).
+fn wide_words(p: &str) -> String {
+    let mut out = String::with_capacity(p.len());
+    let mut in_class = false;
+    let mut chars = p.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '\\' => {
+                let next = chars.next().expect("no trailing backslash");
+                if next == 'w' {
+                    if in_class {
+                        out.push_str(WIDE_WORD);
+                    } else {
+                        out.push_str(&format!("(?-i:[{WIDE_WORD}])"));
+                    }
+                } else {
+                    out.push('\\');
+                    out.push(next);
+                }
+            }
+            '[' if !in_class => {
+                in_class = true;
+                out.push(c);
+            }
+            ']' if in_class => {
+                in_class = false;
+                out.push(c);
+            }
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
 /// Compiles every lazily compiled pattern of the code checks, so the
 /// message that runs `check` pays the compile up front. One entry per
 /// `OnceLock` in this file (`insight::tests` counts them); the number.
@@ -372,7 +427,7 @@ fn worded_figures(text: &str) -> Vec<String> {
         [
             re(r"百分之[零〇一二三四五六七八九十百点两]+|[一二三四五六七八九十两]成|[一二三四五六七八九十两半]倍|翻倍|翻番"),
             re(r"[一二三四五六七八九十百千万亿两]+(?:美元|亿|万|%|％|个百分点)"),
-            re(r"(?i)(?:(?:one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred|a\s+half|half)(?:[- ](?:one|two|three|four|five|six|seven|eight|nine))?\s+(?:percent|per\s+cent|percentage\s+points?|basis\s+points?|%|billion|million|trillion|thousand|dollars|times|fold)|a\s+(?:million|billion|trillion)|(?:doubl|tripl|quadrupl|halv)\w*)"),
+            re(&wide_words(WORDED_EN)),
         ]
     });
     let mut out: Vec<String> = zh.find_iter(text).map(|m| m.as_str().to_string()).collect();
@@ -414,7 +469,12 @@ fn hook_count(text: &str) -> Option<String> {
 
 fn refused_en() -> &'static [Regex] {
     static R: OnceLock<Vec<Regex>> = OnceLock::new();
-    R.get_or_init(|| REFUSED_EN.iter().map(|p| re(&format!("(?i){p}"))).collect())
+    R.get_or_init(|| {
+        REFUSED_EN
+            .iter()
+            .map(|p| re(&wide_words(&format!("(?i){p}"))))
+            .collect()
+    })
 }
 
 /// A match of `r` in `text` as whole words. A hyphen does not join words,
@@ -449,9 +509,7 @@ fn has_word(text: &str, word: &str) -> bool {
 /// is fine: "will hold its report", "whether the plan holds", "on hold".
 fn advice_hold(text: &str) -> Option<String> {
     static R: OnceLock<Regex> = OnceLock::new();
-    let r = R.get_or_init(|| {
-        re(r"(?i)(?:(?:from|rated|rating|investors|continue\s+to|keep|recommend\w*)\s+hold|(?:downgrad\w*|upgrad\w*|cut|lower\w*|rais\w*|mov\w*)\s+(?:\w+\s+){0,3}to\s+hold|hold(?:s|ing)?\s+(?:rating|from|onto|on\s+to|(?:the|their|your|its)\s+(?:stock|shares|positions?|stake)|(?:stock|shares|positions?)))")
-    });
+    let r = R.get_or_init(|| re(&wide_words(ADVICE_HOLD)));
     find_alone(r, text).first().map(|m| m.as_str().to_string())
 }
 
@@ -913,9 +971,7 @@ fn zh_years(text: &str) -> Vec<i32> {
 
 fn relative_en_re() -> &'static Regex {
     static R: OnceLock<Regex> = OnceLock::new();
-    R.get_or_init(|| {
-        re(r"(?i)(?:next\s+(?:week|month|quarter|year|few\s+\w+|several\s+\w+)|(?:over|in|during|within)\s+the\s+(?:next|coming)\s+(?:\w+\s+)?(?:days|weeks|months|quarters|years)|in\s+(?:the\s+)?coming\s+(?:days|weeks|months|quarters)|(?:later\s+)?this\s+(?:week|month|quarter|year)|last\s+(?:week|month)|later\s+today|today|tonight|tomorrow|yesterday|soon|shortly|in\s+the\s+(?:days|weeks|months|quarters|years)\s+ahead|(?:days|weeks|months)\s+ahead|in\s+the\s+near\s+term|near[- ]term|by\s+(?:the\s+)?(?:year[- ]end|end\s+of\s+the\s+year)|later\s+in\s+the\s+year)")
-    })
+    R.get_or_init(|| re(&wide_words(RELATIVE_EN)))
 }
 
 fn relative_zh_re() -> &'static Regex {
@@ -1561,9 +1617,7 @@ const ADVICE_LEAD: &[&str] = &[
 /// The words before a rating: "downgraded Apple to", "moved the stock to".
 fn rating_frame() -> &'static Regex {
     static R: OnceLock<Regex> = OnceLock::new();
-    R.get_or_init(|| {
-        re(r"(?:upgrad|downgrad|cut|lower|rais|mov|reiterat|maintain)\w*\s+(?:[\w.'’-]+\s+){0,3}to\s+$")
-    })
+    R.get_or_init(|| re(&wide_words(RATING_FRAME)))
 }
 
 /// "buy", "sell", "target", "neutral", "upside" and "downside" in their
@@ -3332,5 +3386,103 @@ mod tests {
         i.zh.hook = "四季度营收成焦点".into();
         let f = check(&t, &i);
         assert!(refused(&f, "zh: fiscal label 四季度"), "{f:?}");
+    }
+
+    /// Every text the trial stored (lines in both languages, evidence,
+    /// mover reasons), plus the texts of `INSIGHT_EQUIV_CORPUS` (one per
+    /// line) when it is set.
+    fn stored_texts() -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        let mut take = |v: &serde_json::Value| {
+            for i in ["insight", "variant"] {
+                for lang in ["en", "zh"] {
+                    for k in ["hook", "watch"] {
+                        if let Some(t) = v[i][lang][k].as_str() {
+                            out.push(t.to_string());
+                        }
+                    }
+                }
+            }
+            for e in v["pack"]["evidence"].as_array().into_iter().flatten() {
+                for k in ["text", "quote"] {
+                    if let Some(t) = e[k].as_str() {
+                        out.push(t.to_string());
+                    }
+                }
+            }
+        };
+        for l in include_str!("testdata/run2_records.jsonl")
+            .lines()
+            .chain(include_str!("testdata/run3_records.jsonl").lines())
+            .chain(
+                include_str!("../../../../tools/insight-trial/testdata/final_run_lines.jsonl")
+                    .lines(),
+            )
+        {
+            take(&serde_json::from_str(l).unwrap());
+        }
+        let rec: serde_json::Value =
+            serde_json::from_str(include_str!("testdata/shadow/record.json")).unwrap();
+        for m in rec["movers"].as_array().unwrap() {
+            take(m);
+        }
+        for l in include_str!("testdata/reasons_2026_11.tsv").lines().skip(1) {
+            out.push(l.splitn(3, '\t').nth(2).unwrap_or("").to_string());
+        }
+        if let Ok(path) = std::env::var("INSIGHT_EQUIV_CORPUS") {
+            out.extend(
+                std::fs::read_to_string(path)
+                    .unwrap()
+                    .lines()
+                    .map(String::from),
+            );
+        }
+        out
+    }
+
+    /// The CPU ruling's condition for a cheaper pattern: on every stored
+    /// text, and every lowercase prefix of one (`rating_frame` reads the text
+    /// before a word), the new pattern finds exactly what the old one did.
+    #[test]
+    fn wide_words_match_as_before() {
+        let mut pairs: Vec<String> = REFUSED_EN.iter().map(|p| format!("(?i){p}")).collect();
+        pairs.extend([WORDED_EN, ADVICE_HOLD, RELATIVE_EN, RATING_FRAME].map(String::from));
+        let pairs: Vec<(Regex, Regex)> = pairs
+            .iter()
+            .filter(|p| p.contains(r"\w"))
+            .map(|p| (Regex::new(p).unwrap(), Regex::new(&wide_words(p)).unwrap()))
+            .collect();
+        assert_eq!(pairs.len(), 8);
+        let texts = stored_texts();
+        assert!(texts.len() > 250, "{}", texts.len());
+        let spans = |r: &Regex, t: &str| -> Vec<(usize, usize)> {
+            r.find_iter(t).map(|m| (m.start(), m.end())).collect()
+        };
+        let mut compared = 0;
+        for t in &texts {
+            let lower = t.to_ascii_lowercase();
+            let prefixes: Vec<&str> = std::iter::once(t.as_str())
+                .chain(lower.match_indices(' ').map(|(at, _)| &lower[..at + 1]))
+                .collect();
+            for p in prefixes {
+                for (old, new) in &pairs {
+                    assert_eq!(spans(old, p), spans(new, p), "{old} on {p:?}");
+                    compared += 1;
+                }
+            }
+        }
+        assert!(compared > 10_000, "{compared}");
+        // The rewrite itself: a class of its own outside brackets, ranges
+        // inside them.
+        assert_eq!(
+            wide_words(r"a\w+b"),
+            r"a(?-i:[0-9A-Za-z_\x{80}-\x{10FFFF}])+b"
+        );
+        assert_eq!(wide_words(r"[\w.]\s"), r"[0-9A-Za-z_\x{80}-\x{10FFFF}.]\s");
+        // And it still matches where `\w` does, beyond ASCII.
+        let old = Regex::new(&format!("(?i){}", REFUSED_EN[20])).unwrap();
+        let new = Regex::new(&wide_words(&format!("(?i){}", REFUSED_EN[20]))).unwrap();
+        let t = "analysts at Société Générale expect";
+        assert!(old.is_match(t) && new.is_match(t));
     }
 }
