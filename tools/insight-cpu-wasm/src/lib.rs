@@ -5,6 +5,11 @@
 //! that snapshot, with replies that answer at once. The caller times `tick`:
 //! the first call in a fresh process pays V8's compile of the code it runs
 //! and every pattern's compile, as a cold Worker isolate would.
+//!
+//! Calibration, timed the same way, from paths that run in production
+//! today: `card` (a share card from a stored cover, `cover::card`), `draft`
+//! (the number check a recap build runs on its draft, `numbers::check`
+//! against the facts' numbers) and `noop` (the fixed cost of a first call).
 
 use std::cell::RefCell;
 use std::collections::BTreeMap;
@@ -110,6 +115,59 @@ impl LlmProvider for Canned {
 
 thread_local! {
     static SNAPSHOT: RefCell<Option<Snapshot>> = const { RefCell::new(None) };
+    /// What `load` was given, as text: a cover SVG for `card`.
+    static RAW: RefCell<String> = const { RefCell::new(String::new()) };
+    /// `(allowed numbers, draft body)` for `draft`.
+    static DRAFT: RefCell<Option<(Vec<f64>, String)>> = const { RefCell::new(None) };
+}
+
+/// Returns at once: the fixed cost of a first call into the module.
+#[no_mangle]
+pub extern "C" fn noop() -> u32 {
+    0
+}
+
+/// A share card from the loaded cover SVG, as the `cards` job renders it:
+/// the PNG's size in bytes, or 0 when it failed.
+#[no_mangle]
+pub extern "C" fn card() -> u32 {
+    RAW.with(|r| {
+        let cover = r.borrow();
+        prebell_core::cover::card::card_svg(&cover, "2026-11-06")
+            .and_then(|svg| prebell_core::cover::card::render_png(&svg).ok())
+            .map_or(0, |png| png.len() as u32)
+    })
+}
+
+/// Reads the loaded `{"facts": <recap facts>, "body": <draft>}` outside the
+/// timed call: the numbers the facts allow, and the draft.
+#[no_mangle]
+pub extern "C" fn prepare_draft() -> u32 {
+    let raw = RAW.with(|r| r.borrow().clone());
+    let Ok(v) = serde_json::from_str::<Value>(&raw) else {
+        return 0;
+    };
+    let Ok(facts) = serde_json::from_value::<prebell_core::recap::RecapFacts>(v["facts"].clone())
+    else {
+        return 0;
+    };
+    let body = v["body"].as_str().unwrap_or("").to_string();
+    DRAFT.with(|d| *d.borrow_mut() = Some((prebell_core::recap::numbers_in_facts(&facts), body)));
+    1
+}
+
+/// The number check a recap build runs on its draft: the unbacked numbers
+/// found (0 when every number traces to the facts).
+#[no_mangle]
+pub extern "C" fn draft() -> u32 {
+    DRAFT.with(|d| {
+        let d = d.borrow();
+        let (allowed, body) = d.as_ref().expect("prepare_draft first");
+        match prebell_core::numbers::check(body, prebell_core::numbers::Lang::En, allowed) {
+            Ok(()) => 0,
+            Err(bad) => bad.len() as u32,
+        }
+    })
 }
 
 /// Room for the caller to write `len` bytes into.
@@ -121,13 +179,15 @@ pub extern "C" fn alloc(len: usize) -> *mut u8 {
     p
 }
 
-/// Reads the snapshot JSON at `ptr`; 1 when it parsed.
+/// Reads the input at `ptr`: kept as text, and parsed as a step snapshot
+/// when it is one; 1 when it parsed as a snapshot.
 ///
 /// # Safety
 /// `ptr` holds `len` bytes written by the caller into an `alloc` buffer.
 #[no_mangle]
 pub unsafe extern "C" fn load(ptr: *mut u8, len: usize) -> u32 {
     let bytes = std::slice::from_raw_parts(ptr, len);
+    RAW.with(|r| *r.borrow_mut() = String::from_utf8_lossy(bytes).into_owned());
     match serde_json::from_slice::<Snapshot>(bytes) {
         Ok(s) => {
             SNAPSHOT.with(|x| *x.borrow_mut() = Some(s));
