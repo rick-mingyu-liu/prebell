@@ -4,6 +4,7 @@ mod alerts;
 mod earnings_store;
 mod events_store;
 mod http;
+mod insight_store;
 mod ipo_store;
 mod store;
 
@@ -19,9 +20,10 @@ use prebell_core::earnings::share::Shares;
 use prebell_core::edgar::{Edgar, BUILD_GAP_MS};
 use prebell_core::events::check::{check_tick, mark_checked, missing_table};
 use prebell_core::events::watch::StoreWatch;
+use prebell_core::insight::step::{self as insight_step, Tick};
 use prebell_core::ipo;
 use prebell_core::ipo::store::IpoStore;
-use prebell_core::jobs::{redact, run_job, JobRunner};
+use prebell_core::jobs::{redact, run_job, InsightError, JobRunner};
 use prebell_core::llm::{api_key_var, llm_from_env, unknown_provider};
 use prebell_core::providers::CountingHttp;
 use prebell_core::providers::LlmProvider;
@@ -493,6 +495,66 @@ impl JobRunner for Runner<'_> {
             .map_err(|e| e.to_string())?
             .send(Job {
                 job: "cards".into(),
+                at: None,
+            })
+            .await
+            .map_err(|e| e.to_string())
+    }
+
+    fn insights_mode(&self) -> Option<String> {
+        text(self.env, "INSIGHTS_MODE")
+    }
+
+    /// One insight stage. Writer and judge have their own settings and key,
+    /// never `LLM_PROVIDER`; a missing key skips before anything is read or
+    /// counted, and never falls back to another provider.
+    async fn insight(&self) -> std::result::Result<Tick, InsightError> {
+        let env = self.env;
+        let cfg = insight_step::config(
+            text(env, "INSIGHT_WRITER_PROVIDER").as_deref(),
+            text(env, "INSIGHT_JUDGE_PROVIDER").as_deref(),
+            text(env, "INSIGHT_MONTHLY_CALLS").as_deref(),
+        )
+        .map_err(InsightError::Config)?;
+        let key = |provider: &str| -> (&'static str, String) {
+            let var = api_key_var(provider).unwrap_or("ANTHROPIC_API_KEY");
+            let v = env.secret(var).map(|v| v.to_string()).unwrap_or_default();
+            (var, v)
+        };
+        let (writer_var, writer_key) = key(cfg.writer);
+        let (judge_var, judge_key) = key(cfg.judge);
+        for (var, k) in [(writer_var, &writer_key), (judge_var, &judge_key)] {
+            if k.is_empty() {
+                return Ok(Tick {
+                    line: format!("insight: secret {var} is not set; skipped"),
+                    follow_up: false,
+                });
+            }
+        }
+        let build = |provider: &str, model: &str, k: String| {
+            llm_from_env(
+                provider,
+                self.http.clone(),
+                k,
+                Some(model.to_string()),
+                Some(insight_step::EFFORT.to_string()),
+                |m| console_warn!("{m}"),
+            )
+            .map_err(|e| InsightError::Config(redact(&e.to_string(), &[&writer_key, &judge_key])))
+        };
+        let writer = build(cfg.writer, cfg.writer_model, writer_key.clone())?;
+        let judge = build(cfg.judge, cfg.judge_model, judge_key.clone())?;
+        insight_step::insight_tick(now(env), self.store, writer.as_ref(), judge.as_ref(), &cfg)
+            .await
+            .map_err(|e| InsightError::Failed(redact(&e, &[&writer_key, &judge_key])))
+    }
+
+    async fn queue_insight(&self) -> std::result::Result<(), String> {
+        self.env
+            .queue(queue_for("insight"))
+            .map_err(|e| e.to_string())?
+            .send(Job {
+                job: "insight".into(),
                 at: None,
             })
             .await

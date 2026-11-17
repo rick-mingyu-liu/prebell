@@ -1,7 +1,8 @@
 //! Mover insights: a short hook and one "watch next" sentence per big mover,
 //! in English and Chinese, written by a model from an evidence pack, checked
 //! by code (`check`) and then by a judge model that must quote verbatim
-//! support (`judge`). Pure logic: nothing in the Worker calls it yet.
+//! support (`judge`). `step` runs them in the Worker's `insight` queue job
+//! in shadow mode: every line and verdict is stored, readers see nothing.
 //! Spec: `docs/superpowers/specs/2026-11-13-mover-insights-design.md`.
 
 use serde::{Deserialize, Serialize};
@@ -9,6 +10,7 @@ use serde::{Deserialize, Serialize};
 pub mod check;
 pub mod judge;
 pub mod pack;
+pub mod step;
 pub mod write;
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]

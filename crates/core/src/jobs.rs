@@ -8,6 +8,7 @@ use chrono::{DateTime, Utc};
 
 use crate::clock::et;
 use crate::cover::card::wants_card;
+use crate::insight::step::{self, Mode, Tick};
 use crate::run::TickOutcome;
 use crate::schedule::{ContentJob, EarningsStep, JobKind};
 use crate::store::Store;
@@ -28,6 +29,23 @@ pub trait JobRunner {
     /// Sends a `cards` message now, so a post that just went live gets its
     /// share card within seconds instead of at the next firing.
     async fn queue_cards(&self) -> Result<(), String>;
+    /// The raw `INSIGHTS_MODE` setting (`None` when unset). No I/O: with the
+    /// mode off nothing else of the insight step runs.
+    fn insights_mode(&self) -> Option<String>;
+    /// One `insight` message in shadow mode (`insight::step::insight_tick`).
+    async fn insight(&self) -> Result<Tick, InsightError>;
+    /// Sends an `insight` message now.
+    async fn queue_insight(&self) -> Result<(), String>;
+}
+
+/// Why an `insight` message did nothing.
+#[derive(Debug, Clone, PartialEq)]
+pub enum InsightError {
+    /// A bad setting (`INSIGHT_*_PROVIDER`, `INSIGHT_MONTHLY_CALLS`):
+    /// alerted once per ET day under `config:insight:<date>`.
+    Config(String),
+    /// A store error: logged, never alerted; a later message tries again.
+    Failed(String),
 }
 
 /// `line`, after queueing a `cards` message when `published`.
@@ -38,6 +56,51 @@ async fn queue_card_if(runner: &dyn JobRunner, published: bool, line: String) ->
     match runner.queue_cards().await {
         Ok(()) => format!("{line}; card queued"),
         Err(e) => format!("{line}; card queue failed: {e}"),
+    }
+}
+
+/// `line`, after queueing an `insight` message when a brief, update or
+/// recap was `published` and `INSIGHTS_MODE` is shadow. Off sends nothing;
+/// a bad mode is alerted (once per ET day) and sends nothing.
+async fn queue_insight_if(
+    now: DateTime<Utc>,
+    runner: &dyn JobRunner,
+    store: &dyn Store,
+    published: bool,
+    line: String,
+) -> String {
+    if !published {
+        return line;
+    }
+    match step::mode(runner.insights_mode().as_deref()) {
+        Ok(Mode::Off) => line,
+        Ok(Mode::Shadow) => match runner.queue_insight().await {
+            Ok(()) => format!("{line}; insight queued"),
+            Err(e) => format!("{line}; insight queue failed: {e}"),
+        },
+        Err(e) => format!("{line}; {}", config_error(now, "insight", &e, store).await),
+    }
+}
+
+/// One `insight` message: nothing at all while the mode is off.
+async fn insight_job(
+    now: DateTime<Utc>,
+    job: &str,
+    store: &dyn Store,
+    runner: &dyn JobRunner,
+) -> Result<String, String> {
+    match step::mode(runner.insights_mode().as_deref()) {
+        Ok(Mode::Off) => Ok(format!("job {job}: INSIGHTS_MODE is off; skipped")),
+        Err(e) => Err(config_error(now, "insight", &e, store).await),
+        Ok(Mode::Shadow) => match runner.insight().await {
+            Ok(t) if t.follow_up => Ok(match runner.queue_insight().await {
+                Ok(()) => format!("job {job}: {}; queued", t.line),
+                Err(e) => format!("job {job}: {}; queue failed: {e}", t.line),
+            }),
+            Ok(t) => Ok(format!("job {job}: {}", t.line)),
+            Err(InsightError::Config(e)) => Err(config_error(now, "insight", &e, store).await),
+            Err(InsightError::Failed(e)) => Err(format!("job {job}: {e}")),
+        },
     }
 }
 
@@ -53,7 +116,11 @@ pub async fn run_job(
 ) -> Result<String, String> {
     match JobKind::parse(job) {
         Some(JobKind::Content(c)) => match runner.content(c).await {
-            Ok(o) => Ok(queue_card_if(runner, wants_card(&o), format!("job {job}: {o:?}")).await),
+            Ok(o) => {
+                let published = wants_card(&o);
+                let line = queue_card_if(runner, published, format!("job {job}: {o:?}")).await;
+                Ok(queue_insight_if(now, runner, store, published, line).await)
+            }
             Err(e) => Err(config_error(now, job, &e, store).await),
         },
         Some(JobKind::Earnings(step)) => match runner.earnings(step).await {
@@ -86,6 +153,7 @@ pub async fn run_job(
             .await
             .map(|line| format!("job {job}: {line}"))
             .map_err(|e| format!("job {job}: {e}")),
+        Some(JobKind::Insight) => insight_job(now, job, store, runner).await,
         None => Err(format!("job {job}: unknown job, dropped")),
     }
 }
@@ -149,6 +217,11 @@ mod tests {
         /// What the next `content` and earnings build return, and the `cards` messages sent.
         static OUTCOME: RefCell<TickOutcome> = const { RefCell::new(TickOutcome::Nothing) };
         static QUEUED: RefCell<usize> = const { RefCell::new(0) };
+        /// `INSIGHTS_MODE`, what the next `insight` returns (`None`: it must
+        /// not run), and the `insight` messages sent.
+        static MODE: RefCell<Option<String>> = const { RefCell::new(None) };
+        static INSIGHT: RefCell<Option<Result<Tick, InsightError>>> = const { RefCell::new(None) };
+        static QUEUED_INSIGHT: RefCell<usize> = const { RefCell::new(0) };
     }
     #[async_trait(?Send)]
     impl JobRunner for FakeRunner {
@@ -177,6 +250,156 @@ mod tests {
             QUEUED.with(|q| *q.borrow_mut() += 1);
             Ok(())
         }
+        fn insights_mode(&self) -> Option<String> {
+            MODE.with(|m| m.borrow().clone())
+        }
+        async fn insight(&self) -> Result<Tick, InsightError> {
+            INSIGHT
+                .with(|i| i.borrow().clone())
+                .expect("the insight step must not run")
+        }
+        async fn queue_insight(&self) -> Result<(), String> {
+            QUEUED_INSIGHT.with(|q| *q.borrow_mut() += 1);
+            Ok(())
+        }
+    }
+    fn set_mode(m: Option<&str>) {
+        MODE.with(|x| *x.borrow_mut() = m.map(String::from));
+    }
+    fn queued_insight() -> usize {
+        QUEUED_INSIGHT.with(|q| *q.borrow())
+    }
+    fn ok_runner() -> FakeRunner {
+        FakeRunner {
+            content_err: None,
+            content_calls: RefCell::new(vec![]),
+            earnings_calls: RefCell::new(vec![]),
+        }
+    }
+
+    /// `INSIGHTS_MODE = "off"` (the shipped value) or unset: a publish sends
+    /// exactly what it did before (its card), no insight message; an
+    /// `insight` message that arrives anyway runs nothing and reads nothing.
+    #[tokio::test]
+    async fn with_insights_off_nothing_changes() {
+        let now = utc("2026-11-17T13:05:00Z");
+        for mode in [None, Some("off")] {
+            set_mode(mode);
+            let s = MemStore::default();
+            let r = ok_runner();
+            OUTCOME.with(|o| *o.borrow_mut() = TickOutcome::Published);
+            QUEUED.with(|q| *q.borrow_mut() = 0);
+            for job in ["premarket", "premarket-update", "recap"] {
+                assert_eq!(
+                    run_job(now, job, &s, &r).await,
+                    Ok(format!("job {job}: Published; card queued"))
+                );
+            }
+            assert_eq!(QUEUED.with(|q| *q.borrow()), 3);
+            // `insight` would panic if the step ran.
+            assert_eq!(
+                run_job(now, "insight", &s, &r).await,
+                Ok("job insight: INSIGHTS_MODE is off; skipped".to_string())
+            );
+            assert_eq!(queued_insight(), 0);
+            assert!(s.alerts.borrow().is_empty());
+            assert!(s.kv.borrow().is_empty() && s.facts.borrow().is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn in_shadow_a_published_brief_update_or_recap_queues_its_insight() {
+        set_mode(Some("shadow"));
+        QUEUED_INSIGHT.with(|q| *q.borrow_mut() = 0);
+        let s = MemStore::default();
+        let r = ok_runner();
+        let now = utc("2026-11-17T13:05:00Z");
+        for o in [TickOutcome::Published, TickOutcome::PublishedEnOnly] {
+            OUTCOME.with(|x| *x.borrow_mut() = o.clone());
+            for job in ["premarket", "premarket-update", "recap"] {
+                let line = run_job(now, job, &s, &r).await.unwrap();
+                assert!(line.ends_with("; card queued; insight queued"), "{line}");
+            }
+        }
+        assert_eq!(queued_insight(), 6);
+        // Nothing published, or an earnings check published: no insight.
+        OUTCOME.with(|x| *x.borrow_mut() = TickOutcome::Retrying("en: x".into()));
+        run_job(now, "premarket", &s, &r).await.unwrap();
+        OUTCOME.with(|x| *x.borrow_mut() = TickOutcome::Published);
+        let line = run_job(now, "earnings:build", &s, &r).await.unwrap();
+        assert_eq!(line, "job earnings:build: polled; card queued");
+        assert_eq!(queued_insight(), 6);
+        assert!(s.alerts.borrow().is_empty());
+        set_mode(None);
+    }
+
+    #[tokio::test]
+    async fn a_bad_insights_mode_is_alerted_once_a_day_and_runs_nothing() {
+        set_mode(Some("on"));
+        QUEUED_INSIGHT.with(|q| *q.borrow_mut() = 0);
+        let s = MemStore::default();
+        let r = ok_runner();
+        let now = utc("2026-11-17T13:05:00Z");
+        OUTCOME.with(|x| *x.borrow_mut() = TickOutcome::Published);
+        let line = run_job(now, "premarket", &s, &r).await.unwrap();
+        assert!(
+            line.starts_with(
+                "job premarket: Published; card queued; job insight: config error (alerted)"
+            ),
+            "{line}"
+        );
+        let err = run_job(now, "insight", &s, &r).await.unwrap_err();
+        assert!(
+            err.contains("config error (already alerted today)"),
+            "{err}"
+        );
+        assert!(err.contains("unknown INSIGHTS_MODE: on"), "{err}");
+        assert_eq!(queued_insight(), 0);
+        let alerts = s.alerts.borrow();
+        assert_eq!(alerts.len(), 1, "{alerts:?}");
+        assert_eq!(alerts[0].0, "config:insight:2026-11-17");
+        set_mode(None);
+    }
+
+    #[tokio::test]
+    async fn an_insight_message_queues_its_judge_and_never_alerts_a_failure() {
+        set_mode(Some("shadow"));
+        QUEUED_INSIGHT.with(|q| *q.borrow_mut() = 0);
+        let s = MemStore::default();
+        let r = ok_runner();
+        let now = utc("2026-11-17T13:05:00Z");
+        let set = |t: Result<Tick, InsightError>| INSIGHT.with(|i| *i.borrow_mut() = Some(t));
+        set(Ok(Tick {
+            line: "written".into(),
+            follow_up: true,
+        }));
+        assert_eq!(
+            run_job(now, "insight", &s, &r).await,
+            Ok("job insight: written; queued".to_string())
+        );
+        set(Ok(Tick {
+            line: "judged".into(),
+            follow_up: false,
+        }));
+        assert_eq!(
+            run_job(now, "insight", &s, &r).await,
+            Ok("job insight: judged".to_string())
+        );
+        assert_eq!(queued_insight(), 1);
+        set(Err(InsightError::Failed("R2 get: down".into())));
+        assert_eq!(
+            run_job(now, "insight", &s, &r).await,
+            Err("job insight: R2 get: down".to_string())
+        );
+        assert!(s.alerts.borrow().is_empty());
+        set(Err(InsightError::Config(
+            "unknown INSIGHT_JUDGE_PROVIDER: gpt".into(),
+        )));
+        let err = run_job(now, "insight", &s, &r).await.unwrap_err();
+        assert!(err.contains("insight: config error (alerted)"), "{err}");
+        assert!(s.has_alert("config:insight:2026-11-17").await.unwrap());
+        INSIGHT.with(|i| *i.borrow_mut() = None);
+        set_mode(None);
     }
     /// A runner whose LLM config has `LLM_EFFORT=hgih`, with the error text
     /// redacted the way the Worker does.

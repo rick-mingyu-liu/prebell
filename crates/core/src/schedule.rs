@@ -97,6 +97,11 @@ pub enum JobKind {
     /// `cards`: render at most one missing share card (`cover::card`), in
     /// its own message so its CPU never adds to a build's.
     Cards,
+    /// `insight`: one stage of mover insights (`insight::step`), queued when
+    /// a brief, update or recap publishes and by the sweep windows while
+    /// `INSIGHTS_MODE` is not off. Not in `JOBS` or `CRONS`: the crons
+    /// queue it only through `insight::step::sweep_wanted`.
+    Insight,
 }
 
 impl JobKind {
@@ -115,6 +120,7 @@ impl JobKind {
             "ipo:sweep" => Some(JobKind::Earnings(EarningsStep::IpoSweep)),
             "ipo:article" => Some(JobKind::Earnings(EarningsStep::IpoArticle)),
             "cards" => Some(JobKind::Cards),
+            "insight" => Some(JobKind::Insight),
             _ => None,
         }
     }
@@ -377,9 +383,20 @@ mod tests {
             };
             assert_eq!(queue_for(step.job()), queue);
         }
-        for j in ["premarket", "premarket-update", "recap", "cards", "nope"] {
+        for j in [
+            "premarket",
+            "premarket-update",
+            "recap",
+            "cards",
+            "insight",
+            "nope",
+        ] {
             assert_eq!(queue_for(j), JOBS_QUEUE, "{j}");
         }
+        assert_eq!(JobKind::parse("insight"), Some(JobKind::Insight));
+        // Never queued blindly: an unknown cron queues all of `JOBS`.
+        assert!(!JOBS.contains(&"insight"));
+        assert!(CRONS.iter().all(|(_, jobs)| !jobs.contains(&"insight")));
         let kinds: Vec<JobKind> = JOBS.iter().map(|j| JobKind::parse(j).unwrap()).collect();
         assert_eq!(kinds.len(), 5);
         for (i, k) in kinds.iter().enumerate() {

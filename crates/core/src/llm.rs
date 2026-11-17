@@ -6,7 +6,7 @@ use crate::providers::{Http, LlmProvider, ProviderError};
 use serde_json::Value;
 
 /// `deepseek-chat` was retired; `deepseek-flash` without thinking is what it served.
-const DEEPSEEK_DEFAULT_MODEL: &str = "deepseek-flash";
+pub const DEEPSEEK_DEFAULT_MODEL: &str = "deepseek-flash";
 
 /// Name of the secret holding the API key for `provider` (the `LLM_PROVIDER` value).
 pub fn api_key_var(provider: &str) -> Option<&'static str> {

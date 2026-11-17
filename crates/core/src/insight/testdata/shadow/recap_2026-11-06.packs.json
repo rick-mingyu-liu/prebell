@@ -1,0 +1,241 @@
+[
+ {
+  "ticker": "COHR",
+  "name": "Coherent",
+  "evidence": [
+   {
+    "id": "e1",
+    "kind": "move",
+    "text": "Coherent (COHR) rose 13.58% in the regular session on November 6, 2026.",
+    "outlet": null,
+    "url": null,
+    "date": "2026-11-06"
+   },
+   {
+    "id": "e2",
+    "kind": "news",
+    "text": "AI and semiconductor stocks rebounded in premarket trading Friday after a sharp selloff a day earlier.",
+    "outlet": "Seeking Alpha",
+    "url": "https://seekingalpha.com/news/4667921-ai-and-chip-stocks-rebound-in-premarket-after-steep-selloff",
+    "date": null
+   }
+  ]
+ },
+ {
+  "ticker": "AMD",
+  "name": "Advanced Micro Devices",
+  "evidence": [
+   {
+    "id": "e1",
+    "kind": "move",
+    "text": "Advanced Micro Devices (AMD) rose 11.04% in the regular session on November 6, 2026.",
+    "outlet": null,
+    "url": null,
+    "date": "2026-11-06"
+   },
+   {
+    "id": "e2",
+    "kind": "news",
+    "text": "AMD's Q3 revenue rose by 45% year over year to $13.38 billion.",
+    "outlet": "The Motley Fool",
+    "url": "https://www.fool.com/investing/2026/11/05/is-amd-stock-a-buy-as-ai-revenue-soars",
+    "date": null
+   },
+   {
+    "id": "e3",
+    "kind": "news",
+    "text": "AMD guided for Q4 revenue to grow by 66% year over year to $17 billion, plus or minus 3%.",
+    "outlet": "The Motley Fool",
+    "url": "https://www.fool.com/investing/2026/11/05/is-amd-stock-a-buy-as-ai-revenue-soars",
+    "date": null
+   },
+   {
+    "id": "e4",
+    "kind": "company_figure",
+    "text": "Revenue: $13.38 billion, reported for Q3 of fiscal 2026.",
+    "outlet": null,
+    "url": "https://www.sec.gov/Archives/edgar/data/2488/000000248826000188/q32026991.htm",
+    "date": null,
+    "quote": "Net revenue $13,377 $11,536 $9,246 $35,166 $24,369"
+   },
+   {
+    "id": "e5",
+    "kind": "company_figure",
+    "text": "Net income (GAAP): $2.43 billion, reported for Q3 of fiscal 2026.",
+    "outlet": null,
+    "url": "https://www.sec.gov/Archives/edgar/data/2488/000000248826000188/q32026991.htm",
+    "date": null,
+    "quote": "Net income $2,428 $2,297 $1,243 $6,108 $2,824"
+   },
+   {
+    "id": "e6",
+    "kind": "company_figure",
+    "text": "Diluted EPS (GAAP): $1.46, reported for Q3 of fiscal 2026.",
+    "outlet": null,
+    "url": "https://www.sec.gov/Archives/edgar/data/2488/000000248826000188/q32026991.htm",
+    "date": null,
+    "quote": "Diluted earnings per share $1.46 $0.75 Up 95% $1.38 Up 6%"
+   },
+   {
+    "id": "e7",
+    "kind": "company_figure",
+    "text": "Diluted EPS (non-GAAP): $2.09, reported for Q3 of fiscal 2026.",
+    "outlet": null,
+    "url": "https://www.sec.gov/Archives/edgar/data/2488/000000248826000188/q32026991.htm",
+    "date": null,
+    "quote": "Non-GAAP net income / earnings per share $3,471 $2.09 $2,760 $1.66 $1,965 $1.20"
+   },
+   {
+    "id": "e8",
+    "kind": "company_figure",
+    "text": "Gross margin: 54%, reported for Q3 of fiscal 2026.",
+    "outlet": null,
+    "url": "https://www.sec.gov/Archives/edgar/data/2488/000000248826000188/q32026991.htm",
+    "date": null,
+    "quote": "Gross margin 54% 52% Up 2 ppts 54% Flat"
+   },
+   {
+    "id": "e9",
+    "kind": "company_figure",
+    "text": "Operating margin (GAAP): 21%, reported for Q3 of fiscal 2026.",
+    "outlet": null,
+    "url": "https://www.sec.gov/Archives/edgar/data/2488/000000248826000188/q32026991.htm",
+    "date": null,
+    "quote": "Operating margin 21% 14% Up 7 ppts 17% Up 4 ppts"
+   },
+   {
+    "id": "e10",
+    "kind": "company_figure",
+    "text": "Free cash flow (non-GAAP): $554 million, reported for Q3 of fiscal 2026.",
+    "outlet": null,
+    "url": "https://www.sec.gov/Archives/edgar/data/2488/000000248826000188/q32026991.htm",
+    "date": null,
+    "quote": "Free cash flow (3) $554 $1,558 $1,530 $4,678 $3,437"
+   },
+   {
+    "id": "e11",
+    "kind": "company_guidance",
+    "text": "For the fourth quarter of 2026, AMD expects revenue to be approximately $17 billion, plus or minus 3%.",
+    "outlet": null,
+    "url": "https://www.sec.gov/Archives/edgar/data/2488/000000248826000188/q32026991.htm",
+    "date": null
+   },
+   {
+    "id": "e12",
+    "kind": "theme",
+    "text": "Advanced Micro Devices moved with the Semiconductors group (7 members up, median +5.73%).",
+    "outlet": null,
+    "url": null,
+    "date": null
+   },
+   {
+    "id": "e13",
+    "kind": "report_date",
+    "text": "Advanced Micro Devices reported results on November 3, 2026 (earnings calendar).",
+    "outlet": null,
+    "url": null,
+    "date": "2026-11-03"
+   }
+  ]
+ },
+ {
+  "ticker": "AXON",
+  "name": "Axon Enterprise",
+  "evidence": [
+   {
+    "id": "e1",
+    "kind": "move",
+    "text": "Axon Enterprise (AXON) fell 18.18% in the regular session on November 6, 2026.",
+    "outlet": null,
+    "url": null,
+    "date": "2026-11-06"
+   },
+   {
+    "id": "e2",
+    "kind": "news",
+    "text": "Axon lowered its 2026 revenue forecast to $3.61 billion-$3.63 billion from $3.67 billion-$3.725 billion.",
+    "outlet": "Benzinga",
+    "url": "https://www.benzinga.com/trading-ideas/movers/26/11/62972234/axon-enterprise-stock-slides-again-friday-whats-going-on",
+    "date": null
+   }
+  ]
+ },
+ {
+  "ticker": "MCHP",
+  "name": "Microchip Technology",
+  "evidence": [
+   {
+    "id": "e1",
+    "kind": "move",
+    "text": "Microchip Technology (MCHP) fell 10.02% in the regular session on November 6, 2026.",
+    "outlet": null,
+    "url": null,
+    "date": "2026-11-06"
+   },
+   {
+    "id": "e2",
+    "kind": "news",
+    "text": "Microchip Technology said it sees third-quarter adjusted earnings of 87 cents-95 cents per share, versus market estimates of 94 cents per share.",
+    "outlet": "Benzinga",
+    "url": "https://www.benzinga.com/analyst-stock-ratings/price-target/26/11/62973520/microchip-technology-analysts-slash-their-forecasts-after-q2-results",
+    "date": null
+   },
+   {
+    "id": "e3",
+    "kind": "analyst_action",
+    "text": "These analysts made changes to their price targets on Microchip following earnings announcement.",
+    "outlet": "Benzinga",
+    "url": "https://www.benzinga.com/analyst-stock-ratings/price-target/26/11/62973520/microchip-technology-analysts-slash-their-forecasts-after-q2-results",
+    "date": null
+   }
+  ]
+ },
+ {
+  "ticker": "CHTR",
+  "name": "Charter Communications",
+  "evidence": [
+   {
+    "id": "e1",
+    "kind": "move",
+    "text": "Charter Communications (CHTR) fell 6.19% in the regular session on November 6, 2026.",
+    "outlet": null,
+    "url": null,
+    "date": "2026-11-06"
+   },
+   {
+    "id": "e2",
+    "kind": "company_figure",
+    "text": "Revenue: $14.92 billion, reported for Q3 of fiscal 2026.",
+    "outlet": null,
+    "url": "https://www.sec.gov/Archives/edgar/data/1091667/000109166726000072/chtrex991earningsrelease93.htm",
+    "date": null,
+    "quote": "Total Revenues $16,505 $16,764 (1.5) % $14,922 $13,672 9.1%"
+   },
+   {
+    "id": "e3",
+    "kind": "company_figure",
+    "text": "Diluted EPS (GAAP): -$20.50, reported for Q3 of fiscal 2026.",
+    "outlet": null,
+    "url": "https://www.sec.gov/Archives/edgar/data/1091667/000109166726000072/chtrex991earningsrelease93.htm",
+    "date": null,
+    "quote": "Diluted $(20.50) $8.34 $0.38 $25.95"
+   },
+   {
+    "id": "e4",
+    "kind": "company_guidance",
+    "text": "Charter expects pro forma full year 2026 capital expenditures, excluding transition capital expenditures, to total approximately $13.0 billion.",
+    "outlet": null,
+    "url": "https://www.sec.gov/Archives/edgar/data/1091667/000109166726000072/chtrex991earningsrelease93.htm",
+    "date": null
+   },
+   {
+    "id": "e5",
+    "kind": "report_date",
+    "text": "Charter Communications reported results on November 6, 2026 (earnings calendar).",
+    "outlet": null,
+    "url": null,
+    "date": "2026-11-06"
+   }
+  ]
+ }
+]
