@@ -33,7 +33,7 @@
 //! failure never alerts and never touches a post.
 
 use async_trait::async_trait;
-use chrono::{DateTime, Duration, NaiveDate, Timelike, Utc};
+use chrono::{DateTime, NaiveDate, Timelike, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -505,8 +505,8 @@ pub fn warm_judge() -> usize {
 /// tries again within the attempt limits).
 ///
 /// Subrequests in the worst case (each D1 query, R2 get or put and model
-/// call is one): the posts query and a record read per bundle of the last
-/// two ET days (at most 6), then one step:
+/// call is one): the posts query and a record read per bundle of
+/// today and the previous trading day (at most 6), then one step:
 /// - write: at most `ATTEMPT_READS` attempt counters, the month's count,
 ///   the attempt write, the facts, the calendar and earnings-check queries,
 ///   one earnings bundle per mover (at most 8), the cap claim, the writer
@@ -527,7 +527,9 @@ pub async fn insight_tick(
     judge: &dyn LlmProvider,
     cfg: &Config,
 ) -> Result<Tick, String> {
-    let since = (et(now).date_naive() - Duration::days(1))
+    // Today and the previous trading day: a record a Friday left open is
+    // finished on Monday, and the same across a market holiday.
+    let since = crate::why::previous_trading_day(et(now).date_naive())
         .format("%Y-%m-%d")
         .to_string();
     let cands = candidates(store.insight_posts(&since).await?);
@@ -947,6 +949,7 @@ async fn confirm(
 mod tests {
     use super::*;
     use crate::providers::ProviderError;
+    use chrono::Duration;
     use futures::FutureExt;
     use serde_json::{json, Value};
     use std::cell::{Cell, RefCell};
@@ -1663,6 +1666,41 @@ mod tests {
         assert_eq!(s.kv.borrow()["k"], "2");
     }
 
+    /// A record a Friday left open (here `written`, its judge failed until
+    /// the last sweep) is finished by Monday's first sweep: the step looks
+    /// back to the previous trading day, not the calendar day before.
+    #[tokio::test]
+    async fn a_friday_record_is_finished_on_monday_and_across_a_holiday() {
+        for (day, sweep) in [
+            // Friday 2026-11-06, then Monday 2026-11-09 at 08:10 ET.
+            ("2026-11-06", "2026-11-09T13:10:00Z"),
+            // Wednesday 2026-11-25, then Friday 2026-11-27 after Thanksgiving.
+            ("2026-11-25", "2026-11-27T13:10:00Z"),
+        ] {
+            let m = recap_store();
+            m.posts.borrow_mut()[0].trading_date = day.into();
+            to_written(&m).await;
+            let judge = Llm::judge(vec![judge_reply()]);
+            let t = run(&m, sweep.parse().unwrap(), &Llm::none(false), &judge).await;
+            assert_eq!(
+                t.line, "insight recap/2026-11-06.json: judged 3 lines, 3 passed; done",
+                "{day}"
+            );
+            assert_eq!(m.record(RECAP_KEY).unwrap().stage, Stage::Done);
+        }
+        // A record two trading days back is out of the window.
+        let m = recap_store();
+        to_written(&m).await;
+        let t = run(
+            &m,
+            "2026-11-10T13:10:00Z".parse().unwrap(),
+            &Llm::none(false),
+            &Llm::none(true),
+        )
+        .await;
+        assert_eq!(t.line, "insight: no brief or recap to read");
+    }
+
     /// The lead's CPU ruling: a message killed right after the writer's
     /// reply is stored is redelivered and goes on from the stored reply; the
     /// writer is never paid twice.
@@ -2101,7 +2139,7 @@ mod tests {
         }
     }
 
-    /// The most a tick can read: six bundles of the last two ET days, the
+    /// The most a tick can read: six bundles of today and the previous trading day, the
     /// two newest given up (two attempt reads before the third), and a
     /// brief whose eight movers each have an earnings check.
     #[tokio::test]

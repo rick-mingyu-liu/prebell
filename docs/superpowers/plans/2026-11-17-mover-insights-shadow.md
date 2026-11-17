@@ -80,7 +80,7 @@ pub const RECORD_VERSION: &str = "insight-record/v1";
 /// e.g. `insights/premarket/2026-11-17-update.json`.
 pub fn record_key(facts_key: &str) -> String;
 /// One `insight` message: the newest premarket or recap post of the last
-/// 2 ET days whose facts have no record and fewer than MAX_ATTEMPTS tries.
+/// 2 trading days (today and the previous trading day, so a Friday record is finished on Monday) whose facts have no record and fewer than MAX_ATTEMPTS tries.
 pub async fn insight_tick(now, store, writer: &dyn LlmProvider, judge: &dyn LlmProvider, cap: u32) -> Result<String, String>;
 ```
 
