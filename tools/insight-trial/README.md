@@ -181,3 +181,21 @@ judge-passed lines read, counting a mover once per trading date across the
 brief and its update, and any marked wrong. Below 50 read it says "not yet
 assessable". The bar's seeded-recall part comes from the trial's seed run
 and its own report.
+
+## CPU timing
+
+The Worker allows 10 ms of CPU per invocation. `time` measures the insight
+step's own work natively, with no model call: for each stored brief and
+recap in `--facts`, it runs the real `insight::step::insight_tick` over an
+in-memory store with the stored replies from `--lines` (the final run's
+lines as the writer's, Claude's verdicts as the judge's): the write stage
+(reading the facts and earnings checks, the packs, the code checks, the
+record) and the judge stage (the judge-support confirmation, the record),
+each first in a fresh process (every regular expression compiled on first
+use, as in a cold isolate) and then warm (the median of 20 runs). It prints
+a table per post, then the worst and the median of each column. Native
+time understates Wasm.
+
+```sh
+env -u CARGO_TARGET_DIR cargo run --release -- time --facts facts --lines out/lines.jsonl
+```

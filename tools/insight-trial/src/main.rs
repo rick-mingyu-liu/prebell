@@ -19,6 +19,7 @@
 //! cargo run --release -- page --out DIR [--cards 60]
 //! cargo run --release -- score --out DIR --labels FILE
 //! cargo run --release -- shadow --records DIR --out DIR [--labels FILE]
+//! cargo run --release -- time --facts DIR --lines FILE
 //! ```
 //!
 //! `shadow` reads the Worker's shadow-stage records (`fetch-shadow.sh`),
@@ -33,6 +34,7 @@ mod page;
 mod score;
 mod seed;
 mod shadow;
+mod timing;
 
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
@@ -994,7 +996,7 @@ fn finish(m: &Models, r: Result<(), String>) {
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
     let args: Vec<String> = std::env::args().collect();
-    let usage = "usage: insight-trial run --facts DIR --out DIR --dev-vars PATH [--budget 3.0] [--only SUBSTR] [--fresh] [--plan]\n       insight-trial seed --out DIR --dev-vars PATH [--budget 3.0] [--fresh] [--plan]\n       insight-trial page --out DIR [--cards 60]\n       insight-trial score --out DIR --labels FILE\n       insight-trial shadow --records DIR --out DIR [--labels FILE]";
+    let usage = "usage: insight-trial run --facts DIR --out DIR --dev-vars PATH [--budget 3.0] [--only SUBSTR] [--fresh] [--plan]\n       insight-trial seed --out DIR --dev-vars PATH [--budget 3.0] [--fresh] [--plan]\n       insight-trial page --out DIR [--cards 60]\n       insight-trial score --out DIR --labels FILE\n       insight-trial shadow --records DIR --out DIR [--labels FILE]\n       insight-trial time --facts DIR --lines FILE";
     match args.get(1).map(String::as_str) {
         Some("run") => {
             let out = PathBuf::from(need(&args, "--out"));
@@ -1112,6 +1114,97 @@ async fn main() {
                 lines.len(),
                 out.join("label.html").display(),
                 picked.len() - old
+            );
+        }
+        Some("time") => {
+            let facts = PathBuf::from(need(&args, "--facts"));
+            let lines_file = need(&args, "--lines");
+            if let Some(stage) = arg(&args, "--one") {
+                // A child: one stage of one post, in a fresh process.
+                let records: Vec<Record> = read_jsonl(Path::new(&lines_file));
+                let c = timing::case(&facts, &need(&args, "--post"), &records);
+                let written =
+                    arg(&args, "--written").map(|f| fs::read_to_string(f).expect("written"));
+                let (first, warm, line) = timing::measure(&c, &stage, written.as_deref()).await;
+                if let Some(save) = arg(&args, "--save") {
+                    if let Some(w) = timing::written_record(&c).await {
+                        fs::write(save, w).expect("save written record");
+                    }
+                }
+                println!(
+                    "{}",
+                    json!({"first_us": first, "warm_us": warm, "line": line})
+                );
+                return;
+            }
+            let mut rows: Vec<(String, Value, Option<Value>)> = Vec::new();
+            for post in timing::posts(&facts) {
+                let tmp = std::env::temp_dir()
+                    .join(format!("insight-time-{}-{post}.json", std::process::id()));
+                let base = [
+                    "time",
+                    "--facts",
+                    facts.to_str().expect("facts path"),
+                    "--lines",
+                    &lines_file,
+                    "--post",
+                    &post,
+                ];
+                let mut w: Vec<&str> = base.to_vec();
+                w.extend(["--one", "write", "--save", tmp.to_str().expect("tmp")]);
+                let write = timing::spawn(&w);
+                let judge = tmp.exists().then(|| {
+                    let mut j: Vec<&str> = base.to_vec();
+                    j.extend(["--one", "judge", "--written", tmp.to_str().expect("tmp")]);
+                    timing::spawn(&j)
+                });
+                let _ = fs::remove_file(&tmp);
+                rows.push((post, write, judge));
+            }
+            let us = |v: &Value, k: &str| v[k].as_u64().unwrap_or(0) as u128;
+            println!("| Post | Write, first call | Write, warm | Judge, first call | Judge, warm | Write stage |");
+            println!("|---|---|---|---|---|---|");
+            let ms = |u: u128| format!("{:.2} ms", u as f64 / 1000.0);
+            let mut cols: [Vec<u128>; 4] = Default::default();
+            for (post, w, j) in &rows {
+                cols[0].push(us(w, "first_us"));
+                cols[1].push(us(w, "warm_us"));
+                let (jf, jw) = match j {
+                    Some(j) => {
+                        cols[2].push(us(j, "first_us"));
+                        cols[3].push(us(j, "warm_us"));
+                        (ms(us(j, "first_us")), ms(us(j, "warm_us")))
+                    }
+                    None => ("no judge stage".into(), String::new()),
+                };
+                println!(
+                    "| {post} | {} | {} | {jf} | {jw} | {} |",
+                    ms(us(w, "first_us")),
+                    ms(us(w, "warm_us")),
+                    w["line"].as_str().unwrap_or("")
+                );
+            }
+            println!();
+            for (k, name) in [
+                "Write, first call",
+                "Write, warm",
+                "Judge, first call",
+                "Judge, warm",
+            ]
+            .iter()
+            .enumerate()
+            {
+                let (worst, med) = timing::worst_median(&cols[k]);
+                println!(
+                    "{name}: worst {}, median {} over {} posts",
+                    ms(worst),
+                    ms(med),
+                    cols[k].len()
+                );
+            }
+            println!(
+                "\nNative release build; warm is the median of {} runs. No model call is made.",
+                timing::WARM_RUNS
             );
         }
         _ => {
