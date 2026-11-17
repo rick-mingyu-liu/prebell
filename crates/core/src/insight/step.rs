@@ -1056,6 +1056,18 @@ mod tests {
         );
     }
 
+    /// The Worker ships with the step off: Rick turns it to shadow.
+    #[test]
+    fn the_worker_ships_with_insights_off() {
+        let toml = include_str!("../../../generator/wrangler.toml");
+        let lines: Vec<&str> = toml
+            .lines()
+            .filter(|l| l.starts_with("INSIGHTS_MODE"))
+            .collect();
+        assert_eq!(lines, [r#"INSIGHTS_MODE = "off""#]);
+        assert_eq!(mode(Some("off")), Ok(Mode::Off));
+    }
+
     #[test]
     fn config_defaults_to_claude_and_300_calls() {
         assert_eq!(

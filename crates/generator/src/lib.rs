@@ -124,6 +124,24 @@ async fn scheduled(event: ScheduledEvent, env: Env, _ctx: ScheduleContext) {
             Err(e) => console_error!("cron {cron}: queue send for {job} failed: {e}"),
         }
     }
+    // Mover insights: one sweep message per firing in the windows, only
+    // while INSIGHTS_MODE is not off (off: nothing is queued or read).
+    if insight_step::sweep_wanted(text(&env, "INSIGHTS_MODE").as_deref(), now(&env)) {
+        let sent = match env.queue(queue_for("insight")) {
+            Ok(q) => q
+                .send(Job {
+                    job: "insight".into(),
+                    at: Some(at),
+                })
+                .await
+                .map_err(|e| e.to_string()),
+            Err(e) => Err(e.to_string()),
+        };
+        match sent {
+            Ok(()) => console_log!("cron {cron}: queued insight job"),
+            Err(e) => console_error!("cron {cron}: queue send for insight failed: {e}"),
+        }
+    }
 }
 
 /// The Worker side of `jobs::run_job`, for one queue message.

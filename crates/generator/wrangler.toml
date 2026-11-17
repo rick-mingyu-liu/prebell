@@ -97,3 +97,13 @@ IPO_WATCH_ENABLED = "true"
 # Off means no ipo:article messages (the write-ups are written by code); published
 # write-ups stay. To turn it off, delete this line and deploy.
 IPO_ARTICLES_ENABLED = "true"
+# Mover insights (docs/superpowers/plans/2026-11-17-mover-insights-shadow.md): off.
+# "off" (or unset) means nothing runs: no insight messages, no reads, no model
+# calls. "shadow" writes and judges a hook and a "watch next" line per big mover
+# after each brief, 8:35 update and recap, stores every line and verdict in R2
+# under insights/ and shows readers nothing; it needs the ANTHROPIC_API_KEY
+# secret and spends at most INSIGHT_MONTHLY_CALLS model calls a month (default
+# 300, about $3). Anything else is a config error, alerted once a day. Turning
+# it to "shadow" is Rick's call. Optional: INSIGHT_WRITER_PROVIDER and
+# INSIGHT_JUDGE_PROVIDER ("claude", the default, or "deepseek").
+INSIGHTS_MODE = "off"
