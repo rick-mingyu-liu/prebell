@@ -25,12 +25,12 @@
 // below, bumping simple-icons or adding watchlist rows. See docs/runbook.md.
 //   --offline       use only the cache (no requests)
 //   --allow-shrink  accept a manifest that drops tickers the committed one has
-import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import sharp from "sharp";
+import { WIKIDATA_ITEMS, createFetcher, current, hashOf, plain, readWatchlist, wikidataItems } from "./wikimedia.mjs";
 
 const require = createRequire(import.meta.url);
 const WEB = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -168,8 +168,8 @@ const SITES = {
   YUMC: ["https://www.yumchina.com/"],
 };
 
-/** Wikidata items for tickers whose watchlist CIK has no Wikidata match (new holding companies, foreign issuers). */
-const WIKIDATA = { BLK: "Q219635", XOM: "Q156238", NVO: "Q818846", SAN: "Q6496310" };
+/** Wikidata items for tickers whose watchlist CIK has no Wikidata match: `WIKIDATA_ITEMS` in scripts/wikimedia.mjs (shared with the photo build). */
+const WIKIDATA = WIKIDATA_ITEMS;
 
 /** Commons files used instead of the Wikidata logo (which is wrong or the wrong shape); nothing else from Commons is tried. */
 const COMMONS = {
@@ -248,83 +248,17 @@ const PARTNERS = {
 };
 
 // ---------------------------------------------------------------------------------------------
-// Network: cached, one request per second.
-
-let lastRequest = 0;
-const today = () => new Date().toISOString().slice(0, 10);
-
-/** A 2xx, or a 4xx a retry won't change (not 408 timeout or 429 rate limit): safe to cache. */
-const definitive = (status) => (status >= 200 && status < 300) || (status >= 400 && status < 500 && status !== 408 && status !== 429);
-/** Company-site URLs that failed in a way a retry could fix; reported at the end, never cached. */
-const retryable = [];
+// Network: cached, one request per second (two a second to Wikimedia); see scripts/wikimedia.mjs.
 
 /**
- * GET with an on-disk cache. Returns { body, type, url, fetched }, or null. Only definitive answers
- * are cached. A network error, timeout, 408, 429 or 5xx is not: for a `required` source (Wikidata,
- * Commons, a partner file) it stops the run, since a missing answer would silently drop logos; for a
- * company site it is reported, and the shrink check at the end catches any logo it cost.
+ * Wikidata, Commons and partner files are fetched as `required` (a missing answer stops the run, since it
+ * would silently drop logos); company sites are not, and the shrink check at the end catches any logo a
+ * failed site cost. Company-site URLs that failed in a way a retry could fix end up in `retryable`.
  */
-async function get(url, required = false) {
-  mkdirSync(CACHE, { recursive: true });
-  const key = join(CACHE, createHash("sha1").update(url).digest("hex"));
-  const cached = existsSync(`${key}.json`) && JSON.parse(readFileSync(`${key}.json`, "utf8"));
-  // Older caches also hold transient failures (no status, or a retryable one): those don't count.
-  if (cached && definitive(cached.status ?? (cached.ok ? 200 : 0))) return cached.ok ? { ...cached, body: readFileSync(key) } : null;
-  if (retryable.includes(url)) return null; // already failed this run
-  let why = "not cached (--offline)";
-  if (!OFFLINE) {
-    await new Promise((r) => setTimeout(r, Math.max(0, lastRequest + (/(^|\.)(wikimedia|wikidata|wikipedia)\.org$/.test(new URL(url).hostname) ? 500 : 1000) - Date.now())));
-    lastRequest = Date.now();
-    try {
-      const res = await fetch(url, { headers: { "User-Agent": UA }, signal: AbortSignal.timeout(20_000) });
-      const meta = { ok: res.ok, status: res.status, url: res.url, type: res.headers.get("content-type") ?? "", fetched: today() };
-      const body = Buffer.from(await res.arrayBuffer());
-      if (definitive(res.status)) {
-        writeFileSync(`${key}.json`, JSON.stringify(meta));
-        if (res.ok) writeFileSync(key, body);
-        if (!res.ok) console.warn(`  ${url}: HTTP ${res.status}`);
-        return res.ok ? { ...meta, body } : null;
-      }
-      why = `HTTP ${res.status}`;
-    } catch (e) {
-      why = e.cause?.code ?? e.name;
-    }
-  }
-  if (required) throw new Error(`${url}: ${why}. Nothing was written; run again later.`);
-  console.warn(`  ${url}: ${why} (not cached)`);
-  retryable.push(url);
-  return null;
-}
-
-const getJson = async (url) => {
-  const res = await get(url, true);
-  if (!res) throw new Error(`${url}: no answer`);
-  return JSON.parse(res.body.toString("utf8"));
-};
+const { get, getJson, retryable } = createFetcher({ cache: CACHE, ua: UA, offline: OFFLINE });
 
 // ---------------------------------------------------------------------------------------------
 // Wikidata and Commons.
-
-/** Ticker -> Wikidata item, matched on the SEC CIK (P5531, stored zero-padded to 10 digits). */
-async function wikidataItems(rows) {
-  const byCik = {};
-  for (let i = 0; i < rows.length; i += 80) {
-    const ciks = rows.slice(i, i + 80).map((r) => `"${r.cik.padStart(10, "0")}"`).join(" ");
-    const query = `SELECT ?cik ?item WHERE { VALUES ?cik { ${ciks} } ?item wdt:P5531 ?cik. }`;
-    const res = await getJson(`https://query.wikidata.org/sparql?format=json&query=${encodeURIComponent(query)}`);
-    for (const b of res.results.bindings) byCik[b.cik.value] ??= b.item.value.split("/").pop();
-  }
-  return Object.fromEntries(rows.map((r) => [r.ticker, WIKIDATA[r.ticker] ?? byCik[r.cik.padStart(10, "0")]]));
-}
-
-/** Current values of a property: not deprecated, no end date, preferred rank and newest start first. */
-function current(claims = []) {
-  const start = (c) => c.qualifiers?.P580?.[0]?.datavalue?.value.time ?? "";
-  return claims
-    .filter((c) => c.rank !== "deprecated" && !c.qualifiers?.P582 && c.mainsnak.datavalue)
-    .sort((a, b) => (b.rank === "preferred") - (a.rank === "preferred") || start(b).localeCompare(start(a)))
-    .map((c) => c.mainsnak.datavalue.value);
-}
 
 /** Item -> { icons, logos, sites } from wbgetentities, 50 items a request. */
 async function entities(ids) {
@@ -338,7 +272,6 @@ async function entities(ids) {
   return out;
 }
 
-const plain = (html = "") => html.replace(/<[^>]+>/g, "").replace(/\s+/g, " ").trim();
 /**
  * Free licences accepted from Commons: public domain (incl. PD-textlogo, PD-shape) and CC0 only. CC BY and
  * CC BY-SA need a visible credit, which no page gives, so those files are not used.
@@ -604,9 +537,6 @@ async function renderMark(art) {
   return done(await out(sharp(back).composite([{ input: glyph.data, gravity: "centre" }])));
 }
 
-/** The first 8 hex digits of a file's SHA-1: the `?v=` of its URL, so a changed file is a new URL (served immutable for a year). */
-const hashOf = (buf) => createHash("sha1").update(buf).digest("hex").slice(0, 8);
-
 const icon = (slug) => {
   const data = SI_DATA.find((i) => i.slug === slug);
   if (!data) throw new Error(`simple-icons ${SI_VERSION} has no "${slug}"`);
@@ -619,13 +549,7 @@ const icon = (slug) => {
 // ---------------------------------------------------------------------------------------------
 // Build.
 
-const watchRows = readFileSync(WATCHLIST, "utf8")
-  .split("\n")
-  .filter((l) => l.trim() && !l.startsWith("#"))
-  .map((l) => {
-    const [ticker, cik, , name, domains = "", , tier] = l.split("\t").map((s) => s.trim());
-    return { ticker, cik, name, domains: domains.split(",").filter(Boolean), tier };
-  });
+const watchRows = readWatchlist(WATCHLIST);
 const tickers = watchRows.map((w) => w.ticker);
 for (const t of [...Object.keys(COMPANIES), ...Object.keys(SKIP), ...Object.keys(NO_SITE_ICON), ...Object.keys(SITES), ...Object.keys(NO_COMMONS), ...Object.keys(COMMONS), ...Object.keys(WIKIDATA), ...Object.keys(COMMONS_FALLBACK)])
   if (!tickers.includes(t)) console.warn(`  ${t} is in a mapping but not on the watchlist (ignored)`);
@@ -650,7 +574,7 @@ const manifest = {};
 const sizes = {};
 const partnerManifest = {};
 const todo = watchRows.filter((w) => !(w.ticker in SKIP));
-const items = await wikidataItems(todo);
+const items = await wikidataItems(todo, getJson, WIKIDATA);
 const claims = await entities([...new Set(Object.values(items).filter(Boolean))]);
 const commons = await commonsInfo([
   ...new Set([...Object.values(COMMONS), ...Object.values(COMMONS_FALLBACK), ...Object.values(claims).flatMap((c) => [...c.logos, ...c.icons])]),
