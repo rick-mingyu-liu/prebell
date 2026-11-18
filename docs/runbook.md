@@ -468,7 +468,7 @@ A hook and one "watch next" sentence per big mover, in English and Chinese: writ
 
 ### The switch
 
-`INSIGHTS_MODE` in `crates/generator/wrangler.toml` `[vars]`: `"off"` (unset is the same) or `"shadow"`. Since 2026-11-17 it is `"shadow"`, on Rick's go, with `INSIGHT_MONTHLY_CALLS = "10"` for the first measurement on Workers (`docs/decisions.md`, 2026-11-17). Off means nothing runs: no insight message is queued by a publish or a cron, a stray one returns before any read, and no model is called. Any other value is a config error, alerted once per ET day under `config:insight:<date>`; it still queues one insight message per firing in the sweep windows, so the error is reported. Turning it to `shadow` was Rick's call (2026-11-17, after the dry run of writer v6 and judge v3, Plan 2, Task 7). The first shadow run is the CPU measurement on Workers (below), capped at 10 calls; raising the cap is Rick's call too.
+`INSIGHTS_MODE` in `crates/generator/wrangler.toml` `[vars]`: `"off"` (unset is the same) or `"shadow"`. Since 2026-11-17 it is `"shadow"`, on Rick's go; the first run was capped at 10 calls, and since 2026-11-18 `INSIGHT_MONTHLY_CALLS = "300"` (`docs/decisions.md`, 2026-11-17 and 2026-11-18). Off means nothing runs: no insight message is queued by a publish or a cron, a stray one returns before any read, and no model is called. Any other value is a config error, alerted once per ET day under `config:insight:<date>`; it still queues one insight message per firing in the sweep windows, so the error is reported. Turning it to `shadow` was Rick's call (2026-11-17, after the dry run of writer v6 and judge v3, Plan 2, Task 7). The first shadow run was the CPU measurement on Workers (below), capped at 10 calls; Rick raised the cap to 300 on 2026-11-18.
 
 ### Before the first deploy that includes it (owner only)
 
@@ -482,9 +482,16 @@ After a brief, its 8:35 update or a recap publishes, its job queues an `insight`
 
 At most `INSIGHT_MONTHLY_CALLS` model calls per ET month (default 300: $2.40 to $6 a month at the trial's measured $0.008 to $0.02 a call), each claimed in kv `insight_calls:<YYYY-MM>` before it is made; at the cap the step stops for the month and says so once in the log. Read the count: `pnpm exec wrangler d1 execute prebell --remote --json --command "SELECT key, value FROM kv WHERE key LIKE 'insight_calls:%'"`. Writer and judge are `claude-sonnet-5-5`, effort low (`INSIGHT_WRITER_PROVIDER`, `INSIGHT_JUDGE_PROVIDER`; never `LLM_PROVIDER`), with the `ANTHROPIC_API_KEY` secret; without it the step logs and skips.
 
-### The first measurement on Workers
+### The first measurement on Workers (2026-11-17)
 
-The step's cold CPU is measured only in V8 under Node (`tools/insight-cpu-wasm`), where its check step takes about twice a share card render's first call. Measure it on Workers before running shadow for good: set `INSIGHT_MONTHLY_CALLS = "10"` (the knob that bounds the first run: two calls a bundle, so about 5 bundles), set `INSIGHTS_MODE = "shadow"`, deploy, and read CPU time per invocation for the `insight` messages in the Workers dashboard (Metrics, CPU time) and the log lines `job insight: …` (`wrangler tail`). If the check step is not tolerated, it is split by language before the cap goes back to 300.
+Before the first run the step's cold CPU was known only from V8 under Node (`tools/insight-cpu-wasm`), where the check step took about twice a share card render's first call, and the docs did not settle how much CPU a free-plan queue consumer gets. The first shadow run (generator version `fdc640a3`, `INSIGHT_MONTHLY_CALLS = "10"`, read with `wrangler tail --format json`) settled it for this step:
+
+- Five bundles finished within six minutes; every invocation's outcome was `ok`.
+- CPU per `insight` invocation: 174 ms for the first write step and 129 ms for the first check step (cold), then 13 to 27 ms; one idle sweep at 22 ms. The earnings poll ran at 84, 141 and 179 ms in the same capture, and earnings builds on the morning of 2026-11-18 completed at 159 to 326 ms, so invocations of this size complete on the free plan. No limit was read from the platform; this is what completed.
+- At most 14 subrequests in one `insight` invocation (`insight_ops` 13 plus `subrequests` 1, the judge step), and at most 5 D1 queries; 17 counting both.
+- The check step is not split by language for now. That rests on one cold check sample (129 ms) and on heavier jobs completing beside it, not on a known limit: measure again if any `insight` invocation ends with an outcome other than `ok`.
+
+Not exercised by that run: the stop at the cap (the count matched the records, 4 calls, but the cap was not reached). To measure again, capture `wrangler tail prebell-generator --format json` across a sweep window (08:10-09:30 or 16:10-17:30 ET) and read `cpuTime` and `outcome` per event.
 
 ### Records
 
