@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { getTranslations, setRequestLocale } from "next-intl/server";
+import CompanyPhoto from "@/components/CompanyPhoto";
 import PostList from "@/components/PostList";
 import type { Locale } from "@/i18n/routing";
 import { getDb } from "@/lib/db";
@@ -13,6 +14,7 @@ import {
   tickerHasCheck,
   tickerKnown,
 } from "@/lib/earnings";
+import { companyPhoto } from "@/lib/photos";
 import { pairedAlternates, shareMetadata } from "@/lib/seo";
 import { formatDate } from "@/lib/time";
 
@@ -57,11 +59,13 @@ export default async function TickerArchive({ params }: PageProps<"/[locale]/t/[
   };
   const slot: Record<string, string> = { bmo: t("bmo"), amc: t("amc"), unknown: t("timeUnknown") };
   const name = companyName(ticker);
+  const photo = companyPhoto(ticker, locale);
 
   return (
     <div className="list-page">
       <h1>{t("tickerTitle", { ticker })}</h1>
       {name && <p className="meta">{name}</p>}
+      {photo && <CompanyPhoto photo={photo} locale={locale} />}
       <section aria-labelledby="checks">
         <h2 className="section-title" id="checks">
           {t("checks")}

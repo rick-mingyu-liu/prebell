@@ -1,6 +1,7 @@
 import Link from "next/link";
 import AuthorBlock from "./AuthorBlock";
 import Charts from "./Charts";
+import CompanyPhoto from "./CompanyPhoto";
 import Cover, { type CoverProps } from "./Cover";
 import MoversTable from "./MoversTable";
 import PartnersStrip from "./PartnersStrip";
@@ -10,6 +11,7 @@ import SignupForm from "./SignupForm";
 import type { Locale } from "../i18n/routing";
 import { briefKind, type BriefData } from "../lib/brief";
 import { writeupIpoSlug } from "../lib/ipo";
+import { companyPhoto } from "../lib/photos";
 import { pendingTitle, typeLabel } from "../lib/labels";
 import type { PostListItem } from "../lib/posts";
 import { formatDate, formatDayShort, formatEt, formatEtTime, formatMonthDay } from "../lib/time";
@@ -30,7 +32,8 @@ export interface BriefViewProps {
  * under the body's movers heading, right before the movers prose;
  * a body without that heading (an older post) and a pending page show the table first under a generic
  * heading. Without facts, and for an earnings check, the body keeps its tables
- * (the key-figure table exactly as written) and an earnings check adds its charts. Then the sources,
+ * (the key-figure table exactly as written) and an earnings check adds its charts, and its company's
+ * photo under the lede when there is one. Then the sources,
  * the author, the signup (when enabled), a brief's neighbours and the partner strip.
  */
 export default function BriefView({ data, locale, signup }: BriefViewProps) {
@@ -59,6 +62,8 @@ export default function BriefView({ data, locale, signup }: BriefViewProps) {
   );
   // An IPO write-up links to its IPO page, named by its facts key (`ipo/<ipo_slug>/...`).
   const ipoSlug = post.contentType === "ipo" ? writeupIpoSlug(post.factsKey) : null;
+  // An earnings check shows its company's photo, when it has one, under the opening paragraph.
+  const photo = post.contentType === "earnings" && story ? companyPhoto(post.ticker, locale) : null;
   const neighbour = (p: PostListItem) => `${typeLabel(t, p.contentType)} · ${formatDayShort(p.tradingDate, locale)}`;
 
   return (
@@ -103,6 +108,7 @@ export default function BriefView({ data, locale, signup }: BriefViewProps) {
 
       <div className="story-body">
         {story && post.summary && <p className="story-lede">{post.summary}</p>}
+        {photo && <CompanyPhoto photo={photo} locale={locale} />}
         {movers.length > 0 && !inline && moversSection(t("brief.movers"))}
         {!story ? (
           <PendingNotice slug={post.slug} locale={locale} />
