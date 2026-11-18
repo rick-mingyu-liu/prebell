@@ -719,12 +719,26 @@ pub fn verify_figure(text: &str, metric: Metric, raw: &RawFigure) -> Result<Figu
 /// shares, which are reflected in thousands)" is a millions table. So does
 /// an unparenthesised one outside parentheses: "In millions, except per
 /// share amounts", "Dollars in millions, except per share data".
-fn scale_heading(before: &str) -> Option<(usize, f64)> {
+///
+/// A parenthesised heading may also open with the unit word itself, as
+/// Target's do: "(millions, except per share data)", "(millions)",
+/// "($ millions)", "(millions of dollars)". The word must then end the
+/// heading, or be followed by a comma, "except" or "of dollars", so
+/// "(millions of shares)" or "(millions of customers)" never scales a
+/// dollar row. A heading whose lead before "in" names shares and neither
+/// dollars nor amounts ("(shares in millions)") is a share-count table and
+/// is not one either. A unit-first heading must also open its line (`starts`
+/// holds where each line of `before` starts): a caption, not a row label
+/// ("Retail square feet (thousands)"), a column label or prose, which would
+/// otherwise stand between a table's real heading and its rows.
+fn scale_heading(before: &str, starts: &[usize]) -> Option<(usize, f64)> {
     static PAREN: OnceLock<Regex> = OnceLock::new();
     static BARE: OnceLock<Regex> = OnceLock::new();
     let paren = PAREN.get_or_init(|| {
-        Regex::new(r"(?i)\([^()]{0,30}?\bin\s+(thousands|millions|billions)\b")
-            .expect("valid built-in regex")
+        Regex::new(
+            r"(?i)\((?:([^()]{0,30}?)\bin\s+(thousands|millions|billions)\b|\s*\$?\s*(thousands|millions|billions)\s*(?:\)|,|except\b|of\s+(?:u\.?s\.?\s+)?dollars\b))",
+        )
+        .expect("valid built-in regex")
     });
     let bare = BARE.get_or_init(|| {
         Regex::new(
@@ -733,9 +747,23 @@ fn scale_heading(before: &str) -> Option<(usize, f64)> {
         .expect("valid built-in regex")
     });
     let inside_parens = |at: usize| before[..at].rfind('(') > before[..at].rfind(')');
-    let paren = paren
-        .captures_iter(before)
-        .filter_map(|c| Some((c.get(0)?.start(), c.get(1)?.as_str())));
+    // "(Shares in millions)": a count, not money. "(Dollars and shares in
+    // millions)" names dollars and stays a heading.
+    let share_count = |lead: &str| {
+        let lead = lead.to_ascii_lowercase();
+        lead.contains("share")
+            && !lead.contains("dollar")
+            && !lead.contains("amount")
+            && !lead.contains('$')
+    };
+    let paren = paren.captures_iter(before).filter_map(|c| {
+        let unit = match (c.get(2), c.get(3)) {
+            (Some(u), _) if !c.get(1).is_some_and(|l| share_count(l.as_str())) => u,
+            (None, Some(u)) if starts.binary_search(&c.get(0)?.start()).is_ok() => u,
+            _ => return None,
+        };
+        Some((c.get(0)?.start(), unit.as_str()))
+    });
     let bare = bare
         .captures_iter(before)
         .filter_map(|c| Some((c.get(0)?.start(), c.get(1).or(c.get(2))?.as_str())))
@@ -791,7 +819,7 @@ struct Table<'a> {
 impl<'a> Table<'a> {
     fn find(lines: &'a Lines, quote: &str) -> Option<Self> {
         let quote_at = lines.doc.find(quote)?;
-        let (heading_at, scale) = scale_heading(&lines.doc[..quote_at])?;
+        let (heading_at, scale) = scale_heading(&lines.doc[..quote_at], &lines.starts)?;
         Some(Table {
             lines,
             quote_at,
@@ -4438,6 +4466,174 @@ mod tests {
             let t = format!("(In millions)\nThree Months Ended September 30,\n2026 2025\n{q}");
             let r = verify_figure(&t, Metric::NetIncome, &raw("1,210", "millions", false, &q));
             assert_eq!(r.map(|f| f.value), Ok(1_210e6), "{q}");
+        }
+    }
+
+    /// Target's release (2026-11-18): its tables open with the unit word,
+    /// "(millions, except per share data)" and "(millions)", with no "in".
+    /// Both Net sales rows read as millions; per-share figures stay as
+    /// written, with the table's scale only noted, as under "(In millions,
+    /// except per share amounts)".
+    #[test]
+    fn targets_unit_first_headings_scale_its_tables() {
+        let text = include_str!("testdata/tgt_2026q3_ex99_excerpt.txt");
+        for q in [
+            "Net sales $27,067 $25,270 7.1% $79,049 $74,327 6.4%",
+            "Net sales $27,067 $25,270 $79,049 $74,327",
+        ] {
+            let f = verify_figure(text, Metric::Revenue, &raw("$27,067", "millions", false, q));
+            assert_eq!(f.unwrap().value, 27.067e9, "{q}");
+        }
+        let v = json!({"metrics": {
+            "revenue": {"amount": "$27,067", "scale": "millions", "negative": false, "quote": "Net sales $27,067 $25,270 7.1% $79,049 $74,327 6.4%"},
+            "net_income": {"amount": "$1,211", "scale": "millions", "negative": false, "quote": "Net earnings $1,211 $689 75.8% $3,869 $2,660 45.5%"},
+            "eps_gaap_diluted": {"amount": "$2.65", "scale": "units", "negative": false, "quote": "Diluted earnings per share $2.65 $1.51 74.8% $8.47 $5.84 45.2%"}
+        }});
+        let e = from_reply(text, &v);
+        assert_eq!(e.metrics.value(Metric::Revenue).unwrap().value, 27.067e9);
+        assert_eq!(e.metrics.value(Metric::NetIncome).unwrap().value, 1.211e9);
+        let eps = e.metrics.value(Metric::EpsGaap).unwrap();
+        assert_eq!(
+            (eps.value, eps.unit, eps.scale),
+            (2.65, Unit::UsdPerShare, 1.0)
+        );
+        assert_eq!(eps.table_scale, Some(1e6));
+    }
+
+    /// A share-count or other non-dollar heading never gives a dollar row
+    /// its scale; a heading that names dollars, or the unit alone, does.
+    #[test]
+    fn share_count_headings_never_scale_a_dollar_row() {
+        let table = |heading: &str| {
+            format!("{heading}\nThree Months Ended\nOctober 31, 2026 November 1, 2025\nTotal revenue 454.0 453.7")
+        };
+        let q = "Total revenue 454.0 453.7";
+        for heading in [
+            "(millions of shares)",
+            "(Millions of Shares)",
+            "(shares in millions)",
+            "(Shares in millions) (unaudited)",
+            "(millions of customers)",
+        ] {
+            let f = verify_figure(
+                &table(heading),
+                Metric::Revenue,
+                &raw("454.0", "millions", false, q),
+            );
+            assert_eq!(
+                f.unwrap_err(),
+                "no \"(In millions)\"-style table heading above the quote",
+                "{heading}"
+            );
+        }
+        for (heading, value) in [
+            ("(millions)", 454.0e6),
+            ("(millions) (unaudited)", 454.0e6),
+            ("(millions, except per share data)", 454.0e6),
+            ("(millions except per share data)", 454.0e6),
+            ("($ millions)", 454.0e6),
+            ("(millions of dollars)", 454.0e6),
+            ("(thousands)", 454.0e3),
+            ("(Dollars and shares in millions)", 454.0e6),
+            ("(Amounts and shares in millions)", 454.0e6),
+            (
+                "(In millions, except shares, which are reflected in thousands)",
+                454.0e6,
+            ),
+        ] {
+            let scale = if value == 454.0e3 {
+                "thousands"
+            } else {
+                "millions"
+            };
+            let f = verify_figure(
+                &table(heading),
+                Metric::Revenue,
+                &raw("454.0", scale, false, q),
+            );
+            assert_eq!(f.unwrap().value, value, "{heading}");
+        }
+    }
+
+    /// Parentheticals that are not scale headings stay so, and the nearest
+    /// heading above the quote is still the one read (no wider look-up).
+    #[test]
+    fn other_parentheticals_are_not_scale_headings() {
+        for t in [
+            "(unaudited)",
+            "(1)",
+            "(a)",
+            "(%)",
+            "(in percent)",
+            "Target serves millions of families (millions of guests visit)",
+            "growth (millions more)",
+        ] {
+            assert_eq!(scale_heading(t, &[0]), None, "{t}");
+        }
+        let two = Lines::new(
+            "(millions, except per share data)\nNet sales $27,067\n(thousands)\nOther 12",
+        );
+        let at = two.doc.find("Other").unwrap();
+        assert_eq!(
+            scale_heading(&two.doc[..at], &two.starts).map(|(_, s)| s),
+            Some(1e3)
+        );
+    }
+
+    /// Review M1 of PR #75: a unit-first parenthetical is a heading only when
+    /// it opens its line. A row label, or prose, between a table's real
+    /// heading and the quoted row never becomes the nearest heading, so a
+    /// model that claims that label's scale is refused, not published 1000x
+    /// off.
+    #[test]
+    fn unit_first_headings_must_open_their_line() {
+        let q = "Total revenue 454.0 453.7";
+        for label in [
+            "Retail square feet (thousands) 245,939 245,000",
+            "Stores (thousands, except store count) 1,990 1,978",
+        ] {
+            let t = format!(
+                "(In millions)\nThree Months Ended\nOctober 31, 2026 November 1, 2025\n{label}\n{q}"
+            );
+            let f = verify_figure(&t, Metric::Revenue, &raw("454.0", "millions", false, q));
+            assert_eq!(f.unwrap().value, 454.0e6, "{label}");
+            let f = verify_figure(&t, Metric::Revenue, &raw("454.0", "thousands", false, q));
+            assert!(f.unwrap_err().contains("not in thousands"), "{label}");
+        }
+        // Prose is not a heading, on its own line or after a caption.
+        for t in [
+            "Net sales grew to $27,067 (millions) of sales",
+            "Comparable sales (millions, except per share data) rose",
+        ] {
+            assert_eq!(scale_heading(t, &[0]), None, "{t}");
+        }
+        let prose = Lines::new(
+            "(In millions)\nNet sales grew to $27,067 (thousands) in the quarter\nOther 12",
+        );
+        let at = prose.doc.find("Other").unwrap();
+        assert_eq!(
+            scale_heading(&prose.doc[..at], &prose.starts).map(|(_, s)| s),
+            Some(1e6)
+        );
+        // A line that opens with the heading still is one, below other lines.
+        for (heading, scale) in [
+            ("(millions)", 1e6),
+            ("(millions, except per share data)", 1e6),
+            (
+                "(millions, except per share data) (unaudited) October 31, 2026",
+                1e6,
+            ),
+            ("(thousands)", 1e3),
+        ] {
+            let l = Lines::new(&format!(
+                "TARGET CORPORATION\nConsolidated Statements\n{heading}\nOther 12"
+            ));
+            let at = l.doc.find("Other").unwrap();
+            assert_eq!(
+                scale_heading(&l.doc[..at], &l.starts).map(|(_, s)| s),
+                Some(scale),
+                "{heading}"
+            );
         }
     }
 }

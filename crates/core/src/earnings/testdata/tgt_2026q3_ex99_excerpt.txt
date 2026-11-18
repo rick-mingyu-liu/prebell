@@ -1,0 +1,42 @@
+Excerpt of Target Corporation's third-quarter 2026 earnings release (EX-99, accession 0000027419-26-000051, a2026q3ex-99.htm on SEC EDGAR), as edgar::html_to_text gives it: the consolidated statement of operations and the net sales table.
+Target Corporation Reports Third Quarter Earnings — Page 6 of 15
+TARGET CORPORATION
+Consolidated Statements of Operations
+Three Months Ended Nine Months Ended
+(millions, except per share data) (unaudited) October 31, 2026 November 1, 2025 Change October 31, 2026 November 1, 2025 Change
+Net sales $27,067 $25,270 7.1% $79,049 $74,327 6.4%
+Cost of sales 18,808 18,137 3.7 54,472 53,168 2.5
+Selling, general, and administrative expenses 5,922 5,536 7.0 17,208 15,486 11.1
+Depreciation and amortization (exclusive of depreciation included in cost of sales) 665 649 2.3 2,002 1,936 3.4
+Operating income 1,672 948 76.4 5,367 3,737 43.6
+Net interest expense 95 115 (16.7) 310 346 (10.5)
+Net other expense / (income) (14) (26) (41.9) (27) (68) (60.8)
+Earnings before income taxes 1,591 859 85.3 5,084 3,459 47.0
+Provision for income taxes 380 170 124.0 1,215 799 52.1
+Net earnings $1,211 $689 75.8% $3,869 $2,660 45.5%
+Basic earnings per share $2.67 $1.52 75.7% $8.52 $5.85 45.6%
+Diluted earnings per share $2.65 $1.51 74.8% $8.47 $5.84 45.2%
+Weighted average common shares outstanding
+Basic 454.0 453.7 0.1% 454.1 454.4 (0.1) %
+Diluted 457.6 455.1 0.6% 456.7 455.7 0.2%
+Antidilutive shares — 2.3 — 2.3
+Dividends declared per share $1.16 $1.14 1.8% $3.46 $3.40 1.8%
+Target Corporation Reports Third Quarter Earnings — Page 7 of 15
+Target Corporation Reports Third Quarter Earnings — Page 9 of 15
+TARGET CORPORATION
+Operating Results
+Net Sales Three Months Ended Nine Months Ended
+(millions) (unaudited) October 31, 2026 November 1, 2025 October 31, 2026 November 1, 2025
+Apparel & accessories $3,691 $3,838 $11,629 $11,635
+Beauty 3,525 3,232 10,562 9,729
+Food & beverage 6,406 6,008 18,661 17,499
+Hardlines (Fun 101) 4,046 3,190 11,461 9,786
+Home furnishings & décor 4,007 3,908 10,912 10,789
+Household essentials 4,747 4,542 13,934 13,321
+Other merchandise sales 27 34 132 117
+Merchandise sales 26,449 24,752 77,291 72,876
+Advertising revenue (a) 296 241 821 621
+Credit card profit sharing 153 119 422 395
+Other 169 158 515 435
+Net sales $27,067 $25,270 $79,049 $74,327
+(a)Primarily represents revenue related to advertising services provided via the Company's Roundel digital advertising business offering. Roundel services are classified as either Net Sales or as a reduction of Cost of Sales or Selling, General, and Administrative (SG&A) Expenses, depending on the nature of the advertising arrangement.
