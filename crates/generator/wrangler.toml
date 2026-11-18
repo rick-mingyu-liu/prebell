@@ -114,9 +114,9 @@ IPO_WATCH_ENABLED = "true"
 # write-ups stay. To turn it off, delete this line and deploy.
 IPO_ARTICLES_ENABLED = "true"
 # Mover insights (docs/runbook.md "Mover insights"): shadow since 2026-11-17, on
-# Rick's go, with the first run capped at 10 model calls to measure CPU time
-# on Workers (INSIGHT_MONTHLY_CALLS below; remove that line for the default 300
-# only with Rick's word, once the measurement is read).
+# Rick's go. The first run was capped at 10 model calls to measure CPU time on
+# Workers; on 2026-11-18, with that measurement read, Rick raised the cap to
+# 300 calls a month (INSIGHT_MONTHLY_CALLS below; changing it is his call).
 # "off" (or unset) means nothing runs: no insight messages, no reads, no model
 # calls. "shadow" writes and judges a hook and a "watch next" line per big mover
 # after each brief, 8:35 update and recap, stores every line and verdict in R2
@@ -129,4 +129,4 @@ IPO_ARTICLES_ENABLED = "true"
 # INSIGHT_WRITER_PROVIDER and INSIGHT_JUDGE_PROVIDER ("claude", the default, or
 # "deepseek").
 INSIGHTS_MODE = "shadow"
-INSIGHT_MONTHLY_CALLS = "10"
+INSIGHT_MONTHLY_CALLS = "300"

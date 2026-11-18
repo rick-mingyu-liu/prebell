@@ -1473,11 +1473,11 @@ mod tests {
         );
     }
 
-    /// The Worker ships in shadow with the first run capped at 10 model
-    /// calls (Rick's go, 2026-11-17): the cap bounds the CPU measurement on
-    /// Workers, and raising it is his call.
+    /// The Worker ships in shadow, capped at 300 model calls a month (Rick's
+    /// go: shadow on 2026-11-17, the cap raised from the first run's 10 on
+    /// 2026-11-18). Changing either is his call.
     #[test]
-    fn the_worker_ships_in_shadow_capped_at_ten_calls() {
+    fn the_worker_ships_in_shadow_capped_at_300_calls() {
         let toml = include_str!("../../../generator/wrangler.toml");
         let set =
             |name: &str| -> Vec<&str> { toml.lines().filter(|l| l.starts_with(name)).collect() };
@@ -1485,9 +1485,9 @@ mod tests {
         assert_eq!(mode(Some("shadow")), Ok(Mode::Shadow));
         assert_eq!(
             set("INSIGHT_MONTHLY_CALLS"),
-            [r#"INSIGHT_MONTHLY_CALLS = "10""#]
+            [r#"INSIGHT_MONTHLY_CALLS = "300""#]
         );
-        assert_eq!(config(None, None, Some("10")).unwrap().cap, 10);
+        assert_eq!(config(None, None, Some("300")).unwrap().cap, 300);
     }
 
     #[test]
