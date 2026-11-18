@@ -1,0 +1,103 @@
+# Company photos: the only list the build reads (scripts/build-photos.mjs; docs/runbook.md, "Photos").
+# Tab-separated: ticker, exact Wikimedia Commons file name, English caption, Chinese caption.
+# A row ships only when its licence, author, shape, year and headquarters checks pass. Remove a row to drop a photo.
+AAPL	Apple park cupertino 2019.jpg	Apple Park, Apple's headquarters in Cupertino, California, from the air in 2019.	Apple总部Apple Park的鸟瞰图，位于加利福尼亚州库比蒂诺，摄于2019年。
+ADBE	Adobe World Headquarters.jpg	Adobe's headquarters in San Jose, California, in 2007.	Adobe位于加利福尼亚州圣何塞的总部，摄于2007年。
+ADP	ADP Headquarters.jpg	ADP's headquarters in Roseland, New Jersey, in 2010.	ADP位于新泽西州Roseland的总部，摄于2010年。
+AMD	2485 Augustine Drive headquarters in Santa Clara, California.jpg	AMD's headquarters at 2485 Augustine Drive in Santa Clara, California, in 2020.	AMD位于加利福尼亚州圣克拉拉Augustine Drive 2485号的总部，摄于2020年。
+AMGN	Amgenheadquarters.jpg	A building at Amgen's headquarters in Thousand Oaks, California, in 2016.	Amgen位于加利福尼亚州千橡市的总部园区内的一栋建筑，摄于2016年。
+APD	Air Products Headquarters, Trexlertown.JPG	Air Products' offices in Trexlertown, Pennsylvania, in 2014.	Air Products位于宾夕法尼亚州Trexlertown的办公楼，摄于2014年。
+ASML	ASML headquarters Veldhoven.jpg	ASML's headquarters in Veldhoven, the Netherlands, in 2008.	ASML位于荷兰Veldhoven的总部，摄于2008年。
+AZO	Autozonehqmemphis.jpg	AutoZone's headquarters in Memphis, Tennessee, in 2017.	AutoZone位于田纳西州孟菲斯的总部，摄于2017年。
+BA	Boeing Everett Plant.jpg	Boeing's widebody aircraft factory in Everett, Washington, in 2008.	Boeing位于华盛顿州埃弗里特的宽体客机工厂，摄于2008年。
+BEN	One Franklin Parkway.jpg	One Franklin Parkway, Franklin Templeton's headquarters in San Mateo, California, in 2022.	Franklin Templeton位于加利福尼亚州圣马特奥的总部One Franklin Parkway，摄于2022年。
+BIDU	Baidu Technology Park at ZPark Phase II (20220502113650).jpg	Baidu Technology Park, Baidu's headquarters in Beijing, in 2022.	百度位于北京的总部百度科技园，摄于2022年。
+BIIB	Biogen.jpg	The Philip A. Sharp Building in Cambridge, Massachusetts, which houses Biogen's headquarters, in 2022.	马萨诸塞州剑桥市的Philip A. Sharp大楼，Biogen总部所在地，摄于2022年。
+CAH	Cardinal Health headquarters (Dublin, Ohio).jpg	Cardinal Health's headquarters in Dublin, Ohio, in 2021.	Cardinal Health位于俄亥俄州都柏林的总部，摄于2021年。
+CCI	Cci hq.jpg	Crown Castle's headquarters in Houston, Texas.	Crown Castle位于得克萨斯州休斯敦的总部。
+CDW	CDWChicago.jpg	CDW's offices at 120 South Riverside Plaza in Chicago, in 2018.	CDW位于芝加哥South Riverside Plaza 120号的办公楼，摄于2018年。
+CFG	One Citizens Plaza north side.jpg	One Citizens Plaza in Providence, Rhode Island, in 2019.	罗得岛州普罗维登斯的One Citizens Plaza大楼，摄于2019年。
+CHRW	C.H. Robinson HQ entrance.JPG	The entrance to a C.H. Robinson building in Eden Prairie, Minnesota, in 2014.	C.H. Robinson位于明尼苏达州Eden Prairie的一栋办公楼入口，摄于2014年。
+CMG	Chipotle Brandon.jpeg	A Chipotle restaurant in Brandon, Florida.	佛罗里达州Brandon的一家Chipotle餐厅。
+COF	Capital One World Headquarters.jpg	Capital One's headquarters tower in Tysons, McLean, Virginia, in 2018.	Capital One位于弗吉尼亚州麦克林泰森斯的总部大楼，摄于2018年。
+COST	Costcoheadquarters.jpg	Costco's headquarters in Issaquah, Washington, in 2016.	Costco位于华盛顿州Issaquah的总部，摄于2016年。
+CSCO	Cisco Systems Headquarters (Building 10), Cisco San Jose Main Campus.jpg	Building 10 of Cisco's main campus in San Jose, California, which holds its headquarters, in 2006.	Cisco位于加利福尼亚州圣何塞主园区的10号楼，公司总部所在地，摄于2006年。
+CSX	CSXHQ.JPG	The CSX Building in Jacksonville, Florida, in 2014.	佛罗里达州杰克逊维尔的CSX大楼，摄于2014年。
+CTAS	CintasVehicle3.jpg	A Cintas delivery truck, in 2020.	一辆Cintas送货车，摄于2020年。
+DAL	N508DN, a350 (39758160940).jpg	A Delta Air Lines Airbus A350 at Amsterdam Airport Schiphol in 2018.	Delta Air Lines的一架空客A350在阿姆斯特丹史基浦机场，摄于2018年。
+DE	Mannheim - John Deere.JPG	The John Deere factory in Mannheim, Germany, in 2013.	John Deere位于德国曼海姆的工厂，摄于2013年。
+DECK	Deckers Brands Headquarters Building 1.jpg	Building 1 at Deckers Brands' headquarters in Goleta, California, in 2019.	Deckers Brands位于加利福尼亚州戈利塔的总部1号楼，摄于2019年。
+DELL	RR1- Dell Campus.jpg	Dell's headquarters campus in Round Rock, Texas, in 2015.	Dell位于得克萨斯州Round Rock的总部园区，摄于2015年。
+DLR	Digital Realty data center - Hillsboro, Oregon.jpg	A Digital Realty data center in Hillsboro, Oregon, in 2018.	Digital Realty位于俄勒冈州Hillsboro的一座数据中心，摄于2018年。
+DLTR	Dollar Tree, Griffin.JPG	A Dollar Tree store in Griffin, Georgia, in 2014.	佐治亚州Griffin的一家Dollar Tree门店，摄于2014年。
+DPZ	Domino's Pizza Lobby Entrance Domino's Farms Ann Arbor Township Michigan.JPG	The lobby entrance of Domino's headquarters at Domino's Farms in Ann Arbor Township, Michigan, in 2012.	Domino's位于密歇根州安娜堡镇Domino's Farms的总部大堂入口，摄于2012年。
+EBAY	EBay headquarters 2018.jpg	eBay's headquarters in San Jose, California, in 2018.	eBay位于加利福尼亚州圣何塞的总部，摄于2018年。
+EDU	New Oriental North Building, Zhongguancun (20220429161227).jpg	New Oriental's North Building in Zhongguancun, Beijing, in 2022.	新东方位于北京中关村的北楼，摄于2022年。
+EFX	Equifax HQ.jpg	Equifax's headquarters in Atlanta, Georgia, in 2022.	Equifax位于佐治亚州亚特兰大的总部，摄于2022年。
+ETN	Eaton factory, 2018 Győr.jpg	An Eaton factory in Győr, Hungary, in 2018.	Eaton位于匈牙利杰尔的一座工厂，摄于2018年。
+EXPE	Expedia Group south entrance.jpg	The south entrance of Expedia Group's campus in Seattle, in 2019.	Expedia Group西雅图园区的南入口，摄于2019年。
+EXR	Extra Space Storage, Remerton.jpg	An Extra Space Storage facility in Remerton, Georgia, in 2019.	Extra Space Storage位于佐治亚州Remerton的一处仓储设施，摄于2019年。
+FAST	Quakertown Fastenal location April 30 2018.jpg	A Fastenal branch in Quakertown, Pennsylvania, in 2018.	Fastenal位于宾夕法尼亚州Quakertown的一家分店，摄于2018年。
+FDX	FedEx Super Hub ~` 27 - panoramio.jpg	FedEx aircraft at the FedEx Super Hub in Memphis, Tennessee, in 2008.	FedEx位于田纳西州孟菲斯的超级转运中心及其飞机，摄于2008年。
+GD	General Dynamics Headquarters.jpg	General Dynamics' headquarters in Reston, Virginia, in 2021.	General Dynamics位于弗吉尼亚州雷斯顿的总部，摄于2021年。
+GEN	NortonLifeLock Inc HQ 111519.jpg	Gen Digital's headquarters in Tempe, Arizona, in 2019, when the company was called NortonLifeLock.	Gen Digital位于亚利桑那州坦佩的总部，摄于2019年，当时公司名为NortonLifeLock。
+GILD	333 Lakeside Drive.jpg	333 Lakeside Drive, Gilead Sciences' headquarters in Foster City, California, in 2023.	Gilead Sciences位于加利福尼亚州福斯特城Lakeside Drive 333号的总部，摄于2023年。
+GOOGL	Googleplex HQ (cropped).jpg	The Googleplex, Google's headquarters in Mountain View, California, in 2016.	Google位于加利福尼亚州山景城的总部Googleplex，摄于2016年。
+HD	Home Depot aerial.jpg	A Home Depot store in Onalaska, Wisconsin, from the air in 2023.	威斯康星州Onalaska的一家Home Depot门店鸟瞰，摄于2023年。
+HLT	Hilton Worldwide headquarters in Virginia seen from Jones Branch Drive.jpg	Hilton's headquarters in Tysons, McLean, Virginia, in 2017.	Hilton位于弗吉尼亚州麦克林泰森斯的总部，摄于2017年。
+HRL	Hormel Corporate Headquarters, Austin, Minnesota.jpg	Hormel Foods' headquarters in Austin, Minnesota, in 2023.	Hormel Foods位于明尼苏达州奥斯汀的总部，摄于2023年。
+HST	Host Hotels HQ Bethesda MD HST 20210314 181959 1 crop.jpg	The building in Bethesda, Maryland, that houses Host Hotels & Resorts' headquarters, in 2021.	马里兰州贝塞斯达的一栋大楼，Host Hotels & Resorts总部所在地，摄于2021年。
+IFF	Iff-hq.jpg	International Flavors & Fragrances' headquarters on 57th Street in New York City, in 2009.	International Flavors & Fragrances位于纽约第57街的总部，摄于2009年。
+INTC	2200 Mission College Boulevard.jpg	Intel's headquarters at 2200 Mission College Boulevard in Santa Clara, California, in 2023.	Intel位于加利福尼亚州圣克拉拉Mission College Boulevard 2200号的总部，摄于2023年。
+INTU	Intuitheadquarters.jpg	Intuit's headquarters in Mountain View, California, in 2008.	Intuit位于加利福尼亚州山景城的总部，摄于2008年。
+JD	Building 1, JD.com Headquarters (20240925134055).jpg	Building 1 of JD.com's headquarters in Beijing, in 2024.	京东位于北京的总部1号楼，摄于2024年。
+KMI	KindermorganbuildingHouston.JPG	The Kinder Morgan Building in Houston, Texas, in 2013.	得克萨斯州休斯敦的Kinder Morgan大楼，摄于2013年。
+KR	Cincinnati-kroger-building.jpg	Kroger's headquarters in Cincinnati, Ohio, in 2005.	Kroger位于俄亥俄州辛辛那提的总部，摄于2005年。
+LEN	Lennar headquarters.jpg	Lennar's headquarters in Fontainebleau, Miami-Dade County, Florida, in 2008.	Lennar位于佛罗里达州迈阿密-戴德县Fontainebleau的总部，摄于2008年。
+LII	AirConditionerLennox.jpg	A Lennox air conditioner unit, in 2019.	一台Lennox空调室外机，摄于2019年。
+LIN	Storage tanks by Linde group, Schiedam-8228.jpg	Linde gas storage tanks in Schiedam, the Netherlands, in 2016.	Linde位于荷兰斯希丹的储气罐，摄于2016年。
+LLY	Eli Lilly Corporate Center, Indianapolis, Indiana, USA.jpg	The main building of Eli Lilly's corporate center in Indianapolis, Indiana, in 2019.	Eli Lilly位于印第安纳州印第安纳波利斯的企业中心主楼，摄于2019年。
+LMT	Lockheed Martin headquarters.jpg	The main entrance to Lockheed Martin's Center for Leadership Excellence in Bethesda, Maryland, in 2008.	Lockheed Martin位于马里兰州贝塞斯达的领导力中心主入口，摄于2008年。
+LOW	Lowe’s, Chico (2026)-L1000836.jpg	A Lowe's store in Chico, California, in 2026.	加利福尼亚州奇科的一家Lowe's门店，摄于2026年。
+MCD	New-McDonald-HU-lg (43261171540).jpg	McDonald's Hamburger University in Chicago, in 2018.	McDonald's位于芝加哥的汉堡大学，摄于2018年。
+MDT	2009-0610-001-Fridley-MedtronicHQ.JPG	Medtronic's operational headquarters in Fridley, Minnesota, in 2009.	Medtronic位于明尼苏达州Fridley的运营总部，摄于2009年。
+MELI	Mercadolibre edificio saavedra.jpg	MercadoLibre's headquarters in the Polo Dot building in Saavedra, Buenos Aires, in 2021.	MercadoLibre位于布宜诺斯艾利斯萨韦德拉区Polo Dot大楼的总部，摄于2021年。
+META	Meta HQ 2023.png	Meta's headquarters in Menlo Park, California, from the air in 2023.	Meta位于加利福尼亚州门洛帕克的总部鸟瞰，摄于2023年。
+MMM	3-M Building Maplewood MN1.jpg	3M's headquarters in Maplewood, Minnesota, in 2018.	3M位于明尼苏达州Maplewood的总部，摄于2018年。
+MSFT	Aerial Microsoft West Campus August 2009.jpg	Microsoft's west campus in Redmond, Washington, from the air in 2009.	Microsoft位于华盛顿州雷德蒙德的西园区鸟瞰，摄于2009年。
+MU	Micron Fab in Taichung, Taiwan.jpeg	A Micron Technology fab in Taichung, Taiwan, in 2023.	Micron Technology位于台湾台中的一座晶圆厂，摄于2023年。
+NFLX	101 Albright Way.jpg	101 Albright Way, one of the buildings at Netflix's headquarters in Los Gatos, California, in 2019.	Netflix位于加利福尼亚州洛斯加托斯的总部园区内的Albright Way 101号楼，摄于2019年。
+NKE	Nike Campus, Beaverton - DPLA - ffa63f1bbaf5cd21aeada3d3978db2b0.jpg	Nike's world headquarters campus in Beaverton, Oregon, in 2013.	Nike位于俄勒冈州比弗顿的全球总部园区，摄于2013年。
+NOW	ServiceNowGlobalHQ.jpg	ServiceNow's headquarters in Santa Clara, California, in 2019.	ServiceNow位于加利福尼亚州圣克拉拉的总部，摄于2019年。
+NTES	NetEaseHangzhouOffice.jpg	NetEase's headquarters office in Hangzhou, China, in 2017.	网易位于杭州的总部办公楼，摄于2017年。
+NTRS	Northern Trust Company Building (51574881733).jpg	The Northern Trust Company Building in Chicago, in 2021.	芝加哥的Northern Trust大楼，摄于2021年。
+NVDA	NVIDIA Headquarters.jpg	Nvidia's headquarters in Santa Clara, California, in 2018.	Nvidia位于加利福尼亚州圣克拉拉的总部，摄于2018年。
+NVO	Novo Nordisk headquarters building Denmark.jpg	Novo Nordisk's headquarters in Bagsværd, Denmark, in 2016.	Novo Nordisk位于丹麦Bagsværd的总部，摄于2016年。
+OTIS	Otis Escalator 506 NCE (Daniel Åhs).jpg	An Otis escalator in Norrköping, Sweden, in 2011.	瑞典北雪平的一部Otis自动扶梯，摄于2011年。
+PANW	Palo Alto Networks Headquarters South Side 2018.jpg	Palo Alto Networks' headquarters in Santa Clara, California, in 2018.	Palo Alto Networks位于加利福尼亚州圣克拉拉的总部，摄于2018年。
+PAYX	Paychex headquarters.JPG	Paychex's headquarters in Penfield, near Rochester, New York, in 2010.	Paychex位于纽约州罗切斯特附近Penfield的总部，摄于2010年。
+PEP	PepsiCoHQPurchaseNY.jpg	PepsiCo's world headquarters in Purchase, New York, in 2007.	PepsiCo位于纽约州Purchase的全球总部，摄于2007年。
+PH	Parker Hannifin's Global Headquarters.jpg	Parker Hannifin's headquarters in Cleveland, Ohio, in 2017.	Parker Hannifin位于俄亥俄州克利夫兰的总部，摄于2017年。
+PM	PM Lausanne.jpg	Philip Morris International's operations center in Lausanne, Switzerland, in 2017.	Philip Morris International位于瑞士洛桑的运营中心，摄于2017年。
+QCOM	Qualcomm headquarters.jpg	Qualcomm's headquarters in San Diego, California, in 2008.	Qualcomm位于加利福尼亚州圣迭戈的总部，摄于2008年。
+RCL	Royal Caribbean headquarters.jpg	Royal Caribbean's headquarters in Miami, Florida, in 2008.	Royal Caribbean位于佛罗里达州迈阿密的总部，摄于2008年。
+ROST	Ross Store 01.jpg	A Ross store at Millenia Plaza in Orlando, Florida, in 2016.	佛罗里达州奥兰多Millenia Plaza的一家Ross门店，摄于2016年。
+RYAAY	Ryanair Boeing 737-800 EI-EBX.jpg	A Ryanair Boeing 737-800 at Leeds Bradford Airport, England, in 2018.	Ryanair的一架波音737-800在英格兰利兹布拉德福德机场，摄于2018年。
+SBUX	Starbuckscenter.jpg	Starbucks Center, Starbucks' headquarters in Seattle, Washington, in 2016.	Starbucks位于华盛顿州西雅图的总部Starbucks Center，摄于2016年。
+SHW	Sherwin Williams Orenco - Hillsboro, Oregon.JPG	A Sherwin-Williams paint store in Hillsboro, Oregon, in 2012.	俄勒冈州Hillsboro的一家Sherwin-Williams油漆店，摄于2012年。
+SONY	Sony headquaters 1.jpg	Sony City, Sony's headquarters in Minato, Tokyo, in 2023.	索尼位于东京港区的总部Sony City，摄于2023年。
+STX	Seagate Headquarters Fremont.jpg	Seagate Technology's offices in Fremont, California, in 2021.	Seagate Technology位于加利福尼亚州弗里蒙特的办公楼，摄于2021年。
+STZ	Constellation Brands headquarters.jpg	Constellation Brands' headquarters in Victor, New York, in 2010.	Constellation Brands位于纽约州Victor的总部，摄于2010年。
+SYY	SyscoHQHouston.JPG	Sysco's headquarters in Houston, Texas.	Sysco位于得克萨斯州休斯敦的总部。
+TEVA	TevaCanada7.jpg	Teva Canada's offices at 575 Hood Road in Markham, Ontario, in 2020.	Teva加拿大公司位于安大略省万锦Hood Road 575号的办公楼，摄于2020年。
+TGT	Target2398.jpg	A Target store in Ventura, California, in 2016.	加利福尼亚州文图拉的一家Target门店，摄于2016年。
+TMUS	T-Mobile Headquarters in Bellevue, WA.jpg	T-Mobile's headquarters in Bellevue, Washington, at night in 2022.	T-Mobile位于华盛顿州贝尔维尤的总部夜景，摄于2022年。
+TRI	Thomson Reuters building on Kennedy Road.jpg	A Thomson Reuters building on Kennedy Road in Scarborough, Toronto, in 2018.	Thomson Reuters位于多伦多士嘉堡Kennedy Road的一栋大楼，摄于2018年。
+TSLA	Gigafactory Texas Building 1 June 2022.jpg	Building 1 of Tesla's Gigafactory Texas near Austin, Texas, in 2022.	Tesla位于得克萨斯州奥斯汀附近的得州超级工厂1号楼，摄于2022年。
+TSM	TSMC Fab5.JPG	TSMC's Fab 5 in Hsinchu Science Park, Taiwan, in 2010.	台积电位于台湾新竹科学园区的晶圆五厂，摄于2010年。
+V	Visa headquarters - August 2025 - Sarah Stierch.jpg	Visa's headquarters at Mission Rock in San Francisco, in 2025.	Visa位于旧金山Mission Rock的总部，摄于2025年。
+WDAY	Workday Headquarters.jpg	Workday's headquarters in Pleasanton, California, in 2019.	Workday位于加利福尼亚州普莱森顿的总部，摄于2019年。
+WDC	Western Digital Headquarters.jpg	Western Digital's headquarters in San Jose, California, in 2021.	Western Digital位于加利福尼亚州圣何塞的总部，摄于2021年。
+WMT	Walmart 7.jpg	A Walmart store in Onalaska, Wisconsin, in 2023.	威斯康星州Onalaska的一家Walmart门店，摄于2023年。
+WRB	W. R. Berkley Corporation headquarters 1.jpg	W. R. Berkley's headquarters in Greenwich, Connecticut, in 2022.	W. R. Berkley位于康涅狄格州格林尼治的总部，摄于2022年。
+XYL	Xylem 04.jpg	A Xylem factory in Lindås, Sweden, in 2016.	Xylem位于瑞典Lindås的一座工厂，摄于2016年。
