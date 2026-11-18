@@ -376,9 +376,13 @@ fn matches(n: &Num, allowed: f64) -> bool {
         draft = draft.abs();
         cand = cand.abs();
     }
-    // Round both to the draft's decimals; the draft side absorbs float noise
-    // from the division (e.g. 922.8e8 / 1e8).
-    ((cand * scale).round() - (draft * scale).round()).abs() < 0.5
+    // The draft side is rounded to its own decimals, which absorbs float noise
+    // from the division (e.g. 922.8e8 / 1e8). The value must lie within half a
+    // unit of that last decimal, ends included: a value exactly halfway, such
+    // as 3,445 million written to two decimals of a billion, is "$3.44 billion"
+    // when formatted (3.445 is stored just under the half) and "$3.45 billion"
+    // when rounded half up, and a company may print either.
+    (cand * scale - (draft * scale).round()).abs() <= 0.5 + 1e-9
 }
 
 /// Checks that every number in `text` traces to some value in `allowed`.
@@ -606,6 +610,25 @@ mod tests {
             check("Revenue hit $92.28 billion", Lang::En, &[92_279_000_000.0]),
             Ok(())
         );
+    }
+    #[test]
+    fn a_value_exactly_halfway_matches_either_neighbour() {
+        // Palo Alto Networks, 2026-11-18: revenue 3,445 (millions) in the
+        // table, "$3.44 billion" in the release's own highlights and in the
+        // page's key-figures table.
+        let allowed = [3_445_000_000.0];
+        for text in ["Revenue was $3.44 billion", "Revenue was $3.45 billion"] {
+            assert_eq!(check(text, Lang::En, &allowed), Ok(()), "{text}");
+        }
+        for text in ["Revenue was $3.43 billion", "Revenue was $3.46 billion"] {
+            assert!(check(text, Lang::En, &allowed).is_err(), "{text}");
+        }
+        assert_eq!(check("营收34.5亿美元", Lang::Zh, &allowed), Ok(()));
+        assert_eq!(check("营收34.4亿美元", Lang::Zh, &allowed), Ok(()));
+        assert!(check("营收34.3亿美元", Lang::Zh, &allowed).is_err());
+        // Just past the half still rounds one way only.
+        assert!(check("Revenue was $3.44 billion", Lang::En, &[3_446_000_000.0]).is_err());
+        assert!(check("Revenue was $3.45 billion", Lang::En, &[3_444_000_000.0]).is_err());
     }
     #[test]
     fn brief_zh_yi_and_percent() {

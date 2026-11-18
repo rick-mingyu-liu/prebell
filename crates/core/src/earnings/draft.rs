@@ -1644,6 +1644,24 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn a_halfway_value_passes_the_check_as_the_table_prints_it() {
+        // 3,445 million prints as "$3.44 billion" (3.445 is stored just under
+        // the half); the number check used to round it to 3.45 and refuse the
+        // page's own table on every attempt.
+        for v in [
+            3_445_000_000.0,
+            2_475_000_000.0,
+            1_005_000_000.0,
+            14_935_000_000.0,
+        ] {
+            for lang in [Lang::En, Lang::Zh] {
+                let text = fmt_value(v, Unit::Usd, lang);
+                assert_eq!(check(&text, lang, &[v]), Ok(()), "{text}");
+            }
+        }
+    }
+
+    #[test]
     fn every_rendered_number_is_in_the_facts() {
         let f = facts();
         let allowed = crate::earnings::facts::numbers_in_facts(&f);
