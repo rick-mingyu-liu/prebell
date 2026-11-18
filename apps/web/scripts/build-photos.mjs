@@ -1,31 +1,58 @@
 // Builds the company photos shown under the opening of an earnings check and at the top of a ticker page,
-// from the pinned list in data/photos.tsv (ticker, exact Wikimedia Commons file name, English caption,
-// Chinese caption). Nothing else ships: `--candidates` only proposes files (Wikidata's P18 "image" for each
-// watchlist company) for a person to choose from and pin.
+// from the pinned list in data/photos.tsv. Nothing else ships: `--candidates` only proposes files (Wikidata's
+// P18 "image" for each watchlist company) for a person to choose from and pin.
 //
-// For each pinned file the build fetches the Commons metadata fresh (Artist, LicenseShortName, LicenseUrl,
-// Credit, Restrictions, DateTimeOriginal, ImageDescription) and stops when a licence is no longer public
-// domain, CC0, CC BY or CC BY-SA, when Restrictions holds anything but a personality-rights or trademark
-// note, when the author cannot be reduced to a plain name, when the image is taller than 4:5 or wider than
-// 2.4:1, when a caption's year is not the year the photo was taken, or when a caption says "headquarters"
-// (总部) and Wikidata's current headquarters location (P159) is not named in it. Images are only resized
-// (the long side to at most MAX_SIDE px, never upscaled) and re-encoded as WebP; never cropped. It writes:
+// data/photos.tsv, tab-separated, `#` starts a comment line:
+//   ticker, exact Commons file name, English caption, Chinese caption,
+//   [credit]  the name as the credit shows it, when Commons asks for a form other than the author's name
+//             ("© Raimond Spekking"); otherwise the author's name is used,
+//   [terms]   Commons' Permission text, word for word, when it holds a condition or request beyond the licence:
+//             repeating it records that someone read it, and the build stops when it changes on Commons.
+//
+// For each pinned file the build fetches the Commons metadata fresh (Artist, Attribution, Permission, Credit,
+// LicenseShortName, LicenseUrl, Restrictions, DateTimeOriginal, ImageDescription, the file's own EXIF and its
+// wikitext) and stops when: the licence is no longer public domain, CC0, CC BY or CC BY-SA, or its URL or the
+// Commons page is not https; Restrictions holds anything but a personality-rights or trademark note; the author
+// is not a plain name; a requested attribution would not be shown in full; Permission holds a condition the
+// terms column does not repeat; the EXIF Artist or Copyright names someone other than the credited author; the
+// image is not a JPEG or PNG at least MIN_WIDTH wide, or is taller than 4:5 or wider than 2.4:1; a caption's
+// year is not the year the photo was taken; or a caption says "headquarters" (总部) without naming Wikidata's
+// headquarters location (P159). The rules are pure functions in scripts/photo-rules.mjs, tested in
+// tests/photorules.test.ts. Images are only resized (the long side to at most MAX_SIDE px, never upscaled) and
+// re-encoded as WebP with the credit in their EXIF; never cropped. It writes:
 //   public/photos/{TICKER}.webp
-//   src/lib/photos.generated.ts         ticker -> file, size, captions and credit, read by src/lib/photos.ts
-//   public/photos/LICENSES.md           source, author, licence and change for every file
+//   src/lib/photos.generated.ts         ticker -> file, size, captions, credit and source, read by src/lib/photos.ts
+//                                       (the credit line under each photo and the /{locale}/photo-credits page)
+//   public/photos/LICENSES.md           source, author, requested notice, licence and change for every file
 //   node_modules/.cache/photos/review.html   a review sheet (not committed): every photo as it will appear
 // Every manifest URL ends in `?v=` and the file's content hash, because /photos/* is served immutable for a
-// year. Everything is built in node_modules/.cache/photos-build and moved into place only when the whole run
-// succeeds. Downloads are cached in node_modules/.cache/photos (licence metadata is refetched every run), at
-// most two requests a second to Wikimedia, with the same kind of User-Agent as the logo build.
+// year. Everything is built in node_modules/.cache/photos-build and swapped into place only when the whole run
+// succeeds. Downloads are cached in node_modules/.cache/photos (metadata is refetched every run), at most two
+// requests a second to Wikimedia, with the same kind of User-Agent as the logo build.
 // Run `pnpm photos` in apps/web after changing data/photos.tsv. See docs/runbook.md, "Photos".
-//   --offline     use only the cache (no requests; the licence check then uses the cached metadata)
+//   --offline     use only the cache (no requests; the checks then use the cached metadata)
 //   --candidates  write node_modules/.cache/photos/candidates.{json,tsv} from Wikidata P18; builds nothing
-import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import sharp from "sharp";
-import { WIKIDATA_ITEMS, createFetcher, current, hashOf, plain, readWatchlist, wikidataItems } from "./wikimedia.mjs";
+import {
+  authorName,
+  captionYears,
+  commonsPage,
+  exifMismatch,
+  exifName,
+  headquartersNamed,
+  licenceAllowed,
+  licenceUrl,
+  originalSource,
+  permissionTerms,
+  requestNotCovered,
+  stripFlickrPlace,
+  takenYear,
+  text,
+} from "./photo-rules.mjs";
+import { WIKIDATA_ITEMS, createFetcher, current, hashOf, readWatchlist, wikidataItems } from "./wikimedia.mjs";
 
 const WEB = join(dirname(fileURLToPath(import.meta.url)), "..");
 const WATCHLIST = join(WEB, "../../crates/core/data/watchlist.tsv");
@@ -41,7 +68,7 @@ const UA = "PreBell photo build (https://prebell.site; support@prebell.site)";
 
 /** Long side of a stored photo, in px (an 680px column at 2x, roughly); smaller originals are kept as they are. */
 const MAX_SIDE = 1440;
-/** WebP quality: a typical 1440px photo comes out at about 140 KB (median of the first 100: 137 KB). Shown at 680 CSS px or less, so 2x on most screens. */
+/** WebP quality: a typical 1440px photo comes out at about 140 KB. Shown at 680 CSS px or less, so 2x on most screens. */
 const QUALITY = 50;
 /** Narrowest original worth showing across the column. */
 const MIN_WIDTH = 1200;
@@ -52,71 +79,44 @@ const MAX_ASPECT = 2.4;
 const MAX_TOTAL = 40_000_000;
 /** Commons asks for one of its standard thumbnail widths; the build resizes from this one. */
 const THUMB = 1920;
-
-/**
- * Licences accepted: public domain, CC0, CC BY and CC BY-SA, any version or port (e.g. "CC BY-SA 3.0 de").
- * Anchored, so BY-NC, BY-ND, GFDL and "Attribution" alone are refused.
- */
-const LICENCE = /^(public domain|cc0( 1\.0)?|cc by(-sa)? \d\.\d( [a-z]{2}(-[a-z]{2})?)?)$/i;
 /** Restrictions values that note a right in what is shown (a person in the frame, a trademark on a building), not a limit on reuse of the photo. */
 const NOTED = new Set(["personality", "trademarked"]);
 
 const { get, getJson } = createFetcher({ cache: CACHE, ua: UA, offline: OFFLINE });
 const rows = readWatchlist(WATCHLIST);
 const byTicker = Object.fromEntries(rows.map((r) => [r.ticker, r]));
+/** Author names whose Flickr " from <place>" suffix was dropped, printed so they can be checked. */
+const stripped = [];
 
 // ---------------------------------------------------------------------------------------------
 // Commons and Wikidata.
 
-/** HTML entities in Commons metadata -> characters (after plain() has removed the tags). */
-const ENTITIES = { amp: "&", lt: "<", gt: ">", quot: '"', apos: "'", nbsp: " " };
-const decode = (s) =>
-  s.replace(/&(#x[0-9a-f]+|#\d+|[a-z]+);/gi, (m, e) =>
-    e[0] === "#" ? String.fromCodePoint(e[1] === "x" || e[1] === "X" ? parseInt(e.slice(2), 16) : Number(e.slice(1))) : (ENTITIES[e.toLowerCase()] ?? m),
-  );
-const text = (html) => decode(plain(html ?? "")).replace(/\s+/g, " ").trim();
+/** An EXIF tag's value from Commons' commonmetadata list (values may be nested lists). */
+const exifTag = (list, name) => {
+  const hit = (list ?? []).find((x) => x.name === name)?.value;
+  // A multilingual value is a list of { name: language, value } plus a { name: "_type", value: "lang" } marker.
+  return Array.isArray(hit) ? hit.filter((x) => x?.name !== "_type").map((x) => x?.value ?? x).join("; ") : (hit ?? "");
+};
 
-/**
- * The Artist field as a plain name (a "User:" prefix dropped), or null when it is not one: empty, unknown or
- * anonymous, a URL, an @ (an email address, or a name with an affiliation such as "X @ Project / Team"), markup,
- * the uploader rather than the author ("The original uploader was ..."), or a sentence.
- */
-function authorName(html) {
-  const name = text(html)
-    .replace(/^User:/i, "")
-    .replace(/\s*\((talk|contribs?)\)$/i, "");
-  if (!name || name.length > 60) return null;
-  if (/[<>{}\[\]|@]|https?:|www\.|\bunknown\b|\banonymous\b|\bown work\b|\buploader\b|\bemployee\b|\bnone\b|^(user|author)$/i.test(name)) return null;
-  return name;
-}
+/** The other Commons file this one was cropped from: {{Extracted from|...}} in its wikitext. */
+const extractedFrom = (wikitext) => wikitext.match(/\{\{\s*Extracted from\s*\|\s*(?:1\s*=\s*)?([^|}]+)/i)?.[1]?.trim().replace(/^File:/i, "") ?? null;
 
-const MONTHS = ["january", "february", "march", "april", "may", "june", "july", "august", "september", "october", "november", "december"];
-/**
- * The year a photo was taken, from DateTimeOriginal: "2022:05:01 10:00:00", "2022-05-01", "2009-08",
- * "Taken on 8 June 2016, 11:08:51", "28 October 2013" or "14 July 2021 (according to Exif data)". Null when
- * the field is empty or not a clean date (an upload date, "circa", a range, free text).
- */
-function takenYear(raw) {
-  const t = text(raw)
-    .replace(/^taken on /i, "")
-    .replace(/ \(according to Exif data\)$/i, "");
-  const iso = t.match(/^(\d{4})([-:]\d{2}([-:]\d{2})?)?([ T]\d{1,2}:\d{2}(:\d{2})?)?$/);
-  const long = t.match(/^(\d{1,2}) ([A-Za-z]+) (\d{4})(,? \d{1,2}:\d{2}(:\d{2})?)?$/);
-  const year = iso ? Number(iso[1]) : long && MONTHS.includes(long[2].toLowerCase()) ? Number(long[3]) : null;
-  return year && year > 1820 && year <= new Date().getFullYear() ? year : null;
-}
-
-/** Commons file name -> its imageinfo and metadata, 50 files a request. `fresh` skips the cache (licences can change). */
+/** Commons file name -> its imageinfo, metadata, EXIF and wikitext, 50 files a request. `fresh` skips the cache (licences can change). */
 async function commonsInfo(names, fresh) {
   const out = {};
   for (let i = 0; i < names.length; i += 50) {
     const batch = names.slice(i, i + 50);
     const titles = encodeURIComponent(batch.map((n) => `File:${n}`).join("|"));
     const res = await getJson(
-      "https://commons.wikimedia.org/w/api.php?action=query&format=json&prop=imageinfo&iiprop=url|size|mime|extmetadata" +
-        `&iiurlwidth=${THUMB}&iiextmetadatafilter=Artist|LicenseShortName|LicenseUrl|Credit|Restrictions|DateTimeOriginal|ImageDescription|Categories|Attribution&titles=${titles}`,
+      "https://commons.wikimedia.org/w/api.php?action=query&format=json&prop=imageinfo&iiprop=url|size|mime|extmetadata|commonmetadata" +
+        `&iiurlwidth=${THUMB}&iiextmetadatafilter=Artist|Attribution|Permission|Credit|LicenseShortName|LicenseUrl|Restrictions|DateTimeOriginal|ImageDescription|Categories&titles=${titles}`,
       { fresh },
     );
+    const wiki = await getJson(
+      `https://commons.wikimedia.org/w/api.php?action=query&format=json&formatversion=2&prop=revisions&rvprop=content&rvslots=main&titles=${titles}`,
+      { fresh },
+    );
+    const wikitext = Object.fromEntries(wiki.query.pages.map((pg) => [pg.title, pg.revisions?.[0]?.slots?.main?.content ?? ""]));
     const title = Object.fromEntries(batch.map((n) => [`File:${n}`, n]));
     for (const { from, to } of res.query.normalized ?? []) title[to] = title[from];
     for (const page of Object.values(res.query.pages)) {
@@ -124,20 +124,36 @@ async function commonsInfo(names, fresh) {
       const name = title[page.title];
       if (!info || !name) continue;
       const m = info.extmetadata ?? {};
+      const source = originalSource(m.Credit?.value);
+      const permission = permissionTerms(m.Permission?.value, text(m.LicenseShortName?.value));
+      const attribution = text(m.Attribution?.value);
+      // The credited name: the attribution the author asks for when it is a plain name (not a credit line with
+      // a ©, a licence or a URL), else the Artist field; the Flickr importer's " from <place>" is dropped.
+      const plainAttribution = /©|\/|\bcc[ -]|licen[cs]e/i.test(attribution) ? null : authorName(m.Attribution?.value);
+      const raw = plainAttribution ?? authorName(m.Artist?.value);
+      const author = raw && stripFlickrPlace(raw, source?.flickr);
+      if (author && author !== raw) stripped.push(`${name}: "${raw}" -> "${author}"`);
       out[name] = {
         // A thumbnail at THUMB px when the original is wider; the original otherwise.
         url: info.thumburl && info.thumbwidth < info.width ? info.thumburl : info.url,
-        page: info.descriptionurl,
+        page: commonsPage(info.descriptionurl),
+        pageRaw: info.descriptionurl,
         width: info.width,
         height: info.height,
         mime: info.mime,
         licence: text(m.LicenseShortName?.value),
-        licenceUrl: m.LicenseUrl?.value ?? null,
-        artist: m.Artist?.value ?? "",
-        // The attribution the author asks for, when it is a plain name (not a credit line with a © or a licence); else the Artist field.
-        author: (/©|\/|\bcc[ -]|licen[cs]e/i.test(text(m.Attribution?.value)) ? null : authorName(m.Attribution?.value)) ?? authorName(m.Artist?.value),
-        credit: text(m.Credit?.value),
-        attribution: text(m.Attribution?.value),
+        licenceUrl: licenceUrl(m.LicenseUrl?.value),
+        licenceUrlRaw: m.LicenseUrl?.value ?? null,
+        artist: text(m.Artist?.value),
+        author,
+        // What the author asks the credit to say: the Attribution field, and an "Attribution:" in the licence box.
+        requests: [...new Set([attribution, permission.attribution].filter(Boolean))],
+        conditions: permission.conditions,
+        permission: text(m.Permission?.value),
+        source,
+        exifArtist: text(exifTag(info.commonmetadata, "Artist")),
+        exifCopyright: text(exifTag(info.commonmetadata, "Copyright")),
+        derivedFrom: extractedFrom(wikitext[page.title] ?? ""),
         restrictions: text(m.Restrictions?.value).split("|").map((s) => s.trim()).filter(Boolean),
         taken: text(m.DateTimeOriginal?.value),
         year: takenYear(m.DateTimeOriginal?.value),
@@ -209,9 +225,9 @@ if (CANDIDATES) {
       if (!i) continue;
       const aspect = i.width / i.height;
       const problems = [
-        !LICENCE.test(i.licence) && `licence ${i.licence || "none"}`,
+        !licenceAllowed(i.licence) && `licence ${i.licence || "none"}`,
         i.restrictions.some((x) => !NOTED.has(x)) && `restrictions ${i.restrictions.join(",")}`,
-        !i.author && `author "${text(i.artist).slice(0, 40)}"`,
+        !i.author && `author "${i.artist.slice(0, 40)}"`,
         !/^image\/(jpeg|png)$/.test(i.mime) && i.mime,
         i.width < MIN_WIDTH && `${i.width}px wide`,
         (aspect < MIN_ASPECT || aspect > MAX_ASPECT) && `aspect ${aspect.toFixed(2)}`,
@@ -240,17 +256,18 @@ if (CANDIDATES) {
 // ---------------------------------------------------------------------------------------------
 // Build.
 
-/** data/photos.tsv: ticker, Commons file name, English caption, Chinese caption; # starts a comment line. */
+/** data/photos.tsv: ticker, Commons file name, English caption, Chinese caption, [credit], [terms]. */
 const pinned = readFileSync(PINNED, "utf8")
   .split("\n")
   .map((l, i) => [l, i + 1])
   .filter(([l]) => l.trim() && !l.startsWith("#"))
   .map(([l, line]) => {
     const cols = l.split("\t").map((s) => s.trim());
-    if (cols.length !== 4 || cols.some((c) => !c)) throw new Error(`data/photos.tsv line ${line}: expected 4 non-empty tab-separated columns`);
-    const [ticker, file, en, zh] = cols;
+    if (cols.length < 4 || cols.length > 6 || cols.slice(0, 4).some((c) => !c))
+      throw new Error(`data/photos.tsv line ${line}: expected ticker, file, English caption, Chinese caption, then an optional credit and terms`);
+    const [ticker, file, en, zh, credit = "", terms = ""] = cols;
     if (!byTicker[ticker]) throw new Error(`data/photos.tsv line ${line}: ${ticker} is not on the watchlist`);
-    return { ticker, file: file.replace(/^File:/, "").replace(/_/g, " "), en, zh, line };
+    return { ticker, file: file.replace(/^File:/, "").replace(/_/g, " "), en, zh, credit, terms, line };
   });
 const dupes = pinned.map((p) => p.ticker).filter((t, i, a) => a.indexOf(t) !== i);
 if (dupes.length) throw new Error(`data/photos.tsv pins these tickers twice: ${dupes.join(" ")}`);
@@ -260,6 +277,9 @@ const hq = await headquarters(
   pinned.map((p) => p.ticker),
   !OFFLINE,
 );
+
+/** The licence as the credit names it. */
+const licenceName = (i) => (/^public domain$/i.test(i.licence) ? "Public domain" : i.licence);
 
 /** Every reason a pinned photo may not ship; the build stops if any is found. */
 const errors = [];
@@ -271,27 +291,64 @@ for (const p of pinned) {
     fail(p, "not on Commons (renamed or deleted?)");
     continue;
   }
-  if (!LICENCE.test(i.licence)) fail(p, `licence "${i.licence}" is not public domain, CC0, CC BY or CC BY-SA`);
-  if (/^cc by/i.test(i.licence) && !/^https?:\/\/creativecommons\.org\//.test(i.licenceUrl ?? "")) fail(p, `a CC licence whose licence URL is not on creativecommons.org (${i.licenceUrl ?? "none"})`);
+  if (!i.page) fail(p, `the Commons page is not an https commons.wikimedia.org/wiki/File: URL (${i.pageRaw})`);
+  if (!licenceAllowed(i.licence)) fail(p, `licence "${i.licence}" is not public domain, CC0, CC BY or CC BY-SA`);
+  if (/^cc/i.test(i.licence) && !i.licenceUrl) fail(p, `a CC licence whose URL is not on creativecommons.org (${i.licenceUrlRaw ?? "none"})`);
+  if (i.licenceUrlRaw && !i.licenceUrl) fail(p, `the licence URL ${i.licenceUrlRaw} is not on creativecommons.org`);
   const bad = i.restrictions.filter((x) => !NOTED.has(x));
   if (bad.length) fail(p, `Restrictions: ${bad.join(", ")}`);
   if (i.restrictions.length) notes.push(`${p.ticker}: Restrictions ${i.restrictions.join(", ")} (noted in LICENSES.md)`);
-  if (!i.author) fail(p, `the author "${text(i.artist)}" is not a plain name`);
-  if (i.attribution && i.attribution !== i.author) notes.push(`${p.ticker}: Commons asks for the attribution "${i.attribution}"; the credit gives "${i.author}"`);
+  if (!i.author) fail(p, `the author "${i.artist}" is not a plain name`);
   if (!/^image\/(jpeg|png)$/.test(i.mime)) fail(p, `${i.mime} is not a JPEG or PNG`);
   if (i.width < MIN_WIDTH) fail(p, `${i.width}px wide, under ${MIN_WIDTH}`);
+  // The credit: the author's name, or the credit column when Commons asks for another form. The column may only
+  // use words from what Commons gives (a request or the author's name), so it never invents a credit.
+  const name = p.credit || i.author || "";
+  if (p.credit) {
+    const allowed = [...i.requests, i.author ?? "", i.artist].join(" ");
+    const extra = requestNotCovered(p.credit, allowed, "");
+    if (extra.length) fail(p, `the credit column "${p.credit}" has words Commons does not give: ${extra.join(" ")}`);
+  }
+  for (const r of i.requests) {
+    const missing = requestNotCovered(r, name, licenceName(i));
+    if (missing.length)
+      fail(p, `Commons asks to be credited as "${r}"; the credit "${name}" would not show: ${missing.join(" ")}. Set the credit column to follow it, or drop the row`);
+  }
+  // A condition or request in Permission must be repeated word for word in the terms column.
+  if (i.conditions !== p.terms)
+    fail(
+      p,
+      i.conditions
+        ? `Commons' Permission says: "${i.conditions}". Read it; if the photo can be used as the site uses it, put that text in the terms column, otherwise drop the row`
+        : `the terms column no longer matches Commons' Permission field (now empty or boilerplate): "${i.permission}"`,
+    );
+  // The file's own EXIF must not name another author.
+  for (const [tag, value] of [["Artist", i.exifArtist], ["Copyright", i.exifCopyright]]) {
+    const other = exifMismatch(value, [name, i.author ?? "", i.artist, ...i.requests]);
+    if (other) fail(p, `the file's EXIF ${tag} "${value}" names ${other}, not the credited author "${name}"`);
+  }
   // A year in a caption is the year the photo was taken, so it must match DateTimeOriginal.
   for (const [lang, caption] of [["en", p.en], ["zh", p.zh]]) {
-    const years = [...caption.matchAll(/(?<!\d)(1[89]\d\d|20\d\d)(?!\d)/g)].map((m) => Number(m[1]));
+    const years = captionYears(caption);
     if (years.some((y) => y !== i.year)) fail(p, `the ${lang} caption names ${years.join(", ")} but the photo was taken ${i.year ?? "on an unknown date"}`);
   }
-  if (/\b(19|20)\d\d\b/.test(p.en) !== /(19|20)\d\d/.test(p.zh)) fail(p, "one caption gives the year and the other does not");
+  if (captionYears(p.en).length > 0 !== captionYears(p.zh).length > 0) fail(p, "one caption gives the year and the other does not");
   // "Headquarters" only when Wikidata's current headquarters location is named in the caption.
-  const saysHq = /headquarters/i.test(p.en);
-  if (saysHq !== /总部/.test(p.zh)) fail(p, "one caption says headquarters (总部) and the other does not");
-  if (saysHq && !hq[p.ticker].names.some((n) => p.en.includes(n.replace(/,.*$/, ""))))
+  if (/headquarters/i.test(p.en) !== /总部/.test(p.zh)) fail(p, "one caption says headquarters (总部) and the other does not");
+  if (!headquartersNamed(p.en, hq[p.ticker].names))
     fail(p, `the caption says headquarters, but Wikidata's current headquarters location (${hq[p.ticker].names.join(" / ") || "none"}) is not in it`);
 }
+
+/** The notices the author or the file gives, exactly as given: requested attributions, Permission conditions, EXIF copyright. */
+const noticesOf = (i) => [...new Set([...i.requests, i.conditions, exifName(i.exifCopyright) ? i.exifCopyright : ""].filter(Boolean))];
+/**
+ * Whether the Commons file is itself someone's crop of another file: { from } names that file ({{Extracted
+ * from}} in its wikitext), or is null when only the file name says "crop". Null when it is not a crop.
+ */
+const derivedOf = (p, i) => (i.derivedFrom ? { from: i.derivedFrom } : /\bcrop(ped)?\b/i.test(p.file) ? { from: null } : null);
+/** The same as an English note, for LICENSES.md. */
+const derivedNote = (d, author) =>
+  !d ? null : d.from ? `The Commons file is a crop of the Commons file "${d.from}"; Commons credits it to ${author}.` : `The Commons file is a crop (its name says so); Commons credits it to ${author} as their own work.`;
 
 rmSync(BUILD, { recursive: true, force: true });
 mkdirSync(BUILD, { recursive: true });
@@ -308,9 +365,18 @@ for (const p of pinned) {
     fail(p, `the downloaded file is ${meta.format}, not a JPEG or PNG`);
     continue;
   }
+  const name = p.credit || i.author;
+  const licence = licenceName(i);
   const { data, info: out } = await sharp(file.body)
     .rotate() // apply the EXIF orientation, so the shape below is the shape shown
     .resize(MAX_SIDE, MAX_SIDE, { fit: "inside", withoutEnlargement: true })
+    // The credit travels with the file: everything else in the original's metadata is dropped.
+    .withExif({
+      IFD0: {
+        Artist: name,
+        Copyright: `${name} / Wikimedia Commons, ${licence}${i.licenceUrl ? ` (${i.licenceUrl})` : ""}. Resized by PreBell. Source: ${i.page}`,
+      },
+    })
     .webp({ quality: QUALITY, effort: 6 })
     .toBuffer({ resolveWithObject: true });
   const aspect = out.width / out.height;
@@ -325,10 +391,15 @@ for (const p of pinned) {
     height: out.height,
     en: p.en,
     zh: p.zh,
-    author: i.author,
-    licence: /^public domain$/i.test(i.licence) ? "Public domain" : i.licence,
+    author: name,
+    licence,
     licenceUrl: i.licenceUrl,
     page: i.page,
+    file: p.file,
+    sourceUrl: i.source?.url ?? null,
+    sourceTitle: i.source?.title ?? null,
+    notices: noticesOf(i),
+    derived: derivedOf(p, i),
   };
   built.push({ p, i, bytes: data.length, data, fetched: file.fetched, out });
 }
@@ -345,27 +416,29 @@ writeFileSync(
   `# Photo sources and licences
 
 Generated by \`apps/web/scripts/build-photos.mjs\` from \`apps/web/data/photos.tsv\`; edit those, not this
-file. These photographs are not covered by the repository's MIT licence: each belongs to its author and is
-used under the licence named below, which is also shown with the author's name under the photo on every
-page that shows it. Pages never load a photo from Wikimedia.
+file. The company photographs on earnings checks and ticker pages come from Wikimedia Commons. They are not
+covered by the repository's MIT licence: each is credited under the picture with its author and its licence
+or public-domain status, and PreBell claims no rights in them. The same details are on the site's photo
+credits page (\`/en/photo-credits\`). Pages never load a photo from Wikimedia. To have a photo corrected or
+removed, write to support@prebell.site.
 
-Every file comes from Wikimedia Commons, chosen by hand. Only public domain, CC0, CC BY and CC BY-SA files are
-used. **Changes:** each photo is resized (the long side to at most ${MAX_SIDE} px, never enlarged) and
-re-encoded as WebP; it is not cropped or otherwise altered. Where the licence is CC BY-SA, the resized
-file is shared under the same licence.
+Every file was chosen by hand. Only public domain, CC0, CC BY and CC BY-SA files are used. **Changes:** each
+photo is resized (the long side to at most ${MAX_SIDE} px, never enlarged) and re-encoded as WebP, with the
+credit written into its EXIF; PreBell does not crop or otherwise alter it. Where the licence is CC BY-SA, the
+resized file is shared under the same licence.
 
 Licences: ${Object.entries(licences)
     .sort((a, b) => b[1] - a[1])
     .map(([l, n]) => `${l} ${n}`)
     .join(", ")}.
 
-| File | Company | Commons file | Author | Licence | Taken | Fetched | Changes | Notes |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| File | Company | Commons file | Author | Requested attribution / notice | Original source | Licence | Taken | Fetched | Changes | Notes |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 ${built
-  .map(
-    ({ p, i, fetched, out }) =>
-      `| \`${p.ticker}.webp\` | ${md(byTicker[p.ticker].name)} | [${md(p.file)}](${i.page}) | ${md(i.author)} | ${md(manifest[p.ticker].licence)}${i.licenceUrl ? ` (${i.licenceUrl})` : ""} | ${md(i.taken || "unknown")} | ${fetched} | resized to ${out.width}x${out.height}, WebP | ${md(i.restrictions.join(", "))} |`,
-  )
+  .map(({ p, i, fetched, out }) => {
+    const m = manifest[p.ticker];
+    return `| \`${p.ticker}.webp\` | ${md(byTicker[p.ticker].name)} | [${md(p.file)}](${m.page}) | ${md(m.author)} | ${md(m.notices.join(" — ") || "none")} | ${m.sourceUrl ? `${m.sourceTitle ? `${md(m.sourceTitle)}: ` : ""}${m.sourceUrl}` : "own work on Commons"} | ${md(m.licence)}${m.licenceUrl ? ` (${m.licenceUrl})` : ""} | ${md(i.taken || "unknown")} | ${fetched} | resized to ${out.width}x${out.height}, WebP | ${md([i.restrictions.length ? `Restrictions: ${i.restrictions.join(", ")}` : "", derivedNote(m.derived, m.author) ?? ""].filter(Boolean).join(" "))} |`;
+  })
   .join("\n")}
 
 Total size of the files above: ${total} bytes.
@@ -375,17 +448,30 @@ Total size of the files above: ${total} bytes.
 writeFileSync(
   join(BUILD, "photos.generated.ts"),
   `// Generated by scripts/build-photos.mjs from data/photos.tsv. Do not edit; run \`pnpm photos\`.\n` +
-    `/** Ticker -> its photo: file (with a \`?v=\` content hash), size in px, captions, and the credit (author, licence, Commons page). */\n` +
-    `export const COMPANY_PHOTOS: Readonly<Record<string, { src: string; width: number; height: number; en: string; zh: string; author: string; licence: string; licenceUrl: string | null; page: string }>> = ${JSON.stringify(manifest, null, 2)};\n`,
+    `/**\n * Ticker -> its photo: file (with a \`?v=\` content hash), size in px, captions, the credit (author as credited,\n` +
+    ` * licence, Commons page) and the source details the photo credits page lists (Commons file name, original\n` +
+    ` * source, the author's notices exactly as given, and a note when the Commons file is itself a crop).\n */\n` +
+    `export const COMPANY_PHOTOS: Readonly<Record<string, { src: string; width: number; height: number; en: string; zh: string; author: string; licence: string; licenceUrl: string | null; page: string; file: string; sourceUrl: string | null; sourceTitle: string | null; notices: readonly string[]; derived: { from: string | null } | null }>> = ${JSON.stringify(manifest, null, 2)};\n`,
 );
 
-rmSync(PHOTOS, { recursive: true, force: true });
-renameSync(BUILD, PHOTOS);
+// Swap the new folder in: the old one is moved aside first and put back if the swap fails.
+const OLD = `${PHOTOS}.old`;
+rmSync(OLD, { recursive: true, force: true });
+if (existsSync(PHOTOS)) renameSync(PHOTOS, OLD);
+try {
+  renameSync(BUILD, PHOTOS);
+} catch (e) {
+  if (existsSync(OLD)) renameSync(OLD, PHOTOS);
+  throw e;
+}
 renameSync(join(PHOTOS, "photos.generated.ts"), MANIFEST);
+rmSync(OLD, { recursive: true, force: true });
 
-// The review sheet: every photo as it will appear, with the Commons description beside it.
+// The review sheet: every photo as it will appear, with what Commons and the file say beside it.
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
-const credit = (m, zh) => `${zh ? "图片" : "Photo"}: ${m.author} / Wikimedia Commons · ${m.licence === "Public domain" ? (zh ? "公有领域" : "Public domain") : m.licence}`;
+const credit = (m, zh) =>
+  `${zh ? "图片：" : "Photo: "}${m.author} / Wikimedia Commons · ${m.licence === "Public domain" ? (zh ? "公有领域" : "Public domain") : m.licence} · ${zh ? "已缩放 · 来源" : "resized · Source"}`;
+const row = (label, value) => `<dt>${label}</dt><dd>${value}</dd>`;
 const cards = built
   .map(({ p, i, data, out, bytes }) => {
     const m = manifest[p.ticker];
@@ -395,13 +481,19 @@ const cards = built
 <p class="zh">${esc(p.zh)} <span class="credit">${esc(credit(m, true))}</span></p></div>
 <div class="source"><label class="reject"><input type="checkbox" value="${esc(p.ticker)}"> Reject ${esc(p.ticker)}</label>
 <h2>${esc(p.ticker)} · ${esc(byTicker[p.ticker].name)}</h2>
-<dl><dt>Commons file</dt><dd><a href="${esc(i.page)}">${esc(p.file)}</a></dd>
-<dt>Commons description</dt><dd>${esc(i.description) || "<em>none</em>"}</dd>
-<dt>Taken</dt><dd>${esc(i.taken || "unknown")}</dd>
-<dt>Wikidata headquarters (P159)</dt><dd>${esc(hq[p.ticker].names.join(" / ") || "none")}</dd>
-<dt>Categories</dt><dd>${esc(i.categories.join(" · "))}</dd>
-<dt>Licence</dt><dd>${esc(i.licence)}${i.restrictions.length ? ` · Restrictions: ${esc(i.restrictions.join(", "))}` : ""}</dd>
-<dt>File</dt><dd>${out.width}x${out.height}, ${Math.round(bytes / 1024)} KB</dd></dl></div></section>`;
+<dl>${row("Commons file", `<a href="${esc(m.page)}">${esc(p.file)}</a>`)}
+${row("Commons description", esc(i.description) || "<em>none</em>")}
+${row("Taken", esc(i.taken || "unknown"))}
+${row("Wikidata headquarters (P159)", esc(hq[p.ticker].names.join(" / ") || "none"))}
+${row("Author (Artist field)", esc(i.artist) || "<em>none</em>")}
+${row("Requested attribution", esc(i.requests.join(" — ")) || "<em>none</em>")}
+${row("Permission", esc(i.permission) || "<em>none</em>")}
+${row("EXIF Artist / Copyright", `${esc(i.exifArtist) || "<em>none</em>"} / ${esc(i.exifCopyright) || "<em>none</em>"}`)}
+${row("Original source", m.sourceUrl ? `${esc(m.sourceTitle ?? "")} ${esc(m.sourceUrl)}` : "own work on Commons")}
+${m.derived ? row("Derived from", esc(derivedNote(m.derived, m.author))) : ""}
+${row("Categories", esc(i.categories.join(" · ")))}
+${row("Licence", `${esc(i.licence)}${i.restrictions.length ? ` · Restrictions: ${esc(i.restrictions.join(", "))}` : ""}`)}
+${row("File", `${out.width}x${out.height}, ${Math.round(bytes / 1024)} KB`)}</dl></div></section>`;
   })
   .join("\n");
 writeFileSync(
@@ -419,7 +511,7 @@ h2{font:600 18px Georgia,serif;margin:.3rem 0}dl{margin:0;font-size:13px}dt{font
 #out{width:100%;max-width:1200px;height:4em;font:14px ui-monospace,monospace}
 @media (max-width:760px){.card{grid-template-columns:1fr}}
 </style></head><body><header><h1>PreBell company photos: review</h1>
-<p>${built.length} photos from <code>apps/web/data/photos.tsv</code>, ${Math.round(total / 1024)} KB in all. Each is shown as on the site: the photo, the caption and the credit (English, then Chinese), with the Commons description and date beside it. Tick <b>Reject</b> on any photo that is wrong, then press the button and paste the list back.</p>
+<p>${built.length} photos from <code>apps/web/data/photos.tsv</code>, ${Math.round(total / 1024)} KB in all. Each is shown as on the site: the photo, the caption and the credit (English, then Chinese; "Source" links to the photo credits page), with the Commons description, date, author fields, Permission and the file's own EXIF beside it. Tick <b>Reject</b> on any photo that is wrong, then press the button and paste the list back.</p>
 <p><button id="go" type="button">List the rejected tickers</button></p><textarea id="out" readonly placeholder="Rejected tickers appear here"></textarea></header>
 ${cards}
 <script>document.getElementById("go").onclick=function(){var t=[].map.call(document.querySelectorAll(".reject input:checked"),function(x){return x.value});var o=document.getElementById("out");o.value=t.length?"Rejected photos: "+t.join(" "):"No photos rejected.";o.focus();o.select();};</script>
@@ -430,5 +522,6 @@ ${cards}
 console.log(`${built.length} photos, ${total} bytes (${Math.round(total / built.length / 1024)} KB each on average); licences: ${JSON.stringify(licences)}`);
 const sizes = built.map((b) => b.bytes).sort((a, b) => a - b);
 console.log(`File sizes: smallest ${sizes[0]}, median ${sizes[Math.floor(sizes.length / 2)]}, largest ${sizes.at(-1)} bytes`);
+if (stripped.length) console.log(`Flickr " from <place>" dropped from the author's name (check these):\n  ${stripped.join("\n  ")}`);
 if (notes.length) console.log(`Notes:\n  ${notes.join("\n  ")}`);
 console.log(`Review sheet: ${REVIEW}`);
