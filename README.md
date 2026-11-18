@@ -48,4 +48,4 @@ Secrets live in `crates/generator/.dev.vars` locally (git-ignored) and in Wrangl
 
 ## License
 
-MIT. See `LICENSE`. The photographs in `apps/web/public/photos/` are not covered: each belongs to its author and is used under the licence named in `apps/web/public/photos/LICENSES.md` and credited under the photo on the site.
+MIT. See `LICENSE`. The company photographs in `apps/web/public/photos/` are not covered: they come from Wikimedia Commons, each is credited under the picture with its author and its licence or public-domain status (listed in `apps/web/public/photos/LICENSES.md`), and PreBell claims no rights in them.
