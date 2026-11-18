@@ -523,24 +523,6 @@ export const COMPANY_PHOTOS: Readonly<Record<string, { src: string; width: numbe
     "notices": [],
     "derived": null
   },
-  "GOOGL": {
-    "src": "/photos/GOOGL.webp?v=215ba518",
-    "width": 1440,
-    "height": 1053,
-    "en": "The Googleplex, Google's headquarters in Mountain View, California, in 2016.",
-    "zh": "Google 位于加利福尼亚州山景城的总部 Googleplex，摄于2016年。",
-    "author": "Asoundd",
-    "licence": "CC BY-SA 4.0",
-    "licenceUrl": "https://creativecommons.org/licenses/by-sa/4.0",
-    "page": "https://commons.wikimedia.org/wiki/File:Googleplex_HQ_(cropped).jpg",
-    "file": "Googleplex HQ (cropped).jpg",
-    "sourceUrl": null,
-    "sourceTitle": null,
-    "notices": [],
-    "derived": {
-      "from": "Googleplex HQ.jpg"
-    }
-  },
   "HD": {
     "src": "/photos/HD.webp?v=13341269",
     "width": 1440,
@@ -736,8 +718,8 @@ export const COMPANY_PHOTOS: Readonly<Record<string, { src: string; width: numbe
     "licenceUrl": "https://creativecommons.org/licenses/by-sa/3.0",
     "page": "https://commons.wikimedia.org/wiki/File:Lockheed_Martin_headquarters.jpg",
     "file": "Lockheed Martin headquarters.jpg",
-    "sourceUrl": "http://tools.wikimedia.de/~magnus/commonshelper.php",
-    "sourceTitle": "CommonsHelper",
+    "sourceUrl": null,
+    "sourceTitle": null,
     "notices": [
       "Coolcaesar at en.wikipedia"
     ],
@@ -870,7 +852,7 @@ export const COMPANY_PHOTOS: Readonly<Record<string, { src: string; width: numbe
     "page": "https://commons.wikimedia.org/wiki/File:Nike_Campus,_Beaverton_-_DPLA_-_ffa63f1bbaf5cd21aeada3d3978db2b0.jpg",
     "file": "Nike Campus, Beaverton - DPLA - ffa63f1bbaf5cd21aeada3d3978db2b0.jpg",
     "sourceUrl": "https://nwdh-omeka.s3.us-west-2.amazonaws.com/original/d10299ce79f91e85d7701881c79b72755a79678c.jpg",
-    "sourceTitle": "File URL",
+    "sourceTitle": null,
     "notices": [
       "Gary Halvorson, Oregon State Archives / Cc-by-4.0",
       "Gary Halvorson, Oregon State Archives"
@@ -1016,8 +998,8 @@ export const COMPANY_PHOTOS: Readonly<Record<string, { src: string; width: numbe
     "licenceUrl": "https://creativecommons.org/licenses/by-sa/3.0",
     "page": "https://commons.wikimedia.org/wiki/File:Qualcomm_headquarters.jpg",
     "file": "Qualcomm headquarters.jpg",
-    "sourceUrl": "http://tools.wikimedia.de/~magnus/commonshelper.php",
-    "sourceTitle": "CommonsHelper",
+    "sourceUrl": null,
+    "sourceTitle": null,
     "notices": [
       "Coolcaesar at en.wikipedia"
     ],
@@ -1034,8 +1016,8 @@ export const COMPANY_PHOTOS: Readonly<Record<string, { src: string; width: numbe
     "licenceUrl": "https://creativecommons.org/licenses/by-sa/3.0/",
     "page": "https://commons.wikimedia.org/wiki/File:Royal_Caribbean_headquarters.jpg",
     "file": "Royal Caribbean headquarters.jpg",
-    "sourceUrl": "http://tools.wikimedia.de/~magnus/commonshelper.php",
-    "sourceTitle": "CommonsHelper",
+    "sourceUrl": null,
+    "sourceTitle": null,
     "notices": [
       "Coolcaesar at the English Wikipedia"
     ],
