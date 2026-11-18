@@ -201,15 +201,31 @@ pub(crate) struct Reply {
 /// a reply split in two, cut into a fragment, or corrected after the fact must not pass as
 /// its first half. Nothing before the object is tolerated, and truncated JSON still fails.
 pub(crate) fn parse_reply(text: &str) -> Result<Reply, ProviderError> {
+    read_reply(text, "")
+}
+
+/// `parse_reply`, with `note` (a provider's stop reason) added to an error
+/// about how the reply begins: no JSON at all, or not an object.
+pub(crate) fn read_reply(text: &str, note: &str) -> Result<Reply, ProviderError> {
     let body = after_fence(text);
     let mut values = serde_json::Deserializer::from_str(body).into_iter::<Value>();
     let value = match values.next() {
         Some(Ok(v)) => v,
-        Some(Err(e)) => return Err(ProviderError::Parse(e.to_string())),
-        None => return Err(ProviderError::Parse("empty reply".into())),
+        // What the reply began with tells prose, a refusal in words and cut-off
+        // JSON apart in the log; same rules as a tail's snippet.
+        Some(Err(e)) => {
+            return Err(ProviderError::Parse(format!(
+                "{e}; reply began: {}{note}",
+                snippet(body)
+            )))
+        }
+        None => return Err(ProviderError::Parse(format!("empty reply{note}"))),
     };
     if !value.is_object() {
-        return Err(ProviderError::Parse("not a JSON object".into()));
+        return Err(ProviderError::Parse(format!(
+            "not a JSON object; reply began: {}{note}",
+            snippet(body)
+        )));
     }
     // What follows the object, past the fence that closes it.
     let tail = body[values.byte_offset()..].trim();
@@ -641,9 +657,9 @@ mod tests {
         assert_eq!(parse_err(""), "empty reply");
         assert_eq!(parse_err("   \n"), "empty reply");
         assert!(parse_err("```json\n```").contains("expected value"));
-        assert_eq!(parse_err("[1,2]"), "not a JSON object");
-        assert_eq!(parse_err("\"text\"\n\nand a note"), "not a JSON object");
-        assert_eq!(parse_err("true story: {\"a\":1}"), "not a JSON object");
+        assert!(parse_err("[1,2]").starts_with("not a JSON object"));
+        assert!(parse_err("\"text\"\n\nand a note").starts_with("not a JSON object"));
+        assert!(parse_err("true story: {\"a\":1}").starts_with("not a JSON object"));
         assert!(parse_err("Sorry, here is prose, not JSON.").contains("expected value"));
         // Nothing before the object is tolerated.
         assert!(parse_err("Here is the JSON:\n{\"a\":1}").contains("expected value"));
