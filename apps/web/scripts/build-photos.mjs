@@ -77,13 +77,16 @@ const decode = (s) =>
 const text = (html) => decode(plain(html ?? "")).replace(/\s+/g, " ").trim();
 
 /**
- * The Artist field as a plain name, or null when it is not one: empty, unknown or anonymous, a URL, an email
- * address, markup, the uploader rather than the author ("The original uploader was ..."), or a sentence.
+ * The Artist field as a plain name (a "User:" prefix dropped), or null when it is not one: empty, unknown or
+ * anonymous, a URL, an @ (an email address, or a name with an affiliation such as "X @ Project / Team"), markup,
+ * the uploader rather than the author ("The original uploader was ..."), or a sentence.
  */
 function authorName(html) {
-  const name = text(html).replace(/\s*\((talk|contribs?)\)$/i, "");
+  const name = text(html)
+    .replace(/^User:/i, "")
+    .replace(/\s*\((talk|contribs?)\)$/i, "");
   if (!name || name.length > 60) return null;
-  if (/[<>{}\[\]|]|https?:|www\.|\S@\S|\bunknown\b|\banonymous\b|\bown work\b|\buploader\b|\bemployee\b|\bnone\b|^(user|author)$/i.test(name)) return null;
+  if (/[<>{}\[\]|@]|https?:|www\.|\bunknown\b|\banonymous\b|\bown work\b|\buploader\b|\bemployee\b|\bnone\b|^(user|author)$/i.test(name)) return null;
   return name;
 }
 

@@ -7,7 +7,8 @@ const MAX_HEIGHT = 520;
 
 /**
  * A company photo from Wikimedia Commons, served from /photos: the image, then the caption and the credit
- * as plain text (Commons is out of reach in some places, so the credit reads without its link).
+ * as plain text (Commons is out of reach in some places, so the credit reads without its links). The author
+ * links to the file's Commons page and a CC licence to its deed, as the licences ask.
  */
 export default function CompanyPhoto({ photo, locale }: { photo: Photo; locale: Locale }) {
   const t = translator(locale);
@@ -34,7 +35,14 @@ export default function CompanyPhoto({ photo, locale }: { photo: Photo; locale: 
           <a href={photo.page} rel="noopener">
             {photo.author}
           </a>{" "}
-          / Wikimedia Commons · {licence}
+          / Wikimedia Commons ·{" "}
+          {photo.licenceUrl ? (
+            <a href={photo.licenceUrl} rel="license noopener">
+              {licence}
+            </a>
+          ) : (
+            licence
+          )}
         </span>
       </figcaption>
     </figure>

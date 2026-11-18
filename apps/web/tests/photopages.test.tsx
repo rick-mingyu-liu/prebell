@@ -97,7 +97,7 @@ describe("an earnings check with a company photo", () => {
       '<img src="/photos/INTC.webp?v=0123abcd" alt="Intel&#x27;s headquarters in Santa Clara, California, in 2019." width="1440" height="960" loading="lazy" decoding="async"/>',
     );
     expect(figure).toContain(
-      '<figcaption>Intel&#x27;s headquarters in Santa Clara, California, in 2019.<!-- --> <span class="photo-credit">Photo: <a href="https://commons.wikimedia.org/wiki/File:Intel_HQ.jpg" rel="noopener">Jane Doe</a> <!-- -->/ Wikimedia Commons · <!-- -->CC BY-SA 4.0</span></figcaption>',
+      '<figcaption>Intel&#x27;s headquarters in Santa Clara, California, in 2019.<!-- --> <span class="photo-credit">Photo: <a href="https://commons.wikimedia.org/wiki/File:Intel_HQ.jpg" rel="noopener">Jane Doe</a> <!-- -->/ Wikimedia Commons ·<!-- --> <a href="https://creativecommons.org/licenses/by-sa/4.0" rel="license noopener">CC BY-SA 4.0</a></span></figcaption>',
     );
     // Under the lede, before the rest of the body.
     const lede = out.indexOf('<p class="story-lede">INTC opening paragraph.</p>');
@@ -110,7 +110,7 @@ describe("an earnings check with a company photo", () => {
   it("shows the Chinese caption and credit on the Chinese page", async () => {
     const out = await postPage("zh", "earnings-intc-2026-10-29");
     expect(out).toContain('alt="Intel位于加利福尼亚州圣克拉拉的总部，摄于2019年。"');
-    expect(out).toContain('<span class="photo-credit">图片：<a href="https://commons.wikimedia.org/wiki/File:Intel_HQ.jpg" rel="noopener">Jane Doe</a> <!-- -->/ Wikimedia Commons · <!-- -->CC BY-SA 4.0</span>');
+    expect(out).toContain('<span class="photo-credit">图片：<a href="https://commons.wikimedia.org/wiki/File:Intel_HQ.jpg" rel="noopener">Jane Doe</a> <!-- -->/ Wikimedia Commons ·<!-- --> <a href="https://creativecommons.org/licenses/by-sa/4.0" rel="license noopener">CC BY-SA 4.0</a></span>');
     expect(out).not.toContain("Santa Clara");
   });
 
@@ -150,7 +150,8 @@ describe("pages without a photo render as before", () => {
     // The English version of the same check does show it, with the public-domain credit.
     const en = await postPage("en", "earnings-xom-2026-10-29");
     expect(en).toContain("Photo: <a");
-    expect(en).toContain("/ Wikimedia Commons · <!-- -->Public domain</span>");
+    expect(en).toContain("/ Wikimedia Commons ·<!-- --> <!-- -->Public domain</span>");
+    expect(en).not.toContain('rel="license');
     const brief = await postPage("en", "premarket-2026-10-29");
     expect(brief).not.toMatch(/class="photo"|\/photos\//);
   });
