@@ -333,7 +333,7 @@ mod tests {
         let m = err("{\"reasons\":[{\"url\":\"https://x.test\"").await;
         assert!(m.starts_with("EOF while parsing"), "{m}");
         assert!(
-            m.contains("reply began: {\"reasons\":[{\"url\":\"https://x.test\""),
+            m.contains("reply began: {\"reasons\":[{\"url\":\"https[:]//x.test\""),
             "{m}"
         );
         // Not an object, and an empty reply.
