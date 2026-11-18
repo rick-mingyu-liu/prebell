@@ -212,7 +212,7 @@ async fn build(
     row.updated_at = ts.clone();
     store.upsert_run(&row).await?;
 
-    let facts = c.build_facts(date, now, hooks.budget).await;
+    let facts = c.build_facts(date, now, hooks.budget, hooks.log).await;
     let mut lines = c.diagnostics(&facts);
     lines.extend((hooks.extra)());
     (hooks.log)(&format!("diagnostics: {}", lines.join("; ")));

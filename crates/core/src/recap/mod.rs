@@ -165,7 +165,7 @@ async fn mover(
     llm: &dyn LlmProvider,
     quote: Quote,
     now: DateTime<Utc>,
-    d: &mut Diag,
+    d: &mut Diag<'_>,
 ) -> Mover {
     let name = company_name(&quote.symbol)
         .unwrap_or(&quote.symbol)
@@ -189,6 +189,7 @@ async fn mover(
             );
             extract(
                 llm,
+                &format!("mover {ticker}"),
                 &system,
                 &articles_prompt(&header, &hits),
                 &hits,
@@ -284,7 +285,7 @@ async fn after_hours(
     date: NaiveDate,
     now: DateTime<Utc>,
     reported: &[Reported],
-    d: &mut Diag,
+    d: &mut Diag<'_>,
 ) -> Field<Vec<NewsReason>> {
     let day = long_date(date);
     // Not held to the news age cutoff: a preview from earlier in the week
@@ -323,6 +324,7 @@ async fn after_hours(
     }
     match extract(
         llm,
+        "after-hours",
         &system,
         &articles_prompt(&header, &hits),
         &hits,
@@ -352,7 +354,7 @@ async fn after_hours(
 async fn liquid_closes(
     md: &dyn MarketData,
     date: NaiveDate,
-    d: &mut Diag,
+    d: &mut Diag<'_>,
     extra: &[String],
 ) -> (Vec<Quote>, Vec<(String, Result<Quote, ProviderError>)>) {
     let tickers = universe();
@@ -395,7 +397,7 @@ pub async fn build_facts(
     now: DateTime<Utc>,
     budget: &dyn Fn() -> usize,
 ) -> RecapFacts {
-    build_facts_with_ipo(md, ns, llm, store, None, trading_date, now, budget).await
+    build_facts_with_ipo(md, ns, llm, store, None, trading_date, now, budget, &|_| {}).await
 }
 
 /// `build_facts`, also reading the closes of tracked IPOs (`ipo::trading`)
@@ -411,8 +413,12 @@ pub async fn build_facts_with_ipo(
     trading_date: NaiveDate,
     now: DateTime<Utc>,
     budget: &dyn Fn() -> usize,
+    log: &dyn Fn(&str),
 ) -> RecapFacts {
-    let mut d = Diag::default();
+    let mut d = Diag {
+        log: Some(log),
+        ..Diag::default()
+    };
     // Four chart requests, one per index, kept apart from the batched v7
     // movers scan: the required section then needs no cookie/crumb session,
     // and a v7 failure costs only the optional movers.
@@ -633,9 +639,10 @@ impl Content for Recap<'_> {
         date: NaiveDate,
         now: DateTime<Utc>,
         budget: &dyn Fn() -> usize,
+        log: &crate::run::LogFn<'_>,
     ) -> RecapFacts {
         build_facts_with_ipo(
-            self.md, self.ns, self.llm, self.store, self.ipo, date, now, budget,
+            self.md, self.ns, self.llm, self.store, self.ipo, date, now, budget, log,
         )
         .await
     }
@@ -1011,6 +1018,7 @@ mod tests {
             date(),
             now(),
             &|| 0,
+            &|_| {},
         )
         .await;
         // One batched call with one more symbol: room in the last v7 batch,
@@ -1113,6 +1121,20 @@ mod tests {
         );
         assert_eq!(why("AMD"), (true, group));
         assert_eq!(why("AVGO"), (true, group));
+    }
+
+    #[tokio::test]
+    async fn a_failed_recap_extraction_logs_its_ticker_and_error() {
+        let m = md(&[q("NVDA", 182.35, 3.08, Some(210_000_000))]);
+        let n = ns(vec![(NVDA_Q, Ok(vec![hit(URL, ARTICLE)]))]);
+        let l = llm(vec![("NVDA", Err(ProviderError::Http(529)))]);
+        let lines = std::cell::RefCell::new(Vec::<String>::new());
+        let log = |s: &str| lines.borrow_mut().push(s.to_string());
+        let s = MemStore::default();
+        let f = build_facts_with_ipo(&m, &n, &l, &s, None, date(), now(), &|| 0, &log).await;
+        assert_eq!(*lines.borrow(), ["llm error: mover NVDA: http status 529"]);
+        let plain = build_facts(&m, &n, &l, &s, date(), now(), &|| 0).await;
+        assert_eq!(f.diagnostics, plain.diagnostics);
     }
 
     #[tokio::test]

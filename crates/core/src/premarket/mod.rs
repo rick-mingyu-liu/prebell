@@ -93,7 +93,7 @@ pub(crate) const EVENT_RULE: &str = "A reason must be a specific event that expl
 /// Counters behind `PremarketFacts::diagnostics` (and the recap's, which
 /// counts index closes in `futures_*`).
 #[derive(Default)]
-pub(crate) struct Diag {
+pub(crate) struct Diag<'a> {
     pub(crate) ok: usize,
     pub(crate) http429: usize,
     pub(crate) http_other: usize,
@@ -131,9 +131,31 @@ pub(crate) struct Diag {
     pub(crate) themes_kept: usize,
     /// 1 when the top theme's search ran, else 0.
     pub(crate) theme_searched: usize,
+    /// Receives one line per failed model call (`llm_failed`), written when
+    /// the call fails: the build's log (`run::Hooks::log`), never the facts.
+    pub(crate) log: Option<&'a dyn Fn(&str)>,
 }
 
-impl Diag {
+/// The longest line `Diag::llm_failed` writes.
+pub(crate) const LLM_ERROR_LINE_CHARS: usize = 300;
+
+impl Diag<'_> {
+    /// Counts a failed model call (`llm_err`) and logs one line naming its
+    /// purpose ("mover NVDA", "macro", "theme Semiconductors", "after-hours")
+    /// and the error: `llm error: <purpose>: <error>`, at most
+    /// `LLM_ERROR_LINE_CHARS` characters, on one line.
+    pub(crate) fn llm_failed(&mut self, purpose: &str, e: &ProviderError) {
+        self.llm_err += 1;
+        if let Some(log) = self.log {
+            let line: String = format!("llm error: {purpose}: {e}")
+                .chars()
+                .map(|c| if c.is_control() { ' ' } else { c })
+                .take(LLM_ERROR_LINE_CHARS)
+                .collect();
+            log(&line);
+        }
+    }
+
     pub(crate) fn quote(&mut self, r: &Result<Quote, ProviderError>) {
         let n = match r {
             Ok(_) => &mut self.ok,
@@ -303,7 +325,7 @@ pub(crate) async fn fresh_news(
     query: &str,
     max: usize,
     now: DateTime<Utc>,
-    d: &mut Diag,
+    d: &mut Diag<'_>,
 ) -> Result<Vec<SearchHit>, ProviderError> {
     let since = news_cutoff(now);
     let mut hits = ns.search_since(query, max + NEWS_EXTRA_HITS, since).await?;
@@ -328,14 +350,18 @@ pub(crate) fn as_of(now: DateTime<Utc>) -> String {
 /// No hits means no reasons, without an LLM call. `movers` also drops
 /// reasons whose `summary_en` hedges its cause (`Diag::reasons_hedged`);
 /// macro and after-hours items are not held to that.
+/// `purpose` names the call in the log line a failure writes
+/// (`Diag::llm_failed`).
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn extract(
     llm: &dyn LlmProvider,
+    purpose: &str,
     system: &str,
     user: &str,
     hits: &[SearchHit],
     max: usize,
     movers: bool,
-    d: &mut Diag,
+    d: &mut Diag<'_>,
 ) -> Result<Vec<NewsReason>, ProviderError> {
     if hits.is_empty() {
         return Ok(vec![]);
@@ -343,7 +369,7 @@ pub(crate) async fn extract(
     let v = llm
         .complete_json(system, user)
         .await
-        .inspect_err(|_| d.llm_err += 1)?;
+        .inspect_err(|e| d.llm_failed(purpose, e))?;
     let items = v
         .get("reasons")
         .and_then(Value::as_array)
@@ -386,7 +412,7 @@ async fn mover_reasons(
     name: &str,
     change_pct: f64,
     now: DateTime<Utc>,
-    d: &mut Diag,
+    d: &mut Diag<'_>,
 ) -> Option<Vec<NewsReason>> {
     let Ok(hits) = fresh_news(
         ns,
@@ -413,6 +439,7 @@ async fn mover_reasons(
     );
     extract(
         llm,
+        &format!("mover {ticker}"),
         &system,
         &articles_prompt(&header, &hits),
         &hits,
@@ -443,7 +470,7 @@ pub(crate) async fn macro_items(
     queries: &[&str],
     prompt: &MacroPrompt<'_>,
     now: DateTime<Utc>,
-    d: &mut Diag,
+    d: &mut Diag<'_>,
     budget: &dyn Fn() -> usize,
 ) -> Field<Vec<NewsReason>> {
     let mut hits: Vec<SearchHit> = Vec::new();
@@ -493,6 +520,7 @@ pub(crate) async fn macro_items(
     let header = format!("Topic: {}\n{}", prompt.topic, as_of(now));
     match extract(
         llm,
+        "macro",
         &system,
         &articles_prompt(&header, &hits),
         &hits,
@@ -534,7 +562,7 @@ pub(crate) async fn theme_reasons(
     movers: &[&Mover],
     session: &str,
     now: DateTime<Utc>,
-    d: &mut Diag,
+    d: &mut Diag<'_>,
     budget: &dyn Fn() -> usize,
 ) {
     for t in themes.iter_mut() {
@@ -586,6 +614,7 @@ pub(crate) async fn theme_reasons(
     // Held to the movers' hedge rule, as `THEME_RULE` asks.
     top.reasons = extract(
         llm,
+        &format!("theme {}", top.group),
         &system,
         &articles_prompt(&header, &hits),
         &hits,
@@ -598,7 +627,7 @@ pub(crate) async fn theme_reasons(
 }
 
 /// Universe quotes passing the price/volume filters, with `symbol` set to the universe ticker.
-async fn liquid_quotes(md: &dyn MarketData, now: DateTime<Utc>, d: &mut Diag) -> Vec<Quote> {
+async fn liquid_quotes(md: &dyn MarketData, now: DateTime<Utc>, d: &mut Diag<'_>) -> Vec<Quote> {
     let tickers = universe();
     let symbols: Vec<String> = tickers.iter().map(|t| yahoo_symbol(t)).collect();
     let quotes = md.premarket_quotes(&symbols, now).await;
@@ -630,7 +659,24 @@ pub async fn build_facts(
     now: DateTime<Utc>,
     budget: &dyn Fn() -> usize,
 ) -> PremarketFacts {
-    let mut d = Diag::default();
+    build_facts_logged(md, ns, llm, trading_date, now, budget, &|_| {}).await
+}
+
+/// `build_facts`, writing one line to `log` per failed model call (its
+/// purpose and error) as it fails. Same facts, counters and diagnostics.
+pub async fn build_facts_logged(
+    md: &dyn MarketData,
+    ns: &dyn NewsSearch,
+    llm: &dyn LlmProvider,
+    trading_date: NaiveDate,
+    now: DateTime<Utc>,
+    budget: &dyn Fn() -> usize,
+    log: &dyn Fn(&str),
+) -> PremarketFacts {
+    let mut d = Diag {
+        log: Some(log),
+        ..Diag::default()
+    };
     let mut futures = Vec::with_capacity(FUTURES.len());
     for (label, sym) in FUTURES {
         let f = match md.quote(sym).await {
@@ -724,7 +770,7 @@ async fn to_mover(
     llm: &dyn LlmProvider,
     quote: Quote,
     now: DateTime<Utc>,
-    d: &mut Diag,
+    d: &mut Diag<'_>,
 ) -> Mover {
     let name = company_name(&quote.symbol)
         .unwrap_or(&quote.symbol)
@@ -1483,6 +1529,67 @@ mod tests {
         )]);
         let f = build_facts(&m, &n, &l, date(), now(), &|| 0).await;
         assert_eq!(f.gainers[0].reasons, vec![]);
+    }
+
+    #[tokio::test]
+    async fn a_failed_extraction_logs_its_ticker_and_error() {
+        let m = md(&[
+            q("AAPL", 230.0, 8.0, Some(2_000_000)),
+            q("MSFT", 400.0, -6.0, Some(900_000)),
+        ]);
+        let n = ns(vec![(AAPL_Q, Ok(vec![hit(URL, ARTICLE)]))]);
+        let l = llm(vec![(
+            "AAPL",
+            Err(ProviderError::Parse(
+                "expected value at line 1 column 1; reply began: Sorry, I can't help with that.; stop_reason=end_turn".into(),
+            )),
+        )]);
+        let lines = std::cell::RefCell::new(Vec::<String>::new());
+        let log = |s: &str| lines.borrow_mut().push(s.to_string());
+        let f = build_facts_logged(&m, &n, &l, date(), now(), &|| 0, &log).await;
+        assert_eq!(
+            *lines.borrow(),
+            ["llm error: mover AAPL: parse error: expected value at line 1 column 1; reply began: Sorry, I can't help with that.; stop_reason=end_turn"]
+        );
+        // The same facts and counters as without a log.
+        let plain = build_facts(&m, &n, &l, date(), now(), &|| 0).await;
+        assert_eq!(f.diagnostics, plain.diagnostics);
+        assert!(f
+            .diagnostics
+            .iter()
+            .any(|d| d.starts_with("search_err=") && d.contains("llm_err=1")));
+        assert_eq!(f.gainers[0].reasons, vec![]);
+    }
+
+    /// One line per failed call, on one line and at most
+    /// `LLM_ERROR_LINE_CHARS` characters, whatever the error holds.
+    #[test]
+    fn a_failure_line_is_one_short_line() {
+        let lines = std::cell::RefCell::new(Vec::<String>::new());
+        let log = |s: &str| lines.borrow_mut().push(s.to_string());
+        let mut d = Diag {
+            log: Some(&log),
+            ..Diag::default()
+        };
+        d.llm_failed(
+            "macro",
+            &ProviderError::Network(format!("a\nb{}", "x".repeat(1000))),
+        );
+        d.llm_failed("theme Semiconductors", &ProviderError::Http(529));
+        assert_eq!(d.llm_err, 2);
+        let l = lines.borrow();
+        assert_eq!(l.len(), 2);
+        assert!(
+            l[0].starts_with("llm error: macro: network error: a b"),
+            "{}",
+            l[0]
+        );
+        assert_eq!(l[0].chars().count(), LLM_ERROR_LINE_CHARS);
+        assert_eq!(l[1], "llm error: theme Semiconductors: http status 529");
+        // Without a log the count is all.
+        let mut quiet = Diag::default();
+        quiet.llm_failed("macro", &ProviderError::Http(500));
+        assert_eq!(quiet.llm_err, 1);
     }
 
     #[tokio::test]

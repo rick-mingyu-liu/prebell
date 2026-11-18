@@ -16,13 +16,17 @@ use crate::cover::{
 use crate::events::watch::WatchSource;
 use crate::facts::{missing_required, NewsReason, PremarketFacts};
 use crate::numbers::Lang;
-use crate::premarket::build_facts;
+use crate::premarket::build_facts_logged;
 use crate::premarket::draft::{source_reasons, write, Draft, TEMPLATE_ID};
 use crate::providers::{LlmProvider, MarketData, NewsSearch};
 use crate::store::{PostRow, RunRow, Store, TranslationRow};
 use crate::why;
 
 pub mod update;
+
+/// A log sink (`Hooks::log`). An alias, so `async_trait` keeps the `&str`
+/// argument higher-ranked instead of naming its lifetime.
+pub type LogFn<'a> = dyn Fn(&str) + 'a;
 
 /// One scheduled content type (premarket brief, recap): its window, facts,
 /// gate, drafting and sources. Everything else is the shared state machine.
@@ -45,12 +49,14 @@ pub trait Content {
         true
     }
     /// `budget` returns the subrequests used so far; optional work checks it
-    /// with `crate::budget::allows` before spending more.
+    /// with `crate::budget::allows` before spending more. `log` receives one
+    /// line per failed model call (`premarket::Diag::llm_failed`).
     async fn build_facts(
         &self,
         date: NaiveDate,
         now: DateTime<Utc>,
         budget: &dyn Fn() -> usize,
+        log: &LogFn<'_>,
     ) -> Self::Facts;
     /// Names of required sections that are unavailable; empty = publishable.
     fn missing_required(&self, f: &Self::Facts) -> Vec<&'static str>;
@@ -120,8 +126,9 @@ impl Content for Premarket<'_> {
         date: NaiveDate,
         now: DateTime<Utc>,
         budget: &dyn Fn() -> usize,
+        log: &LogFn<'_>,
     ) -> PremarketFacts {
-        let mut f = build_facts(self.md, self.ns, self.llm, date, now, budget).await;
+        let mut f = build_facts_logged(self.md, self.ns, self.llm, date, now, budget, log).await;
         if let Some(w) = self.watch {
             f.watch_list = w.watch_list(date, now, budget).await;
         }
@@ -438,7 +445,7 @@ async fn build<C: Content>(
     row.updated_at = ts;
     store.upsert_run(&row).await?;
 
-    let facts = c.build_facts(date, now, hooks.budget).await;
+    let facts = c.build_facts(date, now, hooks.budget, hooks.log).await;
     let mut lines = c.diagnostics(&facts);
     lines.extend((hooks.extra)());
     // Logged now, before the drafts, so the line survives a build that dies
@@ -913,7 +920,7 @@ mod tests {
         };
         let date = "2026-10-29".parse().unwrap();
         let f = c
-            .build_facts(date, utc("2026-10-29T12:00:00Z"), &|| 0)
+            .build_facts(date, utc("2026-10-29T12:00:00Z"), &|| 0, &|_| {})
             .await;
         assert_eq!(*w.calls.borrow(), [(date, utc("2026-10-29T12:00:00Z"))]);
         assert_eq!(
@@ -1000,7 +1007,7 @@ mod tests {
         };
         let date = "2026-10-29".parse().unwrap();
         let f = c
-            .build_facts(date, utc("2026-10-29T12:00:00Z"), &|| 0)
+            .build_facts(date, utc("2026-10-29T12:00:00Z"), &|| 0, &|_| {})
             .await;
         assert_eq!(f.themes[0].group, "Networking & optical");
         assert_eq!(f.gainers[0].fallback, None);
@@ -1267,6 +1274,7 @@ mod tests {
             _date: NaiveDate,
             _now: DateTime<Utc>,
             budget: &dyn Fn() -> usize,
+            _log: &LogFn<'_>,
         ) -> u32 {
             self.seen.set(Some(budget()));
             0

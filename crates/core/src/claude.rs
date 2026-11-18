@@ -1,4 +1,4 @@
-use crate::llm::{dropped_note, parse_reply, strict, Reply};
+use crate::llm::{dropped_note, read_reply, strict, Reply};
 use crate::providers::{Http, LlmProvider, ProviderError};
 use async_trait::async_trait;
 use serde_json::{json, Value};
@@ -171,7 +171,13 @@ impl<H: Http> Claude<H> {
             .and_then(|b| b.get("text"))
             .and_then(Value::as_str)
             .ok_or(ProviderError::Empty)?;
-        parse_reply(text)
+        // The stop reason (a normal end here: the others are errors above)
+        // tells a reply that finished as prose from one cut off.
+        let stop = v
+            .get("stop_reason")
+            .and_then(Value::as_str)
+            .unwrap_or("none");
+        read_reply(text, &format!("; stop_reason={stop}"))
     }
 }
 
@@ -288,6 +294,57 @@ mod tests {
             WARNED.with(|w| w.borrow().clone()),
             ["claude reply: ignored text after the JSON object: Note: all claims checked."]
         );
+    }
+
+    /// A reply that is not JSON at all says how it began, sanitized and cut
+    /// to 80 characters, and how the turn ended: prose, a refusal in words
+    /// and cut-off JSON read differently in the log. A reply with nothing in
+    /// it says so.
+    #[tokio::test]
+    async fn a_non_json_reply_says_how_it_began_and_ended() {
+        async fn err(text: &str) -> String {
+            match cl(fake(200, &wrap(text, "end_turn")))
+                .complete_json("s", "u")
+                .await
+            {
+                Err(ProviderError::Parse(m)) => m,
+                other => panic!("{text:?}: {other:?}"),
+            }
+        }
+        // Prose, or a refusal in words.
+        assert_eq!(
+            err("I'm sorry, but I can't help with that request.").await,
+            "expected value at line 1 column 1; reply began: I'm sorry, but I can't help with that request.; stop_reason=end_turn"
+        );
+        // Control and bidirectional characters are replaced; a long reply is
+        // cut to 80 characters with its length noted.
+        let long = format!("Here\u{202e} are\n\tthe reasons{}", " and more".repeat(20));
+        let m = err(&long).await;
+        let began = m
+            .strip_prefix("expected value at line 1 column 1; reply began: ")
+            .unwrap();
+        assert!(began.starts_with("Here? are the reasons and more"), "{m}");
+        assert!(
+            began.ends_with("… (201 characters); stop_reason=end_turn"),
+            "{m}"
+        );
+        assert!(!m.contains('\u{202e}') && !m.contains('\n'), "{m}");
+        // JSON cut off without the model saying so: the start shows the object.
+        let m = err("{\"reasons\":[{\"url\":\"https://x.test\"").await;
+        assert!(m.starts_with("EOF while parsing"), "{m}");
+        assert!(
+            m.contains("reply began: {\"reasons\":[{\"url\":\"https[:]//x.test\""),
+            "{m}"
+        );
+        // Not an object, and an empty reply.
+        assert_eq!(
+            err("[1, 2]").await,
+            "not a JSON object; reply began: [1, 2]; stop_reason=end_turn"
+        );
+        assert_eq!(err("").await, "empty reply; stop_reason=end_turn");
+        // A refusal the API marks stays as it was.
+        let r = cl(fake(200, REFUSAL)).complete_json("s", "u").await;
+        assert!(matches!(r, Err(ProviderError::Parse(m)) if m.starts_with("refusal")));
     }
 
     /// The judge's case (2026-11-16): a pass, then a change of mind after
