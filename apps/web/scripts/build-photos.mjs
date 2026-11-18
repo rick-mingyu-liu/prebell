@@ -129,7 +129,6 @@ async function commonsInfo(names, fresh) {
       if (!info || !name) continue;
       const m = info.extmetadata ?? {};
       const source = originalSource(m.Credit?.value);
-      const permission = permissionTerms(m.Permission?.value, text(m.LicenseShortName?.value));
       const attribution = text(m.Attribution?.value);
       // The credited name: the attribution the author asks for when it is a plain name (not a credit line with
       // a ©, a licence or a URL), else the Artist field; the Flickr importer's " from <place>" is dropped.
@@ -137,6 +136,8 @@ async function commonsInfo(names, fresh) {
       const raw = plainAttribution ?? authorName(m.Artist?.value);
       const author = raw && stripFlickrPlace(raw, source?.flickr);
       if (author && author !== raw) stripped.push(`${name}: "${raw}" -> "${author}"`);
+      // Permission is read against the licence tag and the credited names (the {{self}} line names the author).
+      const permission = permissionTerms(m.Permission?.value, text(m.LicenseShortName?.value), [author ?? "", text(m.Artist?.value), ...userNames(m.Artist?.value), attribution]);
       out[name] = {
         // A thumbnail at THUMB px when the original is wider; the original otherwise.
         url: info.thumburl && info.thumbwidth < info.width ? info.thumburl : info.url,

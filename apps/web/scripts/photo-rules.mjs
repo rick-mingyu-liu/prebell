@@ -84,8 +84,8 @@ export function headquartersNamed(caption, places) {
 }
 
 /**
- * Lower-case word tokens of length 2 or more (initials and punctuation drop out, accents are folded, so "Hiàn"
- * is "hian"), plus "©" as its own token.
+ * Lower-case word tokens, initials included ("Larry D. Moore" is larry, d, moore, so "Larry E. Moore" is another
+ * name), accents folded ("Hiàn" is "hian"), plus "©" as its own token. Punctuation drops out.
  */
 const tokens = (s) => {
   const t = String(s ?? "")
@@ -93,7 +93,7 @@ const tokens = (s) => {
     .replace(/\p{M}/gu, "")
     .toLowerCase()
     .replace(/_/g, " ");
-  return [...(t.includes("©") ? ["©"] : []), ...(t.match(/[\p{L}\p{N}]{2,}/gu) ?? [])];
+  return [...(t.includes("©") ? ["©"] : []), ...(t.match(/[\p{L}\p{N}]+/gu) ?? [])];
 };
 
 /** EXIF values that name no one, in either field: placeholders a camera or an app leaves. */
@@ -134,9 +134,14 @@ export function exifName(value, { tag = "Copyright", make = "" } = {}) {
 export function exifMismatch(value, credited, opts) {
   const name = exifName(value, opts);
   if (!name) return null;
+  return namedIn(name, credited) ? null : name;
+}
+
+/** Whether every word of `name` (initials included) is among the words of the credited names. */
+function namedIn(name, credited) {
   const a = tokens(name).filter((x) => x !== "©");
   const b = new Set(credited.flatMap((c) => tokens(c)).filter((x) => x !== "©"));
-  return a.length > 0 && a.every((w) => b.has(w)) ? null : name;
+  return a.length > 0 && a.every((w) => b.has(w));
 }
 
 /** The Commons or Wikipedia user names an Artist field links to ("User:Hiàn" -> "Hiàn"). */
@@ -178,27 +183,39 @@ const VRT = new RegExp(
 );
 /** The only sentence allowed after a licence box: the Flickr or Panoramio bot's review. */
 const REVIEWED = /^This image, which was originally posted to (Flickr|Panoramio), was automatically reviewed on \d{1,2} [A-Z][a-z]+ \d{4} by [^.,]+, who confirmed that it was available on \1 under the above license on that date\.$/;
-/** The {{self}} line: a name (no sentence in it), then the template's words. */
-const SELF = /^[^.;:!?]{1,80}, the copyright holder of this work, hereby publishes it under the following licen[cs]e:$/;
+/** The {{self}} line: a name, then the template's words. The name is checked against the credited names. */
+const SELF = /^(.{1,120}), the copyright holder of this work, hereby publishes it under the following licen[cs]e:$/;
+/** How {{self}} renders the author of a file transferred from a Wikipedia: "X at the English-language Wikipedia". */
+const AT_WIKIPEDIA = / at the [A-Z][a-z]+-language Wikipedia$/;
+/**
+ * Wording in Permission that names a licence the build never accepts, in any form: non-commercial, no
+ * derivatives (also as "-nc", "nc-sa", "-nd"), the GFDL, or "all rights reserved". Always a conflict.
+ */
+const FORBIDDEN = /non-?commercial|no-?deriv|\bGFDL\b|GNU Free Documentation|all rights reserved|(^|[\s(\-/_,])(nc|nd)(?=$|[\s)\-/_.,;])/i;
 
 /**
- * Commons' Permission text, checked against the file's licence. Known template text is removed exactly: the
- * licence box (whose licence must be the file's), the {{self}} line, the VRT notice, and the file's own licence
- * name restated. After a box only the Flickr or Panoramio review sentence may follow; after a VRT notice, nothing.
+ * Commons' Permission text, checked against the file's licence and the credited names. Known template text is
+ * removed exactly: the licence box (whose licence must be the file's), the {{self}} line when its name is one of
+ * the credited names (so a condition written into the name is not skipped), the VRT notice, and the file's own
+ * licence name restated. After a box only the Flickr or Panoramio review sentence may follow; after a VRT notice, nothing.
  * Returns { conditions, attribution, conflict }:
  * - conditions: the whole text when anything is left over ("" when none): someone must read it, and the build
  *   stops until data/photos.tsv repeats it word for word;
  * - attribution: the "Attribution: X" a box names, or null;
- * - conflict: why the text contradicts the file's licence (a box or a restated name for another licence), or
- *   null. The build always stops on a conflict.
+ * - conflict: why the text contradicts the file's licence (a box or a restated name for another licence, or
+ *   non-commercial, no-derivatives, GFDL or "all rights reserved" wording anywhere), or null. The build always
+ *   stops on a conflict, whatever the terms column says.
  */
-export function permissionTerms(html, licence = "") {
+export function permissionTerms(html, licence = "", credited = []) {
   const t = text(html);
   const none = { conditions: "", attribution: null, conflict: null };
   if (!t) return none;
+  const forbidden = t.match(FORBIDDEN);
+  if (forbidden) return { conditions: t, attribution: null, conflict: `Permission says "${forbidden[0].trim()}", a licence the site does not use` };
   if (/^(public domain|cc0( 1\.0)?|cc[ -]by(-sa)?[ -]\d\.\d( [a-z]{2})?)$/i.test(t))
     return sameLicence(t, licence) ? none : { conditions: t, attribution: null, conflict: `Permission names ${t}, the licence tag ${licence || "none"}` };
-  if (SELF.test(t)) return none;
+  const self = t.match(SELF);
+  if (self) return namedIn(self[1].replace(AT_WIKIPEDIA, ""), credited) ? none : { ...none, conditions: t };
   const vrt = t.match(VRT);
   if (vrt) return vrt[2].trim() ? { ...none, conditions: t } : none;
   const box = t.match(BOX);

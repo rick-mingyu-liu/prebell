@@ -17,5 +17,5 @@ export function exifName(value: unknown, opts?: ExifOptions): string;
 export function exifMismatch(value: unknown, credited: readonly string[], opts?: ExifOptions): string | null;
 export function userNames(artistHtml: unknown): string[];
 export function requestNotCovered(request: string, creditName: string, licence: string): string[];
-export function permissionTerms(html: unknown, licence?: string): { conditions: string; attribution: string | null; conflict: string | null };
+export function permissionTerms(html: unknown, licence?: string, credited?: readonly string[]): { conditions: string; attribution: string | null; conflict: string | null };
 export function originalSource(creditHtml: unknown): { url: string; title: string | null; flickr: boolean } | null;

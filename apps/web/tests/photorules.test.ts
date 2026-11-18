@@ -185,7 +185,7 @@ describe("permissionTerms", () => {
       attribution: "BigBear_in_IN",
       conflict: null,
     });
-    expect(permissionTerms("Coolcaesar at the English-language Wikipedia, the copyright holder of this work, hereby publishes it under the following license:").conditions).toBe("");
+    expect(permissionTerms("Coolcaesar at the English-language Wikipedia, the copyright holder of this work, hereby publishes it under the following license:", "CC BY-SA 3.0", ["Coolcaesar"]).conditions).toBe("");
     expect(permissionTerms(vrt(), "CC BY-SA 4.0")).toEqual({ conditions: "", attribution: null, conflict: null });
     expect(permissionTerms("Public domain", "Public domain").conditions).toBe("");
   });
@@ -203,6 +203,43 @@ describe("permissionTerms", () => {
     expect(permissionTerms(box("Attribution 4.0 International", "CC BY 4.0", "https://creativecommons.org/licenses/by/4.0", false), "CC BY-SA 4.0").conflict).not.toBeNull();
     expect(permissionTerms("CC-By-SA-3.0", "CC BY 3.0").conflict).not.toBeNull();
     expect(permissionTerms("", "CC BY 3.0")).toEqual({ conditions: "", attribution: null, conflict: null });
+  });
+});
+
+describe("review round 3", () => {
+  it("skips the {{self}} line only when its name is a credited name (G1)", () => {
+    const self = (name: string) => `${name}, the copyright holder of this work, hereby publishes it under the following license:`;
+    expect(permissionTerms(self("Coolcaesar at the English-language Wikipedia"), "CC BY-SA 3.0", ["Coolcaesar"]).conditions).toBe("");
+    const hidden = self("Coolcaesar (no commercial use without asking)");
+    expect(permissionTerms(hidden, "CC BY-SA 3.0", ["Coolcaesar"]).conditions).toBe(hidden);
+    expect(permissionTerms(self("Jane Roe"), "CC BY-SA 3.0", ["Coolcaesar"]).conditions).not.toBe("");
+    expect(permissionTerms(self("Coolcaesar"), "CC BY-SA 3.0").conditions).not.toBe("");
+  });
+  it("treats non-commercial, no-derivatives, GFDL and all-rights-reserved wording anywhere as a conflict (G2)", () => {
+    for (const t of [
+      "cc-by-sa-4.0-nc",
+      "cc-by-nc-3.0",
+      "CC BY-NC-ND 4.0",
+      "Creative Commons Attribution-NonCommercial 3.0",
+      "Attribution-NoDerivatives 4.0",
+      "GFDL",
+      "GNU Free Documentation License 1.2",
+      "All rights reserved. Used with permission.",
+      "Free to use; ND.",
+    ])
+      expect(permissionTerms(t, "CC BY-SA 3.0", ["Coolcaesar"]).conflict, t).not.toBeNull();
+    // Another free licence in an unusual form is still a condition to read, not a conflict.
+    const multi = permissionTerms("CC-BY-SA-3.0,2.5,2.0,1.0", "CC BY-SA 3.0");
+    expect(multi.conflict).toBeNull();
+    expect(multi.conditions).toBe("CC-BY-SA-3.0,2.5,2.0,1.0");
+    // Words that only contain the letters are not caught.
+    expect(permissionTerms("Please credit the author and the Commons page.", "CC BY 4.0").conflict).toBeNull();
+  });
+  it("keeps initials in name matching", () => {
+    expect(exifMismatch("Larry E. Moore", ["Larry D. Moore"])).toBe("Larry E. Moore");
+    expect(exifMismatch("Larry D. Moore", ["Larry D. Moore"])).toBeNull();
+    expect(exifMismatch("© 2022 Larry D. Moore", ["Larry D. Moore"])).toBeNull();
+    expect(requestNotCovered("Larry E. Moore", "Larry D. Moore", "CC BY 4.0")).toEqual(["e"]);
   });
 });
 
