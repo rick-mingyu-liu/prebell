@@ -12,7 +12,7 @@ photo is resized (the long side to at most 1440 px, never enlarged) and re-encod
 credit written into its EXIF; PreBell does not crop or otherwise alter it. Where the licence is CC BY-SA, the
 resized file is shared under the same licence.
 
-Licences: CC BY-SA 4.0 44, CC BY-SA 3.0 14, CC0 5, CC BY 2.0 4, CC BY 4.0 4, Public domain 3, CC BY 3.0 3, CC BY-SA 2.0 2.
+Licences: CC BY-SA 4.0 44, CC BY-SA 3.0 14, CC0 5, CC BY 2.0 4, CC BY 4.0 4, Public domain 3, CC BY 3.0 2, CC BY-SA 2.0 2.
 
 | File | Company | Commons file | Author | Requested attribution / notice | Original source | Licence | Taken | Fetched | Changes | Notes |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
@@ -62,7 +62,6 @@ Licences: CC BY-SA 4.0 44, CC BY-SA 3.0 14, CC0 5, CC BY 2.0 4, CC BY 4.0 4, Pub
 | `LLY.webp` | Eli Lilly | [Eli Lilly Corporate Center, Indianapolis, Indiana, USA.jpg](https://commons.wikimedia.org/wiki/File:Eli_Lilly_Corporate_Center,_Indianapolis,_Indiana,_USA.jpg) | Momoneymoproblemz | none | own work on Commons | CC BY-SA 4.0 (https://creativecommons.org/licenses/by-sa/4.0) | 2019-08-01 18:37:34 | 2026-11-18 | resized to 1440x1080, WebP |  |
 | `LMT.webp` | Lockheed Martin | [Lockheed Martin headquarters.jpg](https://commons.wikimedia.org/wiki/File:Lockheed_Martin_headquarters.jpg) | Coolcaesar at en.wikipedia | Coolcaesar at en.wikipedia | CommonsHelper: http://tools.wikimedia.de/~magnus/commonshelper.php | CC BY-SA 3.0 (https://creativecommons.org/licenses/by-sa/3.0) | 2008-08-22 | 2026-11-18 | resized to 1440x1120, WebP |  |
 | `LOW.webp` | Lowe's | [Lowe’s, Chico (2026)-L1000836.jpg](https://commons.wikimedia.org/wiki/File:Lowe%E2%80%99s,_Chico_(2026)-L1000836.jpg) | Frank Schulenburg | none | own work on Commons | CC BY-SA 4.0 (https://creativecommons.org/licenses/by-sa/4.0) | 2026-08-23 09:15:16 | 2026-11-18 | resized to 1440x1029, WebP |  |
-| `MDT.webp` | Medtronic | [2009-0610-001-Fridley-MedtronicHQ.JPG](https://commons.wikimedia.org/wiki/File:2009-0610-001-Fridley-MedtronicHQ.JPG) | Bobak Ha'Eri | CC-By-SA-3.0 | own work on Commons | CC BY 3.0 (https://creativecommons.org/licenses/by/3.0) | 2009-06-10 | 2026-11-18 | resized to 1440x702, WebP |  |
 | `MELI.webp` | MercadoLibre | [Mercadolibre edificio saavedra.jpg](https://commons.wikimedia.org/wiki/File:Mercadolibre_edificio_saavedra.jpg) | Fernando Martello | Fernando Martello — This image was created by Fernando Martello (user name: Fma12). You are free to use it for any purpose as long as you credit the author and follow the terms of the license. Please, do not upload new revisions over this file. Instead, use the possibility to upload a new version under a different name and tag it as a derivate or extract of this image. | own work on Commons | CC BY-SA 4.0 (https://creativecommons.org/licenses/by-sa/4.0) | 14 July 2021, 09:17:09 (according to Exif data) | 2026-11-18 | resized to 1440x1080, WebP |  |
 | `META.webp` | Meta Platforms | [Meta HQ 2023.png](https://commons.wikimedia.org/wiki/File:Meta_HQ_2023.png) | InvadingInvader | none | own work on Commons | CC BY-SA 4.0 (https://creativecommons.org/licenses/by-sa/4.0) | 2023-01-27 | 2026-11-18 | resized to 1440x779, WebP |  |
 | `MMM.webp` | 3M | [3-M Building Maplewood MN1.jpg](https://commons.wikimedia.org/wiki/File:3-M_Building_Maplewood_MN1.jpg) | Acroterion | none | own work on Commons | CC BY-SA 4.0 (https://creativecommons.org/licenses/by-sa/4.0) | 2018-09-24 | 2026-11-18 | resized to 1440x924, WebP |  |
@@ -96,4 +95,4 @@ Licences: CC BY-SA 4.0 44, CC BY-SA 3.0 14, CC0 5, CC BY 2.0 4, CC BY 4.0 4, Pub
 | `WRB.webp` | W. R. Berkley | [W. R. Berkley Corporation headquarters 1.jpg](https://commons.wikimedia.org/wiki/File:W._R._Berkley_Corporation_headquarters_1.jpg) | Mx. Granger | none | own work on Commons | CC0 (https://creativecommons.org/publicdomain/zero/1.0/deed.en) | 2022-12-24 10:55:10 | 2026-11-18 | resized to 1440x866, WebP |  |
 | `XYL.webp` | Xylem | [Xylem 04.jpg](https://commons.wikimedia.org/wiki/File:Xylem_04.jpg) | Bernt Fransson | none | own work on Commons | CC BY-SA 4.0 (https://creativecommons.org/licenses/by-sa/4.0) | 2016-09-25 12:59:59 | 2026-11-18 | resized to 1440x950, WebP |  |
 
-Total size of the files above: 11391842 bytes.
+Total size of the files above: 11312128 bytes.

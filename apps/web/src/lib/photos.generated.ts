@@ -759,24 +759,6 @@ export const COMPANY_PHOTOS: Readonly<Record<string, { src: string; width: numbe
     "notices": [],
     "derived": null
   },
-  "MDT": {
-    "src": "/photos/MDT.webp?v=7c67e703",
-    "width": 1440,
-    "height": 702,
-    "en": "Medtronic's operational headquarters in Fridley, Minnesota, in 2009.",
-    "zh": "Medtronic 位于明尼苏达州 Fridley 的运营总部，摄于2009年。",
-    "author": "Bobak Ha'Eri",
-    "licence": "CC BY 3.0",
-    "licenceUrl": "https://creativecommons.org/licenses/by/3.0",
-    "page": "https://commons.wikimedia.org/wiki/File:2009-0610-001-Fridley-MedtronicHQ.JPG",
-    "file": "2009-0610-001-Fridley-MedtronicHQ.JPG",
-    "sourceUrl": null,
-    "sourceTitle": null,
-    "notices": [
-      "CC-By-SA-3.0"
-    ],
-    "derived": null
-  },
   "MELI": {
     "src": "/photos/MELI.webp?v=cf59b188",
     "width": 1440,
