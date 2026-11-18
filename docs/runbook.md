@@ -487,9 +487,9 @@ At most `INSIGHT_MONTHLY_CALLS` model calls per ET month (default 300: $2.40 to 
 Before the first run the step's cold CPU was known only from V8 under Node (`tools/insight-cpu-wasm`), where the check step took about twice a share card render's first call, and the docs did not settle how much CPU a free-plan queue consumer gets. The first shadow run (generator version `fdc640a3`, `INSIGHT_MONTHLY_CALLS = "10"`, read with `wrangler tail --format json`) settled it for this step:
 
 - Five bundles finished within six minutes; every invocation's outcome was `ok`.
-- CPU per `insight` invocation: 174 ms for the first write step and 129 ms for the first check step (cold), then 13 to 27 ms; an idle sweep about 22 ms. The earnings poll ran at 141 to 179 ms in the same capture, so invocations of this size complete on the free plan. No limit was read from the platform; this is what completed.
-- At most 13 subrequests in one `insight` invocation (`insight_ops` plus `subrequests`), and 5 D1 queries.
-- So the check step is not split by language.
+- CPU per `insight` invocation: 174 ms for the first write step and 129 ms for the first check step (cold), then 13 to 27 ms; one idle sweep at 22 ms. The earnings poll ran at 84, 141 and 179 ms in the same capture, and earnings builds on the morning of 2026-11-18 completed at 159 to 326 ms, so invocations of this size complete on the free plan. No limit was read from the platform; this is what completed.
+- At most 14 subrequests in one `insight` invocation (`insight_ops` 13 plus `subrequests` 1, the judge step), and at most 5 D1 queries; 17 counting both.
+- The check step is not split by language for now. That rests on one cold check sample (129 ms) and on heavier jobs completing beside it, not on a known limit: measure again if any `insight` invocation ends with an outcome other than `ok`.
 
 Not exercised by that run: the stop at the cap (the count matched the records, 4 calls, but the cap was not reached). To measure again, capture `wrangler tail prebell-generator --format json` across a sweep window (08:10-09:30 or 16:10-17:30 ET) and read `cpuTime` and `outcome` per event.
 
