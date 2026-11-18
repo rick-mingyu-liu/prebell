@@ -5,7 +5,8 @@ import type { Locale } from "@/i18n/routing";
 import { pairedAlternates, shareMetadata } from "@/lib/seo";
 import { translator } from "@/lib/translator";
 
-type Section = { h: string; p: string[]; ul?: string[] };
+/** A section; `more` is a same-site link under it (its href without the locale prefix). */
+type Section = { h: string; p: string[]; ul?: string[]; more?: { text: string; href: string } };
 
 export async function generateMetadata({ params }: PageProps<"/[locale]/legal">): Promise<Metadata> {
   const { locale } = await params;
@@ -49,6 +50,13 @@ export default async function Legal({ params }: PageProps<"/[locale]/legal">) {
                     <li key={text}>{text}</li>
                   ))}
                 </ul>
+              )}
+              {s.more && (
+                <p>
+                  <a className="more" href={`/${locale}${s.more.href}`}>
+                    {s.more.text} →
+                  </a>
+                </p>
               )}
             </Fragment>
           ))}

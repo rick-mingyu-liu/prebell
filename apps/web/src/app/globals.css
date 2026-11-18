@@ -313,6 +313,15 @@ html:lang(zh-Hans) .partners-strip .partners-label { font-variant-caps: normal; 
 .prose > ul { margin: 0.25rem 0 1rem; padding-left: 1.25rem; font-size: 16.5px; line-height: 1.7; max-width: 75ch; }
 .prose > ul li + li { margin-top: 0.4rem; }
 .prose-legal > h2 { margin-top: 1.75rem; }
+/* Photo credits: one row per photo, anchored by ticker; URLs are written out, so they wrap anywhere. */
+.photo-credit-row { margin-top: 1.5rem; padding-top: 0.75rem; border-top: 1px solid var(--rule); scroll-margin-top: 1rem; }
+.photo-credit-row h2 { margin: 0; font-size: 18px; }
+.photo-credit-row > p { margin: 0.2rem 0 0.4rem; }
+.photo-credit-row dl { margin: 0; font-size: 14px; line-height: 1.5; }
+.photo-credit-row dt { margin-top: 0.4rem; font-size: 12px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); }
+html:lang(zh-Hans) .photo-credit-row dt { letter-spacing: 0.02em; }
+.photo-credit-row dd { margin: 0; overflow-wrap: anywhere; }
+.photo-credit-row:target { background: color-mix(in srgb, var(--kicker) 6%, var(--paper)); }
 /* For AI agents: the address and command as plain code blocks that wrap on a phone; one click selects the whole line. */
 .prose-mcp > h2 { margin-top: 1.75rem; }
 .prose-mcp code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 0.88em; }

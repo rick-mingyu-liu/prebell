@@ -7,10 +7,12 @@ const MAX_HEIGHT = 520;
 
 /**
  * A company photo from Wikimedia Commons, served from /photos: the image, then the caption and the credit
- * as plain text (Commons is out of reach in some places, so the credit reads without its links). The author
- * links to the file's Commons page and a CC licence to its deed, as the licences ask.
+ * ("Photo: author / Wikimedia Commons · licence · resized · Source"). The credit reads as plain text where
+ * Commons is out of reach; the author links to the file's Commons page, a CC licence to its deed, and "Source"
+ * to the photo's row on the site's own photo credits page, which lists the rest as text.
+ * `eager` is for a photo above the fold (the ticker page); an article's photo, under the lede, loads lazily.
  */
-export default function CompanyPhoto({ photo, locale }: { photo: Photo; locale: Locale }) {
+export default function CompanyPhoto({ photo, locale, eager = false }: { photo: Photo; locale: Locale; eager?: boolean }) {
   const t = translator(locale);
   const licence = photo.licence === "Public domain" ? t("photo.publicDomain") : photo.licence;
   // Narrow enough that the height stays within MAX_HEIGHT; a landscape photo fills the column.
@@ -24,7 +26,7 @@ export default function CompanyPhoto({ photo, locale }: { photo: Photo; locale: 
         alt={photo.caption}
         width={photo.width}
         height={photo.height}
-        loading="lazy"
+        loading={eager ? "eager" : "lazy"}
         decoding="async"
         style={maxWidth < 680 ? { maxWidth } : undefined}
       />
@@ -42,7 +44,8 @@ export default function CompanyPhoto({ photo, locale }: { photo: Photo; locale: 
             </a>
           ) : (
             licence
-          )}
+          )}{" "}
+          · {t("photo.resized")} · <a href={`/${locale}/photo-credits#${photo.ticker}`}>{t("photo.source")}</a>
         </span>
       </figcaption>
     </figure>

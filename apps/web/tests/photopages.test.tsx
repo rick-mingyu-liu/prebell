@@ -24,35 +24,56 @@ vi.mock("next-intl/server", () => ({
     return ns ? (k: string, v?: Record<string, unknown>) => t(`${ns}.${k}` as never, v as never) : t;
   },
 }));
-vi.mock("../src/lib/photos.generated", () => ({
-  COMPANY_PHOTOS: {
-    INTC: {
-      src: "/photos/INTC.webp?v=0123abcd",
-      width: 1440,
-      height: 960,
-      en: "Intel's headquarters in Santa Clara, California, in 2019.",
-      zh: "Intel位于加利福尼亚州圣克拉拉的总部，摄于2019年。",
-      author: "Jane Doe",
-      licence: "CC BY-SA 4.0",
-      licenceUrl: "https://creativecommons.org/licenses/by-sa/4.0",
-      page: "https://commons.wikimedia.org/wiki/File:Intel_HQ.jpg",
-    },
-    XOM: {
-      src: "/photos/XOM.webp?v=89abcdef",
-      width: 1000,
-      height: 1250,
-      en: "An Exxon station in Texas.",
-      zh: "得克萨斯州的一座Exxon加油站。",
-      author: "John Roe",
-      licence: "Public domain",
-      licenceUrl: null,
-      page: "https://commons.wikimedia.org/wiki/File:Exxon_station.jpg",
-    },
-  },
-}));
+vi.mock("../src/lib/photos.generated", () => {
+  const entry = (over: Record<string, unknown>) => ({
+    licenceUrl: null,
+    sourceUrl: null,
+    sourceTitle: null,
+    notices: [],
+    derived: null,
+    ...over,
+  });
+  // ZZZZ is inherited, not the manifest's own: a lookup must never find it.
+  const inherited = { ZZZZ: entry({ src: "/photos/ZZZZ.webp?v=00000000", width: 10, height: 10, en: "x", zh: "x", author: "x", licence: "CC0", page: "x", file: "x.jpg" }) };
+  return {
+    COMPANY_PHOTOS: Object.assign(Object.create(inherited), {
+      INTC: entry({
+        src: "/photos/INTC.webp?v=0123abcd",
+        width: 1440,
+        height: 960,
+        en: "Intel's headquarters in Santa Clara, California, in 2019.",
+        zh: "Intel 位于加利福尼亚州圣克拉拉的总部，摄于2019年。",
+        author: "Jane Doe",
+        licence: "CC BY-SA 4.0",
+        licenceUrl: "https://creativecommons.org/licenses/by-sa/4.0",
+        page: "https://commons.wikimedia.org/wiki/File:Intel_HQ.jpg",
+        file: "Intel HQ.jpg",
+        sourceUrl: "https://www.flickr.com/photos/jane/123/",
+        sourceTitle: "Intel campus",
+        notices: ["© 2019 Jane Doe"],
+        derived: { from: "Intel HQ wide.jpg" },
+      }),
+      XOM: entry({
+        src: "/photos/XOM.webp?v=89abcdef",
+        width: 1000,
+        height: 1250,
+        en: "An Exxon station in Texas.",
+        zh: "得克萨斯州的一座 Exxon 加油站。",
+        author: "John Roe",
+        licence: "Public domain",
+        page: "https://commons.wikimedia.org/wiki/File:Exxon_station.jpg",
+        file: "Exxon station.jpg",
+      }),
+    }),
+  };
+});
 
 const post = await import("../src/app/[locale]/p/[slug]/page");
 const ticker = await import("../src/app/[locale]/t/[ticker]/page");
+const credits = await import("../src/app/[locale]/photo-credits/page");
+const legal = await import("../src/app/[locale]/legal/page");
+const { default: BriefView } = await import("../src/components/BriefView");
+const { companyPhoto, photoCredits } = await import("../src/lib/photos");
 
 const earningsPost = (id: number, tk: string, cik: number, acc: string, zhStatus = "published") => `
 INSERT INTO runs VALUES ('earnings:${tk}','earnings','2026-10-29','published',1,NULL,'2026-10-29T21:00:00Z','2026-10-29T21:00:00Z');
@@ -79,9 +100,13 @@ INSERT INTO post_translations (post_id, lang, status, title, summary, body_md, u
 `;
 
 const props = (params: Record<string, string>) => ({ params: Promise.resolve(params), searchParams: Promise.resolve({}) }) as never;
-const html = async (el: React.ReactElement) => new Response((await prerender(el)).prelude).text();
+/** Rendered HTML without React's text-boundary comments, so expectations read as the page does. */
+const clean = (s: string) => s.replaceAll("<!-- -->", "");
+const html = async (el: React.ReactElement) => clean(await new Response((await prerender(el)).prelude).text());
 const postPage = async (locale: Locale, slug: string) => html(await post.default(props({ locale, slug })));
-const tickerPage = async (locale: Locale, tk: string) => renderToStaticMarkup(await ticker.default(props({ locale, ticker: tk })));
+const tickerPage = async (locale: Locale, tk: string) => clean(renderToStaticMarkup(await ticker.default(props({ locale, ticker: tk }))));
+const creditEn = (tk: string) =>
+  `<span class="photo-credit">Photo: <a href="https://commons.wikimedia.org/wiki/File:Intel_HQ.jpg" rel="noopener">Jane Doe</a> / Wikimedia Commons · <a href="https://creativecommons.org/licenses/by-sa/4.0" rel="license noopener">CC BY-SA 4.0</a> · resized · <a href="/en/photo-credits#${tk}">Source</a></span>`;
 /** The page's JSON-LD blocks, joined. */
 const ldOf = (out: string) => [...out.matchAll(/<script type="application\/ld\+json">([\s\S]*?)<\/script>/g)].map((m) => m[1]).join("\n");
 
@@ -96,9 +121,7 @@ describe("an earnings check with a company photo", () => {
     expect(figure).toContain(
       '<img src="/photos/INTC.webp?v=0123abcd" alt="Intel&#x27;s headquarters in Santa Clara, California, in 2019." width="1440" height="960" loading="lazy" decoding="async"/>',
     );
-    expect(figure).toContain(
-      '<figcaption>Intel&#x27;s headquarters in Santa Clara, California, in 2019.<!-- --> <span class="photo-credit">Photo: <a href="https://commons.wikimedia.org/wiki/File:Intel_HQ.jpg" rel="noopener">Jane Doe</a> <!-- -->/ Wikimedia Commons ·<!-- --> <a href="https://creativecommons.org/licenses/by-sa/4.0" rel="license noopener">CC BY-SA 4.0</a></span></figcaption>',
-    );
+    expect(figure).toContain(`<figcaption>Intel&#x27;s headquarters in Santa Clara, California, in 2019. ${creditEn("INTC")}</figcaption>`);
     // Under the lede, before the rest of the body.
     const lede = out.indexOf('<p class="story-lede">INTC opening paragraph.</p>');
     expect(lede).toBeGreaterThan(0);
@@ -109,8 +132,10 @@ describe("an earnings check with a company photo", () => {
 
   it("shows the Chinese caption and credit on the Chinese page", async () => {
     const out = await postPage("zh", "earnings-intc-2026-10-29");
-    expect(out).toContain('alt="Intel位于加利福尼亚州圣克拉拉的总部，摄于2019年。"');
-    expect(out).toContain('<span class="photo-credit">图片：<a href="https://commons.wikimedia.org/wiki/File:Intel_HQ.jpg" rel="noopener">Jane Doe</a> <!-- -->/ Wikimedia Commons ·<!-- --> <a href="https://creativecommons.org/licenses/by-sa/4.0" rel="license noopener">CC BY-SA 4.0</a></span>');
+    expect(out).toContain('alt="Intel 位于加利福尼亚州圣克拉拉的总部，摄于2019年。"');
+    expect(out).toContain(
+      '<span class="photo-credit">图片：<a href="https://commons.wikimedia.org/wiki/File:Intel_HQ.jpg" rel="noopener">Jane Doe</a> / Wikimedia Commons · <a href="https://creativecommons.org/licenses/by-sa/4.0" rel="license noopener">CC BY-SA 4.0</a> · 已缩放 · <a href="/zh/photo-credits#INTC">来源</a></span>',
+    );
     expect(out).not.toContain("Santa Clara");
   });
 
@@ -150,7 +175,7 @@ describe("pages without a photo render as before", () => {
     // The English version of the same check does show it, with the public-domain credit.
     const en = await postPage("en", "earnings-xom-2026-10-29");
     expect(en).toContain("Photo: <a");
-    expect(en).toContain("/ Wikimedia Commons ·<!-- --> <!-- -->Public domain</span>");
+    expect(en).toContain('/ Wikimedia Commons · Public domain · resized · <a href="/en/photo-credits#XOM">Source</a></span>');
     expect(en).not.toContain('rel="license');
     const brief = await postPage("en", "premarket-2026-10-29");
     expect(brief).not.toMatch(/class="photo"|\/photos\//);
@@ -165,21 +190,112 @@ describe("pages without a photo render as before", () => {
 });
 
 describe("the ticker page with a company photo", () => {
-  it("shows the figure at the top, under the heading and the company name", async () => {
+  it("shows the figure at the top, under the heading and the company name, loading at once (it is above the fold)", async () => {
     const out = await tickerPage("en", "INTC");
     const figure = out.indexOf('<figure class="photo">');
     expect(figure).toBeGreaterThan(out.indexOf("<h1>INTC earnings</h1>"));
     expect(figure).toBeLessThan(out.indexOf('id="checks"'));
-    expect(out).toContain('alt="Intel&#x27;s headquarters in Santa Clara, California, in 2019." width="1440" height="960" loading="lazy" decoding="async"');
-    expect(out).toContain("Photo: <a");
+    expect(out).toContain('alt="Intel&#x27;s headquarters in Santa Clara, California, in 2019." width="1440" height="960" loading="eager" decoding="async"');
+    expect(out).toContain(creditEn("INTC"));
   });
 
   it("in Chinese, with the Chinese caption and the public-domain credit translated", async () => {
     const out = await tickerPage("zh", "INTC");
-    expect(out).toContain("<figcaption>Intel位于加利福尼亚州圣克拉拉的总部，摄于2019年。");
+    expect(out).toContain("<figcaption>Intel 位于加利福尼亚州圣克拉拉的总部，摄于2019年。");
     const xom = await tickerPage("zh", "XOM");
-    expect(xom).toContain("图片：<a href=\"https://commons.wikimedia.org/wiki/File:Exxon_station.jpg\" rel=\"noopener\">John Roe</a> / Wikimedia Commons · 公有领域</span>");
+    expect(xom).toContain(
+      '图片：<a href="https://commons.wikimedia.org/wiki/File:Exxon_station.jpg" rel="noopener">John Roe</a> / Wikimedia Commons · 公有领域 · 已缩放 · <a href="/zh/photo-credits#XOM">来源</a></span>',
+    );
     // A 4:5 photo is narrowed so it is no taller than 520px.
     expect(xom).toContain('style="max-width:416px"');
+  });
+});
+
+describe("only earnings checks show a photo", () => {
+  /** A post of any type rendered directly, with a ticker that has a photo. */
+  const view = (contentType: string, locale: Locale = "en") =>
+    clean(
+      renderToStaticMarkup(
+        <BriefView
+          data={
+            {
+              post: {
+                slug: "x",
+                contentType,
+                tradingDate: "2026-10-29",
+                publishedAt: "2026-10-29T21:10:00Z",
+                title: "T",
+                summary: "Opening paragraph.",
+                bodyMd: "# T\n\nOpening paragraph.\n\n## More\n\nText.",
+                status: "published",
+                sources: [],
+                hasOtherLang: true,
+                factsKey: null,
+                revisedAt: null,
+                coverKey: null,
+                coverLines: null,
+                ticker: "INTC",
+              },
+              facts: null,
+              adjacent: { prev: null, next: null },
+              charts: [],
+            } as never
+          }
+          locale={locale}
+          signup={false}
+        />,
+      ),
+    );
+  it("shows it on an earnings check and not on an IPO write-up, a brief or a recap with the same ticker", () => {
+    expect(view("earnings")).toContain('<figure class="photo">');
+    for (const type of ["ipo", "premarket", "recap", "digest"]) expect(view(type), type).not.toMatch(/class="photo"|\/photos\//);
+  });
+  it("never finds a photo through the manifest's prototype", () => {
+    expect(companyPhoto("ZZZZ", "en")).toBeNull();
+    expect(photoCredits("en").map((c) => c.ticker)).toEqual(["INTC", "XOM"]);
+  });
+});
+
+describe("the photo credits page", () => {
+  const page = async (locale: Locale) => html(await credits.default(props({ locale })));
+  it("lists every photo by ticker, with title, author, notices, URLs as text, licence and change", async () => {
+    const out = await page("en");
+    expect(out).toContain("<h1>Photo credits</h1>");
+    const row = out.match(/<section id="INTC"[\s\S]*?<\/section>/)?.[0] ?? "";
+    expect(row).toContain("<dd>Intel HQ.jpg</dd>");
+    expect(row).toContain("<dt>Original title</dt><dd>Intel campus</dd>");
+    expect(row).toContain("<dd>Jane Doe</dd>");
+    expect(row).toContain('<dd lang="en">© 2019 Jane Doe</dd>');
+    expect(row).toContain('<a href="https://commons.wikimedia.org/wiki/File:Intel_HQ.jpg" rel="noopener">https://commons.wikimedia.org/wiki/File:Intel_HQ.jpg</a>');
+    expect(row).toContain('<a href="https://www.flickr.com/photos/jane/123/" rel="noopener">https://www.flickr.com/photos/jane/123/</a>');
+    expect(row).toContain('CC BY-SA 4.0 · <a href="https://creativecommons.org/licenses/by-sa/4.0" rel="noopener">https://creativecommons.org/licenses/by-sa/4.0</a>');
+    expect(row).toContain("Resized to 1440 × 960 px and re-encoded as WebP; not cropped or otherwise altered by PreBell.");
+    expect(row).toContain("The Commons file is itself a crop of the Commons file “Intel HQ wide.jpg”; Commons credits it to Jane Doe.");
+    const xom = out.match(/<section id="XOM"[\s\S]*?<\/section>/)?.[0] ?? "";
+    expect(xom).toContain("Public domain (no licence)");
+    expect(xom).not.toContain("Original source");
+    expect(out).not.toContain('id="ZZZZ"');
+  });
+  it("is in Chinese on the Chinese page", async () => {
+    const out = await page("zh");
+    expect(out).toContain("<h1>照片来源</h1>");
+    expect(out).toContain("Intel 位于加利福尼亚州圣克拉拉的总部，摄于2019年。");
+    expect(out).toContain("公有领域（无许可协议）");
+    expect(out).toContain("已缩放至 1440 × 960 像素并转为 WebP 格式");
+  });
+  it("is not indexed and loads nothing from a third party", async () => {
+    for (const locale of ["en", "zh"] as const) {
+      expect((await credits.generateMetadata(props({ locale }))).robots).toEqual({ index: false, follow: false });
+      const out = await page(locale);
+      expect(out).not.toMatch(/<(img|script|link|iframe|source|video|audio)\b/i);
+      expect(out).not.toMatch(/\b(src|srcset)=/i);
+    }
+  });
+  it("is linked from the legal page, which says where the photos come from", async () => {
+    const out = await html(await legal.default(props({ locale: "en" })));
+    expect(out).toContain('<a class="more" href="/en/photo-credits">Photo credits →</a>');
+    expect(out).toContain("The company photographs on earnings checks and ticker pages come from Wikimedia Commons.");
+    const zh = await html(await legal.default(props({ locale: "zh" })));
+    expect(zh).toContain('<a class="more" href="/zh/photo-credits">照片来源 →</a>');
   });
 });

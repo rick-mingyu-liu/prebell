@@ -178,8 +178,10 @@
       {
         "h": "Terms: intellectual property",
         "p": [
-          "The site's text and design belong to PreBell. Company names and logos belong to their owners and are used only to identify them. Photographs come from Wikimedia Commons and belong to their authors; each is credited under the picture and used under the licence named there."
-        ]
+          "The site's text and design belong to PreBell. Company names and logos belong to their owners and are used only to identify them.",
+          "The company photographs on earnings checks and ticker pages come from Wikimedia Commons. Each is credited under the picture with its author and its licence or public-domain status; PreBell claims no rights in them. To have a photo corrected or removed, write to support@prebell.site."
+        ],
+        "more": { "text": "Photo credits", "href": "/photo-credits" }
       },
       {
         "h": "Terms: liability",
@@ -438,7 +440,25 @@
     "writeupLink": "IPO watch: every filing and figure with its source"
   },
   "photo": {
+    "resized": "resized",
+    "source": "Source",
     "by": "Photo: ",
     "publicDomain": "Public domain"
+  },
+  "photoCredits": {
+    "title": "Photo credits",
+    "intro": "The company photographs on earnings checks and ticker pages come from Wikimedia Commons. Each is listed here with what its licence asks a reuser to give: the work's title, its author and any notice they ask for, where it comes from, its licence and what PreBell changed. PreBell claims no rights in them. To have a photo corrected or removed, write to support@prebell.site.",
+    "work": "Title",
+    "flickrTitle": "Original title",
+    "author": "Author",
+    "notices": "Requested attribution or notice, as given",
+    "commons": "Wikimedia Commons",
+    "original": "Original source",
+    "licence": "Licence",
+    "publicDomain": "Public domain (no licence)",
+    "change": "Change",
+    "changed": "Resized to {width} × {height} px and re-encoded as WebP; not cropped or otherwise altered by PreBell.",
+    "cropOf": "The Commons file is itself a crop of the Commons file “{file}”; Commons credits it to {author}.",
+    "crop": "The Commons file is itself a crop, which Commons credits to {author} as their own work."
   }
 }

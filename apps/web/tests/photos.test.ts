@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import sharp from "sharp";
 import { describe, expect, it } from "vitest";
+import { licenceAllowed } from "../scripts/photo-rules.mjs";
 import { companyPhoto } from "../src/lib/photos";
 import { COMPANY_PHOTOS } from "../src/lib/photos.generated";
 
@@ -16,16 +17,16 @@ const pinned = readFileSync(new URL("../data/photos.tsv", import.meta.url), "utf
   .split("\n")
   .filter((l) => l.trim() && !l.startsWith("#"))
   .map((l) => l.split("\t").map((s) => s.trim()));
+// The build's allow-list, the same function the build applies.
 const entries = Object.entries(COMPANY_PHOTOS);
-/** The build's allow-list: public domain, CC0, CC BY and CC BY-SA, any version or port; nothing with NC or ND. */
-const LICENCE = /^(Public domain|CC0( 1\.0)?|CC BY(-SA)? \d\.\d( [a-z]{2}(-[a-z]{2})?)?)$/i;
 
 describe("photo manifest", () => {
   it("holds exactly the pinned rows of data/photos.tsv, each a watchlist ticker with its captions", () => {
     expect(entries.length).toBeGreaterThan(0);
     expect(Object.keys(COMPANY_PHOTOS).sort()).toEqual(pinned.map((r) => r[0]).sort());
-    for (const [ticker, file, en, zh] of pinned) {
+    for (const [ticker, file, en, zh, credit] of pinned) {
       expect(watchlist).toContain(ticker);
+      if (credit) expect(COMPANY_PHOTOS[ticker].author).toBe(credit);
       expect(file).toMatch(/\.(jpe?g|png)$/i);
       expect(COMPANY_PHOTOS[ticker].en).toBe(en);
       expect(COMPANY_PHOTOS[ticker].zh).toBe(zh);
@@ -51,26 +52,36 @@ describe("photo manifest", () => {
 
   it("has a LICENSES.md row for every file, naming its Commons page, author and licence", () => {
     const licences = readFileSync(publicFile("/photos/LICENSES.md"), "utf8");
-    expect(licences).toContain("not covered by the repository's MIT licence");
-    expect(licences).toContain("resized");
+    const prose = licences.replace(/\s+/g, " ");
+    expect(prose).toContain("not covered by the repository's MIT licence");
+    expect(prose).toContain("PreBell claims no rights in them");
+    expect(prose).toContain("resized");
     for (const [ticker, p] of entries) {
       const row = licences.split("\n").find((l) => l.startsWith(`| \`${ticker}.webp\` |`));
       expect(row, ticker).toBeDefined();
       expect(row).toContain(p.page);
       expect(row).toContain(p.licence);
       expect(row).toContain("resized");
+      expect(row).toContain(p.author.replace(/\|/g, "\\|"));
+      for (const n of p.notices) expect(row).toContain(n.replace(/\|/g, "\\|").replace(/\s+/g, " "));
     }
   });
 
   it("only carries allowed licences, a plain author name and a Commons page for the credit", () => {
     for (const [ticker, p] of entries) {
-      expect(p.licence, ticker).toMatch(LICENCE);
+      expect(licenceAllowed(p.licence), `${ticker}: ${p.licence}`).toBe(true);
       expect(p.licence).not.toMatch(/NC|ND/);
-      if (p.licence.startsWith("CC BY")) expect(p.licenceUrl, ticker).toMatch(/^https?:\/\/creativecommons\.org\//);
+      // Every licence URL is https on creativecommons.org (CC0 included); a CC licence must have one.
+      if (p.licenceUrl !== null) expect(p.licenceUrl, ticker).toMatch(/^https:\/\/creativecommons\.org\/\S+$/);
+      if (p.licence.startsWith("CC")) expect(p.licenceUrl, ticker).not.toBeNull();
       expect(p.author.trim()).toBe(p.author);
       expect(p.author.length).toBeGreaterThan(0);
       expect(p.author).not.toMatch(/[<>]|https?:|&[a-z#0-9]+;/i);
-      expect(p.page).toMatch(/^https:\/\/commons\.wikimedia\.org\/wiki\/File:/);
+      expect(p.page).toMatch(/^https:\/\/commons\.wikimedia\.org\/wiki\/File:\S+$/);
+      // The credits page's details: the Commons file name, and an original source over http(s) when there is one.
+      expect(p.file).toMatch(/\.(jpe?g|png)$/i);
+      if (p.sourceUrl !== null) expect(p.sourceUrl).toMatch(/^https?:\/\/\S+$/);
+      for (const n of p.notices) expect(n.trim().length).toBeGreaterThan(0);
     }
   });
 
@@ -86,6 +97,7 @@ describe("companyPhoto", () => {
   it("finds a pinned photo by ticker in any case, with the caption in the page's language", () => {
     const [ticker, p] = entries[0];
     expect(companyPhoto(ticker.toLowerCase(), "en")).toEqual({
+      ticker,
       src: p.src,
       width: p.width,
       height: p.height,
@@ -97,7 +109,8 @@ describe("companyPhoto", () => {
     });
     expect(companyPhoto(` ${ticker} `, "zh")?.caption).toBe(p.zh);
   });
-  it("is null for a company without one and for odd input", () => {
-    for (const t of ["ZZZZ", "", null, undefined, "constructor", "__proto__", "toString"]) expect(companyPhoto(t, "en")).toBeNull();
+  it("is null for a company without one and for empty input", () => {
+    for (const t of ["ZZZZ", "", "   ", null, undefined]) expect(companyPhoto(t, "en")).toBeNull();
+    // An inherited key is never a photo: tests/photopages.test.tsx checks that against a manifest with a prototype.
   });
 });

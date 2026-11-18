@@ -178,8 +178,10 @@
       {
         "h": "条款：知识产权",
         "p": [
-          "本站的文字和设计归 PreBell 所有。公司名称和标识归其各自所有者所有，在此仅用于指代这些公司。图片来自 Wikimedia Commons，版权归各自作者所有；每张图片下方均注明作者，并按其中标明的许可协议使用。"
-        ]
+          "本站的文字和设计归 PreBell 所有。公司名称和标识归其各自所有者所有，在此仅用于指代这些公司。",
+          "财报核查和股票页面上的公司照片来自 Wikimedia Commons。每张照片下方均注明作者及其许可协议（或公有领域状态）；PreBell 不主张这些照片的任何权利。如需更正或移除某张照片，请联系 support@prebell.site。"
+        ],
+        "more": { "text": "照片来源", "href": "/photo-credits" }
       },
       {
         "h": "条款：责任限制",
@@ -438,7 +440,25 @@
     "writeupLink": "IPO 追踪：每份申报文件与每个数字的来源"
   },
   "photo": {
+    "resized": "已缩放",
+    "source": "来源",
     "by": "图片：",
     "publicDomain": "公有领域"
+  },
+  "photoCredits": {
+    "title": "照片来源",
+    "intro": "财报核查和股票页面上的公司照片来自 Wikimedia Commons。此处逐一列出各照片许可协议要求注明的信息：作品标题、作者及其要求的署名或声明、来源、许可协议以及 PreBell 所做的修改。PreBell 不主张这些照片的任何权利。如需更正或移除某张照片，请联系 support@prebell.site。",
+    "work": "标题",
+    "flickrTitle": "原始标题",
+    "author": "作者",
+    "notices": "作者要求的署名或声明（原文）",
+    "commons": "Wikimedia Commons",
+    "original": "原始来源",
+    "licence": "许可协议",
+    "publicDomain": "公有领域（无许可协议）",
+    "change": "修改",
+    "changed": "已缩放至 {width} × {height} 像素并转为 WebP 格式；PreBell 未作裁剪或其他修改。",
+    "cropOf": "该 Commons 文件本身裁剪自 Commons 文件“{file}”；Commons 注明的作者为 {author}。",
+    "crop": "该 Commons 文件本身为裁剪版本，Commons 注明为 {author} 的原创作品。"
   }
 }

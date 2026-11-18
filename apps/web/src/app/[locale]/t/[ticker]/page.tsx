@@ -65,7 +65,8 @@ export default async function TickerArchive({ params }: PageProps<"/[locale]/t/[
     <div className="list-page">
       <h1>{t("tickerTitle", { ticker })}</h1>
       {name && <p className="meta">{name}</p>}
-      {photo && <CompanyPhoto photo={photo} locale={locale} />}
+      {/* Above the fold, so it loads at once. */}
+      {photo && <CompanyPhoto photo={photo} locale={locale} eager />}
       <section aria-labelledby="checks">
         <h2 className="section-title" id="checks">
           {t("checks")}
