@@ -83,38 +83,65 @@ export function headquartersNamed(caption, places) {
   return places.some((p) => p && caption.includes(p.replace(/,.*$/, "")));
 }
 
-/** Lower-case word tokens of length 2 or more (initials and punctuation drop out), plus "©" as its own token. */
+/**
+ * Lower-case word tokens of length 2 or more (initials and punctuation drop out, accents are folded, so "Hiàn"
+ * is "hian"), plus "©" as its own token.
+ */
 const tokens = (s) => {
-  const t = String(s ?? "").toLowerCase().replace(/_/g, " ");
+  const t = String(s ?? "")
+    .normalize("NFD")
+    .replace(/\p{M}/gu, "")
+    .toLowerCase()
+    .replace(/_/g, " ");
   return [...(t.includes("©") ? ["©"] : []), ...(t.match(/[\p{L}\p{N}]{2,}/gu) ?? [])];
 };
 
-/** EXIF Artist or Copyright values that name no one: software, camera defaults, placeholders. */
-const NO_NAME = /^(picasa|adobe|photoshop|lightroom|gimp|windows|microsoft|digital camera|camera|owner|unknown|none|copyright|author|artist|photographer|all rights reserved|ricoh|olympus|canon|nikon|sony|samsung|apple|google|huawei|xiaomi|dji)$/i;
-/** An EXIF Artist or Copyright value reduced to the name in it: "©2019 Kenneth C. Zirkel" -> "Kenneth C. Zirkel"; "" when it names no one. */
-export function exifName(value) {
-  const v = text(value)
+/** EXIF values that name no one, in either field: placeholders a camera or an app leaves. */
+const PLACEHOLDER = /^(unknown|none|owner|copyright|author|artist|photographer|camera|digital camera)$/i;
+/** EXIF Artist values that are the editing software, not a person (never ignored in Copyright). */
+const SOFTWARE = /^(picasa|photoshop|adobe photoshop|lightroom|adobe lightroom|gimp|windows photo viewer)\b/i;
+/** Camera makers: ignored only in Artist, and only when the value is the camera's own Make (a camera default). */
+const MAKERS = /^(canon|nikon|sony|olympus|ricoh|pentax|fujifilm|panasonic|samsung|apple|google|huawei|xiaomi|dji|leica|motorola|htc|lg|oneplus)$/i;
+const fold = (s) => tokens(s).join(" ");
+
+/**
+ * An EXIF Artist or Copyright value reduced to the name in it ("©2019 Kenneth C. Zirkel" -> "Kenneth C. Zirkel"),
+ * or "" when it names no one. In Artist, editing software and the camera maker (when it equals the EXIF Make) are
+ * not names; in Copyright every name counts, a company included. "All rights reserved" with no name is returned
+ * as it stands, so it is never taken as naming no one.
+ */
+export function exifName(value, { tag = "Copyright", make = "" } = {}) {
+  const raw = text(value);
+  const v = raw
     .replace(/\b(cc[ -]?by(-sa)?|cc0|public domain)\b[\s\d.]*/gi, " ")
     .replace(/©|\(c\)|\bcopyright\b:?|\bphotographer\b:?|\bphoto(graph)?( by)?\b:?|\ball rights reserved\b|\b(19|20)\d\d\b/gi, " ")
     .replace(/^[\s,.;:/-]+|[\s,.;:/-]+$/g, "")
     .replace(/\s+/g, " ")
     .trim();
-  if (!v || NO_NAME.test(v) || /^picasa\b/i.test(v) || !/\p{L}{2,}/u.test(v)) return "";
+  if (!v || !/\p{L}{2,}/u.test(v)) return /all rights reserved/i.test(raw) ? raw : "";
+  if (PLACEHOLDER.test(v)) return "";
+  if (tag === "Artist" && SOFTWARE.test(v)) return "";
+  if (tag === "Artist" && MAKERS.test(v) && make && fold(make).split(" ")[0] === fold(v)) return "";
   return v;
 }
 
 /**
- * Null when an EXIF Artist or Copyright value names no one or names the credited author (one name's words
- * contain the other's: "Jeroen Stroes" and "Jeroen Stroes Aviation Photography"); otherwise the name it gives,
- * which is someone else.
+ * Null when an EXIF Artist or Copyright value names no one or names the credited author: every word of the EXIF
+ * name must be among the words of the credited names (the credit, the author, the Commons user name and the
+ * requested attributions), so "Jeroen Stroes" passes for "Jeroen Stroes Aviation Photography" but "Coolcaesar
+ * for Reuters" does not pass for "Coolcaesar". Otherwise returns the name the EXIF gives, which is someone else.
  */
-export function exifMismatch(value, credited) {
-  const name = exifName(value);
+export function exifMismatch(value, credited, opts) {
+  const name = exifName(value, opts);
   if (!name) return null;
-  const a = new Set(tokens(name).filter((x) => x !== "©"));
+  const a = tokens(name).filter((x) => x !== "©");
   const b = new Set(credited.flatMap((c) => tokens(c)).filter((x) => x !== "©"));
-  const within = (x, y) => x.size > 0 && [...x].every((w) => y.has(w));
-  return within(a, b) || within(b, a) ? null : name;
+  return a.length > 0 && a.every((w) => b.has(w)) ? null : name;
+}
+
+/** The Commons or Wikipedia user names an Artist field links to ("User:Hiàn" -> "Hiàn"). */
+export function userNames(artistHtml) {
+  return [...String(artistHtml ?? "").matchAll(/href="[^"]*\/wiki\/User:([^"#?/]+)"/gi)].map((m) => decodeURIComponent(m[1]).replace(/_/g, " "));
 }
 
 /** Words a credit line's fixed tail always shows: "/ Wikimedia Commons · {licence}", and the connecting words a request may use. */
@@ -129,28 +156,75 @@ export function requestNotCovered(request, creditName, licence) {
   return tokens(String(request).replace(/\bcc-by(-sa)?-(\d)\.(\d)\b/gi, "cc by$1 $2 $3")).filter((w) => !shown.has(w) && !/^(sa|by|cc)$/.test(w));
 }
 
+const sameLicence = (x, y) => x.toLowerCase().replace(/[-\s]+/g, " ").trim() === y.toLowerCase().replace(/[-\s]+/g, " ").trim();
+
+/** Commons' CC licence box as text, in full: its long and short licence names, an optional "Attribution:", and what follows it. */
+const BOX = new RegExp(
+  "^This file is licensed under the Creative Commons (Attribution(?:-Share Alike)? \\d\\.\\d(?: [A-Za-z]+)*) license\\." +
+    "(?: Attribution: (.+?))?" +
+    " You are free: to share – to copy, distribute and transmit the work to remix – to adapt the work" +
+    " Under the following conditions: attribution – You must give appropriate credit, provide a link to the license, and indicate if changes were made\\." +
+    " You may do so in any reasonable manner, but not in any way that suggests the licensor endorses you or your use\\." +
+    "( share alike – If you remix, transform, or build upon the material, you must distribute your contributions under the same or compatible license as the original\\.)?" +
+    " https://creativecommons\\.org/\\S+ (CC BY(?:-SA)? \\d\\.\\d(?: [a-z]{2}(?:-[a-z]{2})?)?) Creative Commons (Attribution(?:-Share Alike)? \\d\\.\\d) true true(.*)$",
+);
+/** Commons' VRT permission notice, in full, with its ticket number. */
+const VRT = new RegExp(
+  "^This work is free and may be used by anyone for any purpose\\. If you wish to use this content, you do not need to request permission as long as you follow any licensing requirements mentioned on this page\\." +
+    " The Wikimedia Foundation has received an e-mail confirming that the copyright holder has approved publication under the terms mentioned on this page\\." +
+    " This correspondence has been reviewed by a Volunteer Response Team \\(VRT\\) member and stored in our permission archive\\." +
+    " The correspondence is available to trusted volunteers as ticket #(\\d+)\\. If you have questions about the archived correspondence, please use the VRT noticeboard\\." +
+    " Ticket link: https://ticket\\.wikimedia\\.org/otrs/index\\.pl\\?Action=AgentTicketZoom&TicketNumber=\\1 Find other files from the same ticket:(.*)$",
+);
+/** The only sentence allowed after a licence box: the Flickr or Panoramio bot's review. */
+const REVIEWED = /^This image, which was originally posted to (Flickr|Panoramio), was automatically reviewed on \d{1,2} [A-Z][a-z]+ \d{4} by [^.,]+, who confirmed that it was available on \1 under the above license on that date\.$/;
+/** The {{self}} line: a name (no sentence in it), then the template's words. */
+const SELF = /^[^.;:!?]{1,80}, the copyright holder of this work, hereby publishes it under the following licen[cs]e:$/;
+
 /**
- * Commons' Permission text with the parts that say nothing beyond the licence taken out: Commons' own licence box
- * ("This file is licensed under ... Attribution: X ..."), the {{self}} line ("X, the copyright holder of this
- * work, hereby publishes it under the following license:"), a VRT ticket notice and the file's own licence name
- * restated (a different licence name is kept: it contradicts the licence tag). Whatever is left is a
- * condition or request someone must read: the build stops until data/photos.tsv repeats it word for word.
- * Returns { conditions, attribution }: the remaining text ("" when none) and an "Attribution: X" the box names.
+ * Commons' Permission text, checked against the file's licence. Known template text is removed exactly: the
+ * licence box (whose licence must be the file's), the {{self}} line, the VRT notice, and the file's own licence
+ * name restated. After a box only the Flickr or Panoramio review sentence may follow; after a VRT notice, nothing.
+ * Returns { conditions, attribution, conflict }:
+ * - conditions: the whole text when anything is left over ("" when none): someone must read it, and the build
+ *   stops until data/photos.tsv repeats it word for word;
+ * - attribution: the "Attribution: X" a box names, or null;
+ * - conflict: why the text contradicts the file's licence (a box or a restated name for another licence), or
+ *   null. The build always stops on a conflict.
  */
 export function permissionTerms(html, licence = "") {
   const t = text(html);
-  // The licence's own name restated ("Public domain" on a public-domain file) adds nothing; a different one does.
-  const same = (x) => x.toLowerCase().replace(/[-\s]+/g, " ").trim();
-  if (t && licence && same(t) === same(licence)) return { conditions: "", attribution: null };
-  const attribution = t.match(/^This file is licensed under the Creative Commons .*? license\. Attribution: (.+?) You are free:/)?.[1]?.trim() ?? null;
-  const boiler =
-    /^This file is licensed under the Creative Commons .* license\./.test(t) ||
-    /^.{1,120}, the copyright holder of this work, hereby publishes it under the following licen[cs]e:$/.test(t) ||
-    /^This work is free and may be used by anyone for any purpose\. .*Volunteer Response Team/.test(t);
-  return { conditions: boiler ? "" : t, attribution };
+  const none = { conditions: "", attribution: null, conflict: null };
+  if (!t) return none;
+  if (/^(public domain|cc0( 1\.0)?|cc[ -]by(-sa)?[ -]\d\.\d( [a-z]{2})?)$/i.test(t))
+    return sameLicence(t, licence) ? none : { conditions: t, attribution: null, conflict: `Permission names ${t}, the licence tag ${licence || "none"}` };
+  if (SELF.test(t)) return none;
+  const vrt = t.match(VRT);
+  if (vrt) return vrt[2].trim() ? { ...none, conditions: t } : none;
+  const box = t.match(BOX);
+  if (box) {
+    const [, long, attribution = null, sa, short, again, rest] = box;
+    const conflict =
+      !sameLicence(short, licence) || !long.startsWith(again) || Boolean(sa) !== /-SA/.test(short) || /Share Alike/.test(long) !== /-SA/.test(short)
+        ? `Commons' licence box names ${short} (${long}), the licence tag ${licence || "none"}`
+        : null;
+    const after = rest.trim();
+    return { conditions: after && !REVIEWED.test(after) ? t : "", attribution: attribution?.trim() ?? null, conflict };
+  }
+  if (/^This file is licensed under/i.test(t)) return { ...none, conditions: t, conflict: `Commons' licence box could not be read: "${t.slice(0, 120)}"` };
+  return { ...none, conditions: t };
 }
 
-/** The first link in a Credit field that leaves Wikimedia, with its text: the original source (Flickr, Panoramio, a site). */
+/** Hosts in a Credit field that are Wikimedia itself or its tools, never the original source. */
+const WIKIMEDIA = /(^|\.)(wikimedia\.org|wikipedia\.org|wikidata\.org|wikimedia\.de|toolforge\.org|wmflabs\.org|wmcloud\.org)$/;
+/** Link texts that are not a title. */
+const GENERIC = /^(file url|catalog(ue)? record|source|link|here|original|website|download|flickr|panoramio|view|image)$/i;
+
+/**
+ * The first https link in a Credit field that leaves Wikimedia and its tools (Flickr, Panoramio via the web
+ * archive, a museum's file), with its title when the link text is one (not the URL, not "File URL"). A plain-http
+ * link is not used: the credits page writes only https URLs. Null when there is none.
+ */
 export function originalSource(creditHtml) {
   for (const m of String(creditHtml ?? "").matchAll(/<a\b[^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/gi)) {
     const url = decode(m[1]).replace(/^\/\//, "https://");
@@ -160,9 +234,9 @@ export function originalSource(creditHtml) {
     } catch {
       continue;
     }
-    if (!/^https?:\/\//.test(url) || /(^|\.)(wikimedia|wikipedia|wikidata)\.org$/.test(host)) continue;
+    if (!/^https:\/\/\S+$/.test(url) || WIKIMEDIA.test(host)) continue;
     const label = text(m[2]);
-    return { url, title: label && label !== url && !/^https?:/.test(label) ? label : null, flickr: /(^|\.)flickr\.com$/.test(host) };
+    return { url, title: label && label !== url && !/^https?:/.test(label) && !GENERIC.test(label) ? label : null, flickr: /(^|\.)flickr\.com$/.test(host) };
   }
   return null;
 }

@@ -12,6 +12,7 @@ import {
   requestNotCovered,
   stripFlickrPlace,
   takenYear,
+  userNames,
 } from "../scripts/photo-rules.mjs";
 
 // The photo build's gates (scripts/build-photos.mjs applies exactly these functions).
@@ -111,23 +112,43 @@ describe("headquartersNamed", () => {
 });
 
 describe("exifMismatch", () => {
-  it("passes EXIF that names no one or names the credited author", () => {
+  it("passes EXIF that names no one: placeholders, editing software or the camera's own make in Artist", () => {
     expect(exifMismatch("", ["X"])).toBeNull();
     expect(exifMismatch("unknown", ["X"])).toBeNull();
-    expect(exifMismatch("Picasa 3.0", ["X"])).toBeNull();
     expect(exifMismatch("COPYRIGHT, 2007", ["X"])).toBeNull();
     expect(exifMismatch("Copyright", ["X"])).toBeNull();
     expect(exifMismatch("CC BY 2.0", ["X"])).toBeNull();
+    expect(exifMismatch("Picasa 3.0", ["X"], { tag: "Artist" })).toBeNull();
+    expect(exifMismatch("Canon", ["X"], { tag: "Artist", make: "Canon" })).toBeNull();
+    expect(exifMismatch("OLYMPUS", ["X"], { tag: "Artist", make: "OLYMPUS OPTICAL CO.,LTD" })).toBeNull();
+  });
+  it("passes EXIF whose every word is in the credited names (credit, author, Commons account)", () => {
     expect(exifMismatch("©2019 Kenneth C. Zirkel", ["Kenneth C. Zirkel"])).toBeNull();
     expect(exifMismatch("Copyright 2021, G. Edward Johnson. CC-BY", ["G. Edward Johnson"])).toBeNull();
-    expect(exifMismatch("Photographer: Dwight Burdette", ["Dwight Burdette"])).toBeNull();
-    expect(exifMismatch("Jeroen Stroes", ["Jeroen Stroes Aviation Photography"])).toBeNull();
-    expect(exifMismatch("Jason Zhang (Hian)", ["Jason Zhang"])).toBeNull();
-    expect(exifMismatch("Ajay Suresh", ["ajay_suresh"])).toBeNull();
+    expect(exifMismatch("Photographer: Dwight Burdette", ["Dwight Burdette"], { tag: "Artist" })).toBeNull();
+    expect(exifMismatch("Jeroen Stroes", ["Jeroen Stroes Aviation Photography"], { tag: "Artist" })).toBeNull();
+    expect(exifMismatch("Ajay Suresh", ["ajay_suresh"], { tag: "Artist" })).toBeNull();
+    // TRI: the Commons account Hiàn is part of the credited set; accents fold.
+    expect(exifMismatch("Jason Zhang (Hian)", ["Jason Zhang", ...userNames('<a href="//commons.wikimedia.org/wiki/User:Hi%C3%A0n">Jason Zhang</a>')], { tag: "Artist" })).toBeNull();
   });
   it("names someone else when the EXIF does (TGT: '© 2008 Paul Turang' on a file credited to Skinner2398)", () => {
     expect(exifMismatch("© 2008 Paul Turang", ["Skinner2398"])).toBe("Paul Turang");
-    expect(exifMismatch("Paul Turang", ["Skinner2398", "Skinner2398"])).toBe("Paul Turang");
+    expect(exifMismatch("Paul Turang", ["Skinner2398"], { tag: "Artist" })).toBe("Paul Turang");
+  });
+  it("counts a company in Copyright, and a brand in Artist unless it is the camera's make (review round 2, S2)", () => {
+    for (const v of ["© Apple", "Microsoft", "Photo: Google", "Copyright Sony", "© DJI", "Samsung", "© Adobe"]) expect(exifMismatch(v, ["Coolcaesar"]), v).not.toBeNull();
+    expect(exifMismatch("Canon", ["Coolcaesar"], { tag: "Copyright", make: "Canon" })).toBe("Canon");
+    expect(exifMismatch("Google", ["Coolcaesar"], { tag: "Artist", make: "Canon" })).toBe("Google");
+    expect(exifMismatch("Picasa", ["Coolcaesar"], { tag: "Copyright" })).toBe("Picasa");
+  });
+  it("flags 'All rights reserved' with no name, and a credited name inside a longer one (review round 2, S2 and S3)", () => {
+    expect(exifMismatch("All rights reserved", ["Coolcaesar"])).toBe("All rights reserved");
+    expect(exifMismatch("Coolcaesar for Reuters", ["Coolcaesar"], { tag: "Artist" })).toBe("Coolcaesar for Reuters");
+    expect(exifMismatch("© 2010 Jane Roe / Getty Images", ["Jane Roe"])).not.toBeNull();
+  });
+  it("reads the account names an Artist field links to", () => {
+    expect(userNames('<a href="https://en.wikipedia.org/wiki/User:Coolcaesar">Coolcaesar</a> at <a href="https://en.wikipedia.org">en.wikipedia</a>')).toEqual(["Coolcaesar"]);
+    expect(userNames("Gary Halvorson, Oregon State Archives")).toEqual([]);
   });
 });
 
@@ -146,29 +167,47 @@ describe("requestNotCovered", () => {
 });
 
 describe("permissionTerms", () => {
-  it("drops Commons' licence box, the {{self}} line, a VRT notice and the licence restated, keeping a box's Attribution", () => {
-    expect(
-      permissionTerms(
-        "This file is licensed under the Creative Commons Attribution 4.0 International license. Attribution: Gary Halvorson, Oregon State Archives / Cc-by-4.0 You are free: to share",
-      ),
-    ).toEqual({ conditions: "", attribution: "Gary Halvorson, Oregon State Archives / Cc-by-4.0" });
+  const box = (name: string, short: string, url: string, sa: boolean, rest = "", attribution = "") =>
+    `This file is licensed under the Creative Commons ${name} license.${attribution ? ` Attribution: ${attribution}` : ""} You are free: to share – to copy, distribute and transmit the work to remix – to adapt the work Under the following conditions: attribution – You must give appropriate credit, provide a link to the license, and indicate if changes were made. You may do so in any reasonable manner, but not in any way that suggests the licensor endorses you or your use.${sa ? " share alike – If you remix, transform, or build upon the material, you must distribute your contributions under the same or compatible license as the original." : ""} ${url} ${short} Creative Commons ${name.replace(/ (Unported|International)$/, "")} true true${rest}`;
+  const vrt = (rest = "") =>
+    `This work is free and may be used by anyone for any purpose. If you wish to use this content, you do not need to request permission as long as you follow any licensing requirements mentioned on this page. The Wikimedia Foundation has received an e-mail confirming that the copyright holder has approved publication under the terms mentioned on this page. This correspondence has been reviewed by a Volunteer Response Team (VRT) member and stored in our permission archive. The correspondence is available to trusted volunteers as ticket #2021030210012287. If you have questions about the archived correspondence, please use the VRT noticeboard. Ticket link: https://ticket.wikimedia.org/otrs/index.pl?Action=AgentTicketZoom&TicketNumber=2021030210012287 Find other files from the same ticket:${rest}`;
+  const panoramio =
+    " This image, which was originally posted to Panoramio, was automatically reviewed on 7 January 2017 by Panoramio upload bot, who confirmed that it was available on Panoramio under the above license on that date.";
+
+  it("skips Commons' template text exactly: a box for the file's own licence, the review sentence, the {{self}} line, a VRT notice", () => {
+    expect(permissionTerms(box("Attribution 4.0 International", "CC BY 4.0", "https://creativecommons.org/licenses/by/4.0", false, "", "Gary Halvorson, Oregon State Archives / Cc-by-4.0"), "CC BY 4.0")).toEqual({
+      conditions: "",
+      attribution: "Gary Halvorson, Oregon State Archives / Cc-by-4.0",
+      conflict: null,
+    });
+    expect(permissionTerms(box("Attribution-Share Alike 3.0 Unported", "CC BY-SA 3.0", "https://creativecommons.org/licenses/by-sa/3.0", true, panoramio, "BigBear_in_IN"), "CC BY-SA 3.0")).toEqual({
+      conditions: "",
+      attribution: "BigBear_in_IN",
+      conflict: null,
+    });
     expect(permissionTerms("Coolcaesar at the English-language Wikipedia, the copyright holder of this work, hereby publishes it under the following license:").conditions).toBe("");
-    expect(
-      permissionTerms(
-        "This work is free and may be used by anyone for any purpose. If you wish to use this content, you do not need to request permission. This correspondence has been reviewed by a Volunteer Response Team (VRT) member.",
-      ).conditions,
-    ).toBe("");
+    expect(permissionTerms(vrt(), "CC BY-SA 4.0")).toEqual({ conditions: "", attribution: null, conflict: null });
     expect(permissionTerms("Public domain", "Public domain").conditions).toBe("");
   });
-  it("keeps anything else, including a licence name that differs from the file's licence", () => {
+  it("keeps anything after the template text, so it must be read (review round 2, S1)", () => {
+    const after = box("Attribution-Share Alike 4.0 International", "CC BY-SA 4.0", "https://creativecommons.org/licenses/by-sa/4.0", true, " Not for commercial use; ask me first.");
+    expect(permissionTerms(after, "CC BY-SA 4.0").conditions).toBe(after);
+    expect(permissionTerms(vrt(" Not for use in advertising."), "CC BY-SA 4.0").conditions).toContain("Not for use in advertising.");
+    expect(permissionTerms("Not for commercial use; Jane, the copyright holder of this work, hereby publishes it under the following license:").conditions).not.toBe("");
     expect(permissionTerms("Please Ask If you Want It").conditions).toBe("Please Ask If you Want It");
-    expect(permissionTerms("CC-By-SA-3.0", "CC BY 3.0").conditions).toBe("CC-By-SA-3.0");
-    expect(permissionTerms("").conditions).toBe("");
+  });
+  it("reports a conflict when the box or a restated name is another licence (review round 2, S1; MDT)", () => {
+    const nc = "This file is licensed under the Creative Commons Attribution-NonCommercial 4.0 International license.";
+    expect(permissionTerms(nc, "CC BY 4.0").conflict).not.toBeNull();
+    expect(permissionTerms(nc, "CC BY 4.0").conditions).toBe(nc);
+    expect(permissionTerms(box("Attribution 4.0 International", "CC BY 4.0", "https://creativecommons.org/licenses/by/4.0", false), "CC BY-SA 4.0").conflict).not.toBeNull();
+    expect(permissionTerms("CC-By-SA-3.0", "CC BY 3.0").conflict).not.toBeNull();
+    expect(permissionTerms("", "CC BY 3.0")).toEqual({ conditions: "", attribution: null, conflict: null });
   });
 });
 
 describe("originalSource", () => {
-  it("takes the first link that leaves Wikimedia, with its title", () => {
+  it("takes the first https link that leaves Wikimedia, with its title", () => {
     expect(originalSource('<a rel="nofollow" class="external text" href="https://www.flickr.com/photos/pvsbond/1580244122/">IMG_3987</a>')).toEqual({
       url: "https://www.flickr.com/photos/pvsbond/1580244122/",
       title: "IMG_3987",
@@ -177,5 +216,21 @@ describe("originalSource", () => {
     expect(originalSource('<a href="https://www.flickr.com/photos/x/1/">https://www.flickr.com/photos/x/1/</a>')?.title).toBeNull();
     expect(originalSource('<span>Own work</span> <a href="//commons.wikimedia.org/wiki/File:X.jpg">x</a>')).toBeNull();
     expect(originalSource('Transferred from <a href="https://en.wikipedia.org">en.wikipedia</a>')).toBeNull();
+  });
+  it("never takes a Wikimedia tool, a plain-http link or a generic link text as the source (review round 2, S4)", () => {
+    // LMT, QCOM and RCL: transferred with CommonsHelper.
+    expect(
+      originalSource(
+        'Transferred from <a href="https://en.wikipedia.org">en.wikipedia</a> to Commons by <a href="//commons.wikimedia.org/wiki/User:Kelly">User:Kelly</a> using <a rel="nofollow" class="external text" href="http://tools.wikimedia.de/~magnus/commonshelper.php">CommonsHelper</a>.',
+      ),
+    ).toBeNull();
+    expect(originalSource('<a href="https://x.toolforge.org/a">tool</a>')).toBeNull();
+    expect(originalSource('<a href="http://www.example.com/photo">A photo</a>')).toBeNull();
+    // NKE: the DPLA "File URL" link is a source, but its text is not a title.
+    expect(originalSource('<a rel="nofollow" class="external text" href="https://nwdh-omeka.s3.us-west-2.amazonaws.com/original/d1.jpg">File URL</a>')).toEqual({
+      url: "https://nwdh-omeka.s3.us-west-2.amazonaws.com/original/d1.jpg",
+      title: null,
+      flickr: false,
+    });
   });
 });

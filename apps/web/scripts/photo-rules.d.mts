@@ -9,8 +9,13 @@ export function stripFlickrPlace(name: string, fromFlickr: boolean | undefined):
 export function takenYear(raw: unknown, now?: Date): number | null;
 export function captionYears(caption: string): number[];
 export function headquartersNamed(caption: string, places: readonly string[]): boolean;
-export function exifName(value: unknown): string;
-export function exifMismatch(value: unknown, credited: readonly string[]): string | null;
+export interface ExifOptions {
+  tag?: "Artist" | "Copyright";
+  make?: string;
+}
+export function exifName(value: unknown, opts?: ExifOptions): string;
+export function exifMismatch(value: unknown, credited: readonly string[], opts?: ExifOptions): string | null;
+export function userNames(artistHtml: unknown): string[];
 export function requestNotCovered(request: string, creditName: string, licence: string): string[];
-export function permissionTerms(html: unknown, licence?: string): { conditions: string; attribution: string | null };
+export function permissionTerms(html: unknown, licence?: string): { conditions: string; attribution: string | null; conflict: string | null };
 export function originalSource(creditHtml: unknown): { url: string; title: string | null; flickr: boolean } | null;

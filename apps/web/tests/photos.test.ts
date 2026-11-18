@@ -78,9 +78,11 @@ describe("photo manifest", () => {
       expect(p.author.length).toBeGreaterThan(0);
       expect(p.author).not.toMatch(/[<>]|https?:|&[a-z#0-9]+;/i);
       expect(p.page).toMatch(/^https:\/\/commons\.wikimedia\.org\/wiki\/File:\S+$/);
-      // The credits page's details: the Commons file name, and an original source over http(s) when there is one.
+      // The credits page's details: the Commons file name, and an original source over https (not a Wikimedia tool) when there is one.
       expect(p.file).toMatch(/\.(jpe?g|png)$/i);
-      if (p.sourceUrl !== null) expect(p.sourceUrl).toMatch(/^https?:\/\/\S+$/);
+      if (p.sourceUrl !== null) expect(p.sourceUrl, ticker).toMatch(/^https:\/\/\S+$/);
+      if (p.sourceUrl !== null) expect(p.sourceUrl, ticker).not.toMatch(/^https:\/\/[^/]*(wikimedia\.(org|de)|wikipedia\.org|toolforge\.org|wmflabs\.org)\//);
+      expect(p.sourceTitle ?? "", ticker).not.toMatch(/^(file url|catalog record|commonshelper)$/i);
       for (const n of p.notices) expect(n.trim().length).toBeGreaterThan(0);
     }
   });

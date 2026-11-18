@@ -13,8 +13,11 @@
 // LicenseShortName, LicenseUrl, Restrictions, DateTimeOriginal, ImageDescription, the file's own EXIF and its
 // wikitext) and stops when: the licence is no longer public domain, CC0, CC BY or CC BY-SA, or its URL or the
 // Commons page is not https; Restrictions holds anything but a personality-rights or trademark note; the author
-// is not a plain name; a requested attribution would not be shown in full; Permission holds a condition the
-// terms column does not repeat; the EXIF Artist or Copyright names someone other than the credited author; the
+// is not a plain name; a requested attribution would not be shown in full; Permission names another licence
+// than the licence tag, or holds a condition the terms column does not repeat (only Commons' exact template
+// text is skipped); the EXIF Artist or Copyright names someone other than the credited author or their
+// Commons account (a company name counts; only placeholders, editing software and the camera's own make in
+// Artist do not); the
 // image is not a JPEG or PNG at least MIN_WIDTH wide, or is taller than 4:5 or wider than 2.4:1; a caption's
 // year is not the year the photo was taken; or a caption says "headquarters" (总部) without naming Wikidata's
 // headquarters location (P159). The rules are pure functions in scripts/photo-rules.mjs, tested in
@@ -51,6 +54,7 @@ import {
   stripFlickrPlace,
   takenYear,
   text,
+  userNames,
 } from "./photo-rules.mjs";
 import { WIKIDATA_ITEMS, createFetcher, current, hashOf, readWatchlist, wikidataItems } from "./wikimedia.mjs";
 
@@ -145,13 +149,17 @@ async function commonsInfo(names, fresh) {
         licenceUrl: licenceUrl(m.LicenseUrl?.value),
         licenceUrlRaw: m.LicenseUrl?.value ?? null,
         artist: text(m.Artist?.value),
+        // The Commons or Wikipedia accounts the Artist field links to: the same person as the credited name.
+        users: userNames(m.Artist?.value),
         author,
         // What the author asks the credit to say: the Attribution field, and an "Attribution:" in the licence box.
         requests: [...new Set([attribution, permission.attribution].filter(Boolean))],
         conditions: permission.conditions,
+        conflict: permission.conflict,
         permission: text(m.Permission?.value),
         source,
         exifArtist: text(exifTag(info.commonmetadata, "Artist")),
+        exifMake: text(exifTag(info.commonmetadata, "Make")),
         exifCopyright: text(exifTag(info.commonmetadata, "Copyright")),
         derivedFrom: extractedFrom(wikitext[page.title] ?? ""),
         restrictions: text(m.Restrictions?.value).split("|").map((s) => s.trim()).filter(Boolean),
@@ -314,6 +322,8 @@ for (const p of pinned) {
     if (missing.length)
       fail(p, `Commons asks to be credited as "${r}"; the credit "${name}" would not show: ${missing.join(" ")}. Set the credit column to follow it, or drop the row`);
   }
+  // Permission that contradicts the licence tag (another licence, a licence box for another licence) never ships.
+  if (i.conflict) fail(p, `${i.conflict}: the licence terms conflict, so drop the row`);
   // A condition or request in Permission must be repeated word for word in the terms column.
   if (i.conditions !== p.terms)
     fail(
@@ -324,7 +334,7 @@ for (const p of pinned) {
     );
   // The file's own EXIF must not name another author.
   for (const [tag, value] of [["Artist", i.exifArtist], ["Copyright", i.exifCopyright]]) {
-    const other = exifMismatch(value, [name, i.author ?? "", i.artist, ...i.requests]);
+    const other = exifMismatch(value, [name, i.author ?? "", i.artist, ...i.users, ...i.requests], { tag, make: i.exifMake });
     if (other) fail(p, `the file's EXIF ${tag} "${value}" names ${other}, not the credited author "${name}"`);
   }
   // A year in a caption is the year the photo was taken, so it must match DateTimeOriginal.
@@ -340,7 +350,7 @@ for (const p of pinned) {
 }
 
 /** The notices the author or the file gives, exactly as given: requested attributions, Permission conditions, EXIF copyright. */
-const noticesOf = (i) => [...new Set([...i.requests, i.conditions, exifName(i.exifCopyright) ? i.exifCopyright : ""].filter(Boolean))];
+const noticesOf = (i) => [...new Set([...i.requests, i.conditions, exifName(i.exifCopyright, { tag: "Copyright" }) ? i.exifCopyright : ""].filter(Boolean))];
 /**
  * Whether the Commons file is itself someone's crop of another file: { from } names that file ({{Extracted
  * from}} in its wikitext), or is null when only the file name says "crop". Null when it is not a crop.
@@ -488,7 +498,7 @@ ${row("Wikidata headquarters (P159)", esc(hq[p.ticker].names.join(" / ") || "non
 ${row("Author (Artist field)", esc(i.artist) || "<em>none</em>")}
 ${row("Requested attribution", esc(i.requests.join(" — ")) || "<em>none</em>")}
 ${row("Permission", esc(i.permission) || "<em>none</em>")}
-${row("EXIF Artist / Copyright", `${esc(i.exifArtist) || "<em>none</em>"} / ${esc(i.exifCopyright) || "<em>none</em>"}`)}
+${row("EXIF Artist / Copyright / Make", `${esc(i.exifArtist) || "<em>none</em>"} / ${esc(i.exifCopyright) || "<em>none</em>"} / ${esc(i.exifMake) || "<em>none</em>"}`)}
 ${row("Original source", m.sourceUrl ? `${esc(m.sourceTitle ?? "")} ${esc(m.sourceUrl)}` : "own work on Commons")}
 ${m.derived ? row("Derived from", esc(derivedNote(m.derived, m.author))) : ""}
 ${row("Categories", esc(i.categories.join(" · ")))}
