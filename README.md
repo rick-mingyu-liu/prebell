@@ -48,4 +48,4 @@ Secrets live in `crates/generator/.dev.vars` locally (git-ignored) and in Wrangl
 
 ## License
 
-MIT. See `LICENSE`.
+MIT. See `LICENSE`. The photographs in `apps/web/public/photos/` are not covered: each belongs to its author and is used under the licence named in `apps/web/public/photos/LICENSES.md` and credited under the photo on the site.
