@@ -71,9 +71,10 @@ const TAIL_MAX_BYTES: usize = 4096;
 /// How many `{` in a tail are tried as the start of a JSON object; a tail with more is refused.
 const TAIL_SCAN_STARTS: usize = 32;
 
-/// `s` on one line (whitespace runs become one space; control and bidirectional-override
-/// characters become `?`, since the text reaches logs and alert messages), cut to
-/// `TAIL_SNIPPET_CHARS` characters with its full length noted.
+/// `s` on one line (whitespace runs become one space; control, bidirectional-override and
+/// zero-width characters become `?`, since the text reaches logs and alert messages), with
+/// links made inert (see `inert_links`), cut to `TAIL_SNIPPET_CHARS` characters with its
+/// full length noted.
 fn snippet(s: &str) -> String {
     let clean: String = s
         .chars()
@@ -82,16 +83,25 @@ fn snippet(s: &str) -> String {
             c if c.is_control() => '?',
             '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}' => '?',
             '\u{200E}' | '\u{200F}' | '\u{061C}' => '?',
+            '\u{200B}' | '\u{2060}' | '\u{FEFF}' => '?',
             c => c,
         })
         .collect();
-    let flat = clean.split_whitespace().collect::<Vec<_>>().join(" ");
+    let flat = inert_links(&clean.split_whitespace().collect::<Vec<_>>().join(" "));
     let total = flat.chars().count();
     if total <= TAIL_SNIPPET_CHARS {
         return flat;
     }
     let head: String = flat.chars().take(TAIL_SNIPPET_CHARS).collect();
     format!("{head}… ({total} characters)")
+}
+
+/// `s` with nothing a chat app renders as a link: a URL scheme's `://` becomes `[:]//`
+/// (`https[:]//example.com`), and the `](` of a Markdown masked link becomes `] (`. A
+/// snippet is model text: it reaches error lines, `last_error` and the owner's alert
+/// webhook, where a reply that quotes an article must not become a clickable link.
+fn inert_links(s: &str) -> String {
+    s.replace("://", "[:]//").replace("](", "] (")
 }
 
 /// `s` without a Markdown fence marker at its start (```` ``` ````, with or without a
@@ -201,15 +211,31 @@ pub(crate) struct Reply {
 /// a reply split in two, cut into a fragment, or corrected after the fact must not pass as
 /// its first half. Nothing before the object is tolerated, and truncated JSON still fails.
 pub(crate) fn parse_reply(text: &str) -> Result<Reply, ProviderError> {
+    read_reply(text, "")
+}
+
+/// `parse_reply`, with `note` (a provider's stop reason) added to an error
+/// about how the reply begins: no JSON at all, or not an object.
+pub(crate) fn read_reply(text: &str, note: &str) -> Result<Reply, ProviderError> {
     let body = after_fence(text);
     let mut values = serde_json::Deserializer::from_str(body).into_iter::<Value>();
     let value = match values.next() {
         Some(Ok(v)) => v,
-        Some(Err(e)) => return Err(ProviderError::Parse(e.to_string())),
-        None => return Err(ProviderError::Parse("empty reply".into())),
+        // What the reply began with tells prose, a refusal in words and cut-off
+        // JSON apart in the log; same rules as a tail's snippet.
+        Some(Err(e)) => {
+            return Err(ProviderError::Parse(format!(
+                "{e}; reply began: {}{note}",
+                snippet(body)
+            )))
+        }
+        None => return Err(ProviderError::Parse(format!("empty reply{note}"))),
     };
     if !value.is_object() {
-        return Err(ProviderError::Parse("not a JSON object".into()));
+        return Err(ProviderError::Parse(format!(
+            "not a JSON object; reply began: {}{note}",
+            snippet(body)
+        )));
     }
     // What follows the object, past the fence that closes it.
     let tail = body[values.byte_offset()..].trim();
@@ -634,6 +660,30 @@ mod tests {
         }
     }
 
+    /// Review L1 and L4 of PR #74: a snippet is model text that reaches alerts, so a
+    /// masked link or a bare URL in it is inert, and zero-width characters are replaced.
+    #[test]
+    fn snippets_have_no_live_links_or_zero_width_characters() {
+        assert_eq!(
+            parse_err("[click here](https://evil.test/x) for the reasons"),
+            "expected value at line 1 column 2; reply began: [click here] (https[:]//evil.test/x) for the reasons"
+        );
+        assert_eq!(
+            parse_err("See https://evil.test/a and http://x.test for details"),
+            "expected value at line 1 column 1; reply began: See https[:]//evil.test/a and http[:]//x.test for details"
+        );
+        assert_eq!(
+            parse_err("Sor\u{200b}ry\u{2060}, no\u{feff}"),
+            "expected value at line 1 column 1; reply began: Sor?ry?, no?"
+        );
+        // A tail note gets the same treatment.
+        let r = parse_reply("{\"a\":1}\n\nNote: see [here](https://evil.test)").unwrap();
+        assert_eq!(
+            r.dropped.as_deref(),
+            Some("Note: see [here] (https[:]//evil.test)")
+        );
+    }
+
     #[test]
     fn truncated_empty_non_object_and_prose_replies_still_fail() {
         assert!(parse_err("{\"a\":1").contains("EOF"));
@@ -641,9 +691,9 @@ mod tests {
         assert_eq!(parse_err(""), "empty reply");
         assert_eq!(parse_err("   \n"), "empty reply");
         assert!(parse_err("```json\n```").contains("expected value"));
-        assert_eq!(parse_err("[1,2]"), "not a JSON object");
-        assert_eq!(parse_err("\"text\"\n\nand a note"), "not a JSON object");
-        assert_eq!(parse_err("true story: {\"a\":1}"), "not a JSON object");
+        assert!(parse_err("[1,2]").starts_with("not a JSON object"));
+        assert!(parse_err("\"text\"\n\nand a note").starts_with("not a JSON object"));
+        assert!(parse_err("true story: {\"a\":1}").starts_with("not a JSON object"));
         assert!(parse_err("Sorry, here is prose, not JSON.").contains("expected value"));
         // Nothing before the object is tolerated.
         assert!(parse_err("Here is the JSON:\n{\"a\":1}").contains("expected value"));
