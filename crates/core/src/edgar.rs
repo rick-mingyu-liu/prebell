@@ -216,7 +216,7 @@ const TITLE_SCAN_BYTES: usize = 4096;
 /// then at most 300 characters (`alert_once_today`'s cap, so it is never cut
 /// there); the log lines (`earnings poll: ` and the poll's error, see
 /// `earnings::detect::read_feed_page`) are at most 268 after a failed retry
-/// and 287 after a good one. A longer text is cut at its end, so `body
+/// and 256 after a good one. A longer text is cut at its end, so `body
 /// began` goes first, then the title.
 const NOT_FEED_TEXT_CHARS: usize = 179;
 
@@ -1128,7 +1128,7 @@ pub(crate) mod tests {
     /// The worst case, a hostile Content-Type, title and body in a 2 MB reply:
     /// the error text inside the parentheses is cut at its end (body first,
     /// then the title), so the log lines are at most 268 characters (retry
-    /// failed) and 287 (retry ok), the stored alert at most 300
+    /// failed) and 256 (retry ok), the stored alert at most 300
     /// (`alert_once_today` never cuts it) and the webhook message (`error:
     /// sec-not-feed:<date>: ` before it) at most 332.
     #[tokio::test]
@@ -1156,15 +1156,19 @@ pub(crate) mod tests {
         assert!(inner.contains("\", 2097152 bytes, title \"T?'T?'"), "{m}");
         // The lines `read_feed_page` and `poll_job` write.
         let failed = format!("earnings poll: current 6-K filings page 0, retried once: {m}");
+        let facts = m
+            .strip_prefix("parse error: not an Atom feed (")
+            .and_then(|r| r.strip_suffix(')'))
+            .unwrap();
         let ok = format!(
-            "earnings poll: current 6-K filings page 0: retry ok after a non-feed reply: {m}"
+            "earnings poll: current 6-K filings page 0: retry ok after a non-feed reply ({facts})"
         );
         let alert = format!(
             "SEC EDGAR sent a non-feed reply, retry failed: current 6-K filings page 0, retried once: {m}"
         );
         let hook = format!("error: sec-not-feed:2026-11-19: {alert}");
         assert_eq!(failed.chars().count(), 268, "{failed}");
-        assert_eq!(ok.chars().count(), 287, "{ok}");
+        assert_eq!(ok.chars().count(), 256, "{ok}");
         assert_eq!(alert.chars().count(), 300, "{alert}");
         assert_eq!(hook.chars().count(), 332, "{hook}");
     }

@@ -678,12 +678,10 @@ pub async fn foreign_tick(
         );
         let list = match read.await {
             Ok(l) => l,
-            Err((e, retried)) => {
+            Err((e, alert)) => {
                 out.throttled = matches!(e, ProviderError::Http(403 | 429));
                 // Still failing after one retry (a refused retry is a throttle).
-                if retried && !out.throttled {
-                    out.not_feed = out.errors.last().cloned();
-                }
+                out.not_feed = alert;
                 break;
             }
         };

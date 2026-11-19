@@ -149,12 +149,10 @@ pub async fn poll_tick(
         );
         let list = match read.await {
             Ok(l) => l,
-            Err((e, retried)) => {
+            Err((e, alert)) => {
                 out.throttled = matches!(e, ProviderError::Http(403 | 429));
                 // Still failing after one retry (a refused retry is a throttle).
-                if retried && !out.throttled {
-                    out.not_feed = out.errors.last().cloned();
-                }
+                out.not_feed = alert;
                 break;
             }
         };
@@ -1580,9 +1578,11 @@ mod tests {
         assert_eq!(
             o.errors,
             [format!(
-                "current filings page 0: retry ok after a non-feed reply: parse error: not an Atom feed ({NOT_FEED_FACTS})"
+                "current filings page 0: retry ok after a non-feed reply ({NOT_FEED_FACTS})"
             )]
         );
+        // A search for "not an Atom feed" finds only failed reads (review L5).
+        assert!(!o.errors[0].contains("not an Atom feed"));
         assert!(base.alerts.borrow().is_empty());
         assert_eq!(
             feed_stats(&es, "2026-10-30"),
@@ -1649,13 +1649,90 @@ mod tests {
         let last = "current filings page 0, retried once: http status 504";
         assert_eq!(o.errors.len(), 2, "{:?}", o.errors);
         assert_eq!(o.errors[1], last);
-        assert_eq!(o.not_feed.as_deref(), Some(last));
+        assert_eq!(
+            o.errors[0],
+            format!("current filings page 0: parse error: not an Atom feed ({NOT_FEED_FACTS})")
+        );
+        // The alert carries the retry's error, then the first reply's facts.
+        let line = format!("{last}; first reply: not an Atom feed ({NOT_FEED_FACTS})");
+        assert_eq!(o.not_feed.as_deref(), Some(line.as_str()));
         let alerts = base.alerts.borrow();
         assert_eq!(alerts.len(), 1, "{alerts:?}");
         assert_eq!(
             alerts[0].2,
-            format!("SEC EDGAR sent a non-feed reply, retry failed: {last}")
+            format!("SEC EDGAR sent a non-feed reply, retry failed: {line}")
         );
+        assert!(alerts[0].2.chars().count() <= 300);
+    }
+
+    /// Review L1 of PR #80: the 6-K feed, a non-feed reply and then a 504 on
+    /// the retry: 2 requests, not throttled, one `sec-not-feed` alert with
+    /// both errors, and the counter says `retry_failed`.
+    #[tokio::test]
+    async fn a_6k_retry_failing_otherwise_alerts_as_a_failed_retry() {
+        let (base, es) = stores();
+        let fl = FakeFilings::default();
+        fl.six_k_queued
+            .borrow_mut()
+            .extend([Err(not_feed()), Err(ProviderError::Http(504))]);
+        let t = poll_time();
+        let o = poll_job(t, Some(t), &es, base.as_ref(), &fl).await.unwrap();
+        assert_eq!(*fl.page_calls.borrow(), [0]);
+        assert_eq!(fl.six_k_calls.get(), 2);
+        assert!(!o.throttled && !o.foreign.throttled);
+        let line = format!(
+            "current 6-K filings page 0, retried once: http status 504; first reply: not an Atom feed ({NOT_FEED_FACTS})"
+        );
+        assert_eq!(o.foreign.not_feed.as_deref(), Some(line.as_str()));
+        let alerts = base.alerts.borrow();
+        assert_eq!(alerts.len(), 1, "{alerts:?}");
+        assert_eq!(alerts[0].0, "sec-not-feed:2026-10-30");
+        assert_eq!(
+            alerts[0].2,
+            format!("SEC EDGAR sent a non-feed reply, retry failed: {line}")
+        );
+        assert_eq!(
+            feed_stats(&es, "2026-10-30"),
+            Some(json!({"non_feed": 1, "retry_ok": 0, "retry_failed": 1, "last_at": iso(t)}))
+        );
+    }
+
+    /// Review L2 of PR #80, the worst case: the longest first-reply facts
+    /// (179 characters: a 60-character Content-Type, a 7-digit length, an
+    /// 80-character title, the body's start) and a long network error on the
+    /// retry. The stored alert is exactly 300 characters: the error is cut to
+    /// 60, then the facts at their end (body first, then the title), and
+    /// status, Content-Type and length stay whole.
+    #[tokio::test]
+    async fn the_worst_failed_retry_alert_fits_300_characters() {
+        let ct = format!("{}…", "\u{4e2d}".repeat(60));
+        let facts: String = format!(
+            "status 200, content-type \"{ct}\", 2097152 bytes, title \"{}…\", body began: {}…",
+            "T".repeat(80),
+            "b".repeat(40)
+        )
+        .chars()
+        .take(178)
+        .chain(['…'])
+        .collect();
+        assert_eq!(facts.chars().count(), 179);
+        let (base, es) = stores();
+        let fl = FakeFilings::default();
+        fl.six_k_queued.borrow_mut().extend([
+            Err(ProviderError::NotFeed(facts)),
+            Err(ProviderError::Network("x".repeat(500))),
+        ]);
+        let t = poll_time();
+        poll_job(t, Some(t), &es, base.as_ref(), &fl).await.unwrap();
+        let alerts = base.alerts.borrow();
+        let msg = &alerts[0].2;
+        assert_eq!(msg.chars().count(), 300, "{msg}");
+        assert!(msg.ends_with("…)"), "{msg}");
+        let keep = format!(
+            "SEC EDGAR sent a non-feed reply, retry failed: current 6-K filings page 0, retried once: network error: {}…; first reply: not an Atom feed (status 200, content-type \"{ct}\", 2097152 bytes, title \"TTT",
+            "x".repeat(44)
+        );
+        assert!(msg.starts_with(&keep), "{msg}");
     }
 
     /// The 6-K feed the same way: a retry into a feed carries on (one extra
@@ -1679,9 +1756,13 @@ mod tests {
                 retry_failed: 0
             }
         );
-        assert!(o.errors.contains(&format!(
-            "current 6-K filings page 0: retry ok after a non-feed reply: parse error: not an Atom feed ({NOT_FEED_FACTS})"
-        )), "{:?}", o.errors);
+        assert!(
+            o.errors.contains(&format!(
+                "current 6-K filings page 0: retry ok after a non-feed reply ({NOT_FEED_FACTS})"
+            )),
+            "{:?}",
+            o.errors
+        );
         assert!(base.alerts.borrow().is_empty());
         assert_eq!(
             feed_stats(&es, "2026-10-30"),

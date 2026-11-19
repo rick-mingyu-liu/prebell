@@ -37,51 +37,89 @@ impl FeedStats {
     }
 }
 
+/// Longest alert line after a retry that failed other than by a non-feed
+/// reply or a refusal: `poll_job`'s stored alert, `SEC EDGAR sent a non-feed
+/// reply, retry failed: ` (47 characters) and this line, is then at most
+/// 300 characters (`alert_once_today`'s cap, so it is never cut there).
+const FAILED_RETRY_LINE_CHARS: usize = 253;
+/// Characters of that retry's error in the line (a network error's text can
+/// be long); the first reply's status, Content-Type and length then always fit.
+const RETRY_ERROR_CHARS: usize = 60;
+
+/// At most `max` characters of `s`, with `…` where it was cut.
+fn cut(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        return s.to_string();
+    }
+    let head: String = s.chars().take(max.saturating_sub(1)).collect();
+    format!("{head}…")
+}
+
 /// One current-filings feed page (`label`: "current filings page 0"),
 /// asked for once more, at once, when its reply is not a feed (`NotFeed`);
 /// any other error is not retried. `Edgar` paces the retry like every
 /// request (`GAP_MS` after the one before). Lines for the log go into
 /// `errors`, the error's line last:
 /// - a retry that returns a feed: `<label>: retry ok after a non-feed
-///   reply: <first error>`, and the entries;
+///   reply (<first reply's facts>)`, and the entries (the line never holds
+///   "not an Atom feed", so a search for that finds only failed reads);
 /// - a retry that is not a feed either: `<label>, retried once: <error>`;
 /// - a retry that fails otherwise (403/429 included): `<label>: <first
 ///   error>`, then `<label>, retried once: <error>`;
 /// - no retry: `<label>: <error>`, as before.
 ///
-/// The error comes back with whether the page was retried.
+/// The error comes back with the line for the `sec-not-feed` alert when the
+/// retry failed and was not refused (403/429): the retry's line, or, when it
+/// failed some other way (a 504, a network error), `<label>, retried once:
+/// <error>; first reply: not an Atom feed (<facts>)`, cut to
+/// `FAILED_RETRY_LINE_CHARS` at the end of the facts (body first, then the
+/// title; status, Content-Type and length always stay).
 pub(crate) async fn read_feed_page<F, Fut>(
     label: &str,
     read: F,
     stats: &mut FeedStats,
     errors: &mut Vec<String>,
-) -> Result<Vec<FeedEntry>, (ProviderError, bool)>
+) -> Result<Vec<FeedEntry>, (ProviderError, Option<String>)>
 where
     F: Fn() -> Fut,
     Fut: Future<Output = Result<Vec<FeedEntry>, ProviderError>>,
 {
-    let first = match read().await {
+    let facts = match read().await {
         Ok(list) => return Ok(list),
-        Err(e @ ProviderError::NotFeed(_)) => e,
+        Err(ProviderError::NotFeed(facts)) => facts,
         Err(e) => {
             errors.push(format!("{label}: {e}"));
-            return Err((e, false));
+            return Err((e, None));
         }
     };
     stats.non_feed += 1;
     match read().await {
         Ok(list) => {
             stats.retry_ok += 1;
-            errors.push(format!("{label}: retry ok after a non-feed reply: {first}"));
+            errors.push(format!(
+                "{label}: retry ok after a non-feed reply ({facts})"
+            ));
             Ok(list)
         }
         Err(e) => {
             stats.retry_failed += 1;
+            let alert = match &e {
+                ProviderError::Http(403 | 429) => None,
+                ProviderError::NotFeed(_) => Some(format!("{label}, retried once: {e}")),
+                _ => {
+                    let head = format!(
+                        "{label}, retried once: {}; first reply: not an Atom feed (",
+                        cut(&e.to_string(), RETRY_ERROR_CHARS)
+                    );
+                    let room = FAILED_RETRY_LINE_CHARS.saturating_sub(head.chars().count() + 1);
+                    Some(format!("{head}{})", cut(&facts, room)))
+                }
+            };
             if !matches!(e, ProviderError::NotFeed(_)) {
-                errors.push(format!("{label}: {first}"));
+                errors.push(format!("{label}: {}", ProviderError::NotFeed(facts)));
             }
             errors.push(format!("{label}, retried once: {e}"));
-            Err((e, true))
+            Err((e, alert))
         }
     }
 }
