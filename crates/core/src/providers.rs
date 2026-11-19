@@ -8,6 +8,8 @@ pub struct HttpResp {
     pub body: String,
     /// The response's `Set-Cookie` header, if any. Several are joined by ", ".
     pub set_cookie: Option<String>,
+    /// The response's `Content-Type` header, if any. Only error text reads it.
+    pub content_type: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
@@ -20,6 +22,14 @@ pub enum ProviderError {
     Parse(String),
     #[error("empty result")]
     Empty,
+    /// A 200 reply with nothing usable in it, with what came back (status,
+    /// Content-Type, body length): EDGAR's filing index and documents.
+    #[error("empty result ({0})")]
+    EmptyReply(String),
+    /// A reply that should have been an Atom feed was not, with what came
+    /// back (status, Content-Type, body length, how the body began).
+    #[error("parse error: not an Atom feed ({0})")]
+    NotFeed(String),
     /// The quote's premarket fields disagree with its previous close: likely
     /// left over from an earlier session.
     #[error("stale premarket quote")]
@@ -336,6 +346,7 @@ mod tests {
                 status: 200,
                 body: url.into(),
                 set_cookie: None,
+                content_type: None,
             })
         }
         async fn post_json(

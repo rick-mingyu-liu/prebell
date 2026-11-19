@@ -220,6 +220,7 @@ mod tests {
                 status: self.status,
                 body: self.body.clone(),
                 set_cookie: None,
+                content_type: None,
             })
         }
     }

@@ -16,7 +16,8 @@ use serde::Deserialize;
 
 use crate::anchor::decode_entities;
 use crate::earnings::cik10;
-use crate::providers::{Http, ProviderError, Timer};
+use crate::llm::one_line;
+use crate::providers::{Http, HttpResp, ProviderError, Timer};
 
 /// Pause before every EDGAR request after the first: at most 8 requests/second.
 pub const GAP_MS: u64 = 125;
@@ -154,7 +155,7 @@ impl<H: Http, T: Timer> Edgar<H, T> {
     }
 
     async fn get(&self, url: &str) -> Result<String, ProviderError> {
-        self.fetch(url, false).await
+        Ok(self.fetch(url, false).await?.body)
     }
 
     /// A JSON document (the IPO check's submissions), capped at `MAX_BYTES`.
@@ -163,16 +164,17 @@ impl<H: Http, T: Timer> Edgar<H, T> {
     }
 
     /// `prefix`: keep the first `MAX_BYTES` of a bigger body instead of failing.
-    async fn fetch(&self, url: &str, prefix: bool) -> Result<String, ProviderError> {
+    async fn fetch(&self, url: &str, prefix: bool) -> Result<HttpResp, ProviderError> {
         self.fetch_max(url, prefix, MAX_BYTES).await
     }
 
+    /// The reply, when its status is 200.
     async fn fetch_max(
         &self,
         url: &str,
         prefix: bool,
         max: usize,
-    ) -> Result<String, ProviderError> {
+    ) -> Result<HttpResp, ProviderError> {
         if self.used.replace(true) {
             self.timer
                 .sleep(std::time::Duration::from_millis(self.gap_ms))
@@ -190,8 +192,61 @@ impl<H: Http, T: Timer> Edgar<H, T> {
         if r.status != 200 {
             return Err(ProviderError::Http(r.status));
         }
-        Ok(r.body)
+        Ok(r)
     }
+}
+
+/// Bytes of a reply's body (or Content-Type) read for an error's text: a
+/// 2 MB body costs no more CPU than a short one.
+const REPLY_SCAN_BYTES: usize = 512;
+/// Characters of a reply's body in an error.
+const REPLY_BODY_CHARS: usize = 80;
+/// Characters of a reply's Content-Type in an error.
+const REPLY_TYPE_CHARS: usize = 60;
+
+/// At most `chars` characters from the start of `s`, untrusted text from the
+/// network: on one line and sanitised like a model reply's snippet
+/// (`llm::one_line`: control, bidirectional and zero-width characters as
+/// `?`, links inert), with `…` where it was cut. Never interpreted.
+fn reply_text(s: &str, chars: usize) -> String {
+    let mut end = s.len().min(REPLY_SCAN_BYTES);
+    while !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    let flat = one_line(&s[..end]);
+    if end == s.len() && flat.chars().count() <= chars {
+        return flat;
+    }
+    let head: String = flat.chars().take(chars).collect();
+    format!("{head}…")
+}
+
+/// What came back, for an error's text:
+/// `status 200, content-type "text/html; charset=utf-8", 5120 bytes`.
+fn reply_facts(r: &HttpResp) -> String {
+    let ct = match r.content_type.as_deref().map(str::trim) {
+        Some(t) if !t.is_empty() => format!("content-type \"{}\"", reply_text(t, REPLY_TYPE_CHARS)),
+        _ => "no content-type".into(),
+    };
+    format!("status {}, {ct}, {} bytes", r.status, r.body.len())
+}
+
+/// The entries of a current-filings feed reply. A reply that is not a feed
+/// fails as `NotFeed`, saying what came back and how its body began.
+fn feed_reply(r: &HttpResp) -> Result<Vec<FeedEntry>, ProviderError> {
+    parse_current_feed(&r.body).map_err(|_| {
+        let began = reply_text(&r.body, REPLY_BODY_CHARS);
+        if began.is_empty() {
+            ProviderError::NotFeed(reply_facts(r))
+        } else {
+            ProviderError::NotFeed(format!("{}, body began: {began}", reply_facts(r)))
+        }
+    })
+}
+
+/// A 200 reply with nothing usable in it (`EmptyReply`).
+fn empty_reply(r: &HttpResp) -> ProviderError {
+    ProviderError::EmptyReply(reply_facts(r))
 }
 
 /// A press release cut at `MAX_BYTES` ends mid-element, possibly mid-number
@@ -530,11 +585,15 @@ pub fn html_to_text(html: &str) -> String {
 #[async_trait(?Send)]
 impl<H: Http, T: Timer> Filings for Edgar<H, T> {
     async fn current_filings(&self, start: usize) -> Result<Vec<FeedEntry>, ProviderError> {
-        parse_current_feed(&self.get(&current_feed_url(start)).await?)
+        feed_reply(&self.fetch(&current_feed_url(start), false).await?)
     }
 
     async fn current_6k_filings(&self, start: usize) -> Result<Vec<FeedEntry>, ProviderError> {
-        parse_current_feed(&self.get(&current_form_feed_url("6-K", start)).await?)
+        feed_reply(
+            &self
+                .fetch(&current_form_feed_url("6-K", start), false)
+                .await?,
+        )
     }
 
     async fn document_head(&self, url: &str, max: usize) -> Result<String, ProviderError> {
@@ -543,9 +602,10 @@ impl<H: Http, T: Timer> Filings for Edgar<H, T> {
                 "not an EDGAR archive url: {url}"
             )));
         }
-        let text = head_text(&self.fetch_max(url, true, max).await?);
+        let r = self.fetch_max(url, true, max).await?;
+        let text = head_text(&r.body);
         if text.is_empty() {
-            return Err(ProviderError::Empty);
+            return Err(empty_reply(&r));
         }
         Ok(text)
     }
@@ -555,9 +615,10 @@ impl<H: Http, T: Timer> Filings for Edgar<H, T> {
         cik: u64,
         accession: &str,
     ) -> Result<Vec<FilingDoc>, ProviderError> {
-        let docs = parse_filing_index(&self.get(&filing_url(cik, accession)).await?);
+        let r = self.fetch(&filing_url(cik, accession), false).await?;
+        let docs = parse_filing_index(&r.body);
         if docs.is_empty() {
-            return Err(ProviderError::Empty);
+            return Err(empty_reply(&r));
         }
         Ok(docs)
     }
@@ -568,9 +629,11 @@ impl<H: Http, T: Timer> Filings for Edgar<H, T> {
                 "not an EDGAR archive url: {url}"
             )));
         }
-        let text = html_to_text(&whole_blocks(self.fetch(url, true).await?));
+        let r = self.fetch(url, true).await?;
+        let empty = empty_reply(&r);
+        let text = html_to_text(&whole_blocks(r.body));
         if text.is_empty() {
-            return Err(ProviderError::Empty);
+            return Err(empty);
         }
         Ok(text)
     }
@@ -603,10 +666,12 @@ pub(crate) mod tests {
     type Headers = Vec<(String, String)>;
 
     /// URL -> (status, body); records each request's URL and headers.
+    /// Every reply carries `content_type`.
     #[derive(Default)]
     pub(crate) struct FakeHttp {
         pub routes: HashMap<String, (u16, String)>,
         pub seen: RefCell<Vec<(String, Headers)>>,
+        pub content_type: Option<String>,
     }
     #[async_trait(?Send)]
     impl Http for FakeHttp {
@@ -631,6 +696,7 @@ pub(crate) mod tests {
                 status,
                 body,
                 set_cookie: None,
+                content_type: self.content_type.clone(),
             })
         }
         async fn post_json(
@@ -795,8 +861,133 @@ pub(crate) mod tests {
         let e = edgar(&[(FEED_URL, 200, "<html>maintenance</html>")]);
         assert!(matches!(
             e.current_filings(0).await,
-            Err(ProviderError::Parse(_))
+            Err(ProviderError::NotFeed(_))
         ));
+    }
+
+    /// `edgar` whose replies carry `content_type`.
+    fn typed(
+        routes: &[(&str, u16, &str)],
+        content_type: Option<&str>,
+    ) -> Edgar<FakeHttp, RecTimer> {
+        let mut e = edgar(routes);
+        e.http.content_type = content_type.map(String::from);
+        e
+    }
+
+    /// A feed reply that is not a feed says what came back: status,
+    /// Content-Type, body length and how the body began (2026-11-19: 9 polls
+    /// in 12 logged only "not an Atom feed").
+    #[tokio::test]
+    async fn a_non_feed_reply_says_what_came_back() {
+        let six_k = current_form_feed_url("6-K", 0);
+        let err = |body: &str, ct: Option<&str>| {
+            let e = typed(&[(FEED_URL, 200, body), (&six_k, 200, body)], ct);
+            async move {
+                let a = e.current_filings(0).await.unwrap_err().to_string();
+                let b = e.current_6k_filings(0).await.unwrap_err().to_string();
+                assert_eq!(a, b, "both feeds read the same way");
+                a
+            }
+        };
+        let html = "<!DOCTYPE html>\n<html><head><title>SEC.gov | Request Rate Threshold Exceeded</title></head><body>Your request rate is too high.</body></html>";
+        assert_eq!(
+            err(html, Some("text/html; charset=utf-8")).await,
+            format!(
+                "parse error: not an Atom feed (status 200, content-type \"text/html; charset=utf-8\", {} bytes, body began: <!DOCTYPE html> <html><head><title>SEC.gov | Request Rate Threshold Exceeded</ti…)",
+                html.len()
+            )
+        );
+        assert_eq!(
+            err("", None).await,
+            "parse error: not an Atom feed (status 200, no content-type, 0 bytes)"
+        );
+        assert_eq!(
+            err("{\"error\":\"service unavailable\"}", Some("application/json")).await,
+            "parse error: not an Atom feed (status 200, content-type \"application/json\", 31 bytes, body began: {\"error\":\"service unavailable\"})"
+        );
+        // A real feed is still read.
+        let e = typed(&[(FEED_URL, 200, FEED)], Some("application/atom+xml"));
+        assert_eq!(e.current_filings(0).await.unwrap().len(), 4);
+    }
+
+    /// The body is untrusted network text: it reaches the log and the alert
+    /// webhook only on one line, with links inert and zero-width characters
+    /// replaced (as a model reply's snippet, PR #74), cut to 80 characters,
+    /// and only its first `REPLY_SCAN_BYTES` are looked at.
+    #[tokio::test]
+    async fn a_hostile_non_feed_body_is_sanitised_and_cut() {
+        let err = |body: String, ct: &str| {
+            let e = typed(&[(FEED_URL, 200, &body)], Some(ct));
+            async move { e.current_filings(0).await.unwrap_err().to_string() }
+        };
+        let m = err(
+            "See https://evil.test/a\r\n\tand [click](http://x.test) n\u{200b}o\u{2060}w\u{feff}\u{202e}!".into(),
+            "text/html",
+        )
+        .await;
+        assert!(
+            m.ends_with(
+                "body began: See https[:]//evil.test/a and [click] (http[:]//x.test) n?o?w??!)"
+            ),
+            "{m}"
+        );
+        assert!(!m.contains("://") && !m.contains("](") && !m.contains('\n') && !m.contains('\r'));
+        // A very long body: 80 characters, its full length in bytes.
+        let long = format!("<html>{}", "a".repeat(MAX_BYTES - 6));
+        let m = err(long.clone(), "text/html").await;
+        assert!(m.contains(&format!("{} bytes", long.len())), "{m}");
+        let began = m.split("body began: ").nth(1).unwrap();
+        assert_eq!(began.chars().count(), 80 + "…)".chars().count(), "{m}");
+        // A long, hostile Content-Type is sanitised and cut too, and the log
+        // line (`earnings poll: current 6-K filings page 0: <error>`) stays
+        // under 300 characters.
+        let ct = format!("text/html; x=\"https://evil.test\"\n{}", "b".repeat(400));
+        let m = err(format!("<p>{}</p>", "\u{4e2d}".repeat(1000)), &ct).await;
+        assert!(
+            m.contains("content-type \"text/html; x=\"https[:]//evil.test\" bbb"),
+            "{m}"
+        );
+        assert!(!m.contains('\n') && !m.contains("://"), "{m}");
+        let line = format!("earnings poll: current 6-K filings page 0: {m}");
+        assert!(
+            line.chars().count() <= 300,
+            "{} {line}",
+            line.chars().count()
+        );
+    }
+
+    /// An index or document with nothing usable in it says what came back.
+    #[tokio::test]
+    async fn an_empty_result_says_what_came_back() {
+        let page = "<html><body>No documents</body></html>";
+        let e = typed(
+            &[(IDX_URL, 200, page), (EX_URL, 200, "")],
+            Some("text/html"),
+        );
+        let facts = format!(
+            "status 200, content-type \"text/html\", {} bytes",
+            page.len()
+        );
+        assert_eq!(
+            e.filing_docs(320193, "0000320193-26-000070").await,
+            Err(ProviderError::EmptyReply(facts.clone()))
+        );
+        assert_eq!(
+            e.filing_docs(320193, "0000320193-26-000070")
+                .await
+                .unwrap_err()
+                .to_string(),
+            format!("empty result ({facts})")
+        );
+        assert_eq!(
+            e.document_text(EX_URL).await.unwrap_err().to_string(),
+            "empty result (status 200, content-type \"text/html\", 0 bytes)"
+        );
+        assert_eq!(
+            e.document_head(EX_URL, 4096).await.unwrap_err().to_string(),
+            "empty result (status 200, content-type \"text/html\", 0 bytes)"
+        );
     }
 
     #[test]
@@ -887,7 +1078,9 @@ pub(crate) mod tests {
         let e = edgar(&[(IDX_URL, 200, "<html><body>No documents</body></html>")]);
         assert_eq!(
             e.filing_docs(320193, "0000320193-26-000070").await,
-            Err(ProviderError::Empty)
+            Err(ProviderError::EmptyReply(
+                "status 200, no content-type, 38 bytes".into()
+            ))
         );
     }
 

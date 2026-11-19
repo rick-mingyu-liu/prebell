@@ -67,6 +67,9 @@ pub struct PollOutcome {
     pub errors: Vec<String>,
     /// SEC answered 403/429 (blocked or rate-limited) and the poll stopped.
     pub throttled: bool,
+    /// The feed error, when the 8-K feed's reply was not a feed
+    /// (`NotFeed`): `poll_job` alerts once a day.
+    pub not_feed: Option<String>,
     /// The message was older than `MAX_POLL_LAG_MINUTES` and did nothing.
     pub stale: bool,
     /// Messages to queue next, each its own invocation.
@@ -138,6 +141,9 @@ pub async fn poll_tick(
             Err(e) => {
                 out.errors.push(format!("current filings page {page}: {e}"));
                 out.throttled = matches!(e, ProviderError::Http(403 | 429));
+                if matches!(e, ProviderError::NotFeed(_)) {
+                    out.not_feed = out.errors.last().cloned();
+                }
                 break;
             }
         };
@@ -238,6 +244,9 @@ pub async fn poll_job(
         );
         alert_once_today(now, "sec-throttled", "error", &msg, store).await?;
     }
+    if let Some(e) = &out.not_feed {
+        alert_not_feed(now, e, store).await?;
+    }
     if !in_window(now) {
         return Ok(out);
     }
@@ -253,6 +262,9 @@ pub async fn poll_job(
                         f.errors.last().cloned().unwrap_or_default()
                     );
                     alert_once_today(now, "sec-throttled", "error", &msg, store).await?;
+                }
+                if let Some(e) = &f.not_feed {
+                    alert_not_feed(now, e, store).await?;
                 }
                 for (ticker, msg) in &f.mismatches {
                     out.errors.push(msg.clone());
@@ -295,6 +307,15 @@ pub async fn poll_job(
         out.follow_ups.push(EarningsStep::Digest);
     }
     Ok(out)
+}
+
+/// One `error` alert per ET day (`sec-not-feed:<date>`, shared by the 8-K
+/// and 6-K feeds) when a feed's reply was not a feed: what came back, from
+/// the feed error `e`. The poll goes on as it does after any other feed error.
+async fn alert_not_feed(now: DateTime<Utc>, e: &str, store: &dyn Store) -> Result<(), String> {
+    let msg = format!("SEC EDGAR sent a non-feed reply: {e}");
+    alert_once_today(now, "sec-not-feed", "error", &msg, store).await?;
+    Ok(())
 }
 
 fn new_run(f: &FilingRow, now: DateTime<Utc>) -> RunRow {
@@ -1041,6 +1062,8 @@ mod tests {
         exhibit_text: RefCell<Option<String>>,
         /// The current 6-K feed's first page.
         six_k: RefCell<Vec<FeedEntry>>,
+        /// What the 6-K feed answers instead, when set.
+        six_k_err: RefCell<Option<ProviderError>>,
     }
     #[async_trait(?Send)]
     impl Filings for FakeFilings {
@@ -1054,6 +1077,9 @@ mod tests {
             parse_current_feed(&body)
         }
         async fn current_6k_filings(&self, start: usize) -> Result<Vec<FeedEntry>, ProviderError> {
+            if let Some(e) = self.six_k_err.borrow().clone() {
+                return Err(e);
+            }
             Ok(if start == 0 {
                 self.six_k.borrow().clone()
             } else {
@@ -1327,6 +1353,67 @@ mod tests {
         assert_eq!(alerts.len(), 1, "{alerts:?}");
         assert_eq!(alerts[0].0, "sec-throttled:2026-10-30");
         assert_eq!(alerts[0].1, "error");
+    }
+
+    /// A feed reply that is not a feed (8-K or 6-K) raises one `error` alert
+    /// per ET day, `sec-not-feed:<date>`, saying what came back; the poll
+    /// is not throttled, keeps its watermark and still reads the 6-K feed.
+    /// A normal feed raises none, and a 403/429 still raises only
+    /// `sec-throttled` (see the test above).
+    #[tokio::test]
+    async fn a_non_feed_reply_alerts_once_a_day() {
+        let (base, es) = stores();
+        let t = poll_time();
+        let wm = iso(t - Duration::hours(2));
+        es.kv_set(KV_FEED_WATERMARK, &wm, "x").await.unwrap();
+        let fl = FakeFilings::default();
+        // A normal feed: no alert.
+        let o = poll_job(t, Some(t), &es, base.as_ref(), &fl).await.unwrap();
+        assert_eq!(o.not_feed, None);
+        assert!(base.alerts.borrow().is_empty());
+        let wm = es.kv_get(KV_FEED_WATERMARK).await.unwrap();
+        let facts = "status 200, content-type \"text/html\", 5120 bytes, body began: <html>maintenance</html>";
+        fl.pages
+            .borrow_mut()
+            .insert(0, Err(ProviderError::NotFeed(facts.into())));
+        let later = t + Duration::minutes(5);
+        let o = poll_job(later, Some(later), &es, base.as_ref(), &fl)
+            .await
+            .unwrap();
+        let line = format!("current filings page 0: parse error: not an Atom feed ({facts})");
+        assert_eq!(o.not_feed.as_deref(), Some(line.as_str()));
+        assert!(o.errors.contains(&line), "{:?}", o.errors);
+        assert!(!o.throttled);
+        assert_eq!(es.kv_get(KV_FEED_WATERMARK).await.unwrap(), wm);
+        {
+            let alerts = base.alerts.borrow();
+            assert_eq!(alerts.len(), 1, "{alerts:?}");
+            assert_eq!(alerts[0].0, "sec-not-feed:2026-10-30");
+            assert_eq!(alerts[0].1, "error");
+            assert_eq!(
+                alerts[0].2,
+                format!("SEC EDGAR sent a non-feed reply: {line}")
+            );
+        }
+        // The 6-K feed too, later the same day: the same key, no second alert.
+        *fl.six_k_err.borrow_mut() = Some(ProviderError::NotFeed(facts.into()));
+        let later = t + Duration::minutes(10);
+        let o = poll_job(later, Some(later), &es, base.as_ref(), &fl)
+            .await
+            .unwrap();
+        assert!(o.foreign.not_feed.is_some(), "{:?}", o.foreign);
+        assert_eq!(base.alerts.borrow().len(), 1);
+        // Only the 6-K feed, the next trading day (Monday): one new alert, from it.
+        fl.pages.borrow_mut().clear();
+        let next = t + Duration::days(3);
+        poll_job(next, Some(next), &es, base.as_ref(), &fl)
+            .await
+            .unwrap();
+        let alerts = base.alerts.borrow();
+        assert_eq!(alerts.len(), 2, "{alerts:?}");
+        assert_eq!(alerts[1].0, "sec-not-feed:2026-11-02");
+        assert!(alerts[1].2.starts_with("SEC EDGAR sent a non-feed reply: current 6-K filings page 0: parse error: not an Atom feed (status 200"), "{alerts:?}");
+        assert!(alerts.iter().all(|a| !a.0.starts_with("sec-throttled")));
     }
 
     #[tokio::test]
@@ -1930,6 +2017,7 @@ mod tests {
                 status,
                 body: body.into(),
                 set_cookie: None,
+                content_type: None,
             };
             Ok(if url.starts_with("https://fc.yahoo.com") {
                 HttpResp {

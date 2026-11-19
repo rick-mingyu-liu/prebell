@@ -152,6 +152,7 @@ mod tests {
                 status: 204,
                 body: String::new(),
                 set_cookie: None,
+                content_type: None,
             })
         }
     }

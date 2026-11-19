@@ -71,11 +71,23 @@ const TAIL_MAX_BYTES: usize = 4096;
 /// How many `{` in a tail are tried as the start of a JSON object; a tail with more is refused.
 const TAIL_SCAN_STARTS: usize = 32;
 
+/// `s` on one line, cut to `TAIL_SNIPPET_CHARS` characters with its full length noted (see
+/// `one_line`).
+fn snippet(s: &str) -> String {
+    let flat = one_line(s);
+    let total = flat.chars().count();
+    if total <= TAIL_SNIPPET_CHARS {
+        return flat;
+    }
+    let head: String = flat.chars().take(TAIL_SNIPPET_CHARS).collect();
+    format!("{head}… ({total} characters)")
+}
+
 /// `s` on one line (whitespace runs become one space; control, bidirectional-override and
 /// zero-width characters become `?`, since the text reaches logs and alert messages), with
-/// links made inert (see `inert_links`), cut to `TAIL_SNIPPET_CHARS` characters with its
-/// full length noted.
-fn snippet(s: &str) -> String {
+/// links made inert (see `inert_links`). Untrusted text from the network (an EDGAR reply
+/// that is not a feed) gets the same treatment before it is cut.
+pub(crate) fn one_line(s: &str) -> String {
     let clean: String = s
         .chars()
         .map(|c| match c {
@@ -87,13 +99,7 @@ fn snippet(s: &str) -> String {
             c => c,
         })
         .collect();
-    let flat = inert_links(&clean.split_whitespace().collect::<Vec<_>>().join(" "));
-    let total = flat.chars().count();
-    if total <= TAIL_SNIPPET_CHARS {
-        return flat;
-    }
-    let head: String = flat.chars().take(TAIL_SNIPPET_CHARS).collect();
-    format!("{head}… ({total} characters)")
+    inert_links(&clean.split_whitespace().collect::<Vec<_>>().join(" "))
 }
 
 /// `s` with nothing a chat app renders as a link: a URL scheme's `://` becomes `[:]//`
@@ -305,6 +311,7 @@ mod tests {
                 status: 200,
                 body: self.body.clone(),
                 set_cookie: None,
+                content_type: None,
             })
         }
     }

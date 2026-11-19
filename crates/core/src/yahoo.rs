@@ -850,6 +850,7 @@ mod tests {
             status,
             body: body.into(),
             set_cookie: None,
+            content_type: None,
         }
     }
     fn fake(route: impl Fn(&Req, &[Req]) -> HttpResp + 'static) -> Yahoo<FakeHttp> {
