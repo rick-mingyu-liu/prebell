@@ -165,6 +165,9 @@ pub struct MemStore {
     pub reports: RefCell<Vec<ReportRow>>,
     /// Makes `reported_between` fail, as a D1 error would.
     pub fail_reports: Cell<bool>,
+    /// Makes `has_alert` and `add_alert` fail and write nothing, as a D1
+    /// error would.
+    pub fail_alerts: Cell<bool>,
 }
 
 #[async_trait(?Send)]
@@ -287,12 +290,18 @@ impl Store for MemStore {
         Ok(())
     }
     async fn add_alert(&self, run_key: &str, level: &str, msg: &str) -> Result<(), String> {
+        if self.fail_alerts.get() {
+            return Err("d1: add_alert failed".into());
+        }
         self.alerts
             .borrow_mut()
             .push((run_key.into(), level.into(), msg.into()));
         Ok(())
     }
     async fn has_alert(&self, run_key: &str) -> Result<bool, String> {
+        if self.fail_alerts.get() {
+            return Err("d1: has_alert failed".into());
+        }
         Ok(self.alerts.borrow().iter().any(|a| a.0 == run_key))
     }
     async fn put_facts(&self, key: &str, json: &str) -> Result<(), String> {

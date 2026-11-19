@@ -245,7 +245,7 @@ pub async fn poll_job(
         alert_once_today(now, "sec-throttled", "error", &msg, store).await?;
     }
     if let Some(e) = &out.not_feed {
-        alert_not_feed(now, e, store).await?;
+        alert_not_feed(now, e, store, &mut out.errors).await;
     }
     if !in_window(now) {
         return Ok(out);
@@ -264,7 +264,7 @@ pub async fn poll_job(
                     alert_once_today(now, "sec-throttled", "error", &msg, store).await?;
                 }
                 if let Some(e) = &f.not_feed {
-                    alert_not_feed(now, e, store).await?;
+                    alert_not_feed(now, e, store, &mut out.errors).await;
                 }
                 for (ticker, msg) in &f.mismatches {
                     out.errors.push(msg.clone());
@@ -311,11 +311,14 @@ pub async fn poll_job(
 
 /// One `error` alert per ET day (`sec-not-feed:<date>`, shared by the 8-K
 /// and 6-K feeds) when a feed's reply was not a feed: what came back, from
-/// the feed error `e`. The poll goes on as it does after any other feed error.
-async fn alert_not_feed(now: DateTime<Utc>, e: &str, store: &dyn Store) -> Result<(), String> {
+/// the feed error `e`. The poll goes on as it does after any other feed
+/// error, and a failure to read or write the alert (a D1 error) never fails
+/// it: the failure goes into `errors` (logged) and the follow-ups are queued.
+async fn alert_not_feed(now: DateTime<Utc>, e: &str, store: &dyn Store, errors: &mut Vec<String>) {
     let msg = format!("SEC EDGAR sent a non-feed reply: {e}");
-    alert_once_today(now, "sec-not-feed", "error", &msg, store).await?;
-    Ok(())
+    if let Err(err) = alert_once_today(now, "sec-not-feed", "error", &msg, store).await {
+        errors.push(format!("sec-not-feed alert failed: {err}"));
+    }
 }
 
 fn new_run(f: &FilingRow, now: DateTime<Utc>) -> RunRow {
@@ -1414,6 +1417,47 @@ mod tests {
         assert_eq!(alerts[1].0, "sec-not-feed:2026-11-02");
         assert!(alerts[1].2.starts_with("SEC EDGAR sent a non-feed reply: current 6-K filings page 0: parse error: not an Atom feed (status 200"), "{alerts:?}");
         assert!(alerts.iter().all(|a| !a.0.starts_with("sec-throttled")));
+    }
+
+    /// Review L1 of PR #79: a failed `sec-not-feed` alert read or write (a
+    /// D1 error) never fails the poll. It is logged in `errors`, and the
+    /// follow-ups are the same as when the alert works. `sec-throttled`
+    /// keeps its behaviour: the same D1 error still fails that poll.
+    #[tokio::test]
+    async fn a_failed_non_feed_alert_never_fails_the_poll() {
+        async fn poll(fail: bool, e: ProviderError) -> Result<PollOutcome, String> {
+            let (base, es) = stores();
+            base.fail_alerts.set(fail);
+            let fl = FakeFilings::default();
+            fl.pages.borrow_mut().insert(0, Err(e.clone()));
+            *fl.six_k_err.borrow_mut() = Some(e);
+            let t = poll_time();
+            let o = poll_job(t, Some(t), &es, base.as_ref(), &fl).await;
+            assert_eq!(base.alerts.borrow().len(), usize::from(!fail));
+            o
+        }
+        let not_feed = ProviderError::NotFeed("status 200, no content-type, 0 bytes".into());
+        let ok = poll(false, not_feed.clone()).await.unwrap();
+        let failed = poll(true, not_feed).await.unwrap();
+        assert!(!failed.follow_ups.is_empty());
+        assert_eq!(failed.follow_ups, ok.follow_ups);
+        // One failed check per feed, each logged.
+        let logged: Vec<&String> = failed
+            .errors
+            .iter()
+            .filter(|e| e.starts_with("sec-not-feed alert failed"))
+            .collect();
+        assert_eq!(
+            logged, ["sec-not-feed alert failed: d1: has_alert failed"; 2],
+            "{:?}",
+            failed.errors
+        );
+        assert!(!ok.errors.iter().any(|e| e.contains("alert failed")));
+        // `sec-throttled` as before: its D1 error fails the poll.
+        assert_eq!(
+            poll(true, ProviderError::Http(429)).await,
+            Err("d1: has_alert failed".to_string())
+        );
     }
 
     #[tokio::test]
