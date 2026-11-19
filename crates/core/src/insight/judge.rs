@@ -535,6 +535,7 @@ mod tests {
                     status: 200,
                     body: self.0.clone(),
                     set_cookie: None,
+                    content_type: None,
                 })
             }
         }

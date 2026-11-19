@@ -1345,6 +1345,7 @@ mod tests {
                     status: 200,
                     body: "<title>Consumer Price Index News Release</title>".into(),
                     set_cookie: None,
+                    content_type: None,
                 })
             }
             async fn post_json(

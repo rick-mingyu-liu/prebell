@@ -213,6 +213,7 @@ mod tests {
                 status,
                 body: body.into(),
                 set_cookie: cookie.map(String::from),
+                content_type: None,
             };
             if url.starts_with("https://fc.yahoo.com") {
                 return Ok(r(404, "", Some("A3=d=x; Path=/")));

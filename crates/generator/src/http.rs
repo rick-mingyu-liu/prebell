@@ -78,6 +78,7 @@ impl WorkerHttp {
             .map_err(net)?;
         let status = resp.status_code();
         let set_cookie = resp.headers().get("set-cookie").map_err(net)?;
+        let content_type = resp.headers().get("content-type").map_err(net)?;
         let body = match cap {
             None => resp.text().await.map_err(net)?,
             Some(Cap::Fail(max)) => {
@@ -106,6 +107,7 @@ impl WorkerHttp {
                             status,
                             body: utf8_prefix(buf, max)?,
                             set_cookie,
+                            content_type,
                         });
                     }
                 }
@@ -117,6 +119,7 @@ impl WorkerHttp {
             status,
             body,
             set_cookie,
+            content_type,
         })
     }
 }

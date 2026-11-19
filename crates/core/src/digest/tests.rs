@@ -129,6 +129,7 @@ fn resp(status: u16, body: String) -> Result<HttpResp, ProviderError> {
         status,
         body,
         set_cookie: None,
+        content_type: None,
     })
 }
 

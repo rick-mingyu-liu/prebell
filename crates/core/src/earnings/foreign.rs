@@ -541,6 +541,9 @@ pub struct ForeignOutcome {
     pub errors: Vec<String>,
     /// SEC answered 403/429 and the 6-K part stopped.
     pub throttled: bool,
+    /// The feed error, when the 6-K feed's reply was not a feed
+    /// (`NotFeed`): `poll_job` alerts once a day.
+    pub not_feed: Option<String>,
     /// Foreign rows whose CIK files under another name, as `(ticker,
     /// message)`: `poll_job` alerts once a day, like the 8-K watchlist.
     pub mismatches: Vec<(&'static str, String)>,
@@ -670,6 +673,9 @@ pub async fn foreign_tick(
                 out.errors
                     .push(format!("current 6-K filings page {page}: {e}"));
                 out.throttled = matches!(e, ProviderError::Http(403 | 429));
+                if matches!(e, ProviderError::NotFeed(_)) {
+                    out.not_feed = out.errors.last().cloned();
+                }
                 break;
             }
         };
@@ -866,6 +872,7 @@ pub async fn foreign_read(
                         // No readable document: it reads the same next time.
                         ProviderError::Http(404 | 410)
                         | ProviderError::Empty
+                        | ProviderError::EmptyReply(_)
                         | ProviderError::Parse(_) => {
                             checked.push(p.accession.clone());
                         }
@@ -1700,6 +1707,43 @@ mod tests {
         assert_eq!(
             (o.reads, fl.fetches.get() - before),
             (0, 1),
+            "the feed page only"
+        );
+    }
+
+    /// An empty reply now carries what came back (`EmptyReply`), and is
+    /// still "no readable document": the 6-K is checked, not retried.
+    #[tokio::test]
+    async fn a_6k_with_an_empty_reply_is_read_once() {
+        let es = stores();
+        seed(&es, "NIO", "2026-09-01").await;
+        let fl = Fake::default();
+        let acc = fl.add(
+            "NIO",
+            1,
+            "2026-09-01T11:15:00Z",
+            "6-K",
+            Some(fx("nio_results.htm")),
+        );
+        fl.head_errors.borrow_mut().insert(
+            acc,
+            vec![ProviderError::EmptyReply(
+                "status 200, content-type \"text/html\", 0 bytes".into(),
+            )],
+        );
+        let now = utc("2026-09-01T11:20:00Z");
+        let (_, reads) = run(now, &es, &fl).await;
+        assert_eq!(reads.len(), 1);
+        assert!(
+            reads[0].errors[0]
+                .ends_with("empty result (status 200, content-type \"text/html\", 0 bytes)"),
+            "{reads:?}"
+        );
+        let before = fl.fetches.get();
+        let (o, _) = run(now + Duration::minutes(5), &es, &fl).await;
+        assert_eq!(
+            (o.pending, o.reads, fl.fetches.get() - before),
+            (0, 0, 1),
             "the feed page only"
         );
     }

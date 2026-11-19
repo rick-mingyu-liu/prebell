@@ -572,6 +572,7 @@ mod tests {
                 status,
                 body,
                 set_cookie: None,
+                content_type: None,
             })
         }
         async fn post_json(

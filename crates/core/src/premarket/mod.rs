@@ -161,8 +161,9 @@ impl Diag<'_> {
             Ok(_) => &mut self.ok,
             Err(ProviderError::Http(429)) => &mut self.http429,
             Err(ProviderError::Http(_)) => &mut self.http_other,
-            Err(ProviderError::Empty) => &mut self.empty,
-            Err(ProviderError::Parse(_)) => &mut self.parse,
+            // The EDGAR variants are counted with their plain kinds.
+            Err(ProviderError::Empty | ProviderError::EmptyReply(_)) => &mut self.empty,
+            Err(ProviderError::Parse(_) | ProviderError::NotFeed(_)) => &mut self.parse,
             Err(ProviderError::Network(_) | ProviderError::TooLarge(_)) => &mut self.net,
             Err(ProviderError::Stale) => &mut self.stale,
             Err(ProviderError::Skipped) => &mut self.skipped,
