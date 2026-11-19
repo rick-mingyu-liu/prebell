@@ -210,13 +210,15 @@ const REPLY_TITLE_CHARS: usize = 80;
 /// Bytes of a non-feed body searched for its `<title>`: SEC's HTML pages
 /// spend their first 80 characters on DOCTYPE and head boilerplate.
 const TITLE_SCAN_BYTES: usize = 4096;
-/// Longest text inside `NotFeed`'s parentheses. The stored alert, `SEC EDGAR
-/// sent a non-feed reply: current 6-K filings page 0: parse error: not an
-/// Atom feed (<text>)`, is then at most 300 characters (`alert_once_today`'s
-/// cap, so it is never cut there), and the log line, `earnings poll: current
-/// 6-K filings page 0: parse error: not an Atom feed (<text>)`, at most 282.
-/// A longer text is cut at its end, so `body began` goes first, then the title.
-const NOT_FEED_TEXT_CHARS: usize = 207;
+/// Longest text inside `NotFeed`'s parentheses. The stored alert after a
+/// failed retry, `SEC EDGAR sent a non-feed reply, retry failed: current 6-K
+/// filings page 0, retried once: parse error: not an Atom feed (<text>)`, is
+/// then at most 300 characters (`alert_once_today`'s cap, so it is never cut
+/// there); the log lines (`earnings poll: ` and the poll's error, see
+/// `earnings::detect::read_feed_page`) are at most 268 after a failed retry
+/// and 256 after a good one. A longer text is cut at its end, so `body
+/// began` goes first, then the title.
+const NOT_FEED_TEXT_CHARS: usize = 179;
 
 /// The largest char boundary of `s` at or below `max` bytes.
 fn char_floor(s: &str, max: usize) -> usize {
@@ -1125,9 +1127,10 @@ pub(crate) mod tests {
 
     /// The worst case, a hostile Content-Type, title and body in a 2 MB reply:
     /// the error text inside the parentheses is cut at its end (body first,
-    /// then the title), so the log line is at most 282 characters, the stored
-    /// alert at most 300 (`alert_once_today` never cuts it) and the webhook
-    /// message (`error: sec-not-feed:<date>: ` before it) at most 332.
+    /// then the title), so the log lines are at most 268 characters (retry
+    /// failed) and 256 (retry ok), the stored alert at most 300
+    /// (`alert_once_today` never cuts it) and the webhook message (`error:
+    /// sec-not-feed:<date>: ` before it) at most 332.
     #[tokio::test]
     async fn the_worst_case_fits_the_log_and_the_alert() {
         let ct = format!("text/html; {}", "\u{4e2d}\")".repeat(200));
@@ -1151,12 +1154,42 @@ pub(crate) mod tests {
             "{m}"
         );
         assert!(inner.contains("\", 2097152 bytes, title \"T?'T?'"), "{m}");
-        let log = format!("earnings poll: current 6-K filings page 0: {m}");
-        let alert = format!("SEC EDGAR sent a non-feed reply: current 6-K filings page 0: {m}");
+        // The lines `read_feed_page` and `poll_job` write.
+        let failed = format!("earnings poll: current 6-K filings page 0, retried once: {m}");
+        let facts = m
+            .strip_prefix("parse error: not an Atom feed (")
+            .and_then(|r| r.strip_suffix(')'))
+            .unwrap();
+        let ok = format!(
+            "earnings poll: current 6-K filings page 0: retry ok after a non-feed reply ({facts})"
+        );
+        let alert = format!(
+            "SEC EDGAR sent a non-feed reply, retry failed: current 6-K filings page 0, retried once: {m}"
+        );
         let hook = format!("error: sec-not-feed:2026-11-19: {alert}");
-        assert_eq!(log.chars().count(), 282, "{log}");
+        assert_eq!(failed.chars().count(), 268, "{failed}");
+        assert_eq!(ok.chars().count(), 256, "{ok}");
         assert_eq!(alert.chars().count(), 300, "{alert}");
         assert_eq!(hook.chars().count(), 332, "{hook}");
+    }
+
+    /// The reply logged at 11:06 ET on 2026-11-19 (EDGAR's own "Latest EDGAR
+    /// Filings" HTML page, 3292 bytes, for the Atom request): its text fits
+    /// under the cap uncut. The body here is a stand-in of the same shape,
+    /// not the real page.
+    #[tokio::test]
+    async fn the_logged_listing_page_fits_uncut() {
+        let head = "<!DOCTYPE HTML PUBLIC \"-//W3C//DTD HTML 4.01 Transitional//EN\">\n<html><head><title>Latest EDGAR Filings</title></head><body>";
+        let body = format!("{head}{}</body></html>", "<tr><td>x</td></tr>".repeat(200));
+        let body = &body[..3292];
+        let e = typed(&[(FEED_URL, 200, body)], Some("text/html; charset=utf-8"));
+        let m = e.current_filings(0).await.unwrap_err().to_string();
+        assert_eq!(
+            m,
+            "parse error: not an Atom feed (status 200, content-type \"text/html; charset=utf-8\", 3292 bytes, title \"Latest EDGAR Filings\", body began: <!DOCTYPE HTML PUBLIC \"-//W3C//DTD HTML …)"
+        );
+        let inner = m.chars().count() - "parse error: not an Atom feed ()".len();
+        assert!(inner < NOT_FEED_TEXT_CHARS, "{inner}");
     }
 
     /// An index or document with nothing usable in it says what came back.
