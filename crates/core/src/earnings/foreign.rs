@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 use crate::anchor::{has_word, normalize};
 use crate::clock::et;
 use crate::earnings::calendar::{report_changes, SAME_EVENT_DAYS};
-use crate::earnings::detect::{name_mismatches, same_filer};
+use crate::earnings::detect::{name_mismatches, read_feed_page, same_filer, FeedStats};
 use crate::earnings::store::{CalendarRow, EarningsStore};
 use crate::earnings::{watchlist, Filer, WatchEntry};
 use crate::edgar::{exhibit_991, filing_url, FeedEntry, FilingDoc, Filings, FEED_PAGE};
@@ -541,9 +541,11 @@ pub struct ForeignOutcome {
     pub errors: Vec<String>,
     /// SEC answered 403/429 and the 6-K part stopped.
     pub throttled: bool,
-    /// The feed error, when the 6-K feed's reply was not a feed
-    /// (`NotFeed`): `poll_job` alerts once a day.
+    /// The feed error, when the 6-K feed's reply was not a feed (`NotFeed`)
+    /// and its one retry failed too, not refused: `poll_job` alerts once a day.
     pub not_feed: Option<String>,
+    /// The 6-K feed's non-feed replies and retries (`read_feed_page`).
+    pub feed_stats: FeedStats,
     /// Foreign rows whose CIK files under another name, as `(ticker,
     /// message)`: `poll_job` alerts once a day, like the 8-K watchlist.
     pub mismatches: Vec<(&'static str, String)>,
@@ -667,13 +669,19 @@ pub async fn foreign_tick(
     let mut entries: Vec<FeedEntry> = Vec::new();
     let mut complete = false;
     for page in 0..MAX_PAGES {
-        let list = match filings.current_6k_filings(page * FEED_PAGE).await {
+        let label = format!("current 6-K filings page {page}");
+        let read = read_feed_page(
+            &label,
+            || filings.current_6k_filings(page * FEED_PAGE),
+            &mut out.feed_stats,
+            &mut out.errors,
+        );
+        let list = match read.await {
             Ok(l) => l,
-            Err(e) => {
-                out.errors
-                    .push(format!("current 6-K filings page {page}: {e}"));
+            Err((e, retried)) => {
                 out.throttled = matches!(e, ProviderError::Http(403 | 429));
-                if matches!(e, ProviderError::NotFeed(_)) {
+                // Still failing after one retry (a refused retry is a throttle).
+                if retried && !out.throttled {
                     out.not_feed = out.errors.last().cloned();
                 }
                 break;

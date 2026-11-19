@@ -12,7 +12,9 @@ use chrono::{DateTime, Duration, SecondsFormat, Utc};
 use crate::clock::et;
 use crate::cover::{earnings_graphic, earnings_lines, store_graphic};
 use crate::earnings::charts::{charts, r2_key};
-use crate::earnings::detect::{domestic_by_cik, earnings_entries, name_mismatches};
+use crate::earnings::detect::{
+    domestic_by_cik, earnings_entries, name_mismatches, read_feed_page, FeedStats,
+};
 use crate::earnings::draft::{slug, write, CONTENT_TYPE, TEMPLATE_ID};
 use crate::earnings::extract::{extract, Extracted};
 use crate::earnings::facts::{missing_required, EarningsFacts, Metric, Metrics, NOT_STATED};
@@ -67,9 +69,11 @@ pub struct PollOutcome {
     pub errors: Vec<String>,
     /// SEC answered 403/429 (blocked or rate-limited) and the poll stopped.
     pub throttled: bool,
-    /// The feed error, when the 8-K feed's reply was not a feed
-    /// (`NotFeed`): `poll_job` alerts once a day.
+    /// The feed error, when the 8-K feed's reply was not a feed (`NotFeed`)
+    /// and its one retry failed too, not refused: `poll_job` alerts once a day.
     pub not_feed: Option<String>,
+    /// The 8-K feed's non-feed replies and retries (`read_feed_page`).
+    pub feed_stats: FeedStats,
     /// The message was older than `MAX_POLL_LAG_MINUTES` and did nothing.
     pub stale: bool,
     /// Messages to queue next, each its own invocation.
@@ -136,12 +140,19 @@ pub async fn poll_tick(
     let mut entries: Vec<FeedEntry> = Vec::new();
     let mut complete = false;
     for page in 0..MAX_FEED_PAGES {
-        let list = match filings.current_filings(page * FEED_PAGE).await {
+        let label = format!("current filings page {page}");
+        let read = read_feed_page(
+            &label,
+            || filings.current_filings(page * FEED_PAGE),
+            &mut out.feed_stats,
+            &mut out.errors,
+        );
+        let list = match read.await {
             Ok(l) => l,
-            Err(e) => {
-                out.errors.push(format!("current filings page {page}: {e}"));
+            Err((e, retried)) => {
                 out.throttled = matches!(e, ProviderError::Http(403 | 429));
-                if matches!(e, ProviderError::NotFeed(_)) {
+                // Still failing after one retry (a refused retry is a throttle).
+                if retried && !out.throttled {
                     out.not_feed = out.errors.last().cloned();
                 }
                 break;
@@ -277,6 +288,15 @@ pub async fn poll_job(
             Err(e) => out.errors.push(format!("6-K: {e}")),
         }
     }
+    // Only a poll that saw a non-feed reply writes; a failed read or write
+    // is logged and never fails the poll.
+    let stats = out.feed_stats.add(out.foreign.feed_stats);
+    if stats != FeedStats::default() {
+        if let Err(e) = record_feed_stats(now, es, stats).await {
+            out.errors
+                .push(format!("{KV_FEED_STATS}: write failed: {e}"));
+        }
+    }
     let builds = match out.detected.len() {
         0 => retry_builds(&es.open_runs().await?, now),
         n => n,
@@ -315,10 +335,45 @@ pub async fn poll_job(
 /// error, and a failure to read or write the alert (a D1 error) never fails
 /// it: the failure goes into `errors` (logged) and the follow-ups are queued.
 async fn alert_not_feed(now: DateTime<Utc>, e: &str, store: &dyn Store, errors: &mut Vec<String>) {
-    let msg = format!("SEC EDGAR sent a non-feed reply: {e}");
+    let msg = format!("SEC EDGAR sent a non-feed reply, retry failed: {e}");
     if let Err(err) = alert_once_today(now, "sec-not-feed", "error", &msg, store).await {
         errors.push(format!("sec-not-feed alert failed: {err}"));
     }
+}
+
+/// kv key prefix of the per-ET-day count of non-feed replies:
+/// `sec_feed_stats:<date>`.
+pub const KV_FEED_STATS: &str = "sec_feed_stats";
+
+/// The stored day's count (`kv` value, JSON).
+#[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
+struct StoredFeedStats {
+    #[serde(flatten)]
+    counts: FeedStats,
+    /// When the last poll that counted something ran.
+    #[serde(default)]
+    last_at: String,
+}
+
+/// Adds `stats` to the ET day's count in kv (one read, one write). A value
+/// that does not parse counts as empty.
+async fn record_feed_stats(
+    now: DateTime<Utc>,
+    es: &dyn EarningsStore,
+    stats: FeedStats,
+) -> Result<(), String> {
+    let key = format!("{KV_FEED_STATS}:{}", et(now).format("%Y-%m-%d"));
+    let old: StoredFeedStats = es
+        .kv_get(&key)
+        .await?
+        .and_then(|v| serde_json::from_str(&v).ok())
+        .unwrap_or_default();
+    let new = StoredFeedStats {
+        counts: old.counts.add(stats),
+        last_at: iso(now),
+    };
+    let json = serde_json::to_string(&new).map_err(|e| e.to_string())?;
+    es.kv_set(&key, &json, &iso(now)).await
 }
 
 fn new_run(f: &FilingRow, now: DateTime<Utc>) -> RunRow {
@@ -1038,7 +1093,7 @@ mod tests {
     use crate::store::{MemStore, PostRow, TranslationRow};
     use crate::yahoo::Yahoo;
     use async_trait::async_trait;
-    use serde_json::Value;
+    use serde_json::{json, Value};
     use std::cell::{Cell, RefCell};
     use std::collections::HashMap;
     use std::rc::Rc;
@@ -1057,6 +1112,8 @@ mod tests {
     #[derive(Default)]
     struct FakeFilings {
         pages: RefCell<HashMap<usize, Result<String, ProviderError>>>,
+        /// Replies a page gives first, one per request, before `pages`.
+        queued: RefCell<HashMap<usize, Vec<Result<String, ProviderError>>>>,
         page_calls: RefCell<Vec<usize>>,
         no_exhibit: Cell<bool>,
         /// No XBRL concepts: the facts carry no quarterly trend.
@@ -1067,11 +1124,20 @@ mod tests {
         six_k: RefCell<Vec<FeedEntry>>,
         /// What the 6-K feed answers instead, when set.
         six_k_err: RefCell<Option<ProviderError>>,
+        /// Replies the 6-K feed gives first, one per request.
+        six_k_queued: RefCell<Vec<Result<Vec<FeedEntry>, ProviderError>>>,
+        /// 6-K feed requests made.
+        six_k_calls: Cell<usize>,
     }
     #[async_trait(?Send)]
     impl Filings for FakeFilings {
         async fn current_filings(&self, start: usize) -> Result<Vec<FeedEntry>, ProviderError> {
             self.page_calls.borrow_mut().push(start);
+            if let Some(q) = self.queued.borrow_mut().get_mut(&start) {
+                if !q.is_empty() {
+                    return parse_current_feed(&q.remove(0)?);
+                }
+            }
             let body = match self.pages.borrow().get(&start).cloned() {
                 Some(r) => r?,
                 None if start == 0 => FEED.to_string(),
@@ -1080,6 +1146,10 @@ mod tests {
             parse_current_feed(&body)
         }
         async fn current_6k_filings(&self, start: usize) -> Result<Vec<FeedEntry>, ProviderError> {
+            self.six_k_calls.set(self.six_k_calls.get() + 1);
+            if !self.six_k_queued.borrow().is_empty() {
+                return self.six_k_queued.borrow_mut().remove(0);
+            }
             if let Some(e) = self.six_k_err.borrow().clone() {
                 return Err(e);
             }
@@ -1358,11 +1428,13 @@ mod tests {
         assert_eq!(alerts[0].1, "error");
     }
 
-    /// A feed reply that is not a feed (8-K or 6-K) raises one `error` alert
-    /// per ET day, `sec-not-feed:<date>`, saying what came back; the poll
-    /// is not throttled, keeps its watermark and still reads the 6-K feed.
-    /// A normal feed raises none, and a 403/429 still raises only
-    /// `sec-throttled` (see the test above).
+    /// A feed reply that is not a feed (8-K or 6-K), and not a feed again on
+    /// its one retry, raises one `error` alert per ET day,
+    /// `sec-not-feed:<date>`, saying what came back and that the retry
+    /// failed; the poll is not throttled, keeps its watermark and still reads
+    /// the 6-K feed, and the day's counter says `retry_failed`. A normal feed
+    /// raises none, and a 403/429 still raises only `sec-throttled` (see the
+    /// test above).
     #[tokio::test]
     async fn a_non_feed_reply_alerts_once_a_day() {
         let (base, es) = stores();
@@ -1380,11 +1452,25 @@ mod tests {
             .borrow_mut()
             .insert(0, Err(ProviderError::NotFeed(facts.into())));
         let later = t + Duration::minutes(5);
+        fl.page_calls.borrow_mut().clear();
         let o = poll_job(later, Some(later), &es, base.as_ref(), &fl)
             .await
             .unwrap();
-        let line = format!("current filings page 0: parse error: not an Atom feed ({facts})");
+        // The page and its one retry; the 6-K feed is still read (once).
+        assert_eq!(*fl.page_calls.borrow(), [0, 0]);
+        assert_eq!(fl.six_k_calls.get(), 2);
+        let line = format!(
+            "current filings page 0, retried once: parse error: not an Atom feed ({facts})"
+        );
         assert_eq!(o.not_feed.as_deref(), Some(line.as_str()));
+        assert_eq!(
+            o.feed_stats,
+            FeedStats {
+                non_feed: 1,
+                retry_ok: 0,
+                retry_failed: 1
+            }
+        );
         assert!(o.errors.contains(&line), "{:?}", o.errors);
         assert!(!o.throttled);
         assert_eq!(es.kv_get(KV_FEED_WATERMARK).await.unwrap(), wm);
@@ -1395,9 +1481,13 @@ mod tests {
             assert_eq!(alerts[0].1, "error");
             assert_eq!(
                 alerts[0].2,
-                format!("SEC EDGAR sent a non-feed reply: {line}")
+                format!("SEC EDGAR sent a non-feed reply, retry failed: {line}")
             );
         }
+        assert_eq!(
+            feed_stats(&es, "2026-10-30"),
+            Some(json!({"non_feed": 1, "retry_ok": 0, "retry_failed": 1, "last_at": iso(later)}))
+        );
         // The 6-K feed too, later the same day: the same key, no second alert.
         *fl.six_k_err.borrow_mut() = Some(ProviderError::NotFeed(facts.into()));
         let later = t + Duration::minutes(10);
@@ -1405,7 +1495,12 @@ mod tests {
             .await
             .unwrap();
         assert!(o.foreign.not_feed.is_some(), "{:?}", o.foreign);
+        assert_eq!(fl.six_k_calls.get(), 4, "the 6-K page and its retry");
         assert_eq!(base.alerts.borrow().len(), 1);
+        assert_eq!(
+            feed_stats(&es, "2026-10-30"),
+            Some(json!({"non_feed": 3, "retry_ok": 0, "retry_failed": 3, "last_at": iso(later)}))
+        );
         // Only the 6-K feed, the next trading day (Monday): one new alert, from it.
         fl.pages.borrow_mut().clear();
         let next = t + Duration::days(3);
@@ -1415,8 +1510,241 @@ mod tests {
         let alerts = base.alerts.borrow();
         assert_eq!(alerts.len(), 2, "{alerts:?}");
         assert_eq!(alerts[1].0, "sec-not-feed:2026-11-02");
-        assert!(alerts[1].2.starts_with("SEC EDGAR sent a non-feed reply: current 6-K filings page 0: parse error: not an Atom feed (status 200"), "{alerts:?}");
+        assert!(alerts[1].2.starts_with("SEC EDGAR sent a non-feed reply, retry failed: current 6-K filings page 0, retried once: parse error: not an Atom feed (status 200"), "{alerts:?}");
         assert!(alerts.iter().all(|a| !a.0.starts_with("sec-throttled")));
+    }
+
+    /// The day's non-feed counter in kv, as JSON.
+    fn feed_stats(es: &MemEarningsStore, day: &str) -> Option<serde_json::Value> {
+        es.kv
+            .borrow()
+            .get(&format!("{KV_FEED_STATS}:{day}"))
+            .map(|v| serde_json::from_str(v).unwrap())
+    }
+
+    const NOT_FEED_FACTS: &str = "status 200, content-type \"text/html; charset=utf-8\", 3292 bytes, title \"Latest EDGAR Filings\", body began: <!DOCTYPE HTML PUBLIC \"-//W3C//DTD HTML …";
+
+    fn not_feed() -> ProviderError {
+        ProviderError::NotFeed(NOT_FEED_FACTS.into())
+    }
+
+    /// A healthy poll against a fresh store: the outcome, the requests and
+    /// the D1 calls it makes, to compare a bad poll with.
+    async fn healthy_poll() -> (PollOutcome, Option<String>, usize) {
+        let (base, es) = stores();
+        let fl = FakeFilings::default();
+        let t = poll_time();
+        let o = poll_job(t, Some(t), &es, base.as_ref(), &fl).await.unwrap();
+        assert_eq!(*fl.page_calls.borrow(), [0]);
+        assert_eq!(fl.six_k_calls.get(), 1);
+        let wm = es.kv_get(KV_FEED_WATERMARK).await.unwrap();
+        (o, wm, es.calls.get() - 1)
+    }
+
+    /// A healthy feed makes no extra request and writes no counter.
+    #[tokio::test]
+    async fn a_healthy_feed_is_not_retried_or_counted() {
+        let (o, wm, _) = healthy_poll().await;
+        assert!(o.errors.is_empty(), "{:?}", o.errors);
+        assert_eq!(o.feed_stats, FeedStats::default());
+        assert_eq!(o.foreign.feed_stats, FeedStats::default());
+        assert!(wm.is_some());
+        let (base, es) = stores();
+        let fl = FakeFilings::default();
+        let t = poll_time();
+        poll_job(t, Some(t), &es, base.as_ref(), &fl).await.unwrap();
+        assert!(!es.kv.borrow().keys().any(|k| k.starts_with(KV_FEED_STATS)));
+        assert!(base.alerts.borrow().is_empty());
+    }
+
+    /// A non-feed reply whose retry is a feed: the poll carries on as a good
+    /// one (entries, watermark, follow-ups), one line says the retry worked,
+    /// with the first reply's facts, no alert, and the counter says
+    /// `retry_ok`. One extra request, two extra D1 calls (the counter).
+    #[tokio::test]
+    async fn a_non_feed_reply_retried_into_a_feed_carries_on() {
+        let (good, good_wm, good_calls) = healthy_poll().await;
+        let (base, es) = stores();
+        let fl = FakeFilings::default();
+        fl.queued.borrow_mut().insert(0, vec![Err(not_feed())]);
+        let t = poll_time();
+        let o = poll_job(t, Some(t), &es, base.as_ref(), &fl).await.unwrap();
+        assert_eq!(*fl.page_calls.borrow(), [0, 0]);
+        assert_eq!(fl.six_k_calls.get(), 1);
+        assert_eq!(o.detected, good.detected);
+        assert!(!o.detected.is_empty());
+        assert_eq!(o.follow_ups, good.follow_ups);
+        assert_eq!((o.pages, o.checked), (good.pages, good.checked));
+        assert_eq!(es.kv_get(KV_FEED_WATERMARK).await.unwrap(), good_wm);
+        assert!(!o.throttled && o.not_feed.is_none());
+        assert_eq!(
+            o.errors,
+            [format!(
+                "current filings page 0: retry ok after a non-feed reply: parse error: not an Atom feed ({NOT_FEED_FACTS})"
+            )]
+        );
+        assert!(base.alerts.borrow().is_empty());
+        assert_eq!(
+            feed_stats(&es, "2026-10-30"),
+            Some(json!({"non_feed": 1, "retry_ok": 1, "retry_failed": 0, "last_at": iso(t)}))
+        );
+        // The watermark kv_get above is one call; the counter adds two.
+        assert_eq!(es.calls.get() - 1, good_calls + 2);
+    }
+
+    /// A non-feed reply whose retry is refused (429) is a throttle: the poll
+    /// stops, the 6-K feed is not read, `sec-throttled` is raised as today
+    /// (no `sec-not-feed`), and the counter says `retry_failed`.
+    #[tokio::test]
+    async fn a_refused_retry_is_a_throttle() {
+        let (base, es) = stores();
+        let t = poll_time();
+        let wm = iso(t - Duration::hours(2));
+        es.kv_set(KV_FEED_WATERMARK, &wm, "x").await.unwrap();
+        let fl = FakeFilings::default();
+        fl.queued
+            .borrow_mut()
+            .insert(0, vec![Err(not_feed()), Err(ProviderError::Http(429))]);
+        let o = poll_job(t, Some(t), &es, base.as_ref(), &fl).await.unwrap();
+        assert!(o.throttled);
+        assert!(o.not_feed.is_none());
+        assert_eq!(*fl.page_calls.borrow(), [0, 0]);
+        assert_eq!(fl.six_k_calls.get(), 0);
+        assert_eq!(es.kv_get(KV_FEED_WATERMARK).await.unwrap(), Some(wm));
+        assert_eq!(
+            o.errors,
+            [
+                format!("current filings page 0: parse error: not an Atom feed ({NOT_FEED_FACTS})"),
+                "current filings page 0, retried once: http status 429".to_string(),
+            ]
+        );
+        let alerts = base.alerts.borrow();
+        assert_eq!(alerts.len(), 1, "{alerts:?}");
+        assert_eq!(alerts[0].0, "sec-throttled:2026-10-30");
+        assert_eq!(
+            alerts[0].2,
+            "SEC EDGAR refused requests (403/429); polling stopped for this firing: current filings page 0, retried once: http status 429"
+        );
+        assert_eq!(
+            feed_stats(&es, "2026-10-30"),
+            Some(json!({"non_feed": 1, "retry_ok": 0, "retry_failed": 1, "last_at": iso(t)}))
+        );
+    }
+
+    /// A retry that fails some other way (a 504) stops the feed as that error
+    /// does today (not throttled, 6-K still read), and, the retry having
+    /// failed, raises `sec-not-feed`; both replies are logged.
+    #[tokio::test]
+    async fn a_retry_failing_otherwise_alerts_as_a_failed_retry() {
+        let (base, es) = stores();
+        let fl = FakeFilings::default();
+        fl.queued
+            .borrow_mut()
+            .insert(0, vec![Err(not_feed()), Err(ProviderError::Http(504))]);
+        let t = poll_time();
+        let o = poll_job(t, Some(t), &es, base.as_ref(), &fl).await.unwrap();
+        assert!(!o.throttled);
+        assert_eq!(*fl.page_calls.borrow(), [0, 0]);
+        assert_eq!(fl.six_k_calls.get(), 1);
+        let last = "current filings page 0, retried once: http status 504";
+        assert_eq!(o.errors.len(), 2, "{:?}", o.errors);
+        assert_eq!(o.errors[1], last);
+        assert_eq!(o.not_feed.as_deref(), Some(last));
+        let alerts = base.alerts.borrow();
+        assert_eq!(alerts.len(), 1, "{alerts:?}");
+        assert_eq!(
+            alerts[0].2,
+            format!("SEC EDGAR sent a non-feed reply, retry failed: {last}")
+        );
+    }
+
+    /// The 6-K feed the same way: a retry into a feed carries on (one extra
+    /// request, no alert, `retry_ok`); a refused retry raises the 6-K
+    /// `sec-throttled` alert as today.
+    #[tokio::test]
+    async fn the_6k_feed_is_retried_the_same_way() {
+        let (base, es) = stores();
+        let fl = FakeFilings::default();
+        fl.six_k_queued.borrow_mut().push(Err(not_feed()));
+        let t = poll_time();
+        let o = poll_job(t, Some(t), &es, base.as_ref(), &fl).await.unwrap();
+        assert_eq!(*fl.page_calls.borrow(), [0]);
+        assert_eq!(fl.six_k_calls.get(), 2);
+        assert!(!o.foreign.throttled && o.foreign.not_feed.is_none());
+        assert_eq!(
+            o.foreign.feed_stats,
+            FeedStats {
+                non_feed: 1,
+                retry_ok: 1,
+                retry_failed: 0
+            }
+        );
+        assert!(o.errors.contains(&format!(
+            "current 6-K filings page 0: retry ok after a non-feed reply: parse error: not an Atom feed ({NOT_FEED_FACTS})"
+        )), "{:?}", o.errors);
+        assert!(base.alerts.borrow().is_empty());
+        assert_eq!(
+            feed_stats(&es, "2026-10-30"),
+            Some(json!({"non_feed": 1, "retry_ok": 1, "retry_failed": 0, "last_at": iso(t)}))
+        );
+        // Refused on retry: the 6-K throttle path, as today.
+        fl.six_k_queued
+            .borrow_mut()
+            .extend([Err(not_feed()), Err(ProviderError::Http(429))]);
+        let later = t + Duration::minutes(5);
+        let o = poll_job(later, Some(later), &es, base.as_ref(), &fl)
+            .await
+            .unwrap();
+        assert_eq!(fl.six_k_calls.get(), 4);
+        assert!(o.foreign.throttled && o.foreign.not_feed.is_none());
+        let alerts = base.alerts.borrow();
+        assert_eq!(alerts.len(), 1, "{alerts:?}");
+        assert_eq!(
+            alerts[0].2,
+            "SEC EDGAR refused requests (403/429) on the 6-K feed: current 6-K filings page 0, retried once: http status 429"
+        );
+        assert_eq!(
+            feed_stats(&es, "2026-10-30"),
+            Some(json!({"non_feed": 2, "retry_ok": 1, "retry_failed": 1, "last_at": iso(later)}))
+        );
+    }
+
+    /// A counter that cannot be read or written is logged and never fails
+    /// the poll: the follow-ups are queued as without it. A value that does
+    /// not parse starts the day's count again.
+    #[tokio::test]
+    async fn a_failed_counter_never_fails_the_poll() {
+        let (good, _, _) = healthy_poll().await;
+        let key = format!("{KV_FEED_STATS}:2026-10-30");
+        for read in [false, true] {
+            let (base, es) = stores();
+            if read {
+                *es.fail_kv.borrow_mut() = Some(key.clone());
+            } else {
+                *es.fail_kv_set.borrow_mut() = Some(key.clone());
+            }
+            let fl = FakeFilings::default();
+            fl.queued.borrow_mut().insert(0, vec![Err(not_feed())]);
+            let t = poll_time();
+            let o = poll_job(t, Some(t), &es, base.as_ref(), &fl).await.unwrap();
+            assert_eq!(o.follow_ups, good.follow_ups);
+            assert_eq!(o.detected, good.detected);
+            assert_eq!(
+                o.errors.last().unwrap(),
+                &format!("{KV_FEED_STATS}: write failed: d1: kv {key} failed")
+            );
+            assert_eq!(feed_stats(&es, "2026-10-30"), None);
+        }
+        let (base, es) = stores();
+        es.kv.borrow_mut().insert(key, "not json".into());
+        let fl = FakeFilings::default();
+        fl.queued.borrow_mut().insert(0, vec![Err(not_feed())]);
+        let t = poll_time();
+        poll_job(t, Some(t), &es, base.as_ref(), &fl).await.unwrap();
+        assert_eq!(
+            feed_stats(&es, "2026-10-30"),
+            Some(json!({"non_feed": 1, "retry_ok": 1, "retry_failed": 0, "last_at": iso(t)}))
+        );
     }
 
     /// Review L1 of PR #79: a failed `sec-not-feed` alert read or write (a

@@ -2,11 +2,89 @@
 //! watchlist.
 
 use std::collections::HashMap;
+use std::future::Future;
 
 use chrono::{DateTime, Duration, Utc};
+use serde::{Deserialize, Serialize};
 
 use crate::earnings::{watchlist, Filer, WatchEntry};
 use crate::edgar::FeedEntry;
+use crate::providers::ProviderError;
+
+/// Non-feed replies of a poll's feed reads, counted per page read: kept per
+/// ET day in kv `sec_feed_stats:<date>` by `poll_job`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FeedStats {
+    /// Page reads whose first reply was not a feed (each was retried once).
+    #[serde(default)]
+    pub non_feed: u32,
+    /// Retries that returned a feed.
+    #[serde(default)]
+    pub retry_ok: u32,
+    /// Retries that failed: not a feed again, refused (403/429) or any
+    /// other error.
+    #[serde(default)]
+    pub retry_failed: u32,
+}
+
+impl FeedStats {
+    pub fn add(self, o: FeedStats) -> FeedStats {
+        FeedStats {
+            non_feed: self.non_feed + o.non_feed,
+            retry_ok: self.retry_ok + o.retry_ok,
+            retry_failed: self.retry_failed + o.retry_failed,
+        }
+    }
+}
+
+/// One current-filings feed page (`label`: "current filings page 0"),
+/// asked for once more, at once, when its reply is not a feed (`NotFeed`);
+/// any other error is not retried. `Edgar` paces the retry like every
+/// request (`GAP_MS` after the one before). Lines for the log go into
+/// `errors`, the error's line last:
+/// - a retry that returns a feed: `<label>: retry ok after a non-feed
+///   reply: <first error>`, and the entries;
+/// - a retry that is not a feed either: `<label>, retried once: <error>`;
+/// - a retry that fails otherwise (403/429 included): `<label>: <first
+///   error>`, then `<label>, retried once: <error>`;
+/// - no retry: `<label>: <error>`, as before.
+///
+/// The error comes back with whether the page was retried.
+pub(crate) async fn read_feed_page<F, Fut>(
+    label: &str,
+    read: F,
+    stats: &mut FeedStats,
+    errors: &mut Vec<String>,
+) -> Result<Vec<FeedEntry>, (ProviderError, bool)>
+where
+    F: Fn() -> Fut,
+    Fut: Future<Output = Result<Vec<FeedEntry>, ProviderError>>,
+{
+    let first = match read().await {
+        Ok(list) => return Ok(list),
+        Err(e @ ProviderError::NotFeed(_)) => e,
+        Err(e) => {
+            errors.push(format!("{label}: {e}"));
+            return Err((e, false));
+        }
+    };
+    stats.non_feed += 1;
+    match read().await {
+        Ok(list) => {
+            stats.retry_ok += 1;
+            errors.push(format!("{label}: retry ok after a non-feed reply: {first}"));
+            Ok(list)
+        }
+        Err(e) => {
+            stats.retry_failed += 1;
+            if !matches!(e, ProviderError::NotFeed(_)) {
+                errors.push(format!("{label}: {first}"));
+            }
+            errors.push(format!("{label}, retried once: {e}"));
+            Err((e, true))
+        }
+    }
+}
 
 /// A 2.02 8-K accepted longer ago than this is history, not news. Long
 /// enough to pick up a Saturday filing on Monday morning.
