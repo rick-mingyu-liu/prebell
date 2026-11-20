@@ -371,6 +371,22 @@ From then on, the first earnings poll from 18:00 ET each Friday, after that day'
 
 Cloudflare's Workers limits page (https://developers.cloudflare.com/workers/platform/limits/, read 2026-11-17) says "A subrequest is any request a Worker makes using the Fetch API or to Cloudflare services like R2, KV, or D1", and also lists "Subrequests to internal services | 1,000" without saying how the two relate. The generator's alert budget (`alerts::delivery_budget`) counts fetches (and, for the insight step, its R2 calls and queue sends) against 50 and D1 queries against a separate 50, as it did before mover insights. If D1 queries count toward the same 50, an insight write message (28 calls, 5 of them D1), alert delivery's 2 D1 queries and up to 20 webhook posts could reach 50. Not changed yet; noted here until a measurement or Cloudflare settles it.
 
+### Rolling back past the rewrite (2026-11-19)
+
+Generator code from before the rewrite does not know the `refused` and `rewritten` stages: it skips such a record as unreadable (named in each tick's log line; it blocks no other bundle and alerts nothing), so that record is never finished and its passing lines are never judged. And when it finishes a record that was rewritten earlier (at `written` or `judged`), it drops `rewritten_from` and the `rewrite_*` fields from what it writes back, so the record loses the writer's refused line and the review page keys the rewritten line as a writer line. So roll back only when no record is at `refused` or `rewritten`. Records are picked up for today and the previous trading day; check each of their keys (in `crates/generator`):
+
+```sh
+for d in <today> <previous trading day>; do
+  for k in premarket/$d premarket/$d-update recap/$d; do
+    printf '%s ' "$k"
+    pnpm exec wrangler r2 object get "prebell-facts/insights/$k.json" --remote --pipe 2>/dev/null \
+      | grep -o '"stage":"[a-z]*"' || echo "(no record)"
+  done
+done
+```
+
+Any `"stage":"refused"` or `"stage":"rewritten"`: wait for the next message (a record at either stage is a minute or two from `written`), or for the sweep, and check again.
+
 ### Switching it off
 
 - The digest: delete `DIGEST_ENABLED` from `[vars]` (or set it to anything but `"true"`), commit, and deploy the generator. Drafts already saved stay in Buttondown until deleted there; a schedule already set stays until unscheduled there.

@@ -1220,7 +1220,7 @@ async fn recheck_step(
     if rec.work_attempts >= MAX_ATTEMPTS {
         // Given up like the check step, but the writer's own passing lines
         // still go to the judge.
-        let why = format!("checks did not finish in {MAX_ATTEMPTS} tries");
+        let why = format!("recheck did not finish in {MAX_ATTEMPTS} tries");
         return rewrite_skipped(now, store, rec, seen, &why, others).await;
     }
     rec.work_attempts += 1;
@@ -3377,7 +3377,7 @@ mod tests {
         let t = run(&m, recap_now(), &Llm::none(false), &Llm::none(true)).await;
         assert_eq!(
             t.line,
-            "insight recap/2026-11-06.json: rewrite checks did not finish in 3 tries; 1 lines stay refused; judge queued"
+            "insight recap/2026-11-06.json: rewrite recheck did not finish in 3 tries; 1 lines stay refused; judge queued"
         );
         let rec = m.record(RECAP_KEY).unwrap();
         assert_eq!((rec.stage, rec.calls), (Stage::Written, 2));

@@ -569,6 +569,33 @@ pub(crate) fn report(
             Bar::Met => "The reading part of the bar is met: at least 50 judge-passed lines read, none marked wrong. Its seeded-recall part is measured by the trial's seed run, in the trial's report.".to_string(),
             Bar::NotMet => format!("The bar is not met: {} judge-passed lines marked wrong.", c.passed_wrong.len()),
         };
+        // Lines the Worker's rewrite wrote count toward the bar like the
+        // writer's (they are what readers would get); shown apart so the
+        // evidence says how much rests on rewrites.
+        let rewritten: Vec<&Record> = records
+            .iter()
+            .filter(|r| r.rewritten_from.is_some())
+            .filter(|r| r.judges.get(c.name).is_some_and(|j| j.answered()))
+            .collect();
+        if !rewritten.is_empty() {
+            let passed = |r: &&&Record| r.judges[c.name].passed;
+            let labelled = |r: &&&Record| {
+                let key = r.insight.as_ref().map(|i| line_key(&r.writer_version, i));
+                labels.iter().any(|l| {
+                    l.post == r.post
+                        && l.ticker == r.ticker
+                        && l.key.as_ref().is_none_or(|k| Some(k) == key.as_ref())
+                })
+            };
+            let _ = writeln!(
+                out,
+                "\nRewritten lines (refused by the code checks, then rewritten once): {} judged, {} passed the judge, {} labelled, {} of them judge-passed (counted in the lines read above).",
+                rewritten.len(),
+                rewritten.iter().filter(passed).count(),
+                rewritten.iter().filter(labelled).count(),
+                rewritten.iter().filter(passed).filter(labelled).count(),
+            );
+        }
         let _ = writeln!(out, "\n{verdict}");
         return out;
     }

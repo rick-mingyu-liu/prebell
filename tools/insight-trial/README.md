@@ -174,7 +174,10 @@ again with the new ones, so one `labels.json` always holds every label.
 Leave `--labels` off the first time. Lines the code checks refused and
 lines the judge has not answered yet (a record still `written`, or a
 failed judge call) are left out. The 8:00 brief and its 8:35 update often
-carry the same mover: the page shows both.
+carry the same mover: the page shows both. A line the Worker's rewrite
+wrote is marked "rewritten", with the writer's refused line and its check
+failures folded under it; it is labelled like any other line (it is what
+readers would get), and `score` also counts rewritten lines apart.
 
 `score` on the shadow folder reports the reading part of the bar: the
 judge-passed lines read, counting a mover once per trading date across the

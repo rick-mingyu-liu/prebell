@@ -286,6 +286,10 @@ pub(crate) struct Record {
     pub published_if: BTreeMap<String, bool>,
     pub writer_version: String,
     pub judge_version: String,
+    /// A shadow line the Worker's rewrite wrote: the writer's refused line
+    /// and the code checks' refusals of it (`insight` is the rewrite's).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rewritten_from: Option<step::Refusal>,
 }
 
 /// A line's identity across runs: the version of the writer that wrote it
@@ -522,6 +526,7 @@ pub(crate) async fn run_post(
                 published_if,
                 writer_version: WRITER_VERSION.to_string(),
                 judge_version: JUDGE_VERSION.to_string(),
+                rewritten_from: None,
             }
         })
         .collect();
