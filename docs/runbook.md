@@ -371,6 +371,22 @@ From then on, the first earnings poll from 18:00 ET each Friday, after that day'
 
 Cloudflare's Workers limits page (https://developers.cloudflare.com/workers/platform/limits/, read 2026-11-17) says "A subrequest is any request a Worker makes using the Fetch API or to Cloudflare services like R2, KV, or D1", and also lists "Subrequests to internal services | 1,000" without saying how the two relate. The generator's alert budget (`alerts::delivery_budget`) counts fetches (and, for the insight step, its R2 calls and queue sends) against 50 and D1 queries against a separate 50, as it did before mover insights. If D1 queries count toward the same 50, an insight write message (28 calls, 5 of them D1), alert delivery's 2 D1 queries and up to 20 webhook posts could reach 50. Not changed yet; noted here until a measurement or Cloudflare settles it.
 
+### Rolling back past the rewrite (2026-11-19)
+
+Generator code from before the rewrite does not know the `refused` and `rewritten` stages: it skips such a record as unreadable (named in each tick's log line; it blocks no other bundle and alerts nothing), so that record is never finished and its passing lines are never judged. And when it finishes a record that was rewritten earlier (at `written` or `judged`), it drops `rewritten_from` and the `rewrite_*` fields from what it writes back, so the record loses the writer's refused line and the review page keys the rewritten line as a writer line. So roll back only when no record is at `refused` or `rewritten`. Records are picked up for today and the previous trading day; check each of their keys (in `crates/generator`):
+
+```sh
+for d in <today> <previous trading day>; do
+  for k in premarket/$d premarket/$d-update recap/$d; do
+    printf '%s ' "$k"
+    pnpm exec wrangler r2 object get "prebell-facts/insights/$k.json" --remote --pipe \
+      | grep -o '"stage":"[a-z]*"' || echo "(no record or error)"
+  done
+done
+```
+
+Wrangler's errors stay on the screen: "(no record or error)" means either that the key does not exist or that the read failed (auth, network). On any error, fix its cause and run the loop again: a key counts as having no record only when wrangler printed no error for it. Any `"stage":"refused"` or `"stage":"rewritten"`: wait for the next message (a record at either stage is a minute or two from `written`), or for the sweep, and check again.
+
 ### Switching it off
 
 - The digest: delete `DIGEST_ENABLED` from `[vars]` (or set it to anything but `"true"`), commit, and deploy the generator. Drafts already saved stay in Buttondown until deleted there; a schedule already set stays until unscheduled there.
@@ -513,11 +529,11 @@ Create the queue first, as its own step, with the owner's go: `cd crates/generat
 
 ### What runs, and when
 
-After a brief, its 8:35 update or a recap publishes, its job queues an `insight` message; the crons queue one sweep message per firing at 08:10-09:30 and 16:10-17:30 ET on trading days. Each bundle's record goes write (the writer's reply stored as `replied`), check (`written`), judge (the judge's reply stored as `judged`, then `done`), each its own message, so a CPU kill never makes a paid call be paid again. A sweep leaves a record another message wrote in the last 5 minutes alone. Records of today and the previous trading day are picked up, so Friday's are finished on Monday.
+After a brief, its 8:35 update or a recap publishes, its job queues an `insight` message; the crons queue one sweep message per firing at 08:10-09:30 and 16:10-17:30 ET on trading days. Each bundle's record goes write (the writer's reply stored as `replied`), check (`written`), judge (the judge's reply stored as `judged`, then `done`), each its own message, so a CPU kill never makes a paid call be paid again. When the code checks refuse a written line, the record goes `refused` instead: one rewrite call for the refused lines only (`insight-rewrite/v1`: the writer's own rules, then each refused line with its evidence pack and the exact check failures; it may also leave a mover out), its reply stored as `rewritten`, then the same code checks on its lines in their own message; lines that now pass go to the judge with the writer's, and lines that still fail stay refused with both check results. Judge refusals are never rewritten. At most one rewrite try per bundle: a try killed mid-call is not made again, a failed call is not retried, and with fewer than two calls left under the month's cap (the rewrite and the judge after it) it is not made; in each case the lines stay refused and the record goes on. A bundle with a refusal takes up to five messages instead of three. A sweep leaves a record another message wrote in the last 5 minutes alone. Records of today and the previous trading day are picked up, so Friday's are finished on Monday.
 
 ### Cost and the cap
 
-At most `INSIGHT_MONTHLY_CALLS` model calls per ET month (default 300: $2.40 to $6 a month at the trial's measured $0.008 to $0.02 a call), each claimed in kv `insight_calls:<YYYY-MM>` before it is made; at the cap the step stops for the month and says so once in the log. Read the count: `pnpm exec wrangler d1 execute prebell --remote --json --command "SELECT key, value FROM kv WHERE key LIKE 'insight_calls:%'"`. Writer and judge are `claude-sonnet-5-5`, effort low (`INSIGHT_WRITER_PROVIDER`, `INSIGHT_JUDGE_PROVIDER`; never `LLM_PROVIDER`), with the `ANTHROPIC_API_KEY` secret; without it the step logs and skips.
+At most `INSIGHT_MONTHLY_CALLS` model calls per ET month (default 300: $2.40 to $6 a month at the trial's measured $0.008 to $0.02 a call), each claimed in kv `insight_calls:<YYYY-MM>` before it is made, the rewrite's included. A bundle normally makes 2 calls (writer, judge), or 3 with a rewrite; the worst case is 7 (3 writer tries, the rewrite, 3 judge tries). At 3 bundles a trading day and about 21 trading days, that is about 189 calls a month even if every bundle had a rewrite, under the 300; at the cap the step stops for the month and says so once in the log. Read the count: `pnpm exec wrangler d1 execute prebell --remote --json --command "SELECT key, value FROM kv WHERE key LIKE 'insight_calls:%'"`. Writer and judge are `claude-sonnet-5-5`, effort low (`INSIGHT_WRITER_PROVIDER`, `INSIGHT_JUDGE_PROVIDER`; never `LLM_PROVIDER`), with the `ANTHROPIC_API_KEY` secret; without it the step logs and skips.
 
 ### The first measurement on Workers (2026-11-17)
 
@@ -526,17 +542,18 @@ Before the first run the step's cold CPU was known only from V8 under Node (`too
 - Five bundles finished within six minutes; every invocation's outcome was `ok`.
 - CPU per `insight` invocation: 174 ms for the first write step and 129 ms for the first check step (cold), then 13 to 27 ms; one idle sweep at 22 ms. The earnings poll ran at 84, 141 and 179 ms in the same capture, and earnings builds on the morning of 2026-11-18 completed at 159 to 326 ms, so invocations of this size complete on the free plan. No limit was read from the platform; this is what completed.
 - At most 14 subrequests in one `insight` invocation (`insight_ops` 13 plus `subrequests` 1, the judge step), and at most 5 D1 queries; 17 counting both.
+- The rewrite (2026-11-19, not yet measured on Workers): the rewrite message is at most 18 subrequests by the code's count (the judge message is 20 and the write message 28, so the worst case is unchanged), with 3 D1 queries and one model call, and compiles no pattern (a fresh-process test checks it): its CPU is the record's JSON read and written, as in the judge message before its call. The recheck message is the check step's work over the refused lines only (at most 15 subrequests), with the same 22 patterns compiled cold, so its cold CPU should be at or below the check step's 129 ms. Both are derived from the code and native tests, not measured on Workers: capture `wrangler tail` after the deploy and read `cpuTime` and `outcome` on a bundle with a refusal.
 - The check step is not split by language for now. That rests on one cold check sample (129 ms) and on heavier jobs completing beside it, not on a known limit: measure again if any `insight` invocation ends with an outcome other than `ok`.
 
 Not exercised by that run: the stop at the cap (the count matched the records, 4 calls, but the cap was not reached). To measure again, capture `wrangler tail prebell-generator --format json` across a sweep window (08:10-09:30 or 16:10-17:30 ET) and read `cpuTime` and `outcome` per event.
 
 ### Records
 
-One per facts bundle, in the `prebell-facts` bucket: `insights/premarket/<date>.json` (the 8:00 brief), `insights/premarket/<date>-update.json` (the 8:35 update), `insights/recap/<date>.json`, beside `insights/<...>.attempts` (write tries and when). Read one: `cd crates/generator && pnpm exec wrangler r2 object get prebell-facts/insights/recap/2026-11-18.json --remote --file /tmp/insight.json`. Its `stage` (`replied`, `written`, `judged`, `done`), per mover its `pack`, `insight`, `check` (the code checks' refusals), `verdict`, `judge_error` and `passed`, and the raw `writer_reply` and `judge_reply`.
+One per facts bundle, in the `prebell-facts` bucket: `insights/premarket/<date>.json` (the 8:00 brief), `insights/premarket/<date>-update.json` (the 8:35 update), `insights/recap/<date>.json`, beside `insights/<...>.attempts` (write tries and when). Read one: `cd crates/generator && pnpm exec wrangler r2 object get prebell-facts/insights/recap/2026-11-18.json --remote --file /tmp/insight.json`. Its `stage` (`replied`, `refused`, `rewritten`, `written`, `judged`, `done`), per mover its `pack`, `insight`, `check` (the code checks' refusals), `verdict`, `judge_error` and `passed`, and the raw `writer_reply` and `judge_reply`. After a rewrite, a mover the rewrite answered for holds the rewrite's line in `insight` and its refusals in `check`, and the writer's line and its refusals in `rewritten_from`; a refused mover the rewrite gave no line has `rewrite_error` (left out, call failed, not made). The record then also has `rewrite_version`, `rewrite_model`, `rewrite_attempts` and the raw `rewrite_reply`. `skipped_reason` is "the writer wrote no line" when the writer wrote none, and "no line passed the code checks" when lines were written (and rewritten) but none passed.
 
 ### The review page
 
-From the repository root: `tools/insight-trial/fetch-shadow.sh <first shadow day> "$(date +%F)" tools/insight-trial/shadow` (read-only), then in `tools/insight-trial`: `env -u CARGO_TARGET_DIR cargo run --release -- shadow --records shadow --out out-shadow --labels <labels.json>` writes `out-shadow/label.html` (every line the judge answered for, labelled ones shown done), and `… -- score --out out-shadow --labels <labels.json>` reports the bar (50 judge-passed lines read, none wrong). See `tools/insight-trial/README.md`.
+From the repository root: `tools/insight-trial/fetch-shadow.sh <first shadow day> "$(date +%F)" tools/insight-trial/shadow` (read-only), then in `tools/insight-trial`: `env -u CARGO_TARGET_DIR cargo run --release -- shadow --records shadow --out out-shadow --labels <labels.json>` writes `out-shadow/label.html` (every line the judge answered for, labelled ones shown done), and `… -- score --out out-shadow --labels <labels.json>` reports the bar (20 judge-passed lines read, none wrong; 50 until Rick lowered it on 2026-11-19). One wrong line Rick finds sends insights back to shadow. See `tools/insight-trial/README.md`.
 
 ### Switching it off
 

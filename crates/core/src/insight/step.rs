@@ -15,12 +15,22 @@
 //!    call, call the writer, store its reply as a `replied` record. No code
 //!    check runs here.
 //! 2. check (`replied`): read the stored reply, run the code checks (the
-//!    check and number patterns), store `written` (or `done` when no line
-//!    passed them).
-//! 3. judge (`written`): compile the confirmation patterns (numbers and
+//!    check and number patterns), store `refused` when they refused a
+//!    written line, else `written` (or `done` when the writer wrote no line).
+//! 3. rewrite (`refused`): claim a call, make the one rewrite call for the
+//!    refused lines only (each with its pack and the exact check failures;
+//!    `write::rewrite_prompt`), store its reply as `rewritten`. No pattern
+//!    is compiled. At most one try per bundle: a try counted without a
+//!    stored reply (killed mid-call) is not made again, and with fewer than
+//!    two calls left under the cap, or when the call fails, the lines stay
+//!    refused and the record goes on.
+//! 4. recheck (`rewritten`): run the same code checks on the rewritten
+//!    lines; store `written` when any line now passes them (the writer's
+//!    and the rewrite's go to the judge together), else `done`.
+//! 5. judge (`written`): compile the confirmation patterns (numbers and
 //!    dates), claim a call, call the judge, store its reply as `judged`,
 //!    then, in the same message, confirm the verdicts and store `done`.
-//! 4. verdicts (`judged`, only when step 3 was killed after storing the
+//! 6. verdicts (`judged`, only when step 5 was killed after storing the
 //!    reply): confirm the stored verdicts and store `done`.
 //!
 //! A tick does the next step of the oldest unfinished record first, else
@@ -28,7 +38,8 @@
 //!
 //! Bounded like the share cards: at most `MAX_ATTEMPTS` write tries per
 //! bundle, judge tries per record, and tries of a code-only step on a stored
-//! reply, each counted before the work it guards (so a message killed for CPU or wall time still counts), and at
+//! reply, one rewrite try per record (made only with two calls left under
+//! the cap, so it never takes the judge's), each counted before the work it guards (so a message killed for CPU or wall time still counts), and at
 //! most the monthly cap of model calls, each counted before it is made. A
 //! failure never alerts and never touches a post.
 
@@ -39,7 +50,7 @@ use serde_json::Value;
 
 use super::judge::{self, Verdict, JUDGE_VERSION};
 use super::pack::{self, PackInputs, ReportStatus};
-use super::write::{self, WRITER_VERSION};
+use super::write::{self, REWRITE_VERSION, WRITER_VERSION};
 use super::{check, Insight, Pack};
 use crate::clock::{et, trading_day, DayKind};
 use crate::cover::Session;
@@ -225,6 +236,11 @@ fn calls_key(now: DateTime<Utc>) -> String {
 pub enum Stage {
     /// The writer's reply is stored; the code checks have not run.
     Replied,
+    /// The code checks refused at least one written line; the rewrite has
+    /// not answered.
+    Refused,
+    /// The rewrite's reply is stored; its lines have not been checked.
+    Rewritten,
     /// The code checks ran; the judge has not answered.
     Written,
     /// The judge's reply is stored; its verdicts are not confirmed yet.
@@ -247,6 +263,34 @@ pub struct MoverRecord {
     pub judge_error: Option<String>,
     /// The judge passed it and code confirmed the judge's support.
     pub passed: bool,
+    /// Set when the rewrite answered for this mover: the writer's own line
+    /// and the code checks' refusals of it. `insight` and `check` then hold
+    /// the rewrite's line and its refusals (none when it went to the judge).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rewritten_from: Option<Refusal>,
+    /// Why a refused line got no rewritten line: the rewrite left the mover
+    /// out, its item was unusable, the call failed or was not made.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rewrite_error: Option<String>,
+}
+
+/// A line the code checks refused, and their refusals.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+pub struct Refusal {
+    pub insight: Insight,
+    pub check: Vec<String>,
+}
+
+impl MoverRecord {
+    /// A written line the code checks refused: what the rewrite is asked
+    /// for (before it ran; after it, `insight` holds its line).
+    fn refused(&self) -> bool {
+        self.insight.is_some() && !self.check.is_empty()
+    }
+}
+
+fn is_zero(n: &u32) -> bool {
+    *n == 0
 }
 
 /// The audit record of one facts bundle (one per bundle: the 8:00 brief and
@@ -277,8 +321,20 @@ pub struct Record {
     /// Model calls made for this record.
     pub calls: u32,
     /// Why the record is final without every line judged ("no eligible
-    /// mover", "no line passed the code checks", ...).
+    /// mover", "the writer wrote no line", "no line passed the code
+    /// checks", ...).
     pub skipped_reason: Option<String>,
+    /// The rewrite's prompt version and model, once its call is tried.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rewrite_version: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rewrite_model: Option<String>,
+    /// Tries of the rewrite call (at most 1), counted before it is made.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub rewrite_attempts: u32,
+    /// The rewrite's reply as it came, stored before its lines are checked.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rewrite_reply: Option<Value>,
 }
 
 impl Record {
@@ -289,6 +345,17 @@ impl Record {
             .filter(|m| m.check.is_empty())
             .filter_map(|m| m.insight.clone().map(|i| (m.pack.clone(), i)))
             .unzip()
+    }
+
+    /// After the rewrite (made, failed or not made): the judge when a line
+    /// passed the code checks, else done.
+    fn after_rewrite(&mut self) {
+        if self.to_judge().1.is_empty() {
+            self.stage = Stage::Done;
+            self.skipped_reason = Some("no line passed the code checks".into());
+        } else {
+            self.stage = Stage::Written;
+        }
     }
 }
 
@@ -411,11 +478,16 @@ fn chosen_checks(refs: Vec<CheckRef>, cutoff: DateTime<Utc>) -> Vec<CheckRef> {
 /// The month's count before a write stage counts an attempt: at the cap,
 /// nothing is tried.
 async fn under_cap(now: DateTime<Utc>, store: &dyn InsightStore, cap: u32) -> Result<bool, String> {
+    Ok(calls_left(now, store, cap).await? > 0)
+}
+
+/// The calls left under this month's cap.
+async fn calls_left(now: DateTime<Utc>, store: &dyn InsightStore, cap: u32) -> Result<u32, String> {
     let used: u32 = match store.kv_get(&calls_key(now)).await? {
         Some(v) => v.trim().parse().unwrap_or(cap),
         None => 0,
     };
-    Ok(used < cap)
+    Ok(cap.saturating_sub(used))
 }
 
 /// Counts one model call this month; `false` at the cap.
@@ -476,6 +548,8 @@ struct Head {
     judge_attempts: u32,
     #[serde(default)]
     work_attempts: u32,
+    #[serde(default)]
+    rewrite_attempts: u32,
 }
 
 impl Head {
@@ -489,6 +563,7 @@ impl Head {
             stage: self.stage,
             judge_attempts: self.judge_attempts,
             work_attempts: self.work_attempts,
+            rewrite_attempts: self.rewrite_attempts,
         }
     }
 }
@@ -505,6 +580,7 @@ struct Seen {
     stage: Stage,
     judge_attempts: u32,
     work_attempts: u32,
+    rewrite_attempts: u32,
 }
 
 impl Seen {
@@ -513,6 +589,7 @@ impl Seen {
             stage: r.stage,
             judge_attempts: r.judge_attempts,
             work_attempts: r.work_attempts,
+            rewrite_attempts: r.rewrite_attempts,
         }
     }
 }
@@ -626,7 +703,11 @@ pub fn warm_judge() -> usize {
 /// - judge: the month's count, a re-read and a write to count the try, the
 ///   cap claim, the judge call, a re-read and the write of the reply, a
 ///   re-read and the final write, the attempt counters, the send: 20;
-/// - verdicts: as check, 15.
+/// - verdicts: as check, 15;
+/// - rewrite: the month's count, a re-read and a write to count the try,
+///   the cap claim, the rewrite call, a re-read and the write of the reply,
+///   the attempt counters, the send: 18 (14 when it is not made);
+/// - recheck: as check, 15.
 ///
 /// At most 5 are D1 queries and 1 is a fetch. Alert delivery runs after the
 /// step in the same invocation (its 2 D1 queries and up to 20 webhook
@@ -682,6 +763,8 @@ pub async fn insight_tick(
         let others = waiting(store, &found, &c.facts_key).await?;
         let t = match rec.stage {
             Stage::Replied => check_step(now, store, rec, others).await,
+            Stage::Refused => rewrite_step(now, store, writer, cfg, rec, others).await,
+            Stage::Rewritten => recheck_step(now, store, rec, others).await,
             Stage::Written => judge_step(now, store, judge, cfg, rec, others).await,
             Stage::Judged => verdict_step(now, store, rec, others).await,
             Stage::Done => unreachable!("an open record is not done"),
@@ -885,6 +968,8 @@ async fn write_step(
                 verdict: None,
                 judge_error: None,
                 passed: false,
+                rewritten_from: None,
+                rewrite_error: None,
             })
             .collect(),
         writer_reply: None,
@@ -892,6 +977,10 @@ async fn write_step(
         work_attempts: 0,
         calls: 0,
         skipped_reason: None,
+        rewrite_version: None,
+        rewrite_model: None,
+        rewrite_attempts: 0,
+        rewrite_reply: None,
     };
     if rec.movers.is_empty() {
         rec.skipped_reason = Some("no eligible mover".into());
@@ -949,9 +1038,54 @@ async fn check_step(
     warm_check();
     let packs: Vec<Pack> = rec.movers.iter().map(|m| m.pack.clone()).collect();
     let reply = rec.writer_reply.clone().unwrap_or(Value::Null);
+    let (insights, errors) = read_lines(&reply, &packs);
+    for m in rec.movers.iter_mut() {
+        m.insight = insights.iter().find(|i| i.ticker == m.ticker).cloned();
+        m.check = m
+            .insight
+            .as_ref()
+            .map(|i| check::check(&m.pack, i))
+            .unwrap_or_default();
+        m.write_error = errors
+            .iter()
+            .find(|(t, _)| *t == m.ticker && m.insight.is_none())
+            .map(|(_, e)| e.clone());
+    }
+    let to_judge = rec.to_judge().1.len();
+    let refused = rec.movers.iter().filter(|m| m.refused()).count();
+    let next = if refused > 0 {
+        rec.stage = Stage::Refused;
+        format!("rewrite queued for {refused}")
+    } else if to_judge > 0 {
+        rec.stage = Stage::Written;
+        "judge queued".into()
+    } else {
+        // Nothing refused and nothing passed: no line was written.
+        rec.stage = Stage::Done;
+        rec.skipped_reason = Some("the writer wrote no line".into());
+        "done".into()
+    };
+    rec.work_attempts = 0;
+    rec.at = iso(now);
+    if !put_if_seen(store, &rec, &mut seen).await? {
+        return Ok(changed(&key));
+    }
+    let written = rec.movers.iter().filter(|m| m.insight.is_some()).count();
+    Ok(Tick {
+        line: format!(
+            "insight {key}: {} eligible, {written} written, {to_judge} passed the checks; {next}",
+            rec.movers.len(),
+        ),
+        follow_up: rec.stage != Stage::Done || others,
+    })
+}
+
+/// The usable lines of a writer or rewrite reply over `packs`, and the
+/// first error for each mover whose item was unusable.
+fn read_lines(reply: &Value, packs: &[Pack]) -> (Vec<Insight>, Vec<(String, String)>) {
     let mut insights: Vec<Insight> = Vec::new();
     let mut errors: Vec<(String, String)> = Vec::new();
-    for item in write::parse(&reply, &packs) {
+    for item in write::parse(reply, packs) {
         match item {
             Ok(i) => insights.push(i),
             Err(e) => {
@@ -967,39 +1101,176 @@ async fn check_step(
             }
         }
     }
-    for m in rec.movers.iter_mut() {
-        m.insight = insights.iter().find(|i| i.ticker == m.ticker).cloned();
-        m.check = m
-            .insight
-            .as_ref()
-            .map(|i| check::check(&m.pack, i))
-            .unwrap_or_default();
-        m.write_error = errors
-            .iter()
-            .find(|(t, _)| *t == m.ticker && m.insight.is_none())
-            .map(|(_, e)| e.clone());
+    (insights, errors)
+}
+
+/// The one rewrite call for the lines the code checks refused. Tried once
+/// per bundle: a try counted without a stored reply was killed mid-call and
+/// is not made again. With fewer than two calls left this month (a fixed
+/// line needs the judge's call too, and the rewrite must not take the one
+/// the writer's passing lines wait for), or when the call fails, the lines
+/// stay refused and the record goes on to the judge (or ends).
+async fn rewrite_step(
+    now: DateTime<Utc>,
+    store: &dyn InsightStore,
+    writer: &dyn LlmProvider,
+    cfg: &Config,
+    mut rec: Record,
+    others: bool,
+) -> Result<Tick, String> {
+    let key = rec.facts_key.clone();
+    let mut seen = Seen::of(&rec);
+    let at_cap = format!(
+        "not made: fewer than 2 of the monthly cap of {} calls are left",
+        cfg.cap
+    );
+    if rec.rewrite_attempts >= 1 {
+        let why = "not made again: its one try did not finish";
+        return rewrite_skipped(now, store, rec, seen, why, others).await;
     }
-    let to_judge = rec.to_judge().1.len();
-    if to_judge > 0 {
-        rec.stage = Stage::Written;
-    } else {
-        rec.stage = Stage::Done;
-        rec.skipped_reason = Some("no line passed the code checks".into());
+    if calls_left(now, store, cfg.cap).await? < 2 {
+        return rewrite_skipped(now, store, rec, seen, &at_cap, others).await;
     }
+    // Counted first, in the record, so a message killed mid-call never
+    // makes it again.
+    rec.rewrite_attempts = 1;
+    rec.rewrite_version = Some(REWRITE_VERSION.into());
+    rec.rewrite_model = Some(cfg.writer_model.into());
+    rec.at = iso(now);
+    if !put_if_seen(store, &rec, &mut seen).await? {
+        return Ok(changed(&key));
+    }
+    if !claim_call(now, store, cfg.cap).await? {
+        return rewrite_skipped(now, store, rec, seen, &at_cap, others).await;
+    }
+    rec.calls += 1;
+    let refused: Vec<(Pack, Insight, Vec<String>)> = rec
+        .movers
+        .iter()
+        .filter(|m| m.refused())
+        .filter_map(|m| Some((m.pack.clone(), m.insight.clone()?, m.check.clone())))
+        .collect();
+    let (system, user) = write::rewrite_prompt(&refused);
+    match writer.complete_json(&system, &user).await {
+        Ok(reply) => {
+            // Stored as it came, before any check runs on it.
+            rec.stage = Stage::Rewritten;
+            rec.rewrite_reply = Some(reply);
+            rec.work_attempts = 0;
+            rec.at = iso(now);
+            if !put_if_seen(store, &rec, &mut seen).await? {
+                return Ok(changed(&key));
+            }
+            Ok(Tick {
+                line: format!(
+                    "insight {key}: rewrite replied for {} refused lines; checks queued",
+                    refused.len()
+                ),
+                follow_up: true,
+            })
+        }
+        Err(e) => {
+            let why = format!("call failed: {e}");
+            rewrite_skipped(now, store, rec, seen, &why, others).await
+        }
+    }
+}
+
+/// The refused lines stay refused (`why` the rewrite gave none) and the
+/// record goes on to the judge, or ends.
+async fn rewrite_skipped(
+    now: DateTime<Utc>,
+    store: &dyn InsightStore,
+    mut rec: Record,
+    mut seen: Seen,
+    why: &str,
+    others: bool,
+) -> Result<Tick, String> {
+    let key = rec.facts_key.clone();
+    let mut n = 0;
+    for m in rec.movers.iter_mut().filter(|m| m.refused()) {
+        m.rewrite_error = Some(format!("rewrite {why}"));
+        n += 1;
+    }
+    rec.after_rewrite();
     rec.work_attempts = 0;
     rec.at = iso(now);
     if !put_if_seen(store, &rec, &mut seen).await? {
         return Ok(changed(&key));
     }
-    let written = rec.movers.iter().filter(|m| m.insight.is_some()).count();
-    Ok(Tick {
-        line: format!(
-            "insight {key}: {} eligible, {written} written, {to_judge} passed the checks; {}",
-            rec.movers.len(),
-            if to_judge > 0 { "judge queued" } else { "done" }
+    let judge = rec.stage == Stage::Written;
+    Ok(closed(
+        format!(
+            "insight {key}: rewrite {why}; {n} lines stay refused; {}",
+            if judge { "judge queued" } else { "done" }
         ),
-        follow_up: to_judge > 0 || others,
-    })
+        judge || others,
+    ))
+}
+
+/// The code checks over the stored rewrite reply, for the refused lines.
+async fn recheck_step(
+    now: DateTime<Utc>,
+    store: &dyn InsightStore,
+    mut rec: Record,
+    others: bool,
+) -> Result<Tick, String> {
+    let key = rec.facts_key.clone();
+    let mut seen = Seen::of(&rec);
+    if rec.work_attempts >= MAX_ATTEMPTS {
+        // Given up like the check step, but the writer's own passing lines
+        // still go to the judge.
+        let why = format!("recheck did not finish in {MAX_ATTEMPTS} tries");
+        return rewrite_skipped(now, store, rec, seen, &why, others).await;
+    }
+    rec.work_attempts += 1;
+    rec.at = iso(now);
+    if !put_if_seen(store, &rec, &mut seen).await? {
+        return Ok(changed(&key));
+    }
+    warm_check();
+    let packs: Vec<Pack> = rec
+        .movers
+        .iter()
+        .filter(|m| m.refused())
+        .map(|m| m.pack.clone())
+        .collect();
+    let reply = rec.rewrite_reply.clone().unwrap_or(Value::Null);
+    let (insights, errors) = read_lines(&reply, &packs);
+    let no_list = reply.get("insights").and_then(Value::as_array).is_none();
+    let (mut rewritten, mut fixed) = (0, 0);
+    for m in rec.movers.iter_mut().filter(|m| m.refused()) {
+        let Some(i) = insights.iter().find(|i| i.ticker == m.ticker).cloned() else {
+            m.rewrite_error = Some(match errors.iter().find(|(t, _)| *t == m.ticker) {
+                Some((_, e)) => format!("rewrite: {e}"),
+                None if no_list => "rewrite: the reply has no \"insights\" list".into(),
+                None => "the rewrite left the mover out".into(),
+            });
+            continue;
+        };
+        let check = check::check(&m.pack, &i);
+        rewritten += 1;
+        fixed += usize::from(check.is_empty());
+        m.rewritten_from = Some(Refusal {
+            insight: m.insight.replace(i).expect("a refused line has one"),
+            check: std::mem::replace(&mut m.check, check),
+        });
+    }
+    rec.after_rewrite();
+    rec.work_attempts = 0;
+    rec.at = iso(now);
+    if !put_if_seen(store, &rec, &mut seen).await? {
+        return Ok(changed(&key));
+    }
+    let judge = rec.stage == Stage::Written;
+    Ok(closed(
+        format!(
+            "insight {key}: {} refused, {rewritten} rewritten, {fixed} passed the checks; {}",
+            packs.len(),
+            if judge { "judge queued" } else { "done" }
+        ),
+        judge || others,
+    ))
 }
 
 async fn judge_step(
@@ -1456,6 +1727,8 @@ mod tests {
     }
 
     const REPLIED: &str = r#""stage":"replied""#;
+    const REFUSED: &str = r#""stage":"refused""#;
+    const REWRITTEN: &str = r#""stage":"rewritten""#;
     const WRITTEN: &str = r#""stage":"written""#;
     const JUDGED: &str = r#""stage":"judged""#;
 
@@ -1840,7 +2113,9 @@ mod tests {
             let t = run(&m, premarket_now(), &Llm::none(false), &judge).await;
             match update_stage {
                 Stage::Done => assert_eq!(t.line, "insight: nothing to do"),
-                Stage::Replied | Stage::Judged => unreachable!(),
+                Stage::Replied | Stage::Refused | Stage::Rewritten | Stage::Judged => {
+                    unreachable!()
+                }
                 Stage::Written => {
                     assert!(t
                         .line
@@ -2705,6 +2980,10 @@ mod tests {
                 work_attempts: 0,
                 calls: 2,
                 skipped_reason: None,
+                rewrite_version: None,
+                rewrite_model: None,
+                rewrite_attempts: 0,
+                rewrite_reply: None,
             })
             .unwrap();
             for k in [
@@ -2742,5 +3021,536 @@ mod tests {
         // Model calls, and the follow-up queue send a written record makes.
         let total = ops.len() + writer.calls.get() + 1;
         assert_eq!(total, 28, "{ops:#?}");
+    }
+
+    /// The writer's reply with AMD's Chinese line given a relative time
+    /// word ("近期"), which the code checks refuse.
+    fn amd_refused(reply: &Value) -> Value {
+        let mut v = reply.clone();
+        let amd = &mut v["insights"][0];
+        assert_eq!(amd["ticker"], "AMD");
+        let w = amd["zh"]["watch"]
+            .as_str()
+            .unwrap()
+            .replace("下次财报", "近期财报");
+        amd["zh"]["watch"] = json!(w);
+        v
+    }
+    /// A rewrite reply holding `items` of the fixture's writer reply.
+    fn rewrite_of(tickers: &[&str]) -> Value {
+        let items: Vec<Value> = replies()["writer"]["insights"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|i| tickers.contains(&i["ticker"].as_str().unwrap()))
+            .cloned()
+            .collect();
+        json!({ "insights": items })
+    }
+    fn amd(rec: &Record) -> &MoverRecord {
+        rec.movers.iter().find(|m| m.ticker == "AMD").unwrap()
+    }
+    const AMD_FAULT: &str = "zh: relative time: 近期";
+
+    /// The recap's write and check steps with AMD's line refused: the
+    /// record waits for its rewrite.
+    async fn to_refused(m: &Mem) {
+        let writer = Llm::writer(vec![Answer::Value(amd_refused(&replies()["writer"]))]);
+        run(m, recap_now(), &writer, &Llm::none(true)).await;
+        let t = run(m, recap_now(), &Llm::none(false), &Llm::none(true)).await;
+        assert_eq!(
+            t,
+            Tick {
+                line: "insight recap/2026-11-06.json: 5 eligible, 3 written, 2 passed the checks; rewrite queued for 1".into(),
+                follow_up: true,
+            }
+        );
+        let rec = m.record(RECAP_KEY).unwrap();
+        assert_eq!(rec.stage, Stage::Refused);
+        assert_eq!(amd(&rec).check, [AMD_FAULT]);
+    }
+
+    /// A line the code checks refused gets one rewrite call: the rewritten
+    /// line passes them and goes to the judge with the writer's two.
+    #[tokio::test]
+    async fn a_refused_line_is_rewritten_checked_and_judged() {
+        let m = recap_store();
+        to_refused(&m).await;
+        let writer = Llm::writer(vec![Answer::Value(rewrite_of(&["AMD"]))]);
+        let judge = Llm::judge(vec![judge_reply()]);
+        let t = run(&m, recap_now(), &writer, &judge).await;
+        assert_eq!(
+            t,
+            Tick {
+                line: "insight recap/2026-11-06.json: rewrite replied for 1 refused lines; checks queued".into(),
+                follow_up: true,
+            }
+        );
+        let rec = m.record(RECAP_KEY).unwrap();
+        assert_eq!(rec.stage, Stage::Rewritten);
+        assert_eq!(
+            (
+                rec.calls,
+                rec.rewrite_attempts,
+                rec.rewrite_version.as_deref()
+            ),
+            (2, 1, Some("insight-rewrite/v1"))
+        );
+        assert_eq!(rec.rewrite_model.as_deref(), Some("claude-sonnet-5-5"));
+        assert_eq!(rec.rewrite_reply, Some(rewrite_of(&["AMD"])));
+        // Its lines are checked in their own message, with no call.
+        let t = run(&m, recap_now(), &Llm::none(false), &Llm::none(true)).await;
+        assert_eq!(
+            t.line,
+            "insight recap/2026-11-06.json: 1 refused, 1 rewritten, 1 passed the checks; judge queued"
+        );
+        assert!(t.follow_up);
+        let rec = m.record(RECAP_KEY).unwrap();
+        assert_eq!(rec.stage, Stage::Written);
+        let a = amd(&rec);
+        assert!(a.check.is_empty());
+        let fixed: Insight =
+            serde_json::from_value(replies()["writer"]["insights"][0].clone()).unwrap();
+        assert_eq!(a.insight.as_ref(), Some(&fixed));
+        let from = a.rewritten_from.as_ref().unwrap();
+        assert_eq!(from.check, [AMD_FAULT]);
+        assert!(from.insight.zh.watch.contains("近期"));
+        let t = run(&m, recap_now(), &writer, &judge).await;
+        assert_eq!(
+            t.line,
+            "insight recap/2026-11-06.json: judged 3 lines, 3 passed; done"
+        );
+        let rec = m.record(RECAP_KEY).unwrap();
+        assert!(amd(&rec).passed);
+        assert_eq!((rec.stage, rec.calls), (Stage::Done, 3));
+        assert_eq!((writer.calls.get(), judge.calls.get()), (1, 1));
+        assert_eq!(m.calls("2026-11").as_deref(), Some("3"));
+        assert_eq!(
+            run(&m, recap_now(), &writer, &judge).await.line,
+            "insight: nothing to do"
+        );
+    }
+
+    /// A rewritten line the checks still refuse is recorded with both
+    /// refusals and never judged; the writer's passing lines still are.
+    #[tokio::test]
+    async fn a_rewrite_that_still_fails_keeps_both_check_results() {
+        let m = recap_store();
+        to_refused(&m).await;
+        let mut again = rewrite_of(&["AMD"]);
+        let w = again["insights"][0]["zh"]["watch"]
+            .as_str()
+            .unwrap()
+            .replace("下次财报", "明年财报");
+        again["insights"][0]["zh"]["watch"] = json!(w);
+        let writer = Llm::writer(vec![Answer::Value(again)]);
+        run(&m, recap_now(), &writer, &Llm::none(true)).await;
+        let t = run(&m, recap_now(), &Llm::none(false), &Llm::none(true)).await;
+        assert_eq!(
+            t.line,
+            "insight recap/2026-11-06.json: 1 refused, 1 rewritten, 0 passed the checks; judge queued"
+        );
+        let rec = m.record(RECAP_KEY).unwrap();
+        let a = amd(&rec);
+        assert_eq!(a.check, ["zh: relative time: 明年"]);
+        assert_eq!(a.rewritten_from.as_ref().unwrap().check, [AMD_FAULT]);
+        assert!(a.insight.as_ref().unwrap().zh.watch.contains("明年"));
+        let judge = Llm::judge(vec![judge_reply()]);
+        let t = run(&m, recap_now(), &Llm::none(false), &judge).await;
+        assert_eq!(
+            t.line,
+            "insight recap/2026-11-06.json: judged 2 lines, 2 passed; done"
+        );
+        let rec = m.record(RECAP_KEY).unwrap();
+        let a = amd(&rec);
+        assert!(!a.passed && a.verdict.is_none() && a.judge_error.is_none());
+        assert_eq!((rec.calls, writer.calls.get()), (3, 1));
+    }
+
+    /// The writer wrote nothing: done, saying so, with no rewrite call.
+    /// The writer's one line refused and the rewrite leaving it out: done,
+    /// the line still refused.
+    #[tokio::test]
+    async fn an_empty_writer_or_rewrite_reply_ends_the_record() {
+        let m = recap_store();
+        let empty = || Answer::Value(json!({"insights": []}));
+        run(
+            &m,
+            recap_now(),
+            &Llm::writer(vec![empty()]),
+            &Llm::none(true),
+        )
+        .await;
+        let t = run(&m, recap_now(), &Llm::none(false), &Llm::none(true)).await;
+        assert_eq!(
+            t.line,
+            "insight recap/2026-11-06.json: 5 eligible, 0 written, 0 passed the checks; done"
+        );
+        let rec = m.record(RECAP_KEY).unwrap();
+        assert_eq!(rec.stage, Stage::Done);
+        assert_eq!(
+            rec.skipped_reason.as_deref(),
+            Some("the writer wrote no line")
+        );
+        assert_eq!((rec.calls, rec.rewrite_attempts), (1, 0));
+
+        let m = recap_store();
+        let only_amd = json!({"insights": [amd_refused(&replies()["writer"])["insights"][0]]});
+        run(
+            &m,
+            recap_now(),
+            &Llm::writer(vec![Answer::Value(only_amd)]),
+            &Llm::none(true),
+        )
+        .await;
+        let t = run(&m, recap_now(), &Llm::none(false), &Llm::none(true)).await;
+        assert!(
+            t.line
+                .ends_with("1 written, 0 passed the checks; rewrite queued for 1"),
+            "{t:?}"
+        );
+        let writer = Llm::writer(vec![empty()]);
+        run(&m, recap_now(), &writer, &Llm::none(true)).await;
+        let t = run(&m, recap_now(), &Llm::none(false), &Llm::none(true)).await;
+        assert_eq!(
+            t.line,
+            "insight recap/2026-11-06.json: 1 refused, 0 rewritten, 0 passed the checks; done"
+        );
+        let rec = m.record(RECAP_KEY).unwrap();
+        assert_eq!(rec.stage, Stage::Done);
+        assert_eq!(
+            rec.skipped_reason.as_deref(),
+            Some("no line passed the code checks")
+        );
+        let a = amd(&rec);
+        assert_eq!(
+            a.rewrite_error.as_deref(),
+            Some("the rewrite left the mover out")
+        );
+        assert_eq!(a.check, [AMD_FAULT]);
+        assert!(a.rewritten_from.is_none());
+        assert_eq!((rec.calls, writer.calls.get()), (2, 1));
+    }
+
+    /// At the cap, or with one call left (the judge's), the rewrite is not
+    /// made: the line stays refused and the writer's passing lines still go
+    /// to the judge, which gets that last call.
+    #[tokio::test]
+    async fn at_the_cap_the_rewrite_is_skipped_and_the_line_stays_refused() {
+        for used in ["300", "299"] {
+            let m = recap_store();
+            to_refused(&m).await;
+            m.kv.borrow_mut()
+                .insert("insight_calls:2026-11".into(), used.into());
+            let t = run(&m, recap_now(), &Llm::none(false), &Llm::none(true)).await;
+            assert_eq!(
+                t,
+                Tick {
+                    line: "insight recap/2026-11-06.json: rewrite not made: fewer than 2 of the monthly cap of 300 calls are left; 1 lines stay refused; judge queued".into(),
+                    follow_up: true,
+                },
+                "{used}"
+            );
+            let rec = m.record(RECAP_KEY).unwrap();
+            assert_eq!(
+                (rec.stage, rec.rewrite_attempts, rec.calls),
+                (Stage::Written, 0, 1)
+            );
+            let a = amd(&rec);
+            assert_eq!(a.check, [AMD_FAULT]);
+            assert_eq!(
+                a.rewrite_error.as_deref(),
+                Some("rewrite not made: fewer than 2 of the monthly cap of 300 calls are left")
+            );
+            assert_eq!(m.calls("2026-11").as_deref(), Some(used));
+            if used == "299" {
+                let judge = Llm::judge(vec![judge_reply()]);
+                let t = run(&m, recap_now(), &Llm::none(false), &judge).await;
+                assert_eq!(
+                    t.line,
+                    "insight recap/2026-11-06.json: judged 2 lines, 2 passed; done"
+                );
+                assert_eq!(m.calls("2026-11").as_deref(), Some("300"));
+            }
+        }
+        // A failed rewrite call leaves the line refused the same way.
+        let m = recap_store();
+        to_refused(&m).await;
+        let writer = Llm::writer(vec![Answer::Fail(ProviderError::Http(529))]);
+        let t = run(&m, recap_now(), &writer, &Llm::none(true)).await;
+        assert!(
+            t.line.ends_with(
+                "rewrite call failed: http status 529; 1 lines stay refused; judge queued"
+            ),
+            "{t:?}"
+        );
+        let rec = m.record(RECAP_KEY).unwrap();
+        assert_eq!(
+            (rec.stage, rec.rewrite_attempts, rec.calls),
+            (Stage::Written, 1, 2)
+        );
+    }
+
+    /// Killed during the rewrite call: its one try is counted, and the
+    /// redelivery does not make it again.
+    #[tokio::test]
+    async fn a_rewrite_killed_mid_call_is_not_made_again() {
+        let m = recap_store();
+        to_refused(&m).await;
+        let writer = Llm::writer(vec![Answer::Hang]);
+        let killed =
+            insight_tick(recap_now(), &m, &writer, &Llm::none(true), &cfg(), false).now_or_never();
+        assert!(killed.is_none(), "the rewrite call hangs");
+        let rec = m.record(RECAP_KEY).unwrap();
+        assert_eq!((rec.stage, rec.rewrite_attempts), (Stage::Refused, 1));
+        assert_eq!(m.calls("2026-11").as_deref(), Some("2"));
+        let t = run(&m, recap_now(), &Llm::none(false), &Llm::none(true)).await;
+        assert_eq!(
+            t.line,
+            "insight recap/2026-11-06.json: rewrite not made again: its one try did not finish; 1 lines stay refused; judge queued"
+        );
+        assert_eq!(m.record(RECAP_KEY).unwrap().stage, Stage::Written);
+        assert_eq!(
+            (writer.calls.get(), m.calls("2026-11").as_deref()),
+            (1, Some("2"))
+        );
+    }
+
+    /// One message delivered again after a kill at each stage, the new ones
+    /// included (killed right after storing `refused`, the rewrite's reply
+    /// and the rechecked lines): every call is paid once.
+    #[tokio::test]
+    async fn a_kill_at_each_new_stage_never_repays_a_call() {
+        let m = recap_store();
+        let writer = Llm::writer(vec![
+            Answer::Value(amd_refused(&replies()["writer"])),
+            Answer::Value(rewrite_of(&["AMD"])),
+        ]);
+        let judge = Llm::judge(vec![judge_reply()]);
+        for (marker, stage) in [
+            (REPLIED, Stage::Replied),
+            (REFUSED, Stage::Refused),
+            (REWRITTEN, Stage::Rewritten),
+            (WRITTEN, Stage::Written),
+            (JUDGED, Stage::Judged),
+        ] {
+            *m.kill_after.borrow_mut() = Some(marker);
+            let killed =
+                insight_tick(recap_now(), &m, &writer, &judge, &cfg(), false).now_or_never();
+            assert!(killed.is_none(), "{marker}");
+            assert_eq!(m.record(RECAP_KEY).unwrap().stage, stage, "{marker}");
+        }
+        let t = run(&m, recap_now(), &writer, &judge).await;
+        assert!(t.line.ends_with("judged 3 lines, 3 passed; done"), "{t:?}");
+        assert_eq!((writer.calls.get(), judge.calls.get()), (2, 1));
+        assert_eq!(m.calls("2026-11").as_deref(), Some("3"));
+        assert_eq!(m.record(RECAP_KEY).unwrap().calls, 3);
+    }
+
+    /// The recheck killed every time is given up after three tries, with no
+    /// call; the writer's passing lines still go to the judge.
+    #[tokio::test]
+    async fn a_recheck_killed_three_times_is_given_up() {
+        let m = recap_store();
+        to_refused(&m).await;
+        run(
+            &m,
+            recap_now(),
+            &Llm::writer(vec![Answer::Value(rewrite_of(&["AMD"]))]),
+            &Llm::none(true),
+        )
+        .await;
+        for n in 1..=3 {
+            *m.kill_after.borrow_mut() = Some(REWRITTEN);
+            let killed = insight_tick(
+                recap_now(),
+                &m,
+                &Llm::none(false),
+                &Llm::none(true),
+                &cfg(),
+                false,
+            )
+            .now_or_never();
+            assert!(killed.is_none());
+            assert_eq!(m.record(RECAP_KEY).unwrap().work_attempts, n);
+        }
+        let t = run(&m, recap_now(), &Llm::none(false), &Llm::none(true)).await;
+        assert_eq!(
+            t.line,
+            "insight recap/2026-11-06.json: rewrite recheck did not finish in 3 tries; 1 lines stay refused; judge queued"
+        );
+        let rec = m.record(RECAP_KEY).unwrap();
+        assert_eq!((rec.stage, rec.calls), (Stage::Written, 2));
+        assert_eq!(amd(&rec).check, [AMD_FAULT]);
+    }
+
+    /// Judge refusals are never rewritten, and a bundle the code checks
+    /// refused nothing in makes no rewrite call.
+    #[tokio::test]
+    async fn judge_refusals_are_not_rewritten() {
+        let m = recap_store();
+        to_written(&m).await;
+        let mut reply = replies()["judge"].clone();
+        let axon = reply["verdicts"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|v| v["ticker"] == "AXON")
+            .unwrap();
+        axon["formal"] = json!(false);
+        let judge = Llm::judge(vec![Answer::Value(reply)]);
+        let t = run(&m, recap_now(), &Llm::none(false), &judge).await;
+        assert_eq!(
+            t.line,
+            "insight recap/2026-11-06.json: judged 3 lines, 2 passed; done"
+        );
+        let rec = m.record(RECAP_KEY).unwrap();
+        assert_eq!(
+            (rec.stage, rec.calls, rec.rewrite_attempts),
+            (Stage::Done, 2, 0)
+        );
+        assert!(rec.rewrite_reply.is_none());
+        assert!(rec
+            .movers
+            .iter()
+            .all(|m| m.rewritten_from.is_none() && m.rewrite_error.is_none()));
+        let t = run(&m, recap_now(), &Llm::none(false), &Llm::none(true)).await;
+        assert_eq!(t.line, "insight: nothing to do");
+    }
+
+    /// The rewrite message in the worst case: six bundles' records read,
+    /// three attempt counters, then the step: 18 subrequests with its call
+    /// and the follow-up send.
+    #[tokio::test]
+    async fn the_rewrite_tick_stays_at_eighteen_subrequests() {
+        let m = recap_store();
+        to_refused(&m).await;
+        let post = |ct: &str, d: &str, key: &str| PostRef {
+            content_type: ct.into(),
+            trading_date: d.into(),
+            slug: format!("{ct}-{d}"),
+            facts_key: key.into(),
+        };
+        m.posts.borrow_mut().extend([
+            post(
+                "premarket",
+                "2026-11-06",
+                "premarket/2026-11-06-update.json",
+            ),
+            post("recap", "2026-11-05", "recap/2026-11-05.json"),
+            post(
+                "premarket",
+                "2026-11-05",
+                "premarket/2026-11-05-update.json",
+            ),
+        ]);
+        let mut done = m.record(RECAP_KEY).unwrap();
+        done.stage = Stage::Done;
+        let done = serde_json::to_string(&done).unwrap();
+        {
+            let mut o = m.objects.borrow_mut();
+            // Two given up, one still waiting, two done.
+            for k in [
+                "premarket/2026-11-06-update.json",
+                "premarket/2026-11-06.json",
+            ] {
+                o.insert(attempts_key(k), "3".into());
+            }
+            for k in [
+                "premarket/2026-11-05-update.json",
+                "premarket/2026-11-05.json",
+            ] {
+                o.insert(record_key(k), done.clone());
+            }
+        }
+        m.ops.borrow_mut().clear();
+        let writer = Llm::writer(vec![Answer::Value(rewrite_of(&["AMD"]))]);
+        let t = run(&m, recap_now(), &writer, &Llm::none(true)).await;
+        assert!(t.line.ends_with("checks queued"), "{t:?}");
+        let ops = m.ops.borrow().clone();
+        let count = |p: &str| ops.iter().filter(|o| o.starts_with(p)).count();
+        assert_eq!(
+            count("d1 "),
+            3,
+            "posts, the month's count, the claim: {ops:#?}"
+        );
+        // The other five bundles' records and three attempt counters; the
+        // rewritten record itself is read once by the tick and twice more,
+        // before each of its two writes.
+        assert_eq!(
+            count("r2 get insights/") - count("r2 get insights/recap/2026-11-06.json"),
+            5 + 3
+        );
+        assert_eq!(count("r2 get insights/recap/2026-11-06.json"), 3);
+        assert_eq!(count("r2 put "), 2);
+        let total = ops.len() + writer.calls.get() + 1;
+        assert_eq!(total, 18, "{ops:#?}");
+    }
+
+    /// The rewrite answers only for the refused lines: an item for a mover
+    /// whose line passed is ignored, and a refused mover it leaves out stays
+    /// refused, beside one it fixed.
+    #[tokio::test]
+    async fn the_rewrite_touches_only_the_refused_lines() {
+        let m = recap_store();
+        // AMD and CHTR refused; AXON passes.
+        let mut reply = amd_refused(&replies()["writer"]);
+        let chtr = reply["insights"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|i| i["ticker"] == "CHTR")
+            .unwrap();
+        let w = chtr["zh"]["watch"].as_str().unwrap().to_string();
+        chtr["zh"]["watch"] = json!(format!("近期{w}"));
+        run(
+            &m,
+            recap_now(),
+            &Llm::writer(vec![Answer::Value(reply)]),
+            &Llm::none(true),
+        )
+        .await;
+        let t = run(&m, recap_now(), &Llm::none(false), &Llm::none(true)).await;
+        assert!(
+            t.line
+                .ends_with("3 written, 1 passed the checks; rewrite queued for 2"),
+            "{t:?}"
+        );
+        let axon = |r: &Record| {
+            r.movers
+                .iter()
+                .find(|x| x.ticker == "AXON")
+                .unwrap()
+                .clone()
+        };
+        let axon_before = axon(&m.record(RECAP_KEY).unwrap());
+        assert!(axon_before.check.is_empty());
+        // The rewrite fixes AMD, leaves CHTR out and rewrites AXON too.
+        let mut rw = rewrite_of(&["AMD", "AXON"]);
+        rw["insights"][1]["en"]["hook"] = json!("A different hook");
+        run(
+            &m,
+            recap_now(),
+            &Llm::writer(vec![Answer::Value(rw)]),
+            &Llm::none(true),
+        )
+        .await;
+        let t = run(&m, recap_now(), &Llm::none(false), &Llm::none(true)).await;
+        assert_eq!(
+            t.line,
+            "insight recap/2026-11-06.json: 2 refused, 1 rewritten, 1 passed the checks; judge queued"
+        );
+        let rec = m.record(RECAP_KEY).unwrap();
+        assert_eq!(axon(&rec), axon_before);
+        let chtr = rec.movers.iter().find(|x| x.ticker == "CHTR").unwrap();
+        assert_eq!(chtr.check, [AMD_FAULT]);
+        assert_eq!(
+            chtr.rewrite_error.as_deref(),
+            Some("the rewrite left the mover out")
+        );
+        assert!(amd(&rec).check.is_empty() && amd(&rec).rewritten_from.is_some());
+        let (_, judged) = rec.to_judge();
+        let names: Vec<&str> = judged.iter().map(|i| i.ticker.as_str()).collect();
+        assert_eq!(names, ["AMD", "AXON"]);
     }
 }

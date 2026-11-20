@@ -108,15 +108,34 @@ fn card(k: usize, r: &Record, done: Option<&str>) -> String {
     };
     format!(
         r#"<article class="card{class}" data-post="{post}" data-ticker="{ticker}" data-key="{key}">
-<header><span class="n">{n}</span> <strong>{ticker}</strong> {name} <span class="post">{post}</span></header>
+<header><span class="n">{n}</span> <strong>{ticker}</strong> {name} <span class="post">{post}</span>{mark}</header>
 <div class="lines">
 <div lang="en"><p class="hook">{en_hook}</p><p>{en_watch}</p></div>
 <div lang="zh"><p class="hook">{zh_hook}</p><p>{zh_watch}</p></div>
-</div>
+</div>{refused}
 <details open><summary>Evidence the writer had (the items the line cites are marked)</summary><ul>{evidence}</ul></details>
 <fieldset>{fine}{wrong}{advice}</fieldset>
 </article>"#,
         n = k + 1,
+        mark = if r.rewritten_from.is_some() {
+            " <span class=\"tag\">· rewritten</span>"
+        } else {
+            ""
+        },
+        refused = r.rewritten_from.as_ref().map_or(String::new(), |f| {
+            let fails: String = f
+                .check
+                .iter()
+                .map(|c| format!("<li>{}</li>", esc(c)))
+                .collect();
+            format!(
+                "\n<details class=\"rewritten\"><summary>Rewritten: the writer's line, which the code checks refused</summary><div class=\"lines\">\n<div lang=\"en\"><p class=\"hook\">{}</p><p>{}</p></div>\n<div lang=\"zh\"><p class=\"hook\">{}</p><p>{}</p></div>\n</div><ul>{fails}</ul></details>",
+                esc(&f.insight.en.hook),
+                esc(&f.insight.en.watch),
+                esc(&f.insight.zh.hook),
+                esc(&f.insight.zh.watch),
+            )
+        }),
         class = if done.is_some() { " done" } else { "" },
         key = line_key(&r.writer_version, i),
         post = esc(&r.post),
@@ -333,6 +352,7 @@ pub(crate) mod tests {
             published_if: BTreeMap::from([("claude".to_string(), verdicts.0), ("deepseek".to_string(), verdicts.1)]),
             writer_version: "w".into(),
             judge_version: "j".into(),
+            rewritten_from: None,
         }
     }
 

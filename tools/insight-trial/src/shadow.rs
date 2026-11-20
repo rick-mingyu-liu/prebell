@@ -59,8 +59,14 @@ pub(crate) fn lines(records: &[step::Record]) -> Vec<Record> {
                 check: m.check.clone(),
                 judges: BTreeMap::from([(judge.to_string(), j)]),
                 published_if: BTreeMap::from([(judge.to_string(), sent && m.passed)]),
-                writer_version: rec.writer_version.clone(),
+                // A rewritten line is keyed by the rewrite that wrote it, so a
+                // label never carries over from the writer's refused line.
+                writer_version: match (&m.rewritten_from, &rec.rewrite_version) {
+                    (Some(_), Some(v)) => v.clone(),
+                    _ => rec.writer_version.clone(),
+                },
                 judge_version: rec.judge_version.clone(),
+                rewritten_from: m.rewritten_from.clone(),
             });
         }
     }
@@ -166,6 +172,28 @@ mod tests {
         );
     }
 
+    /// A line the rewrite fixed is the judged line, keyed by the rewrite's
+    /// version; the writer's refused line is not shown.
+    #[test]
+    fn a_rewritten_line_is_keyed_by_the_rewrite() {
+        let mut r = record();
+        r.rewrite_version = Some("insight-rewrite/v1".into());
+        let amd = r.movers.iter_mut().find(|m| m.ticker == "AMD").unwrap();
+        let mut refused = amd.insight.clone().unwrap();
+        refused.zh.watch = refused.zh.watch.replace("下次财报", "近期财报");
+        amd.rewritten_from = Some(step::Refusal {
+            insight: refused,
+            check: vec!["zh: relative time: 近期".into()],
+        });
+        let l = lines(&[r]);
+        let amd = l.iter().find(|x| x.ticker == "AMD").unwrap();
+        assert_eq!(amd.writer_version, "insight-rewrite/v1");
+        assert!(amd.published_if["claude"]);
+        let axon = l.iter().find(|x| x.ticker == "AXON").unwrap();
+        assert_eq!(axon.writer_version, "insight-writer/v6");
+        assert_eq!(reviewable(&l).len(), 3);
+    }
+
     #[test]
     fn a_record_still_waiting_for_its_judge_shows_no_line() {
         let mut r = record();
@@ -217,7 +245,7 @@ mod tests {
     }
 
     /// `score` on shadow lines (no seeded rows) reports the reading part of
-    /// the bar: not yet assessable below 50 lines read, met at 50 with none
+    /// the bar: not yet assessable below 20 lines read, met at 20 with none
     /// marked wrong, not met with one.
     #[test]
     fn the_shadow_report_states_the_reading_part_of_the_bar() {
@@ -237,10 +265,17 @@ mod tests {
         };
         let fine: Vec<Label> = reviewable(&l).iter().map(|r| label(r, "fine")).collect();
         assert_eq!(fine.len(), 51);
-        let md = crate::score::report(&l, &[], &[], &[], &fine[..9]);
-        assert!(md.contains("Shadow: 9 judge-passed lines read"), "{md}");
+        let md = crate::score::report(&l, &[], &[], &[], &fine[..19]);
+        assert!(md.contains("Shadow: 19 judge-passed lines read (a mover in the 8:00 brief and its 8:35 update counts once) of the 20 the bar needs"), "{md}");
+        assert!(md.contains("fewer than 20 judge-passed lines read"), "{md}");
         assert!(md.contains("The bar is not yet assessable"), "{md}");
         assert!(!md.contains("The trial's own part of the bar"), "{md}");
+        let md = crate::score::report(&l, &[], &[], &[], &fine[..20]);
+        assert!(md.contains("Shadow: 20 judge-passed lines read"), "{md}");
+        assert!(
+            md.contains("at least 20 judge-passed lines read, none marked wrong"),
+            "{md}"
+        );
         let md = crate::score::report(&l, &[], &[], &[], &fine);
         assert!(md.contains("Shadow: 51 judge-passed lines read"), "{md}");
         assert!(md.contains("The reading part of the bar is met"), "{md}");
@@ -251,6 +286,74 @@ mod tests {
             md.contains("The bar is not met: 1 judge-passed lines marked wrong."),
             "{md}"
         );
+    }
+
+    /// The recap record with AMD's line written by the rewrite: the writer's
+    /// line had "近期", which the code checks refused.
+    fn rewritten_record() -> step::Record {
+        let mut r = record();
+        r.rewrite_version = Some("insight-rewrite/v1".into());
+        let amd = r.movers.iter_mut().find(|m| m.ticker == "AMD").unwrap();
+        let mut refused = amd.insight.clone().unwrap();
+        refused.zh.watch = refused.zh.watch.replace("下次财报", "近期财报");
+        amd.rewritten_from = Some(step::Refusal {
+            insight: refused,
+            check: vec!["zh: relative time: 近期".into()],
+        });
+        r
+    }
+
+    /// Review L3 of PR #83: a rewritten line is marked, with the writer's
+    /// refused line and its check failures collapsed under it; the other
+    /// cards are as before.
+    #[test]
+    fn the_page_marks_a_rewritten_line_and_folds_the_refused_one_under_it() {
+        let l = lines(&[rewritten_record()]);
+        let picked = page_lines(&l, &[]);
+        let html = crate::page::shadow_page(&picked);
+        assert_eq!(html.matches("· rewritten</span>").count(), 1, "{html}");
+        assert_eq!(html.matches("<details class=\"rewritten\">").count(), 1);
+        assert!(html.contains("<li>zh: relative time: 近期</li>"), "{html}");
+        let amd = l.iter().find(|r| r.ticker == "AMD").unwrap();
+        let from = amd.rewritten_from.as_ref().unwrap();
+        assert!(html.contains(&from.insight.zh.watch));
+        // The refused line is folded (no "open"), and the shown one is the
+        // rewrite's, labelled by its own key.
+        assert!(!html.contains("<details class=\"rewritten\" open"));
+        let key = line_key(&amd.writer_version, amd.insight.as_ref().unwrap());
+        assert!(html.contains(&format!("data-key=\"{key}\"")));
+        // Without a rewrite, the page is the same as before the mark existed.
+        let plain = crate::page::shadow_page(&page_lines(&lines(&[record()]), &[]));
+        assert!(!plain.contains("rewritten"), "{plain}");
+    }
+
+    /// The report counts rewritten lines apart (judged, passed, labelled);
+    /// they count toward the lines read like any other, and a report with
+    /// no rewritten line has no such line.
+    #[test]
+    fn the_report_counts_rewritten_lines_apart() {
+        let l = lines(&[rewritten_record()]);
+        let label = |r: &Record| Label {
+            post: r.post.clone(),
+            ticker: r.ticker.clone(),
+            key: Some(line_key(&r.writer_version, r.insight.as_ref().unwrap())),
+            label: "fine".into(),
+        };
+        let all: Vec<Label> = reviewable(&l).iter().map(|r| label(r)).collect();
+        let md = crate::score::report(&l, &[], &[], &[], &all);
+        assert!(md.contains("Shadow: 3 judge-passed lines read"), "{md}");
+        assert!(
+            md.contains("Rewritten lines (refused by the code checks, then rewritten once): 1 judged, 1 passed the judge, 1 labelled, 1 of them judge-passed (counted in the lines read above)."),
+            "{md}"
+        );
+        let others: Vec<Label> = all.into_iter().filter(|x| x.ticker != "AMD").collect();
+        let md = crate::score::report(&l, &[], &[], &[], &others);
+        assert!(
+            md.contains("1 judged, 1 passed the judge, 0 labelled, 0 of them"),
+            "{md}"
+        );
+        let md = crate::score::report(&lines(&[record()]), &[], &[], &[], &others);
+        assert!(!md.contains("Rewritten lines"), "{md}");
     }
 
     /// A line labelled before with the same text (the brief and its update

@@ -15,7 +15,7 @@ use crate::{line_key, Record, JUDGES};
 /// Seeded recall the chosen judge needs (the spec's bar).
 const RECALL_BAR: f64 = 0.9;
 /// Judge-passed lines Rick must have read (the spec's bar).
-const READ_BAR: usize = 50;
+const READ_BAR: usize = 20;
 
 #[derive(Deserialize, Clone, Debug)]
 pub(crate) struct Label {
@@ -38,7 +38,7 @@ pub(crate) struct JudgeScore<'a> {
     /// Labelled lines it passed.
     pub passed_labelled: usize,
     /// The same, counting a mover once per trading date across the 8:00
-    /// brief and its 8:35 update: what the bar's 50 counts.
+    /// brief and its 8:35 update: what the bar's `READ_BAR` counts.
     pub read: usize,
     /// Lines it passed that the owner marked wrong, with the label.
     pub passed_wrong: Vec<(&'a Record, String)>,
@@ -86,9 +86,9 @@ fn ratio(a: usize, b: usize) -> f64 {
 /// The spec's bar for the chosen judge.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Bar {
-    /// Fewer than 50 judge-passed lines labelled: the offline trial cannot
-    /// reach 50 (34 eligible movers in the final run); the rest come in the
-    /// shadow stage.
+    /// Fewer than `READ_BAR` judge-passed lines labelled: the offline
+    /// trial did not reach them (34 eligible movers in the final run); the
+    /// rest come in the shadow stage.
     NotYetAssessable,
     Met,
     NotMet,
@@ -565,10 +565,37 @@ pub(crate) fn report(
             c.passed_wrong.len()
         );
         let verdict = match s.bar {
-            Bar::NotYetAssessable => "The bar is not yet assessable: fewer than 50 judge-passed lines read.".to_string(),
-            Bar::Met => "The reading part of the bar is met: at least 50 judge-passed lines read, none marked wrong. Its seeded-recall part is measured by the trial's seed run, in the trial's report.".to_string(),
+            Bar::NotYetAssessable => format!("The bar is not yet assessable: fewer than {READ_BAR} judge-passed lines read."),
+            Bar::Met => format!("The reading part of the bar is met: at least {READ_BAR} judge-passed lines read, none marked wrong. Its seeded-recall part is measured by the trial's seed run, in the trial's report."),
             Bar::NotMet => format!("The bar is not met: {} judge-passed lines marked wrong.", c.passed_wrong.len()),
         };
+        // Lines the Worker's rewrite wrote count toward the bar like the
+        // writer's (they are what readers would get); shown apart so the
+        // evidence says how much rests on rewrites.
+        let rewritten: Vec<&Record> = records
+            .iter()
+            .filter(|r| r.rewritten_from.is_some())
+            .filter(|r| r.judges.get(c.name).is_some_and(|j| j.answered()))
+            .collect();
+        if !rewritten.is_empty() {
+            let passed = |r: &&&Record| r.judges[c.name].passed;
+            let labelled = |r: &&&Record| {
+                let key = r.insight.as_ref().map(|i| line_key(&r.writer_version, i));
+                labels.iter().any(|l| {
+                    l.post == r.post
+                        && l.ticker == r.ticker
+                        && l.key.as_ref().is_none_or(|k| Some(k) == key.as_ref())
+                })
+            };
+            let _ = writeln!(
+                out,
+                "\nRewritten lines (refused by the code checks, then rewritten once): {} judged, {} passed the judge, {} labelled, {} of them judge-passed (counted in the lines read above).",
+                rewritten.len(),
+                rewritten.iter().filter(passed).count(),
+                rewritten.iter().filter(labelled).count(),
+                rewritten.iter().filter(passed).filter(labelled).count(),
+            );
+        }
         let _ = writeln!(out, "\n{verdict}");
         return out;
     }
@@ -802,7 +829,7 @@ mod tests {
         let s = score(&records2, &seeded, &labels);
         assert_eq!((s.judges[1].agree, s.chosen), (9, "deepseek"));
         // DeepSeek passed nothing Rick marked wrong and caught every seed,
-        // but Rick read only 7 lines it passed, not 50: never "met".
+        // but Rick read only 7 lines it passed, not 20: never "met".
         assert_eq!(s.bar, Bar::NotYetAssessable);
 
         let posts = [json!({"post": "recap_2026-11-12", "movers": 16, "eligible": 10})];
@@ -821,7 +848,7 @@ mod tests {
             "Judge: **claude**",
             "Judge-passed lines Rick labelled for this judge: 9.",
             "does not hold: 1 judge-passed lines marked wrong, seeded recall 90%.",
-            "The bar is not yet assessable: it needs at least 50 judge-passed lines labelled, and this trial has 9.",
+            "The bar is not yet assessable: it needs at least 20 judge-passed lines labelled, and this trial has 9.",
             "## Limits of this trial",
             "today's, read for past posts",
             "### Each seeded line",
@@ -832,9 +859,11 @@ mod tests {
         }
     }
 
-    /// Review H2: the bar needs at least 50 judge-passed lines read.
+    /// Review H2: the bar needs at least 20 judge-passed lines read (50
+    /// until Rick lowered it on 2026-11-19).
     #[test]
-    fn the_bar_needs_fifty_read_judge_passed_lines() {
+    fn the_bar_needs_twenty_read_judge_passed_lines() {
+        assert_eq!(READ_BAR, 20);
         let records: Vec<Record> = (0..60)
             .map(|k| record("recap_2026-11-12", &format!("T{k}"), (true, true)))
             .collect();
@@ -853,11 +882,12 @@ mod tests {
         let s = score(&records, &seeded, &labels);
         assert_eq!(s.judges[0].passed_labelled, 60);
         assert_eq!(s.bar, Bar::Met);
-        let s = score(&records, &seeded, &labels[..49]);
+        assert_eq!(score(&records, &seeded, &labels[..20]).bar, Bar::Met);
+        let s = score(&records, &seeded, &labels[..19]);
         assert_eq!(s.bar, Bar::NotYetAssessable);
-        let md = report(&records, &[], &seeded, &[], &labels[..49]);
+        let md = report(&records, &[], &seeded, &[], &labels[..19]);
         assert!(!md.contains("The bar is met"), "{md}");
-        // Fifty read, but one passed line marked wrong: not met.
+        // Enough read, but one passed line marked wrong: not met.
         let mut wrong = labels.clone();
         wrong[0].label = "wrong_fact".into();
         assert_eq!(score(&records, &seeded, &wrong).bar, Bar::NotMet);

@@ -158,6 +158,7 @@ impl Http for ReqwestHttp {
             status,
             body: text,
             set_cookie: None,
+            content_type: None,
         })
     }
 }
