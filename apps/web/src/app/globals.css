@@ -229,6 +229,8 @@ html:lang(zh-Hans) .front-ipo-facts dt { letter-spacing: 0.02em; }
    previous/next briefs as plain ruled links. */
 .story { max-width: 680px; margin: 0 auto; }
 .story .story-kicker { margin-bottom: 0.5rem; }
+.mover-link { color: inherit; text-decoration: none; }
+.mover-link:hover .mover-name, .mover-link:focus-visible .mover-name { text-decoration: underline; }
 .kicker-link { color: inherit; text-decoration: underline; text-decoration-thickness: 1px; text-underline-offset: 2px; }
 .kicker-link:hover, .kicker-link:focus-visible { color: var(--ink); }
 .story .story-title { margin: 0 0 0.75rem; font-size: 32px; line-height: 1.12; letter-spacing: -0.01em; }

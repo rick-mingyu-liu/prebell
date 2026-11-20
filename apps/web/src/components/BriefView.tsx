@@ -54,7 +54,14 @@ export default function BriefView({ data, locale, signup }: BriefViewProps) {
   const moversSection = (heading: string) => (
     <section className="story-movers" aria-labelledby="movers">
       <h2 id="movers">{heading}</h2>
-      <MoversTable movers={movers} locale={locale} variant="table" showPrice priceLabel={facts?.kind === "recap" ? "close" : "last"} />
+      <MoversTable
+        movers={movers}
+        locale={locale}
+        variant="table"
+        showPrice
+        priceLabel={facts?.kind === "recap" ? "close" : "last"}
+        tickerPages={new Set(data.tickerPages)}
+      />
     </section>
   );
   // An IPO write-up links to its IPO page, named by its facts key (`ipo/<ipo_slug>/...`).

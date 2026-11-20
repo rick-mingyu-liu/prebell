@@ -117,3 +117,26 @@ describe("MoversTable table", () => {
     expect(out).not.toContain("1,234.50");
   });
 });
+
+describe("MoversTable ticker links", () => {
+  const movers = [mover(), mover({ symbol: "BRK.B", name: "Berkshire Hathaway" }), mover({ symbol: "ZZZZ", name: "Unknown Co" })];
+
+  it("links a company to its ticker page only when the site has one, in both variants", () => {
+    for (const variant of ["column", "table"] as const) {
+      const out = renderToStaticMarkup(
+        <MoversTable movers={movers} locale="zh" variant={variant} tickerPages={new Set(["AAPL", "BRK.B"])} />,
+      );
+      expect(out).toContain(
+        '<a class="mover-link" href="/zh/t/AAPL"><b class="mover-name">Apple Inc.</b> <span class="mover-ticker muted">AAPL</span></a>',
+      );
+      expect(out).toContain('href="/zh/t/BRK.B"');
+      expect(out).not.toContain("/t/ZZZZ");
+      expect(out).toContain('<b class="mover-name">Unknown Co</b>');
+    }
+  });
+
+  it("links nothing without the set", () => {
+    const out = renderToStaticMarkup(<MoversTable movers={movers} locale="en" variant="table" />);
+    expect(out).not.toContain("mover-link");
+  });
+});

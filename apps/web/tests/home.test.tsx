@@ -66,6 +66,7 @@ const reporting: StripDay = {
 };
 
 const data = (over: Partial<HomeData> = {}): HomeData => ({
+  tickerPages: [],
   lead: lead(),
   leadFacts: premarketFacts(),
   earnings: [item()],

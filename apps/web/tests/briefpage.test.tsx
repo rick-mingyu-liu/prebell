@@ -47,6 +47,7 @@ const item = (slug: string, contentType: string, tradingDate: string): PostListI
 });
 
 const data = (over: Partial<BriefData> = {}): BriefData => ({
+  tickerPages: [],
   post: post(),
   facts: premarketFacts(),
   adjacent: { prev: item("recap-2026-10-29", "recap", "2026-10-29"), next: item("recap-2026-10-30", "recap", "2026-10-30") },
@@ -384,8 +385,32 @@ describe("loadBrief", () => {
     expect(data.adjacent.prev?.slug).toBe("recap-2026-10-29");
     expect(data.adjacent.next).toBeNull();
     expect(data.charts).toEqual([]);
-    expect(s.queries).toHaveLength(1);
+    // The neighbours, then one lookup of which movers have a ticker page.
+    expect(s.queries).toHaveLength(2);
+    expect(s.queries[1]).toContain("UNION SELECT ticker FROM earnings_calendar");
     expect(s.queries.some((q) => q.includes("post_charts"))).toBe(false);
+  });
+
+  it("lists the movers that have a ticker page, and loses only the links when that read fails", async () => {
+    // REGN has a calendar row and INTC a filing; HPQ's only row is quarantined; XOM is not a mover.
+    const s = spies(`${seed()}
+INSERT INTO earnings_calendar (ticker, report_date, time_slot, status, source, first_seen_at, checked_at, updated_at)
+VALUES ('REGN','2026-11-04','bmo','confirmed','ir','x','x','x'), ('HPQ','2026-11-25','amc','quarantined','ir','x','x','x');
+INSERT INTO earnings_filings VALUES ('0000050863-26-000041',50863,'INTC','8-K','2.02','2026-10-23','2026-10-23','x','x.htm','earnings:intc-x','done','x');`);
+    const data = await loadBrief(s.db, s.bucket, post(), "en");
+    expect([...data.tickerPages].sort()).toEqual(["INTC", "REGN"]);
+
+    const errors: unknown[] = [];
+    const broken = {
+      prepare: (q: string) => {
+        if (q.includes("UNION SELECT ticker")) throw new Error("D1 down");
+        return s.db.prepare(q);
+      },
+    };
+    const again = await loadBrief(broken, s.bucket, post(), "en", (e) => errors.push(e));
+    expect(again.tickerPages).toEqual([]);
+    expect(again.facts).not.toBeNull();
+    expect(errors).toHaveLength(1);
   });
 
   it("reads an updated brief's facts from the key the post points at", async () => {
@@ -397,8 +422,8 @@ describe("loadBrief", () => {
   it("loadBrief no longer loads the strip", async () => {
     const s = spies(seed());
     const data = await loadBrief(s.db, s.bucket, post(), "en");
-    expect(Object.keys(data).sort()).toEqual(["adjacent", "charts", "facts", "post"]);
-    expect(s.queries.some((q) => q.includes("earnings_calendar"))).toBe(false);
+    expect(Object.keys(data).sort()).toEqual(["adjacent", "charts", "facts", "post", "tickerPages"]);
+    expect(s.queries.some((q) => q.includes("report_date"))).toBe(false);
   });
 
   it("loads an earnings check's charts and no facts or neighbours", async () => {

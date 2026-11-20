@@ -45,7 +45,7 @@ ${zh ? `INSERT INTO post_translations (post_id, lang, status, title, summary, bo
 const RANGE_SET = writeup(901, "range_set", "0001628280-26-072484", "2026-11-10", "Anthropic sets IPO range at $70 to $78 a share");
 const FILED = writeup(900, "filed", "0001628280-26-067168", "2026-10-26", "Anthropic files to go public", false);
 
-const homeData = (ipos: HomeData["ipos"]): HomeData => ({ lead: null, leadFacts: null, earnings: [], recent: [], reporting: null, ipos });
+const homeData = (ipos: HomeData["ipos"]): HomeData => ({ lead: null, leadFacts: null, earnings: [], recent: [], reporting: null, ipos, tickerPages: [] });
 const home = (ipos: HomeData["ipos"], locale: Locale = "en") =>
   renderToStaticMarkup(<HomeView data={homeData(ipos)} locale={locale} signup={false} />);
 const section = (out: string) => {

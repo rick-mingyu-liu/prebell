@@ -1,6 +1,7 @@
 /** The front page's data: the lead brief and its facts, the earnings checks, recent posts and who reports next. */
 
 import { addDays, listLatestEarnings, listRecentBriefs, stripDay, type StripDay } from "./earnings";
+import { moverPages } from "./brief";
 import { loadFacts, type FactsView, type R2Like } from "./facts";
 import { listHomeIpos, type HomeIpo } from "./ipo";
 import { getLatestPost, type D1Like, type Lang, type PostHead, type PostListItem } from "./posts";
@@ -23,6 +24,8 @@ export interface HomeData {
   reporting: StripDay | null;
   /** Active tracked IPOs (not withdrawn, at most 30 days past listing); empty without any or before migration 0009. */
   ipos: HomeIpo[];
+  /** The lead's movers whose ticker has a page on the site (their rows link to it). */
+  tickerPages: string[];
 }
 
 /** The more recently published of the two briefs; the premarket on a tie. */
@@ -74,5 +77,6 @@ export async function loadHome(
   const recent = [...briefs.filter((p) => p.slug !== lead?.slug), ...checks.slice(EARNINGS_SHOWN)]
     .sort(newestFirst)
     .slice(0, RECENT_SHOWN);
-  return { lead, leadFacts, earnings: checks.slice(0, EARNINGS_SHOWN), recent, reporting, ipos };
+  const tickerPages = await moverPages(db, leadFacts, onError && ((e) => onError(e, "ticker pages")));
+  return { lead, leadFacts, earnings: checks.slice(0, EARNINGS_SHOWN), recent, reporting, ipos, tickerPages };
 }
