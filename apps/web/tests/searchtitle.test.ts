@@ -45,5 +45,9 @@ describe("earningsSearchTitle", () => {
     expect(calendarAligned(3, 2026, "2026-09-30")).toBe(true);
     expect(calendarAligned(4, 2026, "2026-11-17")).toBe(false);
     expect(calendarAligned(3, 2026, "2027-03-01")).toBe(false);
+    // The window's edges: the quarter's last day, day 120 and day 121 after it.
+    expect(calendarAligned(3, 2026, "2026-09-29")).toBe(false);
+    expect(calendarAligned(3, 2026, "2027-01-28")).toBe(true);
+    expect(calendarAligned(3, 2026, "2027-01-29")).toBe(false);
   });
 });
