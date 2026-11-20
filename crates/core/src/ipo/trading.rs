@@ -1,7 +1,8 @@
 //! After listing: the recap's batched Yahoo close read also asks for the
 //! symbols of tracked IPOs that are priced or listed, as long as they fit
 //! in the room its last batch has left (no extra request), and for 30 days
-//! after the first session. Each close is stored with the IPO price from
+//! after the first session. A symbol already in the universe (ANT since
+//! 2026-11-19) is read once, as a universe ticker, and takes no room. Each close is stored with the IPO price from
 //! the final prospectus and the change against it, computed by code from
 //! those two stored numbers. The first session found confirms the date.
 
@@ -11,7 +12,7 @@ use super::resolve::{changed_rows, current_of, first_session, yahoo_url};
 use super::store::{IpoState, IpoStore, IpoWrite, TradingRow};
 use super::{is_final, iso, ymd, Tracked};
 use crate::facts::{round2, Quote};
-use crate::premarket::yahoo_symbol;
+use crate::premarket::{in_universe, yahoo_symbol};
 use crate::providers::ProviderError;
 use crate::yahoo::QUOTE_BATCH;
 
@@ -29,13 +30,15 @@ pub fn room(universe_len: usize) -> usize {
 /// before listing only once a pricing signal is on file (an `EFFECT`
 /// notice or a final prospectus filed on or before `session`), so another
 /// security that shares the symbol is never read as the IPO; within
-/// `TRADING_DAYS` of the first session; at most `room`.
+/// `TRADING_DAYS` of the first session; at most `room` of them outside the
+/// universe (a universe ticker is in the batches anyway and takes none).
 pub fn symbols(
     st: &IpoState,
     list: &[Tracked],
     session: NaiveDate,
     room: usize,
 ) -> Vec<(String, String)> {
+    let mut left = room;
     list.iter()
         .filter_map(|t| {
             let r = st.row(&t.slug)?;
@@ -55,9 +58,17 @@ pub fn symbols(
             if first.is_none() && !signal {
                 return None;
             }
-            Some((t.slug.clone(), yahoo_symbol(r.symbol.as_deref()?)))
+            Some((t.slug.clone(), r.symbol.clone()?))
         })
-        .take(room)
+        .filter(|(_, sym)| {
+            if in_universe(sym) {
+                return true;
+            }
+            let fits = left > 0;
+            left = left.saturating_sub(1);
+            fits
+        })
+        .map(|(slug, sym)| (slug, yahoo_symbol(&sym)))
         .collect()
 }
 
@@ -230,7 +241,8 @@ mod tests {
         assert_eq!(room(518), 32);
         assert_eq!(room(500), 0);
         assert_eq!(room(549), 1);
-        assert_eq!(room(crate::premarket::universe().len()), 32);
+        // 519 tickers since ANT was added (2026-11-19): 31 slots left.
+        assert_eq!(room(crate::premarket::universe().len()), 31);
     }
 
     #[test]
@@ -249,6 +261,34 @@ mod tests {
         });
         assert_eq!(symbols(&st, &list(), d("2026-12-05"), 32).len(), 1);
         assert!(symbols(&st, &list(), d("2026-12-06"), 32).is_empty());
+    }
+
+    /// A tracked IPO whose symbol is a universe ticker (ANT since
+    /// 2026-11-19) is read with the universe and takes no room: it is picked
+    /// even with none left, and the others still get the room there is.
+    #[test]
+    fn a_universe_symbol_takes_no_room() {
+        let mut st = state();
+        st.watch[0].symbol = Some("ANT".into());
+        assert_eq!(
+            symbols(&st, &list(), d("2026-11-05"), 0),
+            [("nw".to_string(), "ANT".to_string())]
+        );
+        st.filings.push(FilingRow {
+            accession: "e".into(),
+            slug: "hb".into(),
+            form: "EFFECT".into(),
+            filing_date: "2026-11-05".into(),
+            ..Default::default()
+        });
+        assert_eq!(
+            symbols(&st, &list(), d("2026-11-05"), 1),
+            [
+                ("nw".to_string(), "ANT".to_string()),
+                ("hb".to_string(), "HRBO".to_string())
+            ]
+        );
+        assert_eq!(symbols(&st, &list(), d("2026-11-05"), 0).len(), 1);
     }
 
     #[test]
