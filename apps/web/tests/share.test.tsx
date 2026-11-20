@@ -132,7 +132,7 @@ INSERT INTO post_translations (post_id, lang, status, title, summary, body_md, u
     const pages: [string, Metadata, string, string][] = [
       ["home", await home.generateMetadata(props({ locale: "en" })), "/en", "PreBell"],
       ["calendar", await calendar.generateMetadata(props({ locale: "zh" })), "/zh/earnings", "市场日历"],
-      ["ticker", await ticker.generateMetadata(props({ locale: "en", ticker: "intc" })), "/en/t/INTC", "INTC earnings"],
+      ["ticker", await ticker.generateMetadata(props({ locale: "en", ticker: "intc" })), "/en/t/INTC", "Intel (INTC) earnings"],
       ["about", await about.generateMetadata(props({ locale: "zh" })), "/zh/about", "关于"],
     ];
     for (const [name, m, url, title] of pages) {
@@ -142,6 +142,13 @@ INSERT INTO post_translations (post_id, lang, status, title, summary, body_md, u
     }
     expect(og(pages[1][1]).locale).toBe("zh_CN");
     expect(og(pages[2][1]).description).toBe("INTC earnings dates and PreBell earnings checks, with links to the SEC filings.");
+    // The page's own description, not the site tagline, for search results too.
+    expect(pages[2][1].title).toBe("Intel (INTC) earnings");
+    expect(pages[2][1].description).toBe(og(pages[2][1]).description);
+    expect(pages[1][1].description).toBe(og(pages[1][1]).description);
+    // A ticker outside the watchlist keeps the symbol-only title.
+    const unknown = await ticker.generateMetadata(props({ locale: "zh", ticker: "zzzz" }));
+    expect(unknown.title).toBe("ZZZZ 财报");
   });
 
   it("the layout's fallback card has no URL of its own", async () => {

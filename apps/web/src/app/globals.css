@@ -229,6 +229,8 @@ html:lang(zh-Hans) .front-ipo-facts dt { letter-spacing: 0.02em; }
    previous/next briefs as plain ruled links. */
 .story { max-width: 680px; margin: 0 auto; }
 .story .story-kicker { margin-bottom: 0.5rem; }
+.kicker-link { color: inherit; text-decoration: underline; text-decoration-thickness: 1px; text-underline-offset: 2px; }
+.kicker-link:hover, .kicker-link:focus-visible { color: var(--ink); }
 .story .story-title { margin: 0 0 0.75rem; font-size: 32px; line-height: 1.12; letter-spacing: -0.01em; }
 .story .story-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 0.25rem 0.75rem; margin: 0 0 1rem; }
 .checked { display: inline-block; padding: 0.05rem 0.5rem; border: 1px solid var(--up); background: color-mix(in srgb, var(--up) 8%, var(--paper)); color: var(--ink); font-weight: 600; }
@@ -329,6 +331,7 @@ html:lang(zh-Hans) .filters { font-variant-caps: normal; }
 .filters a[aria-current] { color: var(--ink); border-bottom-color: var(--ink); }
 .pager { display: flex; justify-content: space-between; gap: 1rem; margin-top: 1.5rem; padding-top: 0.75rem; border-top: 1px solid var(--rule); }
 .pager:empty { display: none; }
+.pager .next { margin-left: auto; }
 .pager a { font-size: 14px; font-weight: 600; text-decoration: none; }
 .pager a:hover, .pager a:focus-visible { text-decoration: underline; }
 
