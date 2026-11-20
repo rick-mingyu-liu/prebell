@@ -10,6 +10,7 @@ import { getDb } from "@/lib/db";
 import { pendingTitle } from "@/lib/labels";
 import { resolvePost } from "@/lib/posts";
 import { postCard } from "@/lib/covers";
+import { earningsSearchTitle } from "@/lib/searchtitle";
 import { jsonLd, newsArticleLd, pairedAlternates, shareMetadata, siteOrigin } from "@/lib/seo";
 import { signupEnabled } from "@/lib/signup";
 
@@ -40,8 +41,14 @@ export async function generateMetadata({ params }: PageProps<"/[locale]/p/[slug]
       }),
     };
   }
+  // An earnings check's search-result title names the company and period (what people search); its
+  // page, share card and JSON-LD keep the headline.
+  const searchTitle =
+    post.contentType === "earnings" && post.ticker
+      ? earningsSearchTitle({ slug, ticker: post.ticker, tradingDate: post.tradingDate }, locale as Locale)
+      : post.title;
   return {
-    title: post.title,
+    title: searchTitle,
     description: post.summary,
     alternates: post.hasOtherLang ? pairedAlternates(locale, `/p/${slug}`) : { canonical: `/${locale}/p/${slug}` },
     ...shareMetadata({
