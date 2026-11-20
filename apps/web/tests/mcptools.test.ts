@@ -550,3 +550,16 @@ describe("review fixes", () => {
     expect(c2.errors).toHaveLength(1);
   });
 });
+
+describe("calendarSource", () => {
+  it("links the week's page inside the site's range and the undated calendar outside it", async () => {
+    const { calendarSource } = await import("../src/lib/mcptools");
+    expect(calendarSource("en", "2026-11-11", "2026-11-19")).toBe("/en/earnings?week=2026-11-09");
+    expect(calendarSource("zh", "2026-10-28", "2026-11-19")).toBe("/zh/earnings?week=2026-10-26");
+    expect(calendarSource("en", "2026-10-20", "2026-11-19")).toBe("/en/earnings");
+    expect(calendarSource("en", "2027-06-01", "2026-11-19")).toBe("/en/earnings");
+    // The last week the site shows (13 weeks past this one) still links.
+    expect(calendarSource("en", "2027-02-15", "2026-11-19")).toBe("/en/earnings?week=2027-02-15");
+    expect(calendarSource("en", "2027-02-22", "2026-11-19")).toBe("/en/earnings");
+  });
+});

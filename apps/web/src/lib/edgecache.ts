@@ -20,23 +20,38 @@ const NEXT_HEADERS = [
   "next-router-segment-prefetch",
 ] as const;
 
-/** Query parameters no page reads; dropped from the key so a shared link with them still hits. */
-const TRACKING = /^(utm_[a-z_]+|fbclid|gclid|msclkid)$/;
+/**
+ * The query parameters a page reads, by path after the locale; every other parameter (tracking, cache busters)
+ * is dropped from the key, since the page renders the same without it.
+ */
+const PAGE_PARAMS: Record<string, readonly string[]> = {
+  "/earnings": ["week"],
+  "/archive": ["type", "page"],
+};
 
 /** The page's own `Cache-Control`, kept on the stored copy and put back on a hit. */
 const ORIGINAL_CC = "x-page-cache-control";
 
 /**
- * The cache key for a page request, or null when it must not be cached: anything but a plain GET for a page
- * under `/en` or `/zh`. The key is the URL without tracking parameters, its query sorted, and no headers.
+ * The cache key for a page request, or null when it must not be cached: anything but a plain GET or HEAD for a
+ * page under `/en` or `/zh`. The key is the URL with only the parameters its page reads (sorted), plus the
+ * deployed version (`v`), so a new deploy never serves HTML that names the old build's script and style files
+ * (they are gone with the old version). No headers: a page's HTML is the same for every visitor.
  */
-export function pageCacheKey(req: Request): Request | null {
-  if (req.method !== "GET") return null;
+export function pageCacheKey(req: Request, version: string | undefined): Request | null {
+  if (req.method !== "GET" && req.method !== "HEAD") return null;
   const url = new URL(req.url);
-  if (!/^\/(en|zh)(\/|$)/.test(url.pathname)) return null;
+  const m = /^\/(en|zh)(\/.*)?$/.exec(url.pathname);
+  if (!m) return null;
   if (url.searchParams.has("_rsc") || NEXT_HEADERS.some((h) => req.headers.has(h))) return null;
-  for (const k of [...url.searchParams.keys()]) if (TRACKING.test(k)) url.searchParams.delete(k);
-  url.searchParams.sort();
+  const keep = PAGE_PARAMS[m[2] ?? ""] ?? [];
+  const query = new URLSearchParams();
+  for (const k of keep) {
+    const v = url.searchParams.get(k);
+    if (v !== null) query.set(k, v);
+  }
+  if (version) query.set("v", version);
+  url.search = query.toString();
   url.hash = "";
   return new Request(url.toString());
 }
@@ -62,14 +77,16 @@ export function pageTtl(res: Response): number {
 export async function cachedPage(
   req: Request,
   cache: PageCache | undefined,
+  version: string | undefined,
   waitUntil: (p: Promise<unknown>) => void,
   render: () => Promise<Response>,
 ): Promise<Response> {
-  const key = cache ? pageCacheKey(req) : null;
+  const key = cache ? pageCacheKey(req, version) : null;
   if (!cache || !key) return render();
   const hit = await cache.match(key).catch(() => undefined);
   if (hit) {
-    const out = new Response(hit.body, hit);
+    // HEAD (uptime and link checkers) gets the stored page's headers without its body.
+    const out = new Response(req.method === "HEAD" ? null : hit.body, hit);
     const cc = out.headers.get(ORIGINAL_CC);
     if (cc) out.headers.set("cache-control", cc);
     out.headers.delete(ORIGINAL_CC);
@@ -78,7 +95,8 @@ export async function cachedPage(
   }
   const res = await render();
   const ttl = pageTtl(res);
-  if (ttl <= 0 || !res.body) return res;
+  // A HEAD render has no body to store.
+  if (ttl <= 0 || !res.body || req.method !== "GET") return res;
   const [mine, theirs] = res.body.tee();
   const stored = new Response(mine, res);
   stored.headers.set(ORIGINAL_CC, res.headers.get("cache-control") ?? "");
@@ -90,18 +108,23 @@ export async function cachedPage(
 }
 
 /**
- * A permanent redirect to HTTPS for a plain-HTTP request to the site's own hosts (its domain and www), else
- * null. Other hosts (workers.dev, localhost) are left alone. On Cloudflare an HTTP request has both an
- * `http:` URL and `x-forwarded-proto: http`; `wrangler dev` rewrites the URL to the route's host over http but
- * sends no such header, so requiring both keeps local runs from redirecting to themselves. A client that
- * forges the header only gets sent to HTTPS.
+ * A permanent redirect (308, so a POST stays a POST) to HTTPS on the apex for a plain-HTTP request to the
+ * site's own hosts (its domain and www, which goes straight to the apex), else null. Other hosts (workers.dev,
+ * localhost) are left alone. On Cloudflare an HTTP request has an `http:` URL and says so in
+ * `x-forwarded-proto` and `cf-visitor`; `wrangler dev` rewrites the URL to the route's host over http but sends
+ * neither header, so requiring both keeps local runs from redirecting to themselves. A client that forges a
+ * header only gets sent to HTTPS.
  */
 export function httpsRedirect(req: Request, siteUrl: string | undefined): Response | null {
   if (!siteUrl) return null;
   const url = new URL(req.url);
-  if (url.protocol !== "http:" || req.headers.get("x-forwarded-proto") !== "http") return null;
+  if (url.protocol !== "http:") return null;
+  const forwarded =
+    req.headers.get("x-forwarded-proto") === "http" || /"scheme"\s*:\s*"http"/.test(req.headers.get("cf-visitor") ?? "");
+  if (!forwarded) return null;
   const apex = new URL(siteUrl).hostname;
   if (url.hostname !== apex && url.hostname !== `www.${apex}`) return null;
   url.protocol = "https:";
-  return new Response(null, { status: 301, headers: { location: url.toString() } });
+  url.hostname = apex;
+  return new Response(null, { status: 308, headers: { location: url.toString() } });
 }

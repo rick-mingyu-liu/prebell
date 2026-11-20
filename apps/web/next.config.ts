@@ -8,6 +8,9 @@ const nextConfig: NextConfig = {
   // Whether the author photo is shipped, decided once here because the Worker has no file system.
   env: { HAS_AUTHOR_PHOTO: existsSync("public/author.jpg") ? "1" : "0" },
   experimental: { globalNotFound: true },
+  // Metadata always renders in <head> (no streamed metadata for browsers), so the HTML is the same for every
+  // user agent and one edge-cached copy (worker.ts) serves browsers and HTML-only bots alike.
+  htmlLimitedBots: /.*/,
   async redirects() {
     return [
       // www is a second custom domain on this Worker; every www URL moves to the apex.

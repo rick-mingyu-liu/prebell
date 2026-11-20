@@ -15,9 +15,12 @@ const worker = {
     const redirect = httpsRedirect(request, env.SITE_URL);
     if (redirect) return redirect;
     const cache = (globalThis.caches as unknown as { default?: PageCache } | undefined)?.default;
+    // The deployed version (`version_metadata` binding) keys the page cache; see pageCacheKey.
+    const version = (env as { CF_VERSION_METADATA?: { id?: string } }).CF_VERSION_METADATA?.id;
     return cachedPage(
       request,
       cache,
+      version,
       (p) => ctx.waitUntil(p),
       () => handler.fetch(request, env, ctx),
     );

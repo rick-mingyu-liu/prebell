@@ -10,6 +10,7 @@
 import { COMPANIES } from "./companies.generated";
 import {
   addDays,
+  calendarWeeks,
   isDate,
   listCalendarRange,
   listTickerCalendar,
@@ -620,8 +621,18 @@ async function earningsCalendar(ctx: ToolContext, from: string, to: string, tick
     days: out,
     ...(tickers.length ? { tickers_without_dates: tickers.filter((t) => !seen.has(t)) } : {}),
     notice: NOTICE[lang],
-    source: new URL(`/${lang}/earnings?week=${weekStart(from)}`, ctx.origin).href,
+    source: new URL(calendarSource(lang, from, todayEt(ctx.now)), ctx.origin).href,
   };
+}
+
+/**
+ * The calendar page for the week holding `from`, or the undated calendar when that week is outside the
+ * site's range (it answers 404 there), so `source` is always a working link.
+ */
+export function calendarSource(lang: Lang, from: string, today: string): string {
+  const week = weekStart(from);
+  const { first, last } = calendarWeeks(today);
+  return week >= first && week <= last ? `/${lang}/earnings?week=${week}` : `/${lang}/earnings`;
 }
 
 /* ---------- earnings_report ---------- */
