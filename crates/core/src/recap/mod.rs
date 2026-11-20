@@ -958,16 +958,17 @@ mod tests {
         assert_eq!(m.sessions.borrow().len(), 4 + universe().len());
     }
 
-    #[tokio::test]
-    async fn a_priced_ipo_rides_the_movers_batch_and_is_never_a_mover() {
-        use crate::ipo::store::{FactRow, FilingRow, IpoStore, MemIpoStore, WatchRow};
+    /// The tracked IPO (`anthropic`, the only row of `ipo-watch.tsv`),
+    /// priced at $75.00 on 2026-10-28, with `symbol` from its cover.
+    fn priced_ipo(symbol: &str) -> crate::ipo::store::MemIpoStore {
+        use crate::ipo::store::{FactRow, FilingRow, MemIpoStore, WatchRow};
         let ipo = MemIpoStore::default();
         {
             let mut st = ipo.state.borrow_mut();
             st.watch.push(WatchRow {
                 slug: "anthropic".into(),
                 status: "priced".into(),
-                symbol: Some("ANT".into()),
+                symbol: Some(symbol.into()),
                 ..Default::default()
             });
             st.filings.push(FilingRow {
@@ -1004,10 +1005,35 @@ mod tests {
                 ..Default::default()
             });
         }
+        ipo
+    }
+
+    /// The first session's row: the close, the IPO price and the change.
+    fn first_trading_row(ipo: &crate::ipo::store::MemIpoStore) {
+        let st = ipo.state.borrow();
+        assert_eq!(st.trading.len(), 1);
+        let t = &st.trading[0];
+        assert_eq!(
+            (t.session_date.as_str(), t.close, t.ipo_price, t.change_pct),
+            ("2026-10-29", 90.0, Some(75.0), Some(20.0))
+        );
+        let r = st.row("anthropic").unwrap();
+        assert_eq!(
+            (r.status.as_str(), r.first_trade_date.as_deref()),
+            ("listed", Some("2026-10-29"))
+        );
+    }
+
+    /// A tracked IPO whose symbol is not in the universe rides the last v7
+    /// batch's room (no extra request) and is never a mover.
+    #[tokio::test]
+    async fn a_priced_ipo_rides_the_movers_batch_and_is_never_a_mover() {
+        use crate::ipo::store::IpoStore;
+        let ipo = priced_ipo("NWRB");
         // Up 20% on the IPO price: it would top the gainers if it were one.
         let m = md(&[
             q("NVDA", 182.35, 3.08, Some(210_000_000)),
-            q("ANT", 90.0, 20.0, Some(400_000_000)),
+            q("NWRB", 90.0, 20.0, Some(400_000_000)),
         ]);
         let f = build_facts_with_ipo(
             &m,
@@ -1026,7 +1052,7 @@ mod tests {
         let batches = m.batches.borrow();
         assert_eq!(batches.len(), 1);
         assert_eq!(batches[0].len(), universe().len() + 1);
-        assert_eq!(batches[0].last().map(String::as_str), Some("ANT"));
+        assert_eq!(batches[0].last().map(String::as_str), Some("NWRB"));
         assert!(universe().len() % crate::yahoo::QUOTE_BATCH != 0);
         assert_eq!(syms(&f.gainers), ["NVDA"]);
         assert!(
@@ -1034,17 +1060,45 @@ mod tests {
             "{:?}",
             f.diagnostics
         );
-        let st = ipo.state.borrow();
-        let t = &st.trading[0];
-        assert_eq!(
-            (t.session_date.as_str(), t.close, t.ipo_price, t.change_pct),
-            ("2026-10-29", 90.0, Some(75.0), Some(20.0))
+        first_trading_row(&ipo);
+    }
+
+    /// ANT is in the universe (Rick, 2026-11-19) and tracked by the IPO
+    /// watch: its symbol is requested once, as a universe ticker; it can be
+    /// a mover; and the IPO page still gets its trading row, with the IPO
+    /// price and the change, from that one quote.
+    #[tokio::test]
+    async fn an_ipo_in_the_universe_is_read_once_and_can_be_a_mover() {
+        use crate::ipo::store::IpoStore;
+        assert!(crate::premarket::in_universe("ANT"));
+        let ipo = priced_ipo("ANT");
+        let m = md(&[
+            q("NVDA", 182.35, 3.08, Some(210_000_000)),
+            q("ANT", 90.0, 20.0, Some(400_000_000)),
+        ]);
+        let f = build_facts_with_ipo(
+            &m,
+            &ns(vec![]),
+            &llm(vec![]),
+            &MemStore::default(),
+            Some(&ipo as &dyn IpoStore),
+            date(),
+            now(),
+            &|| 0,
+            &|_| {},
+        )
+        .await;
+        let batches = m.batches.borrow();
+        assert_eq!(batches.len(), 1);
+        assert_eq!(batches[0].len(), universe().len(), "no extra symbol");
+        assert_eq!(batches[0].iter().filter(|s| *s == "ANT").count(), 1);
+        assert_eq!(syms(&f.gainers), ["ANT", "NVDA"]);
+        assert!(
+            f.diagnostics.iter().any(|l| l == "ipo symbols=1 closes=1"),
+            "{:?}",
+            f.diagnostics
         );
-        let r = st.row("anthropic").unwrap();
-        assert_eq!(
-            (r.status.as_str(), r.first_trade_date.as_deref()),
-            ("listed", Some("2026-10-29"))
-        );
+        first_trading_row(&ipo);
     }
 
     #[tokio::test]

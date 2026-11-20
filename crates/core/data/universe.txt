@@ -1,4 +1,5 @@
 # S&P 500 ∪ Nasdaq-100 as of 2026-11 (Wikipedia index-change tables citing S&P DJI and Nasdaq releases, through 2026-11-04); refresh periodically.
+# Plus hand-added companies in neither index, in the section at the end (ANT, 2026-11-19): keep them when the index members are refreshed (docs/runbook.md).
 # Format: TICKER<TAB>Company Name<TAB>GICS Sector<TAB>Group. Lines starting with # are comments.
 A	Agilent Technologies	Health Care	Life science tools & diagnostics
 AAPL	Apple	Information Technology	Mega-cap tech platforms
@@ -518,3 +519,6 @@ RKLB	Rocket Lab	Industrials	Aerospace & defense
 SHOP	Shopify	Information Technology	Internet & e-commerce
 SPCX	SpaceX	Industrials	Aerospace & defense
 TRI	Thomson Reuters	Industrials	Exchanges & data
+# Hand-added, in neither index: Anthropic (ANT), listed on Nasdaq 2026-11-19, added by Rick's decision of 2026-11-19 (docs/decisions.md).
+# It must survive the next index refresh: keep this section when the lines above are regenerated.
+ANT	Anthropic	Information Technology	Cloud & enterprise software

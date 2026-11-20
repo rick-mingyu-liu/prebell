@@ -81,6 +81,11 @@ pub fn sector(ticker: &str) -> Option<&'static str> {
     index().by_ticker.get(ticker).and_then(|e| e.sector)
 }
 
+/// Whether `ticker` (display form, e.g. `BRK.B`) is in the universe.
+pub fn in_universe(ticker: &str) -> bool {
+    index().by_ticker.contains_key(ticker)
+}
+
 /// Industry group (e.g. "Memory & storage") for a universe ticker.
 pub fn group(ticker: &str) -> Option<&'static str> {
     index().by_ticker.get(ticker).and_then(|e| e.group)
@@ -116,6 +121,7 @@ mod tests {
         d.dedup();
         assert_eq!(d.len(), u.len());
         assert!(u.contains(&"BRK.B".to_string()) && u.contains(&"ASML".to_string()));
+        assert!(in_universe("BRK.B") && !in_universe("BRK-B") && !in_universe("NWRB"));
     }
 
     #[test]
