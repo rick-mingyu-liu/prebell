@@ -230,6 +230,7 @@
     "prevWeek": "Previous week",
     "nextWeek": "Next week",
     "tickerTitle": "{ticker} earnings",
+    "tickerTitleNamed": "{name} ({ticker}) earnings",
     "tickerDescription": "{ticker} earnings dates and PreBell earnings checks, with links to the SEC filings.",
     "checks": "Earnings checks",
     "noChecks": "No earnings checks yet.",
@@ -296,8 +297,7 @@
     "movers": "Top movers",
     "adjacent": "More briefs",
     "prev": "Previous",
-    "next": "Next",
-    "kickerEarnings": "Earnings check · {ticker}"
+    "next": "Next"
   },
   "paper": {
     "masthead": {

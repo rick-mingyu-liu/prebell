@@ -69,7 +69,13 @@ export default function BriefView({ data, locale, signup }: BriefViewProps) {
             {typeLabel(t, kind)} · <time dateTime={post.tradingDate}>{formatDate(post.tradingDate, locale)}</time>
           </>
         ) : post.ticker ? (
-          t("brief.kickerEarnings", { ticker: post.ticker })
+          // The symbol links to the company's page (its report dates and every check).
+          <>
+            {typeLabel(t, "earnings")} ·{" "}
+            <Link className="kicker-link" href={`/${locale}/t/${encodeURIComponent(post.ticker)}`}>
+              {post.ticker}
+            </Link>
+          </>
         ) : (
           typeLabel(t, post.contentType)
         )}

@@ -1,9 +1,12 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "prebell-web",
-  "main": ".open-next/worker.js",
+  // worker.ts wraps the OpenNext worker (.open-next/worker.js) with the page cache and the HTTPS redirect.
+  "main": "worker.ts",
   "compatibility_date": "2026-10-01",
   "compatibility_flags": ["nodejs_compat", "global_fetch_strictly_public"],
+  // The deployed version's id, part of the page cache's key (src/lib/edgecache.ts). Free; no resource behind it.
+  "version_metadata": { "binding": "CF_VERSION_METADATA" },
   "assets": {
     "directory": ".open-next/assets",
     "binding": "ASSETS"

@@ -2,7 +2,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { Locale } from "../src/i18n/routing";
 import { translator } from "../src/lib/translator";
-import { addDays, todayEt, weekStart } from "../src/lib/earnings";
+import { addDays, todayEt, weekStart, WEEKS_AHEAD } from "../src/lib/earnings";
 import { memoryD1 } from "./d1";
 
 // The pages read D1 through getDb() and messages through next-intl/server; both are swapped for
@@ -21,7 +21,7 @@ vi.mock("next-intl/server", () => ({
 }));
 
 const { default: Archive } = await import("../src/app/[locale]/archive/page");
-const { default: EarningsCalendar } = await import("../src/app/[locale]/earnings/page");
+const { default: EarningsCalendar, generateMetadata: calendarMetadata } = await import("../src/app/[locale]/earnings/page");
 const { default: TickerArchive, generateMetadata: tickerMetadata } = await import("../src/app/[locale]/t/[ticker]/page");
 
 const seed = `
@@ -93,10 +93,11 @@ describe("list pages are one paper column", () => {
     // Two companies, no events that week: the events count is left out.
     expect(out).toContain('<p class="cal-count">2 companies</p>');
     expect(out).toContain('<nav class="cal-weeks" aria-label="Weeks">');
-    expect(out).toContain(
-      '<a class="cal-btn cal-arrow" rel="prev" href="/en/earnings?week=2026-10-19"><span aria-hidden="true">←</span><span class="sr-only">Previous week</span></a>',
-    );
+    // The calendar's first week: no way further back.
+    expect(out).not.toContain('rel="prev"');
+    expect(out).not.toContain("Previous week");
     expect(out).toContain('<a class="cal-btn cal-arrow" rel="next" href="/en/earnings?week=2026-11-02">');
+    expect(out).toContain('<nav class="pager"><a class="next" href="/en/earnings?week=2026-11-02">Next week →</a></nav>');
     // A week that is not this one links back to it.
     expect(out).toContain('<a class="cal-btn cal-this-week" href="/en/earnings">Back to this week</a>');
     // The share button waits for script (hidden in the server markup), with a live region for its result.
@@ -105,6 +106,35 @@ describe("list pages are one paper column", () => {
     // The board itself: five columns, none of them today in a past week.
     expect(out.match(/<section id="d-2026-10-/g)).toHaveLength(5);
     expect(out).not.toContain("is-today");
+  });
+
+  it("a later week links back a week", async () => {
+    const out = renderToStaticMarkup(await EarningsCalendar(props({ locale: "en" }, { week: "2026-11-02" })));
+    expect(out).toContain(
+      '<a class="cal-btn cal-arrow" rel="prev" href="/en/earnings?week=2026-10-26"><span aria-hidden="true">←</span><span class="sr-only">Previous week</span></a>',
+    );
+    expect(out).toContain('<a href="/en/earnings?week=2026-10-26">← Previous week</a>');
+  });
+
+  it("weeks before the first and past the last answer 404 before reading anything, and the last has no next", async () => {
+    const last = addDays(weekStart(todayEt()), 7 * WEEKS_AHEAD);
+    for (const week of ["2026-10-19", "2004-12-27", addDays(last, 7), "2048-05-11"]) {
+      await expect(EarningsCalendar(props({ locale: "en" }, { week })), week).rejects.toThrow("NEXT_HTTP_ERROR_FALLBACK;404");
+      await expect(calendarMetadata(props({ locale: "en" }, { week })), week).rejects.toThrow("NEXT_HTTP_ERROR_FALLBACK;404");
+    }
+    const out = renderToStaticMarkup(await EarningsCalendar(props({ locale: "en" }, { week: last })));
+    expect(out).toContain('rel="prev"');
+    expect(out).not.toContain('rel="next"');
+    expect(out).not.toContain("Next week");
+  });
+
+  it("a dated week's title names the week and its description is the calendar's own", async () => {
+    const m = await calendarMetadata(props({ locale: "en" }, { week: "2026-11-04" }));
+    expect(m.title).toBe("Market calendar · Week of Nov 2, 2026");
+    expect(m.description).toBe(
+      "US earnings dates for the S&P 500 and Nasdaq-100, with confirmed dates, reported results and links to the SEC filings.",
+    );
+    expect((await calendarMetadata(props({ locale: "en" }))).title).toBe("Market calendar");
   });
 
   it("the current week has no way back, counts companies once and events, and marks today", async () => {
@@ -131,7 +161,7 @@ describe("list pages are one paper column", () => {
     const out = renderToStaticMarkup(await EarningsCalendar(props({ locale: "zh" }, { week: "2026-10-26" })));
     expect(out).toContain('<h1 class="cal-title"><span class="kicker">市场日历</span>2026年10月26日当周</h1>');
     expect(out).toContain('<p class="cal-count">本周 2 家公司</p>');
-    expect(out).toContain('<span class="sr-only">上一周</span>');
+    expect(out).toContain('<span class="sr-only">下一周</span>');
     expect(out).toContain(">回到本周</a>");
     expect(out).toMatch(/hidden="">.*?分享<\/button>/);
     expect(out).toContain("<time dateTime=\"2026-10-26\">周一 · 10/26</time>");

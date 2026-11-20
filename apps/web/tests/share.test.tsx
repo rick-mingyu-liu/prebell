@@ -118,6 +118,27 @@ INSERT INTO post_translations (post_id, lang, status, title, summary, body_md, u
     }
   });
 
+  it("an earnings check's search title names the company and period; its cards and JSON-LD keep the headline", async () => {
+    env.db = memoryD1(`${seed}
+INSERT INTO runs VALUES ('earnings:nvda','earnings','2026-11-17','published',1,NULL,'2026-11-17T21:00:00Z','2026-11-17T21:00:00Z');
+INSERT INTO posts (id, run_key, content_type, template_id, trading_date, slug, facts_r2_key, published_at)
+  VALUES (3,'earnings:nvda','earnings','earnings:v1','2026-11-17','nvda-q3-fy2027-earnings',NULL,'2026-11-17T21:26:00Z');
+INSERT INTO post_translations (post_id, lang, status, title, summary, body_md, updated_at)
+  VALUES (3,'en','published','Nvidia''s quarterly revenue reaches $115.8 billion','S.','# x','2026-11-17T21:26:00Z');
+INSERT INTO post_translations (post_id, lang, status, title, summary, body_md, updated_at)
+  VALUES (3,'zh','published','英伟达营收升至1158.4亿美元','S.','# x','2026-11-17T21:26:00Z');
+INSERT INTO earnings_filings VALUES ('0001045810-26-000100',1045810,'NVDA','8-K','2.02','2026-11-17','2026-11-17','2026-11-17T21:05:00Z','x.htm','earnings:nvda','done','2026-11-17T21:06:00Z');`);
+    const en = await post.generateMetadata(props({ locale: "en", slug: "nvda-q3-fy2027-earnings" }));
+    expect(en.title).toBe("Nvidia Q3 fiscal 2027 earnings results");
+    expect(og(en).title).toBe("Nvidia's quarterly revenue reaches $115.8 billion");
+    expect(tw(en).title).toBe("Nvidia's quarterly revenue reaches $115.8 billion");
+    const zh = await post.generateMetadata(props({ locale: "zh", slug: "nvda-q3-fy2027-earnings" }));
+    expect(zh.title).toBe("Nvidia 2027财年第三季度财报");
+    // A brief keeps its headline as the title.
+    const brief = await post.generateMetadata(props({ locale: "en", slug: "premarket-2026-11-05" }));
+    expect(brief.title).toBe("Futures slip <b> as yields rise");
+  });
+
   it("a post names the default card until its own is rendered, so an early share never caches a URL that changes", async () => {
     env.cards = new Set();
     const props_ = props({ locale: "en", slug: "premarket-2026-11-05" });
@@ -132,7 +153,7 @@ INSERT INTO post_translations (post_id, lang, status, title, summary, body_md, u
     const pages: [string, Metadata, string, string][] = [
       ["home", await home.generateMetadata(props({ locale: "en" })), "/en", "PreBell"],
       ["calendar", await calendar.generateMetadata(props({ locale: "zh" })), "/zh/earnings", "市场日历"],
-      ["ticker", await ticker.generateMetadata(props({ locale: "en", ticker: "intc" })), "/en/t/INTC", "INTC earnings"],
+      ["ticker", await ticker.generateMetadata(props({ locale: "en", ticker: "intc" })), "/en/t/INTC", "Intel (INTC) earnings"],
       ["about", await about.generateMetadata(props({ locale: "zh" })), "/zh/about", "关于"],
     ];
     for (const [name, m, url, title] of pages) {
@@ -142,6 +163,13 @@ INSERT INTO post_translations (post_id, lang, status, title, summary, body_md, u
     }
     expect(og(pages[1][1]).locale).toBe("zh_CN");
     expect(og(pages[2][1]).description).toBe("INTC earnings dates and PreBell earnings checks, with links to the SEC filings.");
+    // The page's own description, not the site tagline, for search results too.
+    expect(pages[2][1].title).toBe("Intel (INTC) earnings");
+    expect(pages[2][1].description).toBe(og(pages[2][1]).description);
+    expect(pages[1][1].description).toBe(og(pages[1][1]).description);
+    // A ticker outside the watchlist keeps the symbol-only title.
+    const unknown = await ticker.generateMetadata(props({ locale: "zh", ticker: "zzzz" }));
+    expect(unknown.title).toBe("ZZZZ 财报");
   });
 
   it("the layout's fallback card has no URL of its own", async () => {

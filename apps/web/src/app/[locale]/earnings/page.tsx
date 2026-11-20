@@ -1,12 +1,13 @@
 import type { Metadata } from "next";
 import Link from "next/link";
+import { notFound } from "next/navigation";
 import { getTranslations, setRequestLocale } from "next-intl/server";
 import CalendarWeek from "@/components/CalendarWeek";
 import IpoWatchList from "@/components/IpoWatchList";
 import ShareButton from "@/components/ShareButton";
 import type { Locale } from "@/i18n/routing";
 import { getDb } from "@/lib/db";
-import { addDays, INDEXED_WEEKS, isDate, listCalendarWeek, todayEt, weekStart } from "@/lib/earnings";
+import { addDays, calendarWeeks, INDEXED_WEEKS, isDate, listCalendarWeek, todayEt, weekStart } from "@/lib/earnings";
 import { listEvents } from "@/lib/events";
 import { iposByDate, listIposBetween, listIpoWatch } from "@/lib/ipo";
 import { pairedAlternates, shareMetadata } from "@/lib/seo";
@@ -17,22 +18,36 @@ function monday(raw: string | string[] | undefined): string {
   return weekStart(isDate(v) ? v : todayEt());
 }
 
+/** A 404 for a week outside the calendar's range, before anything is read. */
+function inRange(start: string, today: string): { first: string; last: string } {
+  const range = calendarWeeks(today);
+  if (start < range.first || start > range.last) notFound();
+  return range;
+}
+
 export async function generateMetadata({ params, searchParams }: PageProps<"/[locale]/earnings">): Promise<Metadata> {
   const { locale } = await params;
   const week = (await searchParams).week;
   const t = await getTranslations({ locale });
   const start = monday(week);
+  inRange(start, todayEt());
   const query = isDate(Array.isArray(week) ? week[0] : week) ? `?week=${start}` : "";
-  // The week links go on forever; only weeks near today are worth indexing.
+  // Only weeks near today are worth indexing.
   const distance = Math.abs(Date.parse(start) - Date.parse(weekStart(todayEt()))) / (7 * 86_400_000);
+  // A dated week names its week, so the weeks' titles differ; the undated page moves with today.
+  const title = query
+    ? `${t("earnings.calendarTitle")} · ${t("earnings.boardTitle", { date: formatDate(start, locale as Locale) })}`
+    : t("earnings.calendarTitle");
+  const description = t("earnings.calendarDescription");
   return {
-    title: t("earnings.calendarTitle"),
+    title,
+    description,
     alternates: pairedAlternates(locale, `/earnings${query}`),
     ...shareMetadata({
       locale: locale as Locale,
       url: `/${locale}/earnings${query}`,
-      title: t("earnings.calendarTitle"),
-      description: t("earnings.calendarDescription"),
+      title,
+      description,
       siteName: t("site.name"),
     }),
     ...(distance > INDEXED_WEEKS ? { robots: { index: false } } : {}),
@@ -46,8 +61,9 @@ export default async function EarningsCalendar({ params, searchParams }: PagePro
   const t = await getTranslations("earnings");
   const te = await getTranslations("events");
   const ti = await getTranslations("ipo");
-  const db = getDb();
   const today = todayEt();
+  const range = inRange(start, today);
+  const db = getDb();
   const [days, events, weekIpos, watch] = await Promise.all([
     listCalendarWeek(db, start, locale),
     listEvents(db, start, addDays(start, 4), locale),
@@ -76,19 +92,23 @@ export default async function EarningsCalendar({ params, searchParams }: PagePro
         </div>
         <div className="cal-tools">
           <nav className="cal-weeks" aria-label={t("weeks")}>
-            <Link className="cal-btn cal-arrow" href={href(addDays(start, -7))} rel="prev">
-              <span aria-hidden="true">←</span>
-              <span className="sr-only">{t("prevWeek")}</span>
-            </Link>
+            {start > range.first && (
+              <Link className="cal-btn cal-arrow" href={href(addDays(start, -7))} rel="prev">
+                <span aria-hidden="true">←</span>
+                <span className="sr-only">{t("prevWeek")}</span>
+              </Link>
+            )}
             {start !== weekStart(today) && (
               <Link className="cal-btn cal-this-week" href={`/${locale}/earnings`}>
                 {t("thisWeek")}
               </Link>
             )}
-            <Link className="cal-btn cal-arrow" href={href(addDays(start, 7))} rel="next">
-              <span aria-hidden="true">→</span>
-              <span className="sr-only">{t("nextWeek")}</span>
-            </Link>
+            {start < range.last && (
+              <Link className="cal-btn cal-arrow" href={href(addDays(start, 7))} rel="next">
+                <span aria-hidden="true">→</span>
+                <span className="sr-only">{t("nextWeek")}</span>
+              </Link>
+            )}
           </nav>
           <ShareButton
             path={href(start)}
@@ -115,8 +135,12 @@ export default async function EarningsCalendar({ params, searchParams }: PagePro
         )}
       </p>
       <nav className="pager">
-        <Link href={href(addDays(start, -7))}>← {t("prevWeek")}</Link>
-        <Link href={href(addDays(start, 7))}>{t("nextWeek")} →</Link>
+        {start > range.first && <Link href={href(addDays(start, -7))}>← {t("prevWeek")}</Link>}
+        {start < range.last && (
+          <Link className="next" href={href(addDays(start, 7))}>
+            {t("nextWeek")} →
+          </Link>
+        )}
       </nav>
     </div>
   );

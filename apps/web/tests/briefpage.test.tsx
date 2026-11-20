@@ -212,7 +212,7 @@ describe("BriefView", () => {
     const out = render(earnings());
     // React hoists the author photo's preload ahead of the markup; Next moves it into <head>.
     expect(out.replace(/^(<link [^>]*\/>)*/, "").startsWith('<article class="story">')).toBe(true);
-    const kicker = at(out, '<p class="kicker story-kicker">Earnings check · AMGN</p>');
+    const kicker = at(out, '<p class="kicker story-kicker">Earnings check · <a class="kicker-link" href="/en/t/AMGN">AMGN</a></p>');
     const title = at(out, "<h1 class=\"story-title\">Amgen&#x27;s third quarter 2026: revenue up 8% to $10.4 billion</h1>");
     const checked = at(out, '<span class="checked">✓ Every figure traced to the filing</span>');
     const cover = at(out, `<span class="cover-tag"><img src="${companyLogo("AMGN")}" alt="AMGN"`);
