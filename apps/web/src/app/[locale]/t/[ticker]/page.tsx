@@ -67,10 +67,11 @@ export default async function TickerArchive({ params }: PageProps<"/[locale]/t/[
   };
   const slot: Record<string, string> = { bmo: t("bmo"), amc: t("amc"), unknown: t("timeUnknown") };
   const name = companyName(ticker);
-  // The next report (the earliest date from today on), else the latest past one; the dates are newest first.
+  // The next report (the earliest unreported date from today on), else the newest reported one; the dates are
+  // newest first. A past date never marked reported (no filing seen) is not shown as a report that happened.
   const today = todayEt();
   const next = [...dates].reverse().find((d) => d.date >= today && d.status !== "reported");
-  const last = dates.find((d) => d.date < today || d.status === "reported");
+  const last = dates.find((d) => d.status === "reported");
   const lead = next ? { label: t("nextReport"), d: next } : last ? { label: t("lastReport"), d: last } : null;
   const { first, last: lastWeek } = calendarWeeks(today);
   const week = lead ? weekStart(lead.d.date) : null;

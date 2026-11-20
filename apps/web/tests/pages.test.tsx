@@ -195,6 +195,23 @@ INSERT INTO earnings_calendar (ticker, report_date, time_slot, status, source, f
     expect(lone).not.toContain("See the week on the calendar");
   });
 
+  it("a report due today is the next one, and a past date never marked reported is not shown as the last", async () => {
+    const today = todayEt();
+    env.db = memoryD1(`${seed}
+INSERT INTO earnings_calendar (ticker, report_date, time_slot, status, source, first_seen_at, checked_at, updated_at)
+  VALUES ('A','${today}','amc','confirmed','ir','x','x','x'), ('A','${addDays(today, -5)}','bmo','confirmed','yahoo','x','x','x');`);
+    const due = renderToStaticMarkup(await TickerArchive(props({ locale: "en", ticker: "A" })));
+    expect(due).toContain(`Next report: <time dateTime="${today}">`);
+
+    // Only a stale past date and the older reported one (Oct 28): the line names the reported one.
+    env.db = memoryD1(`${seed}
+INSERT INTO earnings_calendar (ticker, report_date, time_slot, status, source, first_seen_at, checked_at, updated_at)
+  VALUES ('A','${addDays(today, -5)}','bmo','confirmed','yahoo','x','x','x');`);
+    const stale = renderToStaticMarkup(await TickerArchive(props({ locale: "en", ticker: "A" })));
+    expect(stale).toContain('Last report: <time dateTime="2026-10-28">');
+    expect(stale).not.toContain(`Last report: <time dateTime="${addDays(today, -5)}">`);
+  });
+
   it("a calendar-only company's page names it, links its SEC filing, and is not indexed until it has a check", async () => {
     const out = renderToStaticMarkup(await TickerArchive(props({ locale: "en", ticker: "A" })));
     expect(out).toContain("<h1>Agilent Technologies (A) earnings</h1>");
