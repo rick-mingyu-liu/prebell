@@ -175,9 +175,50 @@ describe("list pages are one paper column", () => {
     expect(out).toContain("Reported");
   });
 
+  it("a ticker page leads with the next report, links its week while the calendar shows it, and reads in Chinese", async () => {
+    const soon = addDays(todayEt(), 3);
+    const far = addDays(weekStart(todayEt()), 7 * (WEEKS_AHEAD + 2));
+    env.db = memoryD1(`${seed}
+INSERT INTO earnings_calendar (ticker, report_date, time_slot, status, source, first_seen_at, checked_at, updated_at)
+  VALUES ('A','${far}','bmo','unconfirmed','yahoo','x','x','x'), ('A','${soon}','amc','confirmed','ir','x','x','x');`);
+    const out = renderToStaticMarkup(await TickerArchive(props({ locale: "zh", ticker: "A" })));
+    expect(out).toContain("<h1>Agilent Technologies（A）财报</h1>");
+    expect(out).toContain(`下次财报：<time dateTime="${soon}">`);
+    expect(out).toContain(` · 盘后 · 已确认 <a class="more" href="/zh/earnings?week=${weekStart(soon)}">在日历中查看当周 →</a>`);
+
+    // Only a report beyond the calendar's range: named, but no link to a week that answers 404.
+    env.db = memoryD1(`${seed}
+INSERT INTO earnings_calendar (ticker, report_date, time_slot, status, source, first_seen_at, checked_at, updated_at)
+  VALUES ('ZTS','${far}','bmo','unconfirmed','yahoo','x','x','x');`);
+    const lone = renderToStaticMarkup(await TickerArchive(props({ locale: "en", ticker: "ZTS" })));
+    expect(lone).toContain("Next report: ");
+    expect(lone).not.toContain("See the week on the calendar");
+  });
+
+  it("a report due today is the next one, and a past date never marked reported is not shown as the last", async () => {
+    const today = todayEt();
+    env.db = memoryD1(`${seed}
+INSERT INTO earnings_calendar (ticker, report_date, time_slot, status, source, first_seen_at, checked_at, updated_at)
+  VALUES ('A','${today}','amc','confirmed','ir','x','x','x'), ('A','${addDays(today, -5)}','bmo','confirmed','yahoo','x','x','x');`);
+    const due = renderToStaticMarkup(await TickerArchive(props({ locale: "en", ticker: "A" })));
+    expect(due).toContain(`Next report: <time dateTime="${today}">`);
+
+    // Only a stale past date and the older reported one (Oct 28): the line names the reported one.
+    env.db = memoryD1(`${seed}
+INSERT INTO earnings_calendar (ticker, report_date, time_slot, status, source, first_seen_at, checked_at, updated_at)
+  VALUES ('A','${addDays(today, -5)}','bmo','confirmed','yahoo','x','x','x');`);
+    const stale = renderToStaticMarkup(await TickerArchive(props({ locale: "en", ticker: "A" })));
+    expect(stale).toContain('Last report: <time dateTime="2026-10-28">');
+    expect(stale).not.toContain(`Last report: <time dateTime="${addDays(today, -5)}">`);
+  });
+
   it("a calendar-only company's page names it, links its SEC filing, and is not indexed until it has a check", async () => {
     const out = renderToStaticMarkup(await TickerArchive(props({ locale: "en", ticker: "A" })));
-    expect(out).toContain('<p class="meta">Agilent Technologies</p>');
+    expect(out).toContain("<h1>Agilent Technologies (A) earnings</h1>");
+    // Its last report, with a link to that week on the calendar.
+    expect(out).toContain(
+      '<p class="meta ticker-next">Last report: <time dateTime="2026-10-28">Oct 28, 2026</time> · After close · Reported <a class="more" href="/en/earnings?week=2026-10-26">See the week on the calendar →</a></p>',
+    );
     expect(out).toContain("No earnings checks yet.");
     expect(out).toContain('aria-label="SEC filing: Oct 28, 2026">SEC filing ↗</a>');
     expect((await tickerMetadata(props({ locale: "en", ticker: "A" }))).robots).toEqual({ index: false });

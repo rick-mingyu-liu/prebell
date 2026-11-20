@@ -6,12 +6,15 @@ import PostList from "@/components/PostList";
 import type { Locale } from "@/i18n/routing";
 import { getDb } from "@/lib/db";
 import {
+  calendarWeeks,
   companyName,
   listTickerCalendar,
   listTickerPosts,
   normalizeTicker,
   tickerHasCheck,
   tickerKnown,
+  todayEt,
+  weekStart,
 } from "@/lib/earnings";
 import { pairedAlternates, shareMetadata } from "@/lib/seo";
 import { formatDate } from "@/lib/time";
@@ -27,7 +30,9 @@ export async function generateMetadata({ params }: PageProps<"/[locale]/t/[ticke
   // Searchers type the company's name more often than its symbol.
   const name = companyName(ticker);
   const title = name ? t("earnings.tickerTitleNamed", { name, ticker }) : t("earnings.tickerTitle", { ticker });
-  const description = t("earnings.tickerDescription", { ticker });
+  const description = name
+    ? t("earnings.tickerDescriptionNamed", { name, ticker })
+    : t("earnings.tickerDescription", { ticker });
   return {
     title,
     description,
@@ -62,11 +67,34 @@ export default async function TickerArchive({ params }: PageProps<"/[locale]/t/[
   };
   const slot: Record<string, string> = { bmo: t("bmo"), amc: t("amc"), unknown: t("timeUnknown") };
   const name = companyName(ticker);
+  // The next report (the earliest unreported date from today on), else the newest reported one; the dates are
+  // newest first. A past date never marked reported (no filing seen) is not shown as a report that happened.
+  const today = todayEt();
+  const next = [...dates].reverse().find((d) => d.date >= today && d.status !== "reported");
+  const last = dates.find((d) => d.status === "reported");
+  const lead = next ? { label: t("nextReport"), d: next } : last ? { label: t("lastReport"), d: last } : null;
+  const { first, last: lastWeek } = calendarWeeks(today);
+  const week = lead ? weekStart(lead.d.date) : null;
 
   return (
     <div className="list-page">
-      <h1>{t("tickerTitle", { ticker })}</h1>
-      {name && <p className="meta">{name}</p>}
+      <h1>{name ? t("tickerTitleNamed", { name, ticker }) : t("tickerTitle", { ticker })}</h1>
+      {lead && (
+        <p className="meta ticker-next">
+          {lead.label}
+          {locale === "zh" ? "：" : ": "}
+          <time dateTime={lead.d.date}>{formatDate(lead.d.date, locale)}</time> · {slot[lead.d.slot]} ·{" "}
+          {status[lead.d.status]}
+          {week && week >= first && week <= lastWeek && (
+            <>
+              {" "}
+              <Link className="more" href={`/${locale}/earnings?week=${week}`}>
+                {t("onCalendar")} →
+              </Link>
+            </>
+          )}
+        </p>
+      )}
       <section aria-labelledby="checks">
         <h2 className="section-title" id="checks">
           {t("checks")}

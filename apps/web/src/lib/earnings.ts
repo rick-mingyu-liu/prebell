@@ -340,6 +340,27 @@ export async function tickerKnown(db: D1Like, ticker: string): Promise<boolean> 
   return row !== null;
 }
 
+/** At most this many tickers are looked up at once (a brief has about 20 movers; D1 binds at most 100). */
+const PAGES_LOOKUP_MAX = 40;
+
+/**
+ * Which of these tickers have a page (`/{locale}/t/{ticker}` renders rather than 404): `tickerKnown`'s rule for
+ * a list, in one query. Tickers are compared as written (display form, e.g. `BRK.B`).
+ */
+export async function tickersWithPages(db: D1Like, tickers: readonly string[]): Promise<Set<string>> {
+  const list = [...new Set(tickers.filter((t) => TICKER.test(t)))].slice(0, PAGES_LOOKUP_MAX);
+  if (list.length === 0) return new Set();
+  const qs = list.map(() => "?").join(",");
+  const { results } = await db
+    .prepare(
+      `SELECT ticker FROM earnings_filings WHERE ticker IN (${qs})
+       UNION SELECT ticker FROM earnings_calendar WHERE status <> 'quarantined' AND ticker IN (${qs})`,
+    )
+    .bind(...list, ...list)
+    .all<{ ticker: string }>();
+  return new Set(results.map((r) => r.ticker));
+}
+
 /** True when the ticker has an earnings check whose English text is published (else its page is noindex). */
 export async function tickerHasCheck(db: D1Like, ticker: string): Promise<boolean> {
   const row = await db

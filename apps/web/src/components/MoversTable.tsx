@@ -14,6 +14,8 @@ export interface MoversTableProps {
   showPrice?: boolean;
   /** The price column's heading: the last trade (premarket) or the close (recap). */
   priceLabel?: "last" | "close";
+  /** Tickers that have a page on the site; those rows link the company to it. */
+  tickerPages?: ReadonlySet<string>;
 }
 
 /**
@@ -37,8 +39,30 @@ const pct = (m: MoverView) => <span className={`num ${m.quote.dir}`}>{fmtPct(m.q
  * Movers as ruled rows or a ruled table: company name, ticker in grey, the move in the number colours and
  * the one-line reason. Reasons are English-only, so ZH pages show no reason line or column. No logos, no pills.
  */
-export default function MoversTable({ movers, locale, variant, showPrice = false, priceLabel = "last" }: MoversTableProps) {
+export default function MoversTable({
+  movers,
+  locale,
+  variant,
+  showPrice = false,
+  priceLabel = "last",
+  tickerPages,
+}: MoversTableProps) {
   if (movers.length === 0) return null;
+  // The company and its ticker, linked to the company's page when the site has one.
+  const company = (m: MoverView) => {
+    const label = (
+      <>
+        <b className="mover-name">{m.name}</b> <span className="mover-ticker muted">{m.symbol}</span>
+      </>
+    );
+    return tickerPages?.has(m.symbol) ? (
+      <Link className="mover-link" href={`/${locale}/t/${encodeURIComponent(m.symbol)}`}>
+        {label}
+      </Link>
+    ) : (
+      label
+    );
+  };
   const t = translator(locale);
   const reasons = locale === "en";
   const noNews = t("movers.noNews");
@@ -49,9 +73,7 @@ export default function MoversTable({ movers, locale, variant, showPrice = false
         {movers.map((m) => (
           <li key={m.symbol} className="mover-row">
             <p className="mover-head">
-              <span className="mover-co">
-                <b className="mover-name">{m.name}</b> <span className="mover-ticker muted">{m.symbol}</span>
-              </span>
+              <span className="mover-co">{company(m)}</span>
               <span className="mover-move">
                 {showPrice && <span className="mover-price">${fmtPrice(m.quote.last)}</span>}
                 {pct(m)}
@@ -84,9 +106,7 @@ export default function MoversTable({ movers, locale, variant, showPrice = false
         <tbody>
           {movers.map((m) => (
             <tr key={m.symbol}>
-              <td>
-                <b className="mover-name">{m.name}</b> <span className="mover-ticker muted">{m.symbol}</span>
-              </td>
+              <td>{company(m)}</td>
               {reasons && <td className="mover-why muted">{why(m, noNews, locale)}</td>}
               {showPrice && <td className="r num">${fmtPrice(m.quote.last)}</td>}
               <td className="r">{pct(m)}</td>

@@ -330,7 +330,7 @@ export default function HomeView({ data, locale, signup }: { data: HomeData; loc
             <section className="front-movers">
               <h2 className="section-title">{t("home.topMovers")}</h2>
               {movers.length > 0 ? (
-                <MoversTable movers={movers} locale={locale} variant="column" />
+                <MoversTable movers={movers} locale={locale} variant="column" tickerPages={new Set(data.tickerPages)} />
               ) : leadFacts ? (
                 <p className="muted">{t("home.noMovers")}</p>
               ) : (

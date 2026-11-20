@@ -162,7 +162,7 @@ INSERT INTO earnings_filings VALUES ('0001045810-26-000100',1045810,'NVDA','8-K'
       expect(tw(m).card, name).toBe("summary_large_image");
     }
     expect(og(pages[1][1]).locale).toBe("zh_CN");
-    expect(og(pages[2][1]).description).toBe("INTC earnings dates and PreBell earnings checks, with links to the SEC filings.");
+    expect(og(pages[2][1]).description).toBe("Intel (INTC) earnings dates and PreBell earnings checks, with links to the SEC filings.");
     // The page's own description, not the site tagline, for search results too.
     expect(pages[2][1].title).toBe("Intel (INTC) earnings");
     expect(pages[2][1].description).toBe(og(pages[2][1]).description);
