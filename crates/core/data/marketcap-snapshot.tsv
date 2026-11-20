@@ -520,3 +520,6 @@ RKLB	29071867393
 SHOP	185053326350
 SPCX	1683778920535
 TRI	51247841609
+# ANT: hand-added 2026-11-19, after this snapshot (listed that day); 0 = no screener figure.
+# Its tier is set to full in watchlist-overrides.tsv, not read from this line.
+ANT	0

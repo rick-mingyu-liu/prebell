@@ -36,6 +36,7 @@ export const COMPANIES: Readonly<Record<string, readonly [name: string, writeUps
   "AMT": ["American Tower", true],
   "AMZN": ["Amazon", true],
   "ANET": ["Arista Networks", true],
+  "ANT": ["Anthropic", true],
   "AON": ["Aon", false],
   "AOS": ["A. O. Smith", false],
   "APA": ["APA Corporation", false],
