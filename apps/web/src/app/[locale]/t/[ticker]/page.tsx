@@ -24,14 +24,19 @@ export async function generateMetadata({ params }: PageProps<"/[locale]/t/[ticke
   const path = `/t/${encodeURIComponent(ticker)}`;
   // A calendar-only company's page is a list of dates: not indexed until it has a check.
   const checked = await tickerHasCheck(getDb(), ticker);
+  // Searchers type the company's name more often than its symbol.
+  const name = companyName(ticker);
+  const title = name ? t("earnings.tickerTitleNamed", { name, ticker }) : t("earnings.tickerTitle", { ticker });
+  const description = t("earnings.tickerDescription", { ticker });
   return {
-    title: t("earnings.tickerTitle", { ticker }),
+    title,
+    description,
     alternates: pairedAlternates(locale, path),
     ...shareMetadata({
       locale: locale as Locale,
       url: `/${locale}${path}`,
-      title: t("earnings.tickerTitle", { ticker }),
-      description: t("earnings.tickerDescription", { ticker }),
+      title,
+      description,
       siteName: t("site.name"),
     }),
     ...(checked ? {} : { robots: { index: false } }),

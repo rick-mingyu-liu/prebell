@@ -294,6 +294,38 @@ mod tests {
         assert!(earnings_entries(&[entry(tm, "8-K", &["2.02"], t)], &w, now).is_empty());
     }
 
+    /// Anthropic (ANT, hand-added 2026-11-19): a domestic, full-tier row
+    /// under CIK 2130357, so its first 8-K Item 2.02 is detected under the
+    /// SEC name "Anthropic, PBC" however the feed spells it, and a filing
+    /// under that CIK in another name is not.
+    #[test]
+    fn anthropics_first_202_is_detected() {
+        let w = crate::earnings::find("ANT").unwrap();
+        assert_eq!(
+            (w.cik, w.sec, w.tier),
+            (2130357, "Anthropic, PBC", crate::earnings::Tier::Full)
+        );
+        let watch = domestic_by_cik();
+        let t = "2026-11-19T21:05:00Z";
+        let now = utc("2026-11-19T21:10:00Z");
+        for company in ["Anthropic, PBC", "ANTHROPIC, PBC", "Anthropic PBC"] {
+            let e = [FeedEntry {
+                company: company.into(),
+                ..entry(2130357, "8-K", &["2.02", "9.01"], t)
+            }];
+            let got = earnings_entries(&e, &watch, now);
+            assert_eq!(got.len(), 1, "{company}");
+            assert_eq!(got[0].1.ticker, "ANT");
+            assert!(name_mismatches(&e, &watch).is_empty(), "{company}");
+        }
+        let other = [FeedEntry {
+            company: "Anthropic Holdings LLC".into(),
+            ..entry(2130357, "8-K", &["2.02"], t)
+        }];
+        assert!(earnings_entries(&other, &watch, now).is_empty());
+        assert_eq!(name_mismatches(&other, &watch).len(), 1);
+    }
+
     #[test]
     fn filer_names_match_across_spelling() {
         for (filer, sec) in [

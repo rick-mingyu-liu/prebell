@@ -6,7 +6,7 @@ mod groups_zh;
 mod universe;
 
 pub use groups_zh::group_zh;
-pub use universe::{company_name, group, groups, sector, universe, yahoo_symbol};
+pub use universe::{company_name, group, groups, in_universe, sector, universe, yahoo_symbol};
 
 use std::sync::OnceLock;
 

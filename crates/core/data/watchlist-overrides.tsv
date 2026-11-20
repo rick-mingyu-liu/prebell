@@ -217,3 +217,8 @@ TJX	-	-	tjx.com
 VRTX	-	-	vrtx.com
 WELL	-	-	welltower.com
 WMB	-	-	williams.com
+# Anthropic, hand-added to universe.txt on 2026-11-19 by Rick's decision of 2026-11-19 ("we
+# should add it into the stock list as it is already live on the stockt market";
+# docs/decisions.md): listed on Nasdaq that day, in neither index. Tier full is set here, not
+# read from marketcap-snapshot.tsv, which predates the listing and has no figure for it (ANT 0).
+ANT	full	-	anthropic.com

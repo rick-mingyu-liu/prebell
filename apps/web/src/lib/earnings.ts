@@ -311,8 +311,22 @@ export async function listRecentBriefs(db: D1Like, lang: Lang, n: number): Promi
   return results.map(toItem);
 }
 
-/** Weeks this far from today are not indexed (the week links go on forever). */
+/** Weeks this far from today are not indexed. */
 export const INDEXED_WEEKS = 8;
+
+/**
+ * The calendar's first week (the site's first): earlier weeks answer 404 and have no "previous" link.
+ * Unbounded week links led crawlers back to 2004 and forward to 2050, each week a full render.
+ */
+export const FIRST_WEEK = "2026-10-26";
+
+/** How many weeks past this one the calendar goes. */
+export const WEEKS_AHEAD = 13;
+
+/** The Mondays of the first and last weeks the calendar shows. */
+export function calendarWeeks(today: string): { first: string; last: string } {
+  return { first: FIRST_WEEK, last: addDays(weekStart(today), 7 * WEEKS_AHEAD) };
+}
 
 /** True when the ticker has an earnings filing or a calendar row. */
 export async function tickerKnown(db: D1Like, ticker: string): Promise<boolean> {
