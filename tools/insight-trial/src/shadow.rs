@@ -245,7 +245,7 @@ mod tests {
     }
 
     /// `score` on shadow lines (no seeded rows) reports the reading part of
-    /// the bar: not yet assessable below 50 lines read, met at 50 with none
+    /// the bar: not yet assessable below 20 lines read, met at 20 with none
     /// marked wrong, not met with one.
     #[test]
     fn the_shadow_report_states_the_reading_part_of_the_bar() {
@@ -265,10 +265,17 @@ mod tests {
         };
         let fine: Vec<Label> = reviewable(&l).iter().map(|r| label(r, "fine")).collect();
         assert_eq!(fine.len(), 51);
-        let md = crate::score::report(&l, &[], &[], &[], &fine[..9]);
-        assert!(md.contains("Shadow: 9 judge-passed lines read"), "{md}");
+        let md = crate::score::report(&l, &[], &[], &[], &fine[..19]);
+        assert!(md.contains("Shadow: 19 judge-passed lines read (a mover in the 8:00 brief and its 8:35 update counts once) of the 20 the bar needs"), "{md}");
+        assert!(md.contains("fewer than 20 judge-passed lines read"), "{md}");
         assert!(md.contains("The bar is not yet assessable"), "{md}");
         assert!(!md.contains("The trial's own part of the bar"), "{md}");
+        let md = crate::score::report(&l, &[], &[], &[], &fine[..20]);
+        assert!(md.contains("Shadow: 20 judge-passed lines read"), "{md}");
+        assert!(
+            md.contains("at least 20 judge-passed lines read, none marked wrong"),
+            "{md}"
+        );
         let md = crate::score::report(&l, &[], &[], &[], &fine);
         assert!(md.contains("Shadow: 51 judge-passed lines read"), "{md}");
         assert!(md.contains("The reading part of the bar is met"), "{md}");

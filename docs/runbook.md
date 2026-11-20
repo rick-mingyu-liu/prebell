@@ -553,7 +553,7 @@ One per facts bundle, in the `prebell-facts` bucket: `insights/premarket/<date>.
 
 ### The review page
 
-From the repository root: `tools/insight-trial/fetch-shadow.sh <first shadow day> "$(date +%F)" tools/insight-trial/shadow` (read-only), then in `tools/insight-trial`: `env -u CARGO_TARGET_DIR cargo run --release -- shadow --records shadow --out out-shadow --labels <labels.json>` writes `out-shadow/label.html` (every line the judge answered for, labelled ones shown done), and `… -- score --out out-shadow --labels <labels.json>` reports the bar (50 judge-passed lines read, none wrong). See `tools/insight-trial/README.md`.
+From the repository root: `tools/insight-trial/fetch-shadow.sh <first shadow day> "$(date +%F)" tools/insight-trial/shadow` (read-only), then in `tools/insight-trial`: `env -u CARGO_TARGET_DIR cargo run --release -- shadow --records shadow --out out-shadow --labels <labels.json>` writes `out-shadow/label.html` (every line the judge answered for, labelled ones shown done), and `… -- score --out out-shadow --labels <labels.json>` reports the bar (20 judge-passed lines read, none wrong; 50 until Rick lowered it on 2026-11-19). One wrong line Rick finds sends insights back to shadow. See `tools/insight-trial/README.md`.
 
 ### Switching it off
 

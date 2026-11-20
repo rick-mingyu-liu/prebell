@@ -139,9 +139,10 @@ is sent.
   to choose (higher agreement, ties broken by seeded recall), how many
   judge-passed lines were labelled, whether the trial's part of the bar
   holds (none marked wrong, seeded recall at least 90%), and the limits of
-  the trial. The bar's 50 labelled judge-passed lines cannot be reached
-  with this trial's 34 eligible movers (final run): the report calls the bar "not yet
-  assessable" until they are, and they accumulate through the shadow stage.
+  the trial. The bar's labelled judge-passed lines (20 since 2026-11-19,
+  50 before) were not reached with this trial's 34 eligible movers (final
+  run): the report calls the bar "not yet assessable" until they are, and
+  they accumulate through the shadow stage.
 
 ## The shadow stage's review
 
@@ -181,8 +182,8 @@ readers would get), and `score` also counts rewritten lines apart.
 
 `score` on the shadow folder reports the reading part of the bar: the
 judge-passed lines read, counting a mover once per trading date across the
-brief and its update, and any marked wrong. Below 50 read it says "not yet
-assessable". The bar's seeded-recall part comes from the trial's seed run
+brief and its update, and any marked wrong. Below 20 read (the bar since
+2026-11-19; it was 50) it says "not yet assessable". The bar's seeded-recall part comes from the trial's seed run
 and its own report.
 
 ### Replaying the rewrite on stored records (spends money)

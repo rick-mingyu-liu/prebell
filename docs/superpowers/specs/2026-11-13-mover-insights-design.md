@@ -330,6 +330,12 @@ Bar to move from shadow to on (Rick's to change): Rick has read at least
 50 judge-passed lines; none states a false fact or reads as advice; the
 chosen judge catches at least 9 in 10 of the seeded wrong lines.
 
+> **2026-11-19:** Rick lowered the lines-read part of the bar from 50 to 20
+> ("yes we can lower it to 20"), with the rewrite of lines the code checks
+> refuse in place. The rest stands: lines Rick has read and judged, none
+> wrong, and one wrong line he finds sends insights back to shadow
+> (`docs/decisions.md`, 2026-11-19).
+
 ## Cost
 
 Two model calls per post (writer, judge), three posts a trading day
