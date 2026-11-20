@@ -8,6 +8,9 @@ use super::{EvidenceKind, Insight, Line, Pack};
 use crate::providers::{LlmProvider, ProviderError};
 
 pub const WRITER_VERSION: &str = "insight-writer/v6";
+/// The rewrite of lines the code checks refused (`rewrite_prompt`): the
+/// writer's own prompt with the rewrite task after it.
+pub const REWRITE_VERSION: &str = "insight-rewrite/v1";
 
 /// What a news or analyst-action item is to the brief: the reason it gives
 /// for the move.
@@ -42,7 +45,14 @@ pub(crate) fn movers_json(packs: &[Pack]) -> Vec<Value> {
 
 /// (system, user) for one writer call over `packs`.
 pub fn prompt(packs: &[Pack]) -> (String, String) {
-    let system = format!(
+    let user = json!({ "movers": movers_json(packs) }).to_string();
+    (system(), user)
+}
+
+/// The writer's system prompt: every rule a line must keep. The rewrite
+/// reads the same text (`rewrite_prompt`), so the two never drift apart.
+fn system() -> String {
+    format!(
         r#"You write PreBell's short reading of big stock movers in a daily US market brief. For each mover you write a hook (a few words) and one sentence on what to track next for this company and why it matters. The reading is PreBell's own, in a formal, neutral register.
 
 What to track:
@@ -68,9 +78,28 @@ Rules:
 
 Reply with JSON only, in this shape:
 {{"insights":[{{"ticker":"...","en":{{"hook":"...","watch":"...","cites":["e2"]}},"zh":{{"hook":"...","watch":"...","cites":["e2"]}}}}]}}"#
-    );
-    let user = json!({ "movers": movers_json(packs) }).to_string();
-    (system, user)
+    )
+}
+
+/// What the rewrite asks, after the writer's own rules. It adds no rule:
+/// the faults come from the code checks, which enforce the rules above.
+const REWRITE_TASK: &str = r#"This is a rewrite. Each mover below comes with the line you wrote for it ("refused_line") and the exact faults PreBell's code checks found in it ("check_failures"; each names the language, "en" or "zh", then the fault). For each mover, write a corrected hook and sentence in both languages that fix every listed fault and keep every rule above, from the same evidence, changing only what the faults require; or leave the mover out when the evidence does not allow a line within the rules. Reply in the same JSON shape, with only the movers you rewrote."#;
+
+/// (system, user) for the one rewrite call over the lines the code checks
+/// refused: each `(pack, the refused line, the checks' refusals of it)`.
+pub fn rewrite_prompt(refused: &[(Pack, Insight, Vec<String>)]) -> (String, String) {
+    let packs: Vec<Pack> = refused.iter().map(|(p, _, _)| p.clone()).collect();
+    let movers: Vec<Value> = movers_json(&packs)
+        .into_iter()
+        .zip(refused)
+        .map(|(mut m, (_, i, check))| {
+            m["refused_line"] = json!({"en": i.en, "zh": i.zh});
+            m["check_failures"] = json!(check);
+            m
+        })
+        .collect();
+    let system = format!("{}\n\n{REWRITE_TASK}", system());
+    (system, json!({ "movers": movers }).to_string())
 }
 
 fn line(v: Option<&Value>) -> Option<Line> {
@@ -345,6 +374,36 @@ mod tests {
         let r = write(&llm, &[pack("AAPL")]).await.unwrap();
         assert_eq!(llm.calls.get(), 1);
         assert!(r[0].is_ok());
+    }
+
+    /// The rewrite reads the writer's own rules, word for word, then its
+    /// task; each mover carries its pack (no URLs), the refused line and the
+    /// exact check failures.
+    #[test]
+    fn the_rewrite_prompt_is_the_writers_rules_and_the_refused_lines() {
+        let (writer_system, _) = prompt(&[pack("AAPL")]);
+        let i: Insight = serde_json::from_value(item("AAPL")).unwrap();
+        let fails = vec!["zh: relative time: 近期".to_string()];
+        let (system, user) = rewrite_prompt(&[(pack("AAPL"), i.clone(), fails.clone())]);
+        assert!(system.starts_with(&writer_system), "{system}");
+        assert_eq!(
+            system[writer_system.len()..].trim_start(),
+            REWRITE_TASK,
+            "only the task follows the rules"
+        );
+        let v: Value = serde_json::from_str(&user).unwrap();
+        let m = &v["movers"][0];
+        assert_eq!(m["ticker"], "AAPL");
+        assert_eq!(m["evidence"], movers_json(&[pack("AAPL")])[0]["evidence"]);
+        assert_eq!(m["refused_line"]["en"]["hook"], i.en.hook);
+        assert_eq!(m["refused_line"]["zh"]["cites"], json!(["e2"]));
+        assert_eq!(m["check_failures"], json!(fails));
+        assert!(!user.contains("http"), "{user}");
+        assert_eq!(v["movers"].as_array().unwrap().len(), 1);
+        assert_eq!(REWRITE_VERSION, "insight-rewrite/v1");
+        // Its reply has the writer's shape, read by the same parser.
+        let r = parse(&json!({"insights": [item("AAPL")]}), &[pack("AAPL")]);
+        assert_eq!(r[0].as_ref().unwrap(), &i);
     }
 
     /// Round 4, M4: the prompt's examples are invented, never the trial's

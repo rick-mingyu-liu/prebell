@@ -59,7 +59,12 @@ pub(crate) fn lines(records: &[step::Record]) -> Vec<Record> {
                 check: m.check.clone(),
                 judges: BTreeMap::from([(judge.to_string(), j)]),
                 published_if: BTreeMap::from([(judge.to_string(), sent && m.passed)]),
-                writer_version: rec.writer_version.clone(),
+                // A rewritten line is keyed by the rewrite that wrote it, so a
+                // label never carries over from the writer's refused line.
+                writer_version: match (&m.rewritten_from, &rec.rewrite_version) {
+                    (Some(_), Some(v)) => v.clone(),
+                    _ => rec.writer_version.clone(),
+                },
                 judge_version: rec.judge_version.clone(),
             });
         }
@@ -164,6 +169,28 @@ mod tests {
             post_name("premarket/2026-11-17-update.json"),
             "premarket_2026-11-17-update"
         );
+    }
+
+    /// A line the rewrite fixed is the judged line, keyed by the rewrite's
+    /// version; the writer's refused line is not shown.
+    #[test]
+    fn a_rewritten_line_is_keyed_by_the_rewrite() {
+        let mut r = record();
+        r.rewrite_version = Some("insight-rewrite/v1".into());
+        let amd = r.movers.iter_mut().find(|m| m.ticker == "AMD").unwrap();
+        let mut refused = amd.insight.clone().unwrap();
+        refused.zh.watch = refused.zh.watch.replace("下次财报", "近期财报");
+        amd.rewritten_from = Some(step::Refusal {
+            insight: refused,
+            check: vec!["zh: relative time: 近期".into()],
+        });
+        let l = lines(&[r]);
+        let amd = l.iter().find(|x| x.ticker == "AMD").unwrap();
+        assert_eq!(amd.writer_version, "insight-rewrite/v1");
+        assert!(amd.published_if["claude"]);
+        let axon = l.iter().find(|x| x.ticker == "AXON").unwrap();
+        assert_eq!(axon.writer_version, "insight-writer/v6");
+        assert_eq!(reviewable(&l).len(), 3);
     }
 
     #[test]

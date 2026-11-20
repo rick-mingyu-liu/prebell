@@ -20,7 +20,12 @@
 //! cargo run --release -- score --out DIR --labels FILE
 //! cargo run --release -- shadow --records DIR --out DIR [--labels FILE]
 //! cargo run --release -- time --facts DIR --lines FILE [--dump DIR]
+//! cargo run --release -- rewrite --records DIR --out DIR --dev-vars PATH [--budget 3.0] [--plan]
 //! ```
+//!
+//! `rewrite` replays the Worker's rewrite of refused lines on its stored
+//! shadow records (`replay.rs`): one rewrite call per record with a line the
+//! code checks refuse, then one Claude judge call over the lines that pass.
 //!
 //! `shadow` reads the Worker's shadow-stage records (`fetch-shadow.sh`),
 //! writes them as `lines.jsonl` and writes a cumulative `label.html` with
@@ -31,6 +36,7 @@
 
 mod http;
 mod page;
+mod replay;
 mod score;
 mod seed;
 mod shadow;
@@ -961,11 +967,12 @@ fn budget(args: &[String], out: &Path) -> Rc<Budget> {
     Rc::new(Budget::new(cap, out.join("spend.jsonl")))
 }
 
-/// The models for a step that spends money: both keys must be present.
-fn live_models(args: &[String], budget: Rc<Budget>) -> Models {
+/// The models for a step that spends money: the keys in `needs` must be
+/// present.
+fn live_models(args: &[String], budget: Rc<Budget>, needs: &[&str]) -> Models {
     let keys = http::load_keys(arg(args, "--dev-vars").as_deref());
-    for var in ["ANTHROPIC_API_KEY", "DEEPSEEK_API_KEY"] {
-        if !keys.contains_key(var) {
+    for var in needs {
+        if !keys.contains_key(*var) {
             eprintln!("{var} is not set: pass --dev-vars PATH or set it in the environment");
             std::process::exit(2);
         }
@@ -997,7 +1004,7 @@ fn finish(m: &Models, r: Result<(), String>) {
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
     let args: Vec<String> = std::env::args().collect();
-    let usage = "usage: insight-trial run --facts DIR --out DIR --dev-vars PATH [--budget 3.0] [--only SUBSTR] [--fresh] [--plan]\n       insight-trial seed --out DIR --dev-vars PATH [--budget 3.0] [--fresh] [--plan]\n       insight-trial page --out DIR [--cards 60]\n       insight-trial score --out DIR --labels FILE\n       insight-trial shadow --records DIR --out DIR [--labels FILE]\n       insight-trial time --facts DIR --lines FILE [--dump DIR]";
+    let usage = "usage: insight-trial run --facts DIR --out DIR --dev-vars PATH [--budget 3.0] [--only SUBSTR] [--fresh] [--plan]\n       insight-trial seed --out DIR --dev-vars PATH [--budget 3.0] [--fresh] [--plan]\n       insight-trial page --out DIR [--cards 60]\n       insight-trial score --out DIR --labels FILE\n       insight-trial shadow --records DIR --out DIR [--labels FILE]\n       insight-trial time --facts DIR --lines FILE [--dump DIR]\n       insight-trial rewrite --records DIR --out DIR --dev-vars PATH [--budget 3.0] [--plan]";
     match args.get(1).map(String::as_str) {
         Some("run") => {
             let out = PathBuf::from(need(&args, "--out"));
@@ -1023,7 +1030,7 @@ async fn main() {
                 eprintln!("{e}");
                 std::process::exit(1);
             }
-            let m = live_models(&args, budget);
+            let m = live_models(&args, budget, &["ANTHROPIC_API_KEY", "DEEPSEEK_API_KEY"]);
             let r = run(&inputs, &m, &out, fresh).await;
             finish(&m, r);
         }
@@ -1050,7 +1057,7 @@ async fn main() {
                 }
                 return;
             }
-            let m = live_models(&args, budget);
+            let m = live_models(&args, budget, &["ANTHROPIC_API_KEY", "DEEPSEEK_API_KEY"]);
             let r = seed(&m, &out, fresh).await;
             finish(&m, r);
         }
@@ -1116,6 +1123,37 @@ async fn main() {
                 out.join("label.html").display(),
                 picked.len() - old
             );
+        }
+        Some("rewrite") => {
+            let dir = PathBuf::from(need(&args, "--records"));
+            let out = PathBuf::from(need(&args, "--out"));
+            let budget = budget(&args, &out);
+            let records = shadow::read_records(&dir);
+            let done: Vec<replay::Replayed> = kept_jsonl(&out.join("rewrite.jsonl"), false);
+            let plan = replay::plan(&records, &done, &budget.ledger);
+            eprintln!(
+                "{} records, {} with a line the code checks refuse",
+                records.len(),
+                records
+                    .iter()
+                    .filter(|r| !replay::refused(r).is_empty())
+                    .count()
+            );
+            eprintln!("{}", plan.describe("rewrite"));
+            if flag(&args, "--plan") {
+                return;
+            }
+            if let Err(e) = plan.fits(&budget) {
+                eprintln!("{e}");
+                std::process::exit(1);
+            }
+            // Only Claude is called: the Worker's writer and judge.
+            let m = live_models(&args, budget, &["ANTHROPIC_API_KEY"]);
+            let r = replay::replay(&records, &m, &out, &done).await;
+            if let Ok(rows) = &r {
+                eprintln!("{}", replay::summary(rows));
+            }
+            finish(&m, r.map(|_| ()));
         }
         Some("time") => {
             let facts = PathBuf::from(need(&args, "--facts"));
@@ -1227,6 +1265,18 @@ async fn main() {
                         let v = child("verdicts", Some(&sj), &s3);
                         cells.push(push(3, &v));
                     }
+                    // A record whose checks refused a line waits for the
+                    // rewrite, which `time` does not run (no stored reply).
+                    None if fs::read_to_string(&s2)
+                        .ok()
+                        .and_then(|r| timing::stage_of(&r))
+                        == Some(step::Stage::Refused) =>
+                    {
+                        cells.extend([
+                            "a line refused: waits for the rewrite (not timed)".to_string(),
+                            String::new(),
+                        ])
+                    }
                     None => cells.extend(["no line to judge".to_string(), String::new()]),
                 }
                 for f in [&s1, &s2, &s3, &sj] {
@@ -1312,6 +1362,7 @@ pub(crate) mod tests {
                 status: 200,
                 body,
                 set_cookie: None,
+                content_type: None,
             })
         }
     }
@@ -1435,7 +1486,7 @@ pub(crate) mod tests {
         )
     }
 
-    fn budget(out: &Path, cap: f64) -> Rc<Budget> {
+    pub(crate) fn budget(out: &Path, cap: f64) -> Rc<Budget> {
         Rc::new(Budget::new(cap, out.join("spend.jsonl")))
     }
 

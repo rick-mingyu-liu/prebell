@@ -221,12 +221,29 @@ mod tests {
                 assert_eq!(before(check::compiled), 0);
                 assert_eq!(before(crate::numbers::compiled), 0);
             }
-            "check" => {
+            "rewrite" => {
+                // The rewrite message builds its prompt and stores the reply:
+                // no pattern at all.
+                let mut n = 0;
+                for (p, i, _) in corpus() {
+                    if let Some(i) = i {
+                        write::rewrite_prompt(&[(p, i, vec!["zh: relative time: 近期".into()])]);
+                        n += 1;
+                    }
+                }
+                assert!(n > 20, "{n}");
+                assert_eq!(compiled(), 0, "the rewrite step compiled a pattern");
+            }
+            "check" | "recheck" => {
+                // The recheck is the check step's work on the rewrite's reply.
                 step::warm_check();
                 let c0 = compiled();
                 for (p, i, _) in corpus() {
                     if let Some(i) = i {
-                        check::check(&p, &i);
+                        let reply = serde_json::json!({"insights": [i]});
+                        for i in write::parse(&reply, std::slice::from_ref(&p)) {
+                            check::check(&p, &i.unwrap());
+                        }
                     }
                 }
                 assert_eq!(
@@ -276,7 +293,7 @@ mod tests {
     #[test]
     fn each_step_compiles_only_what_it_warmed() {
         let exe = std::env::current_exe().unwrap();
-        for s in ["write", "check", "judge"] {
+        for s in ["write", "check", "rewrite", "recheck", "judge"] {
             let out = std::process::Command::new(&exe)
                 .args(["--exact", "insight::tests::warm_probe", "--test-threads=1"])
                 .env("INSIGHT_WARM_PROBE", s)

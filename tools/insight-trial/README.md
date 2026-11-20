@@ -182,6 +182,33 @@ brief and its update, and any marked wrong. Below 50 read it says "not yet
 assessable". The bar's seeded-recall part comes from the trial's seed run
 and its own report.
 
+### Replaying the rewrite on stored records (spends money)
+
+The Worker gives a line the code checks refuse one rewrite call
+(`insight-rewrite/v1`, the writer's own rules plus the refused line and the
+exact check failures). `rewrite` replays it on saved records, for lines the
+checks refused before the Worker had it: per record with a line the current
+checks refuse, one rewrite call (Claude, the Worker's writer) over those
+lines only, the code checks on what it returns, then one Claude judge call
+over the lines that now pass. It writes `OUT/rewrite.jsonl` (per refused
+line: the writer's line and its refusals, the rewrite's line, its refusals,
+the verdict, passed) and skips records already there. Only
+`ANTHROPIC_API_KEY` is needed. It shares `run`'s spend ledger and cap: a
+new `--out` starts its own ledger.
+
+```sh
+# The calls and their cost, no key read and no call made:
+env -u CARGO_TARGET_DIR cargo run --release -- rewrite \
+    --records shadow --out out-rewrite --plan
+# The replay (Rick's go first: it pays for real calls):
+env -u CARGO_TARGET_DIR cargo run --release -- rewrite \
+    --records shadow --out out-rewrite \
+    --dev-vars ../../crates/generator/.dev.vars --budget 1.0
+```
+
+The time command does not run the rewrite: a record whose checks refused a
+line shows "waits for the rewrite (not timed)" in its judge cell.
+
 ## CPU timing
 
 The Worker allows 10 ms of CPU per invocation. `time` measures the insight
