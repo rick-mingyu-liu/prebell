@@ -379,13 +379,13 @@ Generator code from before the rewrite does not know the `refused` and `rewritte
 for d in <today> <previous trading day>; do
   for k in premarket/$d premarket/$d-update recap/$d; do
     printf '%s ' "$k"
-    pnpm exec wrangler r2 object get "prebell-facts/insights/$k.json" --remote --pipe 2>/dev/null \
-      | grep -o '"stage":"[a-z]*"' || echo "(no record)"
+    pnpm exec wrangler r2 object get "prebell-facts/insights/$k.json" --remote --pipe \
+      | grep -o '"stage":"[a-z]*"' || echo "(no record or error)"
   done
 done
 ```
 
-Any `"stage":"refused"` or `"stage":"rewritten"`: wait for the next message (a record at either stage is a minute or two from `written`), or for the sweep, and check again.
+Wrangler's errors stay on the screen: "(no record or error)" means either that the key does not exist or that the read failed (auth, network). On any error, fix its cause and run the loop again: a key counts as having no record only when wrangler printed no error for it. Any `"stage":"refused"` or `"stage":"rewritten"`: wait for the next message (a record at either stage is a minute or two from `written`), or for the sweep, and check again.
 
 ### Switching it off
 

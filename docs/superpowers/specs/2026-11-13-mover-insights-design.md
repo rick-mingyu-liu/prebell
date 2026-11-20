@@ -333,8 +333,9 @@ chosen judge catches at least 9 in 10 of the seeded wrong lines.
 > **2026-11-19:** Rick lowered the lines-read part of the bar from 50 to 20
 > ("yes we can lower it to 20"), with the rewrite of lines the code checks
 > refuse in place. The rest stands: lines Rick has read and judged, none
-> wrong, and one wrong line he finds sends insights back to shadow
-> (`docs/decisions.md`, 2026-11-19).
+> wrong. New with it, the lead's proposal that Rick accepted: one wrong
+> line he finds sends insights back to shadow (`docs/decisions.md`,
+> 2026-11-19).
 
 ## Cost
 
