@@ -209,7 +209,11 @@
     "premarket": "盘前简报",
     "recap": "收盘回顾",
     "earnings": "财报速评",
-    "ipo": "IPO"
+    "ipo": "IPO",
+    "week": "财报周报"
+  },
+  "week": {
+    "checked": "✓ 数字出自盘前铃财报速评。日期以下文所示时间为准：已确认的由公司公布，其余来自第三方汇总。"
   },
   "earnings": {
     "calendarTitle": "市场日历",

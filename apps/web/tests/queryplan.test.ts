@@ -4,7 +4,7 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { listHomeIpos, listIpoSlugs, listIposBetween, listIpoWatch, loadIpo } from "../src/lib/ipo";
 import { prepareCall, type ToolContext } from "../src/lib/mcptools";
-import { getLatestPost, type D1Like } from "../src/lib/posts";
+import { getLatestPost, listPosts, type D1Like } from "../src/lib/posts";
 import { migrations } from "./d1";
 import { bucket, FRIDAY, objects, seed } from "./mcpseed";
 
@@ -64,6 +64,19 @@ describe.each([false, true])("query plans (ANALYZE: %s)", (analyze) => {
       const brief = plans.find((p) => p.sql.includes("FROM posts p"))!;
       expect(brief.plan).toMatch(/SEARCH p USING INDEX idx_posts_trading_date/);
       expect(brief.plan).not.toMatch(POSTS_SCAN);
+    }
+  });
+
+  it("the archive (three types by default: premarket, recap, week) walks the trading-date index without sorting", async () => {
+    for (const lang of ["en", "zh"] as const) {
+      for (const type of [null, "week", "earnings"] as const) {
+        const { db, plans } = planning(database(analyze));
+        await listPosts(db, lang, 2, type);
+        // Newest first by the date index, each translation by its key; only a date's ties are sorted.
+        expect(plans[0].plan).toMatch(/SCAN p USING INDEX idx_posts_trading_date/);
+        expect(plans[0].plan).toMatch(/SEARCH t USING INDEX sqlite_autoindex_post_translations_1 \(post_id=\? AND lang=\?\)/);
+        expect(plans[0].plan).not.toMatch(/SCAN t\b|idx_post_translations_lang_status|TEMP B-TREE FOR ORDER BY/);
+      }
     }
   });
 
