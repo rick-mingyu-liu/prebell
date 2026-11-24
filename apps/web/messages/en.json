@@ -209,7 +209,11 @@
     "premarket": "Premarket brief",
     "recap": "After-close recap",
     "earnings": "Earnings check",
-    "ipo": "IPO"
+    "ipo": "IPO",
+    "week": "Earnings week"
+  },
+  "week": {
+    "checked": "✓ Figures from PreBell's earnings checks. Dates as of the time shown below: confirmed ones announced by the company, the rest from an aggregator."
   },
   "earnings": {
     "calendarTitle": "Market calendar",

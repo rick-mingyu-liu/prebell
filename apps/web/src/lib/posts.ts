@@ -5,7 +5,7 @@ import { COVER_KEY } from "./covers";
 export type Lang = "en" | "zh";
 
 /** Content types the site lists and filters by; `posts.content_type` values. */
-export const CONTENT_TYPES = ["premarket", "recap", "earnings", "ipo"] as const;
+export const CONTENT_TYPES = ["premarket", "recap", "earnings", "ipo", "week"] as const;
 export type ContentType = (typeof CONTENT_TYPES)[number];
 
 /** A known content type from a query parameter, or null. */
@@ -211,8 +211,8 @@ export function getLatestPremarket(db: D1Like, lang: Lang): Promise<PostHead | n
 }
 
 /**
- * Published posts in `lang`, newest first, of one `type`, or the daily briefs (premarket and recap)
- * without one; `page` starts at 1.
+ * Published posts in `lang`, newest first, of one `type`, or without one the daily briefs (premarket
+ * and recap) and the Friday earnings week posts (the lead's call, 2026-11-24); `page` starts at 1.
  */
 export async function listPosts(
   db: D1Like,
@@ -223,14 +223,16 @@ export async function listPosts(
   const p = Number.isFinite(page) && page >= 1 ? Math.floor(page) : 1;
   const { results } = await db
     .prepare(
+      // CROSS JOIN keeps posts as the outer table, so SQLite walks idx_posts_trading_date newest first
+      // and stops at the page, instead of reading every published translation in the language and sorting.
       `SELECT p.slug, p.content_type, p.trading_date, p.published_at, t.title, t.summary, ${COVER_COLUMNS}
-       FROM posts p JOIN post_translations t ON t.post_id = p.id AND t.lang = ?
+       FROM posts p CROSS JOIN post_translations t ON t.post_id = p.id AND t.lang = ?
        ${JOIN_FILING}
-       WHERE t.status = 'published' AND p.content_type IN (?, ?)
+       WHERE t.status = 'published' AND p.content_type IN (?, ?, ?)
        ORDER BY p.trading_date DESC, p.published_at DESC, p.id DESC
        LIMIT ? OFFSET ?`,
     )
-    .bind(lang, type ?? "premarket", type ?? "recap", PAGE_SIZE, (p - 1) * PAGE_SIZE)
+    .bind(lang, type ?? "premarket", type ?? "recap", type ?? "week", PAGE_SIZE, (p - 1) * PAGE_SIZE)
     .all<ListRow>();
   return results.map(toListItem);
 }
