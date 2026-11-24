@@ -1,0 +1,41 @@
+[
+ {
+  "id": "nyse:closed:2026-11-26",
+  "series": "closed",
+  "ref_period": null,
+  "variant": null,
+  "starts_at": null,
+  "et_date": "2026-11-26",
+  "tier": 2,
+  "status": "scheduled",
+  "proof_url": "https://www.nyse.com/markets/hours-calendars",
+  "release_url": null,
+  "moved_from": null
+ },
+ {
+  "id": "nyse:early_close:2026-11-27",
+  "series": "early_close",
+  "ref_period": null,
+  "variant": null,
+  "starts_at": null,
+  "et_date": "2026-11-27",
+  "tier": 2,
+  "status": "scheduled",
+  "proof_url": "https://www.nyse.com/markets/hours-calendars",
+  "release_url": null,
+  "moved_from": null
+ },
+ {
+  "id": "bls:jobs:2026-11",
+  "series": "jobs",
+  "ref_period": "2026-11",
+  "variant": null,
+  "starts_at": "2026-12-04T13:30:00Z",
+  "et_date": "2026-12-04",
+  "tier": 1,
+  "status": "confirmed",
+  "proof_url": "https://www.bls.gov/schedule/news_release/empsit.htm",
+  "release_url": null,
+  "moved_from": null
+ }
+]

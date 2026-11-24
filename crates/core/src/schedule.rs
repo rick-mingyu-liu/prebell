@@ -75,6 +75,11 @@ pub enum EarningsStep {
     /// one IPO write-up build (`ipo::article`, written by code). On the
     /// serial build queue, like an earnings build, so two never run at once.
     IpoArticle,
+    /// `week`, queued by a poll while `WEEK_POST_ENABLED` is on: the Friday
+    /// earnings week post, or a correction of an earlier one
+    /// (`week::job`, written by code). On the serial build queue, so a check
+    /// build already in flight finishes first.
+    Week,
 }
 
 impl EarningsStep {
@@ -90,6 +95,7 @@ impl EarningsStep {
             EarningsStep::IpoCheck => "ipo:check",
             EarningsStep::IpoSweep => "ipo:sweep",
             EarningsStep::IpoArticle => "ipo:article",
+            EarningsStep::Week => "week",
         }
     }
 }
@@ -124,6 +130,7 @@ impl JobKind {
             "ipo:check" => Some(JobKind::Earnings(EarningsStep::IpoCheck)),
             "ipo:sweep" => Some(JobKind::Earnings(EarningsStep::IpoSweep)),
             "ipo:article" => Some(JobKind::Earnings(EarningsStep::IpoArticle)),
+            "week" => Some(JobKind::Earnings(EarningsStep::Week)),
             "cards" => Some(JobKind::Cards),
             "insight" => Some(JobKind::Insight),
             _ => None,
@@ -134,9 +141,9 @@ impl JobKind {
 /// The queue binding a job is sent to.
 pub fn queue_for(job: &str) -> &'static str {
     match JobKind::parse(job) {
-        Some(JobKind::Earnings(EarningsStep::Build | EarningsStep::IpoArticle)) => {
-            EARNINGS_BUILD_QUEUE
-        }
+        Some(JobKind::Earnings(
+            EarningsStep::Build | EarningsStep::IpoArticle | EarningsStep::Week,
+        )) => EARNINGS_BUILD_QUEUE,
         Some(JobKind::Earnings(EarningsStep::IpoSweep)) => JOBS_QUEUE,
         Some(JobKind::Earnings(_)) => EARNINGS_QUEUE,
         Some(JobKind::Insight) => INSIGHT_QUEUE,

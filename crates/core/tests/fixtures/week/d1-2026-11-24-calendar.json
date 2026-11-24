@@ -1,0 +1,317 @@
+[
+ {
+  "ticker": "A",
+  "report_date": "2026-11-23",
+  "time_slot": "amc",
+  "status": "reported",
+  "source": "edgar",
+  "proof_url": "https://www.sec.gov/Archives/edgar/data/1090872/000109087226000082/0001090872-26-000082-index.htm",
+  "checked_at": "2026-11-23T21:11:03Z"
+ },
+ {
+  "ticker": "CRWD",
+  "report_date": "2026-11-23",
+  "time_slot": "unknown",
+  "status": "reported",
+  "source": "edgar",
+  "proof_url": "https://www.sec.gov/Archives/edgar/data/1535527/000153552726000035/0001535527-26-000035-index.htm",
+  "checked_at": "2026-11-23T11:06:01Z"
+ },
+ {
+  "ticker": "HPE",
+  "report_date": "2026-11-23",
+  "time_slot": "amc",
+  "status": "reported",
+  "source": "edgar",
+  "proof_url": "https://www.sec.gov/Archives/edgar/data/1645590/000164559026000097/0001645590-26-000097-index.htm",
+  "checked_at": "2026-11-23T21:16:04Z"
+ },
+ {
+  "ticker": "J",
+  "report_date": "2026-11-23",
+  "time_slot": "amc",
+  "status": "reported",
+  "source": "edgar",
+  "proof_url": "https://www.sec.gov/Archives/edgar/data/52988/000162828026075492/0001628280-26-075492-index.htm",
+  "checked_at": "2026-11-23T21:11:03Z"
+ },
+ {
+  "ticker": "ADI",
+  "report_date": "2026-11-24",
+  "time_slot": "bmo",
+  "status": "reported",
+  "source": "edgar",
+  "proof_url": "https://www.sec.gov/Archives/edgar/data/6281/000000628126000087/0000006281-26-000087-index.htm",
+  "checked_at": "2026-11-24T12:06:01Z"
+ },
+ {
+  "ticker": "ADSK",
+  "report_date": "2026-11-24",
+  "time_slot": "amc",
+  "status": "unconfirmed",
+  "source": "yahoo",
+  "proof_url": null,
+  "checked_at": "2026-11-06T22:26:02Z"
+ },
+ {
+  "ticker": "BBY",
+  "report_date": "2026-11-24",
+  "time_slot": "bmo",
+  "status": "reported",
+  "source": "edgar",
+  "proof_url": "https://www.sec.gov/Archives/edgar/data/764478/000076447826000045/0000764478-26-000045-index.htm",
+  "checked_at": "2026-11-24T12:06:01Z"
+ },
+ {
+  "ticker": "BILI",
+  "report_date": "2026-11-24",
+  "time_slot": "bmo",
+  "status": "unconfirmed",
+  "source": "yahoo",
+  "proof_url": null,
+  "checked_at": "2026-11-06T22:26:02Z"
+ },
+ {
+  "ticker": "DELL",
+  "report_date": "2026-11-24",
+  "time_slot": "amc",
+  "status": "confirmed",
+  "source": "ir",
+  "proof_url": "https://investors.delltechnologies.com/news-events/press-releases/detail/1661/dell-technologies-to-hold-conference-call-nov-24-to-discuss-third-quarter-fiscal-2027-financial-results",
+  "checked_at": "2026-11-19T11:01:11Z"
+ },
+ {
+  "ticker": "DLTR",
+  "report_date": "2026-11-24",
+  "time_slot": "bmo",
+  "status": "reported",
+  "source": "edgar",
+  "proof_url": "https://www.sec.gov/Archives/edgar/data/935703/000093570326000136/0000935703-26-000136-index.htm",
+  "checked_at": "2026-11-24T11:36:05Z"
+ },
+ {
+  "ticker": "HPQ",
+  "report_date": "2026-11-24",
+  "time_slot": "amc",
+  "status": "unconfirmed",
+  "source": "yahoo",
+  "proof_url": null,
+  "checked_at": "2026-11-06T22:26:02Z"
+ },
+ {
+  "ticker": "MDT",
+  "report_date": "2026-11-24",
+  "time_slot": "bmo",
+  "status": "reported",
+  "source": "edgar",
+  "proof_url": "https://www.sec.gov/Archives/edgar/data/1613103/000162828026075604/0001628280-26-075604-index.htm",
+  "checked_at": "2026-11-24T11:36:05Z"
+ },
+ {
+  "ticker": "QFIN",
+  "report_date": "2026-11-24",
+  "time_slot": "amc",
+  "status": "unconfirmed",
+  "source": "yahoo",
+  "proof_url": null,
+  "checked_at": "2026-11-13T11:01:07Z"
+ },
+ {
+  "ticker": "SJM",
+  "report_date": "2026-11-24",
+  "time_slot": "bmo",
+  "status": "reported",
+  "source": "edgar",
+  "proof_url": "https://www.sec.gov/Archives/edgar/data/91419/000009141926000110/0000091419-26-000110-index.htm",
+  "checked_at": "2026-11-24T12:06:01Z"
+ },
+ {
+  "ticker": "TIGR",
+  "report_date": "2026-11-24",
+  "time_slot": "bmo",
+  "status": "reported",
+  "source": "edgar",
+  "proof_url": "https://www.sec.gov/Archives/edgar/data/1756699/000119312526473075/0001193125-26-473075-index.htm",
+  "checked_at": "2026-11-24T11:16:14Z"
+ },
+ {
+  "ticker": "VIPS",
+  "report_date": "2026-11-24",
+  "time_slot": "bmo",
+  "status": "reported",
+  "source": "edgar",
+  "proof_url": "https://www.sec.gov/Archives/edgar/data/1529192/000110465926131313/0001104659-26-131313-index.htm",
+  "checked_at": "2026-11-24T11:16:14Z"
+ },
+ {
+  "ticker": "WDAY",
+  "report_date": "2026-11-24",
+  "time_slot": "amc",
+  "status": "unconfirmed",
+  "source": "yahoo",
+  "proof_url": null,
+  "checked_at": "2026-11-06T22:26:02Z"
+ },
+ {
+  "ticker": "BZ",
+  "report_date": "2026-11-25",
+  "time_slot": "bmo",
+  "status": "unconfirmed",
+  "source": "yahoo",
+  "proof_url": null,
+  "checked_at": "2026-11-16T11:01:11Z"
+ },
+ {
+  "ticker": "DE",
+  "report_date": "2026-11-25",
+  "time_slot": "bmo",
+  "status": "unconfirmed",
+  "source": "yahoo",
+  "proof_url": null,
+  "checked_at": "2026-11-06T22:26:02Z"
+ },
+ {
+  "ticker": "GDS",
+  "report_date": "2026-11-25",
+  "time_slot": "bmo",
+  "status": "unconfirmed",
+  "source": "yahoo",
+  "proof_url": null,
+  "checked_at": "2026-11-12T11:01:03Z"
+ },
+ {
+  "ticker": "LI",
+  "report_date": "2026-11-25",
+  "time_slot": "bmo",
+  "status": "unconfirmed",
+  "source": "yahoo",
+  "proof_url": null,
+  "checked_at": "2026-11-11T11:01:11Z"
+ },
+ {
+  "ticker": "CPRT",
+  "report_date": "2026-12-01",
+  "time_slot": "bmo",
+  "status": "unconfirmed",
+  "source": "yahoo",
+  "proof_url": null,
+  "checked_at": "2026-11-18T11:01:16Z"
+ },
+ {
+  "ticker": "MRVL",
+  "report_date": "2026-12-01",
+  "time_slot": "amc",
+  "status": "confirmed",
+  "source": "ir",
+  "proof_url": "https://investor.marvell.com/news-events/press-releases/detail/1041/marvell-technology-inc-announces-conference-call-to-review-third-quarter-of-fiscal-year-2027-financial-results",
+  "checked_at": "2026-11-24T11:01:10Z"
+ },
+ {
+  "ticker": "NIO",
+  "report_date": "2026-12-01",
+  "time_slot": "bmo",
+  "status": "unconfirmed",
+  "source": "yahoo",
+  "proof_url": null,
+  "checked_at": "2026-11-18T11:01:16Z"
+ },
+ {
+  "ticker": "NTAP",
+  "report_date": "2026-12-01",
+  "time_slot": "amc",
+  "status": "unconfirmed",
+  "source": "yahoo",
+  "proof_url": null,
+  "checked_at": "2026-11-11T11:01:11Z"
+ },
+ {
+  "ticker": "OKTA",
+  "report_date": "2026-12-01",
+  "time_slot": "amc",
+  "status": "unconfirmed",
+  "source": "yahoo",
+  "proof_url": null,
+  "checked_at": "2026-11-11T11:01:11Z"
+ },
+ {
+  "ticker": "TCOM",
+  "report_date": "2026-12-01",
+  "time_slot": "amc",
+  "status": "unconfirmed",
+  "source": "yahoo",
+  "proof_url": null,
+  "checked_at": "2026-11-20T11:01:16Z"
+ },
+ {
+  "ticker": "CRM",
+  "report_date": "2026-12-02",
+  "time_slot": "amc",
+  "status": "unconfirmed",
+  "source": "yahoo",
+  "proof_url": null,
+  "checked_at": "2026-11-11T11:01:11Z"
+ },
+ {
+  "ticker": "BF.B",
+  "report_date": "2026-12-03",
+  "time_slot": "bmo",
+  "status": "unconfirmed",
+  "source": "yahoo",
+  "proof_url": null,
+  "checked_at": "2026-11-12T11:01:03Z"
+ },
+ {
+  "ticker": "COO",
+  "report_date": "2026-12-03",
+  "time_slot": "amc",
+  "status": "unconfirmed",
+  "source": "yahoo",
+  "proof_url": null,
+  "checked_at": "2026-11-12T11:01:03Z"
+ },
+ {
+  "ticker": "DG",
+  "report_date": "2026-12-03",
+  "time_slot": "bmo",
+  "status": "unconfirmed",
+  "source": "yahoo",
+  "proof_url": null,
+  "checked_at": "2026-11-12T11:01:03Z"
+ },
+ {
+  "ticker": "HRL",
+  "report_date": "2026-12-03",
+  "time_slot": "bmo",
+  "status": "unconfirmed",
+  "source": "yahoo",
+  "proof_url": null,
+  "checked_at": "2026-11-12T11:01:03Z"
+ },
+ {
+  "ticker": "KR",
+  "report_date": "2026-12-03",
+  "time_slot": "bmo",
+  "status": "unconfirmed",
+  "source": "yahoo",
+  "proof_url": null,
+  "checked_at": "2026-11-12T11:01:03Z"
+ },
+ {
+  "ticker": "ULTA",
+  "report_date": "2026-12-03",
+  "time_slot": "amc",
+  "status": "unconfirmed",
+  "source": "yahoo",
+  "proof_url": null,
+  "checked_at": "2026-11-12T11:01:03Z"
+ },
+ {
+  "ticker": "VEEV",
+  "report_date": "2026-12-03",
+  "time_slot": "amc",
+  "status": "unconfirmed",
+  "source": "yahoo",
+  "proof_url": null,
+  "checked_at": "2026-11-13T11:01:07Z"
+ }
+]

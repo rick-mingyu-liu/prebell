@@ -23,3 +23,9 @@ png = "0.17"
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt"] }
 ttf-parser = "0.25"
+
+# The week post's Wasm CPU probe (crates/core/examples/week-cpu.rs): renders and
+# checks the peak-week bundle, run under node with --cpu-prof. Not shipped.
+[[example]]
+name = "week-cpu"
+crate-type = ["cdylib"]
