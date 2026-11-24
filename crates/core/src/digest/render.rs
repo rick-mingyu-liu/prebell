@@ -16,7 +16,7 @@ pub const SITE: &str = "https://prebell.site";
 /// Text safe inside a Markdown link label or list item.
 /// Every `{` becomes `&#123;`, so no `{{` or `{%` reaches Buttondown's
 /// template tags (the entity renders as `{`).
-fn escape(s: &str) -> String {
+pub(crate) fn escape(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {
         if c == '{' {

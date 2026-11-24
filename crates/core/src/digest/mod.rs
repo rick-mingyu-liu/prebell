@@ -181,22 +181,32 @@ pub trait DigestStore {
     ) -> Result<Vec<PostLink>, String>;
 }
 
-/// A write-up company on the calendar.
+/// A company on the calendar, with its row's status and where the date
+/// came from (the week post shows both; the email only `confirmed`).
 #[derive(Debug, Clone, PartialEq)]
 pub struct Company {
     pub ticker: String,
+    /// The watchlist's display name (the ticker for a row no longer on it).
     pub name: String,
     /// The company announced the date (or it is reported); otherwise an
     /// aggregator's date.
     pub confirmed: bool,
+    /// The calendar row's status: unconfirmed | confirmed | reported.
+    pub status: String,
+    /// The row's `source` (yahoo | ir | edgar), `proof_url` and `checked_at`.
+    pub source: String,
+    pub proof_url: Option<String>,
+    pub checked_at: String,
 }
 
 /// One report slot of a day: its write-up companies, largest first, and how
-/// many other companies report then.
+/// many other companies report then (`rest` names them, largest first).
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Slot {
     pub writeups: Vec<Company>,
     pub others: usize,
+    /// The calendar-only companies `others` counts.
+    pub rest: Vec<Company>,
 }
 
 impl Slot {
@@ -249,7 +259,7 @@ pub struct Week {
 }
 
 /// Market caps from the snapshot the write-up tier is cut from; 0 when absent.
-fn market_cap(ticker: &str) -> u64 {
+pub(crate) fn market_cap(ticker: &str) -> u64 {
     static M: OnceLock<HashMap<&'static str, u64>> = OnceLock::new();
     M.get_or_init(|| {
         CAPS.lines()
@@ -321,6 +331,32 @@ pub async fn gather(
     events: &dyn EventStore,
     posts: &dyn DigestStore,
 ) -> Result<Week, String> {
+    let days = week_days(now, monday, es, events).await?;
+    let last_monday = monday - Duration::days(7);
+    let picks = pick(
+        posts
+            .published_posts(
+                crate::earnings::draft::CONTENT_TYPE,
+                &ymd(last_monday),
+                &ymd(last_monday + Duration::days(6)),
+            )
+            .await?,
+    );
+    Ok(Week {
+        monday,
+        days,
+        picks,
+    })
+}
+
+/// `gather`'s days of `monday`'s week, without the picks (the week post
+/// reads its checks itself): two reads, the events and the calendar.
+pub async fn week_days(
+    now: DateTime<Utc>,
+    monday: NaiveDate,
+    es: &dyn EarningsStore,
+    events: &dyn EventStore,
+) -> Result<Vec<Day>, String> {
     let friday = monday + Duration::days(4);
     let (from, to) = (ymd(monday), ymd(friday));
 
@@ -381,32 +417,24 @@ pub async fn gather(
             "amc" => &mut day.amc,
             _ => &mut day.unknown,
         };
-        match find(&c.ticker).filter(|w| w.tier == Tier::Full) {
-            Some(w) => slot.writeups.push(Company {
-                ticker: w.ticker.to_string(),
-                name: w.name.to_string(),
-                confirmed: c.status != "unconfirmed",
-            }),
-            None => slot.others += 1,
+        let w = find(&c.ticker);
+        let company = Company {
+            ticker: c.ticker.clone(),
+            name: w.as_ref().map_or(c.ticker.clone(), |w| w.name.to_string()),
+            confirmed: c.status != "unconfirmed",
+            status: c.status.clone(),
+            source: c.source.clone(),
+            proof_url: c.proof_url.clone(),
+            checked_at: c.checked_at.clone(),
+        };
+        if w.is_some_and(|w| w.tier == Tier::Full) {
+            slot.writeups.push(company);
+        } else {
+            slot.others += 1;
+            slot.rest.push(company);
         }
     }
-
-    let last_monday = monday - Duration::days(7);
-    let picks = pick(
-        posts
-            .published_posts(
-                crate::earnings::draft::CONTENT_TYPE,
-                &ymd(last_monday),
-                &ymd(last_monday + Duration::days(6)),
-            )
-            .await?,
-    );
-
-    Ok(Week {
-        monday,
-        days,
-        picks,
-    })
+    Ok(days)
 }
 
 /// The email, as rendered.

@@ -7,6 +7,7 @@ mod http;
 mod insight_store;
 mod ipo_store;
 mod store;
+mod week_store;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
@@ -31,6 +32,7 @@ use prebell_core::recap;
 use prebell_core::run::{tick_with_watch, update, Hooks, TickOutcome};
 use prebell_core::schedule::{jobs_for_cron, queue_for, ContentJob, EarningsStep, JOBS};
 use prebell_core::tavily::Tavily;
+use prebell_core::week;
 use prebell_core::yahoo::Yahoo;
 use prebell_core::yahoo_calendar::YahooCalendar;
 use serde::{Deserialize, Serialize};
@@ -298,6 +300,20 @@ impl JobRunner for Runner<'_> {
                     Ok(step) => o.follow_ups.extend(step),
                     Err(e) => console_warn!("ipo article: {e}"),
                 }
+                // The earnings week post only while WEEK_POST_ENABLED is
+                // exactly "true" (off: nothing is read or queued).
+                match week::job::follow_up(
+                    text(env, "WEEK_POST_ENABLED").as_deref(),
+                    t,
+                    store,
+                    store,
+                    store,
+                )
+                .await
+                {
+                    Ok(step) => o.follow_ups.extend(step),
+                    Err(e) => console_warn!("week: {e}"),
+                }
                 for next in &o.follow_ups {
                     // Builds go to their own queue, the calendar to this one.
                     let sent = match env.queue(queue_for(next.job())) {
@@ -475,6 +491,18 @@ impl JobRunner for Runner<'_> {
                     )),
                     Err(e) => Err(e),
                 }
+            }
+            EarningsStep::Week => {
+                if !week::enabled(text(env, "WEEK_POST_ENABLED").as_deref()) {
+                    return Ok((
+                        "disabled (WEEK_POST_ENABLED is not true); skipped".into(),
+                        false,
+                    ));
+                }
+                // Written by code: no model, no provider config. No card is
+                // queued: a week post has no cover until the card task.
+                let line = week::job::week_tick(t, store, store, store, store).await?;
+                Ok((line, false))
             }
             EarningsStep::Digest => {
                 // Read quietly: no key is the normal state until the owner
