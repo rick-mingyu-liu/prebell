@@ -171,7 +171,7 @@ describe("list pages are one paper column", () => {
   it("the Chinese calendar heads the board in Chinese", async () => {
     const out = renderToStaticMarkup(await EarningsCalendar(props({ locale: "zh" }, { week: "2026-10-26" })));
     expect(out).toContain('<h1 class="cal-title"><span class="kicker">市场日历</span>2026年10月26日当周</h1>');
-    expect(out).toContain('<p class="cal-count">本周 2 家公司</p>');
+    expect(out).toContain('<p class="cal-count">2 家公司</p>');
     expect(out).toContain('<span class="sr-only">下一周</span>');
     expect(out).toContain(">回到本周</a>");
     expect(out).toMatch(/hidden="">.*?分享<\/button>/);
@@ -272,6 +272,8 @@ describe("the calendar at weekends", () => {
     at("2026-12-05T15:00:00Z");
     expect(await undated("en")).toContain(head("Market calendar · Coming week", "Week of Dec 7, 2026"));
     expect(await undated("zh")).toContain(head("市场日历 · 下周", "2026年12月7日当周"));
+    // The weekend header never says 本周 next to 下周 (the count reads "N 家公司", the days' label 当周各日).
+    expect(await undated("zh")).not.toContain("本周");
     at("2026-12-02T15:00:00Z");
     expect(await undated("zh")).toContain(head("市场日历", "2026年11月30日当周"));
   });
@@ -284,7 +286,7 @@ describe("the calendar at weekends", () => {
     expect(en).toContain('<a class="cal-btn cal-arrow" rel="next" href="/en/earnings?week=2026-12-07">');
     expect(en).toContain('<a class="cal-btn cal-arrow" rel="prev" href="/en/earnings?week=2026-11-23">');
     const zh = await dated("2026-11-30", "zh");
-    expect(zh).toContain('<a class="cal-btn cal-this-week" href="/zh/earnings">下周</a>');
+    expect(zh).toContain('<a class="cal-btn cal-this-week" href="/zh/earnings">前往下周</a>');
     expect(zh).not.toContain("回到本周");
     // An older week also renders, with the same way back.
     expect(await dated("2026-10-26")).toContain('<a class="cal-btn cal-this-week" href="/en/earnings">Coming week</a>');

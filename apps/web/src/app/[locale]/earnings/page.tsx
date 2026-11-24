@@ -111,7 +111,7 @@ export default async function EarningsCalendar({ params, searchParams }: PagePro
             )}
             {start !== readingWeek(today) && (
               <Link className="cal-btn cal-this-week" href={`/${locale}/earnings`}>
-                {weekend ? t("comingWeek") : t("thisWeek")}
+                {weekend ? t("toComingWeek") : t("thisWeek")}
               </Link>
             )}
             {start < range.last && (

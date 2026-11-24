@@ -250,6 +250,7 @@
     "countEvents": "{count, plural, one {# economy event} other {# economy events}}",
     "thisWeek": "Back to this week",
     "comingWeek": "Coming week",
+    "toComingWeek": "Coming week",
     "share": "Share",
     "shareCopied": "Link copied",
     "shareFailed": "Copy this link:",
