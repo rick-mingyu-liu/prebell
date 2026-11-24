@@ -14,8 +14,10 @@ import {
   stripDay,
   tickerHasCheck,
   tickerKnown,
-  todayEt,
   weekStart,
+  readingWeek,
+  isWeekend,
+  todayEt,
 } from "../src/lib/earnings";
 import type { D1Like } from "../src/lib/posts";
 import { memoryD1 } from "./d1";
@@ -363,5 +365,37 @@ describe("date helpers stay in four-digit years", () => {
     expect(addDays("9998-12-31", 1)).toBe("9999-01-01");
     expect(() => addDays("9999-12-31", 1)).toThrow(RangeError);
     expect(() => addDays("0000-01-01", -1)).toThrow(RangeError);
+  });
+});
+
+describe("readingWeek: the week the undated calendar shows", () => {
+  // [instant, ET date, Monday shown]. EST is UTC-5 (December), EDT UTC-4 (June).
+  const cases: [string, string, string][] = [
+    ["2026-12-05T04:59:00Z", "2026-12-04", "2026-11-30"], // Friday 23:59 EST: this week
+    ["2026-12-05T05:00:00Z", "2026-12-05", "2026-12-07"], // Saturday 00:00 EST: the coming week
+    ["2026-12-07T04:59:00Z", "2026-12-06", "2026-12-07"], // Sunday 23:59 EST: the coming week
+    ["2026-12-07T05:00:00Z", "2026-12-07", "2026-12-07"], // Monday 00:00 EST: that week, now this week
+    ["2027-06-12T03:59:00Z", "2027-06-11", "2027-06-07"], // Friday 23:59 EDT
+    ["2027-06-12T04:00:00Z", "2027-06-12", "2027-06-14"], // Saturday 00:00 EDT
+    ["2027-06-14T03:59:00Z", "2027-06-13", "2027-06-14"], // Sunday 23:59 EDT
+    ["2027-06-14T04:00:00Z", "2027-06-14", "2027-06-14"], // Monday 00:00 EDT
+  ];
+  it("is this week Monday to Friday and the coming week on Saturday and Sunday, ET", () => {
+    for (const [instant, date, monday] of cases) {
+      const today = todayEt(new Date(instant));
+      expect(today, instant).toBe(date);
+      expect(readingWeek(today), instant).toBe(monday);
+    }
+  });
+  it("isWeekend is Saturday and Sunday only", () => {
+    expect(["2026-11-23", "2026-11-24", "2026-11-25", "2026-11-26", "2026-11-27", "2026-11-28", "2026-11-29"].map(isWeekend)).toEqual([
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      true,
+    ]);
   });
 });

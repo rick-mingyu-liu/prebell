@@ -96,12 +96,24 @@ export default function BriefView({ data, locale, signup }: BriefViewProps) {
               {t("post.published", { time: formatEt(post.publishedAt, locale) })}
             </time>
           )}
-          {/* The premarket update rewrites the brief the same morning, so its time of day is enough. */}
+          {/* The premarket update rewrites the brief the same morning, so its time of day is enough; a week
+              post is corrected days later, so it gets the date too. */}
           {!pending && post.revisedAt && (
-            <time dateTime={post.revisedAt}>{t("post.updated", { time: formatEtTime(post.revisedAt, locale) })}</time>
+            <time dateTime={post.revisedAt}>
+              {t("post.updated", {
+                time: post.contentType === "week" ? formatEt(post.revisedAt, locale) : formatEtTime(post.revisedAt, locale),
+              })}
+            </time>
           )}
-          {/* An IPO write-up also quotes news reports, so it does not claim every figure is from the filing. */}
-          <span className="checked">{kind || post.contentType === "ipo" ? t("brief.checked") : t("earnings.checkedFiling")}</span>
+          {/* An IPO write-up also quotes news reports, so it does not claim every figure is from the filing; a week
+              post's dates are the calendar's, so it says where its figures and its dates come from. */}
+          <span className="checked">
+            {post.contentType === "week"
+              ? t("week.checked")
+              : kind || post.contentType === "ipo"
+                ? t("brief.checked")
+                : t("earnings.checkedFiling")}
+          </span>
         </p>
       )}
       {ipoSlug && (
