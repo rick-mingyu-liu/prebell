@@ -1,8 +1,8 @@
 import { renderToStaticMarkup } from "react-dom/server";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Locale } from "../src/i18n/routing";
 import { translator } from "../src/lib/translator";
-import { addDays, todayEt, weekStart, WEEKS_AHEAD } from "../src/lib/earnings";
+import { addDays, INDEXED_WEEKS, todayEt, weekStart, WEEKS_AHEAD } from "../src/lib/earnings";
 import { memoryD1 } from "./d1";
 
 // The pages read D1 through getDb() and messages through next-intl/server; both are swapped for
@@ -46,9 +46,20 @@ const pages: [string, () => Promise<React.ReactElement>][] = [
   ["ticker", () => TickerArchive(props({ locale: "en", ticker: "INTC" }))],
 ];
 
+/** Pins the clock (Date only; timers stay real) at an instant, so "today" and the reading week are known. */
+const at = (instant: string) => {
+  vi.useFakeTimers({ toFake: ["Date"] });
+  vi.setSystemTime(new Date(instant));
+};
+afterEach(() => {
+  vi.useRealTimers();
+});
+
 describe("list pages are one paper column", () => {
   beforeEach(() => {
     env.db = memoryD1(seed);
+    // A Wednesday: on a weekend the undated calendar and its way back change (see "the calendar at weekends").
+    at("2026-11-25T17:00:00Z");
   });
 
   for (const [name, page] of pages) {
@@ -160,7 +171,7 @@ describe("list pages are one paper column", () => {
   it("the Chinese calendar heads the board in Chinese", async () => {
     const out = renderToStaticMarkup(await EarningsCalendar(props({ locale: "zh" }, { week: "2026-10-26" })));
     expect(out).toContain('<h1 class="cal-title"><span class="kicker">市场日历</span>2026年10月26日当周</h1>');
-    expect(out).toContain('<p class="cal-count">本周 2 家公司</p>');
+    expect(out).toContain('<p class="cal-count">2 家公司</p>');
     expect(out).toContain('<span class="sr-only">下一周</span>');
     expect(out).toContain(">回到本周</a>");
     expect(out).toMatch(/hidden="">.*?分享<\/button>/);
@@ -223,5 +234,99 @@ INSERT INTO earnings_calendar (ticker, report_date, time_slot, status, source, f
     expect(out).toContain('aria-label="SEC filing: Oct 28, 2026">SEC filing ↗</a>');
     expect((await tickerMetadata(props({ locale: "en", ticker: "A" }))).robots).toEqual({ index: false });
     expect((await tickerMetadata(props({ locale: "zh", ticker: "INTC" }))).robots).toBeUndefined();
+  });
+});
+
+describe("the calendar at weekends", () => {
+  beforeEach(() => {
+    env.db = memoryD1(seed);
+  });
+  const undated = async (locale: Locale = "en") => renderToStaticMarkup(await EarningsCalendar(props({ locale })));
+  const dated = async (week: string, locale: Locale = "en") => renderToStaticMarkup(await EarningsCalendar(props({ locale }, { week })));
+  const head = (kicker: string, title: string) => `<h1 class="cal-title"><span class="kicker">${kicker}</span>${title}</h1>`;
+
+  // [instant, the week the undated page shows, its title, whether it is the weekend]; EST in December, EDT in June.
+  const turns: [string, string, string, boolean][] = [
+    ["2026-12-05T04:59:00Z", "2026-11-30", "Week of Nov 30, 2026", false], // Friday 23:59 EST
+    ["2026-12-05T05:00:00Z", "2026-12-07", "Week of Dec 7, 2026", true], // Saturday 00:00 EST
+    ["2026-12-07T04:59:00Z", "2026-12-07", "Week of Dec 7, 2026", true], // Sunday 23:59 EST
+    ["2026-12-07T05:00:00Z", "2026-12-07", "Week of Dec 7, 2026", false], // Monday 00:00 EST
+    ["2027-06-12T03:59:00Z", "2027-06-07", "Week of Jun 7, 2027", false], // Friday 23:59 EDT
+    ["2027-06-12T04:00:00Z", "2027-06-14", "Week of Jun 14, 2027", true], // Saturday 00:00 EDT
+    ["2027-06-14T03:59:00Z", "2027-06-14", "Week of Jun 14, 2027", true], // Sunday 23:59 EDT
+    ["2027-06-14T04:00:00Z", "2027-06-14", "Week of Jun 14, 2027", false], // Monday 00:00 EDT
+  ];
+  for (const [instant, monday, title, weekend] of turns) {
+    it(`the undated page at ${instant} shows the week of ${monday}${weekend ? ", as the coming week" : ""}`, async () => {
+      at(instant);
+      const out = await undated();
+      expect(out).toContain(head(weekend ? "Market calendar · Coming week" : "Market calendar", title));
+      // The undated page is the reading week, so it has no way back to it.
+      expect(out).not.toContain("cal-this-week");
+      expect(out).toContain(`<a class="cal-btn cal-arrow" rel="prev" href="/en/earnings?week=${addDays(monday, -7)}">`);
+      expect(out).toContain(`<a class="cal-btn cal-arrow" rel="next" href="/en/earnings?week=${addDays(monday, 7)}">`);
+    });
+  }
+
+  it("the kicker reads the coming week in both languages on a Saturday, and plain on a weekday", async () => {
+    at("2026-12-05T15:00:00Z");
+    expect(await undated("en")).toContain(head("Market calendar · Coming week", "Week of Dec 7, 2026"));
+    expect(await undated("zh")).toContain(head("市场日历 · 下周", "2026年12月7日当周"));
+    // The weekend header never says 本周 next to 下周 (the count reads "N 家公司", the days' label 当周各日).
+    expect(await undated("zh")).not.toContain("本周");
+    at("2026-12-02T15:00:00Z");
+    expect(await undated("zh")).toContain(head("市场日历", "2026年11月30日当周"));
+  });
+
+  it("on a Saturday, the week just ended still renders and its button goes to the coming week, in both languages", async () => {
+    at("2026-12-05T15:00:00Z");
+    const en = await dated("2026-11-30");
+    expect(en).toContain(head("Market calendar", "Week of Nov 30, 2026"));
+    expect(en).toContain('<a class="cal-btn cal-this-week" href="/en/earnings">Coming week</a>');
+    expect(en).toContain('<a class="cal-btn cal-arrow" rel="next" href="/en/earnings?week=2026-12-07">');
+    expect(en).toContain('<a class="cal-btn cal-arrow" rel="prev" href="/en/earnings?week=2026-11-23">');
+    const zh = await dated("2026-11-30", "zh");
+    expect(zh).toContain('<a class="cal-btn cal-this-week" href="/zh/earnings">前往下周</a>');
+    expect(zh).not.toContain("回到本周");
+    // An older week also renders, with the same way back.
+    expect(await dated("2026-10-26")).toContain('<a class="cal-btn cal-this-week" href="/en/earnings">Coming week</a>');
+  });
+
+  it("on a Saturday, the coming week's own dated page has no button, and a later week's button says coming week", async () => {
+    at("2026-12-05T15:00:00Z");
+    const coming = await dated("2026-12-07");
+    expect(coming).not.toContain("cal-this-week");
+    expect(coming).toContain(head("Market calendar", "Week of Dec 7, 2026"));
+    expect(await dated("2026-12-14")).toContain('<a class="cal-btn cal-this-week" href="/en/earnings">Coming week</a>');
+    // On a weekday the same pages keep "Back to this week".
+    at("2026-12-02T15:00:00Z");
+    expect(await dated("2026-11-23")).toContain('<a class="cal-btn cal-this-week" href="/en/earnings">Back to this week</a>');
+  });
+
+  it("on a Saturday the undated page keeps its canonical URL, title and indexing; dated weeks keep theirs", async () => {
+    at("2026-12-05T15:00:00Z");
+    for (const locale of ["en", "zh"] as const) {
+      const m = await calendarMetadata(props({ locale }));
+      expect(m.alternates?.canonical).toBe(`/${locale}/earnings`);
+      expect(m.alternates?.languages).toEqual({ en: "/en/earnings", "zh-Hans": "/zh/earnings", "x-default": "/en/earnings" });
+      expect(m.title).toBe(locale === "en" ? "Market calendar" : "市场日历");
+      expect(m.robots).toBeUndefined();
+      expect((m.openGraph as { url?: string }).url).toBe(`/${locale}/earnings`);
+    }
+    const past = await calendarMetadata(props({ locale: "en" }, { week: "2026-11-30" }));
+    expect(past.alternates?.canonical).toBe("/en/earnings?week=2026-11-30");
+    expect(past.robots).toBeUndefined();
+    // The noindex distance is still counted from this week (Nov 30), weekend or not.
+    const edge = addDays("2026-11-30", 7 * INDEXED_WEEKS);
+    expect((await calendarMetadata(props({ locale: "en" }, { week: edge }))).robots).toBeUndefined();
+    expect((await calendarMetadata(props({ locale: "en" }, { week: addDays(edge, 7) }))).robots).toEqual({ index: false });
+  });
+
+  it("on a Saturday the calendar's range is unchanged: the last week still renders and the one after answers 404", async () => {
+    at("2026-12-05T15:00:00Z");
+    const last = addDays("2026-11-30", 7 * WEEKS_AHEAD);
+    expect(await dated(last)).not.toContain('rel="next"');
+    await expect(dated(addDays(last, 7))).rejects.toThrow("NEXT_HTTP_ERROR_FALLBACK;404");
+    await expect(dated("2026-10-19")).rejects.toThrow("NEXT_HTTP_ERROR_FALLBACK;404");
   });
 });
