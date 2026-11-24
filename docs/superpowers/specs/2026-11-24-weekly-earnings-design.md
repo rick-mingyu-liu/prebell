@@ -2,12 +2,7 @@
 
 Date: 2026-11-24. Status: Rick chose this form on 2026-11-24 (`docs/decisions.md`). The details below are waiting for his answers to the open questions. Nothing is built until then.
 
-This design replaces the live week page proposed earlier the same day, for three reasons:
-- The critic's review showed that the live page mostly repeated the dated calendar.
-- Its "last quarter" figures would be empty through January, and never exist for foreign filers.
-- Its generator state had a race.
-
-Rick then chose "Friday weekly post (Recommended)". The design was revised the same day after the critic's second review: the post gets its own guard, a stored window, a correction path that works, its date sources shown, and a minimum size.
+It supersedes the live week page proposed earlier the same day: the critic showed it mostly repeated the dated calendar, its "last quarter" figures would be empty through January and never exist for foreign filers, and its generator state had a race. Rick then chose "Friday weekly post (Recommended)". Revised the same day after the critic's second review.
 
 ## Why
 
@@ -50,7 +45,7 @@ So the December posts are short, and the January season makes them long.
   - the English text is published and `published_at <= cutoff`;
   - the slug is not in the previous published week bundle's `listed`;
   - the report date is on or after the previous week post's Monday (for the first post, on or after this week's Monday).
-- **Why this rule.** Rebuilding a check or a week post overwrites `published_at`; this rule does not move when that happens. A check published after the build lands in the next post. A failed or missing week is covered by the next post, and the heading names the dates it spans (`window`).
+- **Why:** rebuilds overwrite `published_at`; this rule does not move. A late check lands in the next post; a failed or missing week is covered by the next one, whose heading names its dates (`window`).
 - **Order:** market value from the dated snapshot, the digest's rule. A company missing from the snapshot, or at 0 there, comes after the rest, by ticker. ANT is at 0, so it sorts last.
 - **One line per check:**
   - display name and ticker;
@@ -220,21 +215,13 @@ Once the card task ships, he posts after the log line `job cards: card og/earnin
 - He notes whether the image, title and description show.
 - If WeChat shows no image, the card task waits, and the Chinese route is the screenshot.
 
-**Measure.** Cloudflare Web Analytics uses no cookies, so it cannot count returning visitors. The proxies are:
-- weekly page views of `/zh/p/earnings-week-*` and `/en/p/earnings-week-*`;
-- Saturday-to-Monday visits to `/zh/earnings` and `/en/earnings`;
-- referrers.
+**Measure.** Web Analytics has no cookies, so no returning-visitor count. Proxies: weekly views of `/{zh,en}/p/earnings-week-*`, Saturday-to-Monday visits to `/{zh,en}/earnings`, and referrers.
 
 **Stop rule.** December's posts run, but the clock starts at the first January post (Jan 8). After six posts from then, compare views per post, and weekend calendar visits against the average for the same weekdays. If neither rose, switch `WEEK_POST_ENABLED` off and keep the published posts. Comparing December with February would measure the earnings season, not the post.
 
 ## Out of scope
 
-- A live week page and "Changes since Friday".
-- Prior-quarter figures (see the appendix).
-- Chinese company names.
-- The IPO watch in the post.
-- MCP.
-- Any change to the digest.
+A live week page, "Changes since Friday", prior-quarter figures (appendix), Chinese company names, the IPO watch in the post, MCP, any change to the digest.
 
 ## Open questions for Rick
 
@@ -346,15 +333,4 @@ Work:
 
 ## Appendix: prior-quarter figures from XBRL, for later
 
-From the critic's estimate:
-- **Requests:** 2 to 4 EDGAR `companyconcept` requests per domestic company, cached per ticker and period in R2, so each company is fetched once a quarter.
-- **Volume:** about 50 requests in a quiet week and 340 to 680 in a peak week, each message under 50 subrequests.
-
-Prerequisites:
-- `accn` in `FactEntry`, so each figure links to its filing.
-- Only 10-Q and 10-K facts of 80 to 100 days.
-- A period end within 120 days before the report.
-- Figures labelled "as filed", with the revenue tag named.
-- Formatting by the generator's cover-line formatter.
-
-It cannot cover foreign filers (so no Chinese ADR), or a preceding fiscal Q4. Build it only after the week post shows that readers come back.
+From the critic's estimate: 2 to 4 EDGAR `companyconcept` requests per domestic company, cached per ticker and period in R2 (about 50 a quiet week, 340 to 680 a peak week). Prerequisites: `accn` in `FactEntry` so each figure links to its filing; 80 to 100 day 10-Q/10-K facts; a period end within 120 days before the report; "as filed" labels with the revenue tag named; the cover-line formatter. No foreign filers, no preceding fiscal Q4. Only after the week post shows readers come back.
