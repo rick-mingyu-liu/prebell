@@ -95,6 +95,7 @@ fn dates(b: &Bundle) -> HashSet<NaiveDate> {
     let mut out: HashSet<NaiveDate> = HashSet::new();
     let (from, to) = b.range();
     out.extend([from, to, b.monday(), b.friday(), et(b.as_of()).date_naive()]);
+    out.extend(b.cutoff.parse().ok().map(|t| et(t).date_naive()));
     for i in 0..5 {
         out.insert(b.next_monday() + Duration::days(i));
     }
@@ -114,6 +115,10 @@ fn dates(b: &Bundle) -> HashSet<NaiveDate> {
 fn times(b: &Bundle) -> HashSet<String> {
     let mut out: HashSet<String> = HashSet::new();
     out.insert(super::render::clock(b));
+    // A correction's note names when the post first went out.
+    if let Ok(t) = b.cutoff.parse() {
+        out.insert(super::render::hhmm(t));
+    }
     for e in &b.events {
         if let Some(at) = e.starts_at.as_deref().and_then(|t| t.parse().ok()) {
             out.insert(et(at).format("%-I:%M").to_string());

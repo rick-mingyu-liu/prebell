@@ -3,7 +3,7 @@
 //! date comes from the bundle's `friday`, `next_monday`, `window` and
 //! `as_of`, never from the build day.
 
-use chrono::{Datelike, Duration, NaiveDate, Timelike};
+use chrono::{DateTime, Datelike, Duration, NaiveDate, Timelike, Utc};
 
 use super::period::label;
 use super::{Bundle, Check, Expected, WeekEvent};
@@ -75,21 +75,53 @@ fn day_label(d: NaiveDate, lang: Lang) -> String {
 
 /// The as-of time in ET, 24-hour: "18:05".
 pub fn clock(b: &Bundle) -> String {
-    let t = et(b.as_of());
-    format!("{:02}:{:02}", t.hour(), t.minute())
+    hhmm(b.as_of())
 }
 
 fn as_of_day(b: &Bundle) -> NaiveDate {
     et(b.as_of()).date_naive()
 }
 
+/// An ET time, 24-hour: "18:05".
+pub fn hhmm(t: DateTime<Utc>) -> String {
+    let t = et(t);
+    format!("{:02}:{:02}", t.hour(), t.minute())
+}
+
+/// "Fri Dec 4, 18:05 ET" / "12月4日周五18:05", for any time.
+fn stamp(t: DateTime<Utc>, lang: Lang) -> String {
+    let d = et(t).date_naive();
+    match lang {
+        Lang::En => format!("{} {}, {} ET", wd(d, lang), date(d, lang), hhmm(t)),
+        Lang::Zh => format!("{}{}{}", date(d, lang), wd(d, lang), hhmm(t)),
+    }
+}
+
 /// "Fri Dec 4, 18:05 ET" / "12月4日周五18:05".
 fn as_of_long(b: &Bundle, lang: Lang) -> String {
-    let d = as_of_day(b);
-    match lang {
-        Lang::En => format!("{} {}, {} ET", wd(d, lang), date(d, lang), clock(b)),
-        Lang::Zh => format!("{}{}{}", date(d, lang), wd(d, lang), clock(b)),
+    stamp(b.as_of(), lang)
+}
+
+/// The cutoff, parsed.
+fn cutoff(b: &Bundle) -> DateTime<Utc> {
+    b.cutoff.parse().unwrap_or_default()
+}
+
+/// A correction says that next week's list was read again, and when the
+/// post first went out; `None` for the first build.
+fn reread_note(b: &Bundle, lang: Lang) -> Option<String> {
+    if b.revision == 0 || b.as_of == b.cutoff {
+        return None;
     }
+    let (now, first) = (stamp(b.as_of(), lang), stamp(cutoff(b), lang));
+    Some(match lang {
+        Lang::En => format!(
+            "This list was read again on {now}, after the post was first published on {first}. The checks above are the ones listed then."
+        ),
+        Lang::Zh => format!(
+            "本列表于美东时间{now}重新读取；本文首发于美东时间{first}。上方的速评仍为首发时所列。"
+        ),
+    })
 }
 
 /// The summary's as-of: "Friday 18:05 ET" on the Friday, else the long form.
@@ -452,6 +484,9 @@ pub fn body(b: &Bundle, lang: Lang, title: &str, summary: &str) -> String {
         Lang::En => format!("## Expected next week, as of {}", as_of_long(b, lang)),
         Lang::Zh => format!("## 下周预计公布（截至美东时间{}）", as_of_long(b, lang)),
     });
+    if let Some(note) = reread_note(b, lang) {
+        out.push(note);
+    }
     let m = b.next_monday();
     for i in 0..5 {
         out.push(day_block(b, m + Duration::days(i), lang));

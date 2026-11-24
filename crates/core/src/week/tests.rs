@@ -1055,6 +1055,27 @@ async fn the_guard_refuses_a_page_that_is_not_the_bundle() {
             .contains("date not in the bundle")
     );
     assert!(refused(Lang::En, "18:05 ET", "18:06 ET").contains("time not in the bundle"));
+    assert!(refused(Lang::Zh, "周五18:05", "周五18:06").contains("time not in the bundle"));
+    // A wrong fiscal year or quarter, in each language's wording.
+    assert!(refused(Lang::En, "Q3 fiscal 2027", "Q3 fiscal 2028").contains("check line"));
+    assert!(refused(Lang::En, "Q3 fiscal 2027", "Q4 fiscal 2027").contains("check line"));
+    assert!(refused(Lang::Zh, "2027财年第三季度", "2028财年第三季度").contains("check line"));
+    assert!(refused(Lang::Zh, "2027财年第三季度", "2027财年第四季度").contains("check line"));
+    // A wrong date in the summary's range, in each language.
+    assert!(refused(
+        Lang::En,
+        "published Nov 30–Dec 4.",
+        "published Nov 30–Dec 5."
+    )
+    .contains("date not in the bundle"));
+    assert!(refused(
+        Lang::Zh,
+        "11月30日至12月4日发布）",
+        "11月30日至12月5日发布）"
+    )
+    .contains("date not in the bundle"));
+    // A cover line under the wrong company, in Chinese too.
+    assert!(refused(Lang::Zh, "营收 21.2亿美元", "营收 103.6亿美元").contains("check line"));
     // A count off by one, in each phrase that states one.
     assert!(
         refused(Lang::En, "; 8 expected next week", "; 9 expected next week")
@@ -1090,10 +1111,20 @@ async fn the_guard_refuses_a_page_that_is_not_the_bundle() {
         md.replacen(&l, &format!("{l}\n{l}"), 1)
     });
     assert!(doubled.unwrap_err().join("; ").contains("listed 2 times"));
-    // The cover lines are checked too.
+    // The cover lines are checked too: a small count off by one ("9" for 8).
     let mut cover = cover_lines(&b, Lang::En);
+    assert_eq!(cover[1], "8 expected next week");
     cover[1] = "9 expected next week".into();
-    assert!(verify_page(&b, Lang::En, &write(&b, Lang::En).1, &cover).is_err());
+    let e = verify_page(&b, Lang::En, &write(&b, Lang::En).1, &cover).unwrap_err();
+    assert!(
+        e.join("; ")
+            .contains("count not in the bundle: 9 expected next week"),
+        "{e:?}"
+    );
+    let mut cover = cover_lines(&b, Lang::Zh);
+    assert_eq!(cover[1], "下周预计 8 家");
+    cover[1] = "下周预计 9 家".into();
+    assert!(verify_page(&b, Lang::Zh, &write(&b, Lang::Zh).1, &cover).is_err());
 }
 
 /// Neither language publishes unless both pass: an English cover line the
@@ -1344,6 +1375,29 @@ async fn a_tuesday_correction_rebuilds_last_fridays_post() {
     assert_eq!(after.counts.confirmed, before.counts.confirmed + 1);
     let en = w.page("2026-12-04", "en").unwrap().body_md;
     assert!(en.contains("as of Tue Dec 8, 10:05 ET"), "{en}");
+    // The page says the list was read again, and when the post first went out.
+    assert!(
+        en.contains("## Expected next week, as of Tue Dec 8, 10:05 ET\n\nThis list was read again on Tue Dec 8, 10:05 ET, after the post was first published on Fri Dec 4, 18:05 ET. The checks above are the ones listed then."),
+        "{en}"
+    );
+    let zh = w.page("2026-12-04", "zh").unwrap().body_md;
+    assert!(
+        zh.contains("## 下周预计公布（截至美东时间12月8日周二10:05）\n\n本列表于美东时间12月8日周二10:05重新读取；本文首发于美东时间12月4日周五18:05。上方的速评仍为首发时所列。"),
+        "{zh}"
+    );
+    assert!(w
+        .page("2026-12-04", "en")
+        .unwrap()
+        .summary
+        .contains("as of Tue Dec 8, 10:05 ET"));
+    // The first build's page has no such note.
+    assert!(!rendered(&w, "2026-12-04").is_empty());
+    assert!(!std::fs::read_to_string(format!(
+        "{}/tests/fixtures/week/2026-12-04.md",
+        env!("CARGO_MANIFEST_DIR")
+    ))
+    .unwrap()
+    .contains("read again"));
     assert!(!en.contains("adbe-q4"));
     assert!(en.contains("Revenue $10.5B"), "{en}");
     assert_eq!(w.run("2026-12-04").unwrap().status, "published");
