@@ -122,6 +122,7 @@ pub async fn follow_up(
     raw: Option<&str>,
     now: DateTime<Utc>,
     es: &dyn EarningsStore,
+    store: &dyn Store,
     ws: &dyn WeekStore,
 ) -> Result<Option<EarningsStep>, String> {
     if !enabled(raw) || !crate::earnings::in_window(now) {
@@ -130,9 +131,16 @@ pub async fn follow_up(
     let friday = this_friday(now).filter(|_| due(now));
     let key = friday.map(run_key).unwrap_or_default();
     let runs = ws.week_runs(&key).await?;
+    // From the same read: a past Friday's run left open (its last build died
+    // after polls stopped) is alerted once and closed.
+    for w in &runs {
+        if stuck(w, now) {
+            never_published(now, w, store).await?;
+        }
+    }
     if runs
         .iter()
-        .any(|w| w.run.run_key != key && correction(w, now))
+        .any(|w| w.run.run_key != key && (correction(w, now) || unpublished_redo(w, now)))
     {
         return Ok(Some(EarningsStep::Week));
     }
@@ -155,6 +163,51 @@ pub async fn follow_up(
         || closing(now)
         || crate::earnings::calendar::refreshed_today(es, now).await?;
     Ok(ready.then_some(EarningsStep::Week))
+}
+
+/// A past Friday's run whose post never went live and whose last build is
+/// over (`pending` after a failure, or `building` past its lease): polls
+/// stop at 22:00 ET and none runs on a Saturday, so nothing would build or
+/// alert it again. Not the owner's `pending` with `attempts = 0`, which asks
+/// for it to be built (`unpublished_redo`).
+fn stuck(w: &WeekRun, now: DateTime<Utc>) -> bool {
+    let past = friday_of(&w.run.run_key).is_some_and(|f| f < et(now).date_naive());
+    past && !w.live
+        && w.run.attempts > 0
+        && match w.run.status.as_str() {
+            "pending" => true,
+            "building" => !leased(&w.run, now),
+            _ => false,
+        }
+}
+
+/// The owner's correction statement on a past Friday whose post never went
+/// live: `pending` with `attempts = 0`. Built as that Friday's first build.
+fn unpublished_redo(w: &WeekRun, now: DateTime<Utc>) -> bool {
+    let past = friday_of(&w.run.run_key).is_some_and(|f| f < et(now).date_naive());
+    past && !w.live && w.run.status == "pending" && w.run.attempts == 0
+}
+
+/// One error alert, `week-unpublished:<friday>`, and the run closed as
+/// `failed`, which takes it out of the open runs the poll reads: once only.
+async fn never_published(now: DateTime<Utc>, w: &WeekRun, store: &dyn Store) -> Result<(), String> {
+    let friday = w.run.trading_date.clone();
+    let why = w
+        .run
+        .last_error
+        .clone()
+        .unwrap_or_else(|| "its last build did not finish".into());
+    let msg = format!(
+        "week post for {friday} was never published: its last build did not finish before polls stopped ({why}). To publish it now, run the correction statement for week:{friday} (runbook, \"Earnings week post\"); otherwise nothing more happens"
+    );
+    let mut row = w.run.clone();
+    row.status = "failed".into();
+    row.last_error = Some(format!("never published: {why}"));
+    row.updated_at = iso(now);
+    store.upsert_run(&row).await?;
+    store
+        .add_alert(&format!("week-unpublished:{friday}"), "error", &msg)
+        .await
 }
 
 fn new_run(friday: NaiveDate, now: DateTime<Utc>) -> RunRow {
@@ -231,6 +284,15 @@ pub async fn week_tick(
         {
             let f = friday_of(&w.run.run_key).expect("checked by correction");
             let what = correct(now, f, w, es, events, store, ws).await?;
+            out.push(format!("{}: {what}", w.run.run_key));
+        } else if let Some(w) = runs
+            .iter()
+            .filter(|w| w.run.run_key != key)
+            .find(|w| unpublished_redo(w, now))
+        {
+            // The owner asked for a past week that never went out: its first build.
+            let f = friday_of(&w.run.run_key).expect("checked by unpublished_redo");
+            let what = build(now, f, Some(w.run.clone()), false, es, events, store, ws).await?;
             out.push(format!("{}: {what}", w.run.run_key));
         }
     }
@@ -454,6 +516,12 @@ pub async fn bundle_for(
             prev.first().map(|b| b.listed.clone()).unwrap_or_default(),
         ),
     };
+    // A late first build (an unpublished week rebuilt days later) lists only
+    // that week's reports, never a later one's.
+    let rows = rows
+        .into_iter()
+        .filter(|r| r.trading_date.as_str() <= super::ymd(friday).as_str())
+        .collect();
     let listed = checks(rows, &exclude);
     let next_monday = friday + Duration::days(3);
     let days = week_days(now, next_monday, es, events).await?;

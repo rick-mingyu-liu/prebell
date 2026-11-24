@@ -173,9 +173,15 @@ impl World {
     }
 
     pub async fn queued(&self, now: &str) -> bool {
-        follow_up(Some("true"), utc(now), &self.es, self.base.as_ref())
-            .await
-            .unwrap()
+        follow_up(
+            Some("true"),
+            utc(now),
+            &self.es,
+            self.base.as_ref(),
+            self.base.as_ref(),
+        )
+        .await
+        .unwrap()
             == Some(EarningsStep::Week)
     }
 
@@ -1562,19 +1568,27 @@ async fn off_reads_nothing_and_on_reads_one_row_range_per_poll() {
     let before = w.es.calls.get();
     for raw in [None, Some("false"), Some("TRUE"), Some("true ")] {
         assert_eq!(
-            follow_up(raw, utc(DEC4_BUILD), &w.es, &ws).await.unwrap(),
+            follow_up(raw, utc(DEC4_BUILD), &w.es, w.base.as_ref(), &ws)
+                .await
+                .unwrap(),
             None
         );
     }
     assert_eq!((ws.1.get(), w.es.calls.get() - before), (0, 0));
     assert!(w.base.runs.borrow().is_empty() && w.base.facts.borrow().is_empty());
     // On, on a Tuesday: the one read of the week runs.
-    follow_up(Some("true"), utc("2026-12-08T15:00:00Z"), &w.es, &ws)
-        .await
-        .unwrap();
+    follow_up(
+        Some("true"),
+        utc("2026-12-08T15:00:00Z"),
+        &w.es,
+        w.base.as_ref(),
+        &ws,
+    )
+    .await
+    .unwrap();
     assert_eq!((ws.1.get(), w.es.calls.get() - before), (1, 0));
     // On, on Friday evening: that read and the refresh marker.
-    follow_up(Some("true"), utc(DEC4_BUILD), &w.es, &ws)
+    follow_up(Some("true"), utc(DEC4_BUILD), &w.es, w.base.as_ref(), &ws)
         .await
         .unwrap();
     assert_eq!((ws.1.get(), w.es.calls.get() - before), (2, 1));
@@ -2281,4 +2295,135 @@ async fn a_correction_carries_as_of_where_it_belongs() {
         )
     });
     assert!(r.is_err());
+}
+
+/// The trade-off of L1: a Friday build still in flight at 21:55 skips the
+/// last-try alert; if it then dies, the next weekday's first poll alerts
+/// once (from the runs read it makes anyway) and closes the run. The
+/// owner's correction statement then builds that Friday's post.
+#[tokio::test]
+async fn a_friday_that_never_published_is_alerted_on_the_next_weekday() {
+    let w = dec4();
+    // Friday 21:56 ET: a build in flight (it then dies of a store error).
+    w.set_run("2026-12-04", |r| {
+        r.status = "building".into();
+        r.attempts = 1;
+        r.updated_at = "2026-12-05T02:56:00Z".into();
+    });
+    w.tick("2026-12-05T02:57:00Z").await;
+    assert!(w.alerts().is_empty(), "{:?}", w.alerts());
+    // Monday's first poll (06:00 ET): one alert, the run closed.
+    let ws = Counted(&w.base, Cell::new(0));
+    let q = follow_up(
+        Some("true"),
+        utc("2026-12-07T11:00:00Z"),
+        &w.es,
+        w.base.as_ref(),
+        &ws,
+    )
+    .await
+    .unwrap();
+    assert_eq!((q, ws.1.get()), (None, 1), "one runs read, nothing queued");
+    let a: Vec<_> = w
+        .alerts()
+        .into_iter()
+        .filter(|a| a.0.starts_with("week-unpublished"))
+        .collect();
+    assert_eq!(a.len(), 1, "{:?}", w.alerts());
+    assert_eq!(
+        (a[0].0.as_str(), a[0].1.as_str()),
+        ("week-unpublished:2026-12-04", "error")
+    );
+    assert!(
+        a[0].2
+            .starts_with("week post for 2026-12-04 was never published: "),
+        "{}",
+        a[0].2
+    );
+    assert!(
+        a[0].2
+            .contains("run the correction statement for week:2026-12-04"),
+        "{}",
+        a[0].2
+    );
+    assert_eq!(w.run("2026-12-04").unwrap().status, "failed");
+    // A second poll raises nothing more.
+    follow_up(
+        Some("true"),
+        utc("2026-12-07T11:05:00Z"),
+        &w.es,
+        w.base.as_ref(),
+        &ws,
+    )
+    .await
+    .unwrap();
+    assert_eq!(w.alerts().len(), 1);
+    // The runbook's statement builds that Friday's post, with only its checks.
+    w.check(
+        "adbe-q4-fy2026-earnings",
+        "ADBE",
+        "2026-12-07",
+        "2026-12-07T21:10:00Z",
+        ["Revenue $6.2B", "GAAP EPS $4.10"],
+        ["营收 62亿美元", "GAAP每股收益 4.10美元"],
+        "published",
+    );
+    w.set_run("2026-12-04", |r| {
+        r.status = "pending".into();
+        r.attempts = 0;
+    });
+    assert!(w.queued("2026-12-08T15:00:00Z").await);
+    let line = w.tick("2026-12-08T15:00:00Z").await;
+    assert!(
+        line.contains("week:2026-12-04: published earnings-week-2026-12-04"),
+        "{line}"
+    );
+    let b = w.bundle("2026-12-04");
+    assert_eq!(
+        b.listed,
+        ["crm-q3-fy2027-earnings", "mrvl-q3-fy2027-earnings"]
+    );
+    assert_eq!(w.alerts().len(), 1);
+}
+
+/// A Friday that published normally raises nothing on Monday, and the flag
+/// off reads nothing.
+#[tokio::test]
+async fn a_published_friday_raises_nothing_on_monday() {
+    let w = dec4();
+    w.tick(DEC4_BUILD).await;
+    let ws = Counted(&w.base, Cell::new(0));
+    assert_eq!(
+        follow_up(
+            Some("true"),
+            utc("2026-12-07T11:00:00Z"),
+            &w.es,
+            w.base.as_ref(),
+            &ws
+        )
+        .await
+        .unwrap(),
+        None
+    );
+    assert_eq!(ws.1.get(), 1);
+    assert!(w.alerts().is_empty(), "{:?}", w.alerts());
+    // Off: no read, even with an open past run.
+    w.set_run("2026-11-27", |r| {
+        r.status = "pending".into();
+        r.attempts = 2;
+    });
+    assert_eq!(
+        follow_up(
+            None,
+            utc("2026-12-07T11:00:00Z"),
+            &w.es,
+            w.base.as_ref(),
+            &ws
+        )
+        .await
+        .unwrap(),
+        None
+    );
+    assert_eq!(ws.1.get(), 1);
+    assert!(w.alerts().is_empty());
 }
