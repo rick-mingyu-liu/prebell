@@ -158,6 +158,11 @@ pub fn title_of(b: &Bundle, lang: Lang) -> String {
     if c.checks == 0 {
         let from = date(b.next_monday(), lang);
         return match lang {
+            // A correction skips the minimum, so a week may hold neither.
+            Lang::En if c.expected == 0 => {
+                format!("Earnings next week: no company expected from {from}")
+            }
+            Lang::Zh if c.expected == 0 => format!("下周财报：{from}起暂无公司预计"),
             Lang::En if c.expected == 1 => {
                 format!("Earnings next week: 1 company expected from {from}")
             }
@@ -211,12 +216,15 @@ pub fn summary_of(b: &Bundle, lang: Lang) -> String {
         Lang::Zh => {
             let first = match c.checks {
                 0 => format!("盘前铃{this}未发布财报速评。"),
-                n => format!("盘前铃本周核对了{n}份财报（{this}发布）。"),
+                // The range, not 本周: a late check from the week before widens it.
+                n => format!("盘前铃核对了{n}份财报（{this}发布）。"),
             };
             let second = match c.expected {
                 0 => format!("截至美东时间{at}，下周（{next}）暂无公司预计公布财报。"),
                 n => {
                     let conf = match c.confirmed {
+                        // 均 ("all") only for more than one company.
+                        0 if n == 1 => "日期未确认".to_string(),
                         0 => "日期均未确认".to_string(),
                         k => format!("其中{k}家日期已确认"),
                     };
@@ -287,10 +295,14 @@ pub const ENGLISH: &str = "（英文）";
 /// Between a check line's parts.
 pub const SEP: &str = " · ";
 
-/// A cover line shows when it holds a digit ("American International Group
-/// results" does not).
-pub fn shown(line: &str) -> bool {
-    line.bytes().any(|b| b.is_ascii_digit())
+/// A cover line shows when it holds a digit outside the company's name and
+/// ticker ("American International Group results" and "3M results" do not).
+pub fn shown(line: &str, c: &Check) -> bool {
+    let mut rest = line.to_string();
+    for w in [c.name.as_str(), c.ticker.as_str()] {
+        rest = crate::ipo::writeup::replace_word(&rest, w, " ");
+    }
+    rest.bytes().any(|b| b.is_ascii_digit())
 }
 
 fn lines_of(c: &Check, lang: Lang) -> &[String; 2] {
@@ -315,7 +327,7 @@ fn check_line(c: &Check, lang: Lang) -> String {
         s.push_str(SEP);
         s.push_str(&label(p, lang));
     }
-    for l in lines_of(c, lang).iter().filter(|l| shown(l)) {
+    for l in lines_of(c, lang).iter().filter(|l| shown(l, c)) {
         s.push_str(SEP);
         s.push_str(&escape(l));
     }
@@ -355,7 +367,7 @@ fn group_word(status: &str, lang: Lang) -> &'static str {
 const SLOTS: [(&str, &str, &str); 3] = [
     ("bmo", "Before open", "盘前"),
     ("amc", "After close", "盘后"),
-    ("unknown", "Time n/a", "时间暂缺"),
+    ("unknown", "Time not given", "时间暂缺"),
 ];
 
 /// One slot: write-up companies first, one line each with their status in

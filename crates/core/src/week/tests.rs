@@ -205,12 +205,16 @@ impl World {
             .cloned()
     }
 
+    /// The bundle the post points to (its `facts_r2_key`).
     pub fn bundle(&self, friday: &str) -> Bundle {
+        let key = self
+            .post(friday)
+            .map_or(format!("week/{friday}.json"), |p| p.facts_r2_key);
         let json = self
             .base
             .facts
             .borrow()
-            .get(&format!("week/{friday}.json"))
+            .get(&key)
             .cloned()
             .unwrap_or_else(|| panic!("no bundle for {friday}"));
         serde_json::from_str(&json).unwrap()
@@ -759,7 +763,7 @@ async fn mixed_statuses_in_one_slot_and_a_reported_row_next_week() {
         "{tue}"
     );
     assert!(
-        tue.contains("**Time n/a**\n\n- Not confirmed: [Kroger (KR)](/en/t/KR)"),
+        tue.contains("**Time not given**\n\n- Not confirmed: [Kroger (KR)](/en/t/KR)"),
         "{tue}"
     );
     let zh = w.page("2026-12-04", "zh").unwrap().body_md;
@@ -1820,4 +1824,407 @@ fn the_week_job_goes_to_the_build_queue() {
     );
     assert_eq!(queue_for("week"), EARNINGS_BUILD_QUEUE);
     assert_eq!(queue_for("week"), queue_for("ipo:article"));
+}
+
+// ---------------------------------------------------------------------------
+// Review of PR #89 (492bd63): M1, M2, M4, L1-L3, L5, L6.
+
+/// The reviewer's tamper cases (`zz_review_guard_attacks.rs`): each passed
+/// the guard at 492bd63 and must now be refused.
+#[tokio::test]
+async fn every_tamper_case_of_the_review_is_refused() {
+    let b = dec4_bundle().await;
+    let cases: &[(Lang, &str, &str, &str)] = &[
+        (Lang::En, "zero form with 8 expected", "8 companies are expected to report Dec 7–Dec 11, as of Friday 18:05 ET; 2 dates are confirmed.", "No company is expected to report Dec 7–Dec 11, as of Friday 18:05 ET."),
+        (Lang::En, "no date confirmed with 2", "2 dates are confirmed", "no date is confirmed"),
+        (Lang::Zh, "日期均未确认 with 2", "其中2家日期已确认", "日期均未确认"),
+        (Lang::En, "write-up status word", "(/en/t/ADBE): confirmed", "(/en/t/ADBE): date not confirmed"),
+        (Lang::En, "calendar group word", "- Not confirmed: [Copart (CPRT)]", "- Confirmed: [Copart (CPRT)]"),
+        (Lang::Zh, "zh status word", "(/zh/t/ADBE)：日期已确认", "(/zh/t/ADBE)：日期未确认"),
+        (Lang::En, "row moved to another day", "- Not confirmed: [Kroger (KR)](/en/t/KR)\n\n### Wed, Dec 9\n\nNo reports expected.", "\n### Wed, Dec 9\n\n- Not confirmed: [Kroger (KR)](/en/t/KR)"),
+        (Lang::En, "row dropped", ", [NIO (NIO)](/en/t/NIO)", ""),
+        (Lang::En, "wrong weekday", "### Tue, Dec 8", "### Wed, Dec 8"),
+        (Lang::Zh, "wrong weekday zh", "### 12月8日（周二）", "### 12月8日（周三）"),
+        (Lang::En, "wrong as-of date", "as of Fri Dec 4, 18:05 ET", "as of Mon Dec 7, 18:05 ET"),
+        (Lang::En, "section 1 range shifted", "## Earnings checks published Nov 30–Dec 4", "## Earnings checks published Dec 7–Dec 11"),
+        (Lang::En, "summary range shifted", "published Nov 30–Dec 4.", "published Dec 7–Dec 11."),
+        (Lang::En, "slot swapped", "**Before open**", "**After close**"),
+        (Lang::En, "time-zone label", "18:05 ET; 2", "18:05 EST; 2"),
+        (Lang::Zh, "zh time-zone label", "（截至美东时间12月4日周五18:05）", "（截至北京时间12月4日周五18:05）"),
+        (Lang::En, "bare URL", "No reports expected.", "No reports expected. https://evil.example/x"),
+        (Lang::En, "as-of time swapped for an event's", "as of Fri Dec 4, 18:05 ET", "as of Fri Dec 4, 8:30 ET"),
+        (Lang::En, "event time without AM", "8:30 AM ET", "8:30 PM ET"),
+        (Lang::En, "fiscal period", "· Q3 fiscal 2027 · Revenue $10.4B", "· Q4 fiscal 2027 · Revenue $10.4B"),
+        (Lang::En, "unlisted check link", "No reports expected.", "No reports expected. [Apple (AAPL)](/en/p/aapl-q4-fy2026-earnings)"),
+        (Lang::En, "check line removed", "- [Marvell Technology (MRVL)](/en/p/mrvl-q3-fy2027-earnings) · Q3 fiscal 2027 · Revenue $2.1B · GAAP EPS $0.21\n", ""),
+        (Lang::En, "legend reworded", "Unconfirmed: the date comes from an aggregator and may change.", "Unconfirmed: the company has not said."),
+        (Lang::Zh, "zh legend reworded", "未确认：日期来自第三方汇总，可能变动。", "未确认：公司尚未公布。"),
+        (Lang::En, "HTML", "No reports expected.", "<script>x()</script>"),
+        (Lang::En, "wrong-language link", "[Kroger (KR)](/en/t/KR)", "[Kroger (KR)](/zh/t/KR)"),
+        (Lang::En, "no reports on a day that has some", "**After close**\n\n- [Adobe (ADBE)]", "No reports expected.\n\n**After close**\n\n- [Adobe (ADBE)]"),
+        (Lang::En, "a day heading dropped", "### Fri, Dec 11\n\nNo reports expected.\n", ""),
+    ];
+    for (lang, name, from, to) in cases {
+        let (_, page) = write(&b, *lang);
+        assert!(
+            page.contains(from),
+            "{name}: {from:?} not on the page:\n{page}"
+        );
+        let r = guarded(&b, *lang, |md| md.replacen(from, to, 1));
+        assert!(r.is_err(), "{name} passed the guard");
+    }
+}
+
+/// M1: when the newest week post's bundle cannot be read (an R2 error, a
+/// missing object, a bundle that does not parse), the build retries with
+/// an alert; it never falls back to an older post and re-lists its checks.
+#[tokio::test]
+async fn an_unreadable_newest_bundle_fails_the_build() {
+    for cause in ["r2 error", "missing", "unparseable"] {
+        let w = dec4();
+        w.tick(DEC4_BUILD).await;
+        for (slug, t, day) in [
+            ("orcl-q2-fy2027-earnings", "ORCL", "2026-12-08"),
+            ("adbe-q4-fy2026-earnings", "ADBE", "2026-12-09"),
+        ] {
+            w.check(
+                slug,
+                t,
+                day,
+                &format!("{day}T21:10:00Z"),
+                ["Revenue $16.1B", "GAAP EPS $1.47"],
+                ["营收 161亿美元", "GAAP每股收益 1.47美元"],
+                "published",
+            );
+        }
+        w.refreshed("2026-12-11");
+        w.tick("2026-12-11T23:05:00Z").await;
+        let key = w.post("2026-12-11").unwrap().facts_r2_key;
+        match cause {
+            "r2 error" => *w.base.fail_facts_key.borrow_mut() = Some(key.clone()),
+            "missing" => {
+                w.base.facts.borrow_mut().remove(&key);
+            }
+            _ => {
+                w.base.facts.borrow_mut().insert(
+                    key.clone(),
+                    r#"{"friday":"2026-12-11","counts":"x"}"#.into(),
+                );
+            }
+        }
+        w.cal("MU", "2026-12-21", "amc", "confirmed");
+        w.cal("NKE", "2026-12-22", "amc", "confirmed");
+        w.refreshed("2026-12-18");
+        let line = w
+            .try_tick("2026-12-18T23:05:00Z")
+            .await
+            .unwrap_or_else(|e| e);
+        assert!(
+            line.contains("the newest week post's bundle cannot be read"),
+            "{cause}: {line}"
+        );
+        assert!(w.post("2026-12-18").is_none(), "{cause}");
+        let run = w.run("2026-12-18").unwrap();
+        assert_eq!(
+            (run.status.as_str(), run.attempts),
+            ("pending", 1),
+            "{cause}"
+        );
+        assert!(
+            w.alerts()
+                .iter()
+                .any(|a| a.0.starts_with("week:2026-12-18") && a.1 == "warn"),
+            "{cause}"
+        );
+    }
+}
+
+/// M1, the happy end: once the newest bundle reads again, the build lists
+/// from its Monday and leaves its checks out.
+#[tokio::test]
+async fn after_the_bundle_reads_again_nothing_is_listed_twice() {
+    let w = dec4();
+    w.tick(DEC4_BUILD).await;
+    for (slug, t, day) in [
+        ("orcl-q2-fy2027-earnings", "ORCL", "2026-12-08"),
+        ("adbe-q4-fy2026-earnings", "ADBE", "2026-12-09"),
+    ] {
+        w.check(
+            slug,
+            t,
+            day,
+            &format!("{day}T21:10:00Z"),
+            ["Revenue $16.1B", "GAAP EPS $1.47"],
+            ["营收 161亿美元", "GAAP每股收益 1.47美元"],
+            "published",
+        );
+    }
+    w.refreshed("2026-12-11");
+    w.tick("2026-12-11T23:05:00Z").await;
+    let key = w.post("2026-12-11").unwrap().facts_r2_key;
+    *w.base.fail_facts_key.borrow_mut() = Some(key);
+    w.cal("MU", "2026-12-21", "amc", "confirmed");
+    w.cal("NKE", "2026-12-22", "amc", "confirmed");
+    w.refreshed("2026-12-18");
+    assert!(w.tick("2026-12-18T23:05:00Z").await.contains("retrying"));
+    *w.base.fail_facts_key.borrow_mut() = None;
+    w.tick("2026-12-18T23:10:00Z").await;
+    let b = w.bundle("2026-12-18");
+    assert_eq!(b.since, "2026-12-07");
+    assert!(b.listed.is_empty(), "{:?}", b.listed);
+}
+
+/// M4: a correction writes its bundle under its own key and switches the
+/// post to it in the D1 batch. A failed correction leaves the page and the
+/// bundle it points to in agreement, and the next Friday reads that one.
+#[tokio::test]
+async fn a_failed_correction_leaves_the_page_and_its_bundle_in_agreement() {
+    let w = dec4();
+    w.tick(DEC4_BUILD).await;
+    let before = w.bundle("2026-12-04");
+    let page = w.page("2026-12-04", "en").unwrap().body_md;
+    assert_eq!(
+        w.post("2026-12-04").unwrap().facts_r2_key,
+        "week/2026-12-04.json"
+    );
+    // A correction with a calendar change, failing at the batch.
+    w.cal("MU", "2026-12-09", "amc", "unconfirmed");
+    w.set_run("2026-12-04", |r| {
+        r.status = "pending".into();
+        r.attempts = 0;
+    });
+    w.base.fail_revise_post.set(true);
+    assert!(w.try_tick("2026-12-08T15:05:00Z").await.is_err());
+    // The page and the bundle it points to are still the first build's.
+    assert_eq!(
+        w.post("2026-12-04").unwrap().facts_r2_key,
+        "week/2026-12-04.json"
+    );
+    assert_eq!(w.bundle("2026-12-04"), before);
+    assert_eq!(w.page("2026-12-04", "en").unwrap().body_md, page);
+    assert!(w
+        .base
+        .facts
+        .borrow()
+        .contains_key("week/2026-12-04-r1.json"));
+    // The next Friday excludes and checks against the bundle the page shows.
+    w.base.fail_revise_post.set(false);
+    w.set_run("2026-12-04", |r| r.status = "failed".into());
+    w.check(
+        "adbe-q4-fy2026-earnings",
+        "ADBE",
+        "2026-12-08",
+        "2026-12-08T21:10:00Z",
+        ["Revenue $6.2B", "GAAP EPS $4.10"],
+        ["营收 62亿美元", "GAAP每股收益 4.10美元"],
+        "published",
+    );
+    w.check(
+        "avgo-q4-fy2026-earnings",
+        "AVGO",
+        "2026-12-10",
+        "2026-12-10T21:20:00Z",
+        ["Revenue $17.2B", "GAAP EPS $1.30"],
+        ["营收 172亿美元", "GAAP每股收益 1.30美元"],
+        "published",
+    );
+    w.refreshed("2026-12-11");
+    w.tick("2026-12-11T23:05:00Z").await;
+    let b = w.bundle("2026-12-11");
+    assert_eq!(b.since, before.monday);
+    assert!(b.listed.iter().all(|s| !before.listed.contains(s)));
+    // A correction that succeeds switches the post to its own key.
+    let w = dec4();
+    w.tick(DEC4_BUILD).await;
+    w.set_run("2026-12-04", |r| {
+        r.status = "pending".into();
+        r.attempts = 0;
+    });
+    w.tick("2026-12-08T15:05:00Z").await;
+    assert_eq!(
+        w.post("2026-12-04").unwrap().facts_r2_key,
+        "week/2026-12-04-r1.json"
+    );
+    assert_eq!(w.bundle("2026-12-04").revision, 1);
+    assert!(w.base.facts.borrow().contains_key("week/2026-12-04.json"));
+}
+
+/// L1: no "not published" alert at 21:55 while a build is in flight.
+#[tokio::test]
+async fn the_last_try_does_not_alert_while_a_build_is_in_flight() {
+    let w = dec4();
+    w.set_run("2026-12-04", |r| {
+        r.status = "building".into();
+        r.attempts = 1;
+        r.updated_at = "2026-12-05T02:50:00Z".into();
+    });
+    let line = w.tick("2026-12-05T02:56:00Z").await;
+    assert!(line.contains("in flight"), "{line}");
+    assert!(
+        !w.alerts().iter().any(|a| a.0.starts_with("week-missed")),
+        "{:?}",
+        w.alerts()
+    );
+}
+
+/// L2: a check revised before a post read it and rebuilt after keeps its
+/// old `revised_at`; the later of the two times counts.
+#[tokio::test]
+async fn a_check_revised_then_rebuilt_is_stale() {
+    let w = dec4();
+    {
+        let mut posts = w.base.posts.borrow_mut();
+        let crm = posts
+            .iter_mut()
+            .find(|p| p.slug == "crm-q3-fy2027-earnings")
+            .unwrap();
+        crm.revised_at = Some("2026-12-03T12:00:00Z".into());
+    }
+    w.tick(DEC4_BUILD).await;
+    {
+        let mut posts = w.base.posts.borrow_mut();
+        let crm = posts
+            .iter_mut()
+            .find(|p| p.slug == "crm-q3-fy2027-earnings")
+            .unwrap();
+        crm.published_at = Some("2026-12-07T15:00:00Z".into());
+    }
+    w.cal("ORCL", "2026-12-15", "amc", "confirmed");
+    w.cal("MU", "2026-12-17", "amc", "unconfirmed");
+    w.refreshed("2026-12-11");
+    w.tick("2026-12-11T23:05:00Z").await;
+    let stale: Vec<_> = w
+        .alerts()
+        .into_iter()
+        .filter(|a| a.0 == "week-stale:2026-12-04")
+        .collect();
+    assert_eq!(stale.len(), 1, "{:?}", w.alerts());
+    assert!(stale[0].2.contains("crm-q3-fy2027-earnings"));
+}
+
+/// L3: a Friday evening's message processed after midnight ET still builds
+/// that Friday's post (its dates come from the Friday, the as-of from the
+/// read); one that cannot publish alerts, since no Saturday poll retries.
+#[tokio::test]
+async fn a_friday_message_after_midnight_still_builds_or_alerts() {
+    let w = dec4();
+    // Sat Dec 5, 00:10 ET; the refresh marker is Friday's.
+    let line = w.tick("2026-12-05T05:10:00Z").await;
+    assert!(
+        line.contains("published earnings-week-2026-12-04"),
+        "{line}"
+    );
+    let b = w.bundle("2026-12-04");
+    assert_eq!(
+        (b.friday.as_str(), b.next_monday.as_str()),
+        ("2026-12-04", "2026-12-07")
+    );
+    assert!(w
+        .page("2026-12-04", "en")
+        .unwrap()
+        .body_md
+        .contains("as of Sat Dec 5, 00:10 ET"));
+    assert!(!w.alerts().iter().any(|a| a.0.starts_with("week-missed")));
+    // One that fails alerts at once.
+    let w = dec4();
+    broken_check(&w);
+    w.tick("2026-12-05T05:10:00Z").await;
+    let missed: Vec<_> = w
+        .alerts()
+        .into_iter()
+        .filter(|a| a.0.starts_with("week-missed"))
+        .collect();
+    assert_eq!(missed.len(), 1, "{:?}", w.alerts());
+    assert_eq!(missed[0].2, "week post for 2026-12-04 not published");
+    // Polls do not run on a Saturday, so nothing queues it again.
+    assert!(!w.queued("2026-12-05T15:00:00Z").await);
+}
+
+/// L5: a cover line whose only digit is in the company's name is no figure
+/// line; 均 only for more than one company; a correction with neither
+/// checks nor companies expected says so in words.
+#[tokio::test]
+async fn wording_points_of_the_review() {
+    let w = dec4();
+    w.check(
+        "mmm-q4-fy2026-earnings",
+        "MMM",
+        "2026-12-03",
+        "2026-12-03T12:00:00Z",
+        ["3M results", "GAAP EPS $2.10"],
+        ["3M业绩", "GAAP每股收益 2.10美元"],
+        "published",
+    );
+    w.tick(DEC4_BUILD).await;
+    let en = w.page("2026-12-04", "en").unwrap().body_md;
+    assert!(
+        en.contains("](/en/p/mmm-q4-fy2026-earnings) · Q4 fiscal 2026 · GAAP EPS $2.10\n"),
+        "{en}"
+    );
+    assert!(!en.contains("3M results"));
+    assert!(en.contains("**Time not given**"));
+    let zh = w.page("2026-12-04", "zh").unwrap();
+    assert!(
+        zh.summary
+            .starts_with("盘前铃核对了3份财报（11月30日至12月4日发布）"),
+        "{}",
+        zh.summary
+    );
+    let one = bundle_with(2, 1, 0, 0, "2026-12-11T23:05:00Z");
+    assert!(
+        summary_of(&one, Lang::Zh).ends_with("预计1家公司公布财报，日期未确认。"),
+        "{}",
+        summary_of(&one, Lang::Zh)
+    );
+    let none = bundle_with(0, 0, 0, 0, "2026-12-11T23:05:00Z");
+    assert_eq!(
+        title_of(&none, Lang::En),
+        "Earnings next week: no company expected from Dec 14"
+    );
+    assert_eq!(
+        title_of(&none, Lang::Zh),
+        "下周财报：12月14日起暂无公司预计"
+    );
+    for lang in [Lang::En, Lang::Zh] {
+        let (_, md) = write(&none, lang);
+        assert_eq!(
+            verify_page(&none, lang, &md, &cover_lines(&none, lang)),
+            Ok(()),
+            "{lang:?}\n{md}"
+        );
+    }
+}
+
+/// L6: a link target the guard cannot vouch for (a slug, ticker or event
+/// link with a space, a parenthesis or another scheme) fails the page.
+#[tokio::test]
+async fn unsafe_link_targets_fail_the_page() {
+    let b = dec4_bundle().await;
+    for (field, value) in [
+        ("slug", "crm q3) [x](http://evil"),
+        ("ticker", "CPRT X"),
+        ("link", "javascript:alert(1)"),
+        ("link", "https://www.bls.gov/a b"),
+    ] {
+        let mut t = b.clone();
+        match field {
+            "slug" => {
+                t.checks[0].slug = value.into();
+                t.listed[0] = value.into();
+            }
+            "ticker" => t
+                .expected
+                .iter_mut()
+                .filter(|e| e.ticker == "CPRT")
+                .for_each(|e| e.ticker = value.into()),
+            _ => t.events[0].link = value.into(),
+        }
+        for lang in [Lang::En, Lang::Zh] {
+            let (_, md) = write(&t, lang);
+            assert!(
+                verify_page(&t, lang, &md, &cover_lines(&t, lang)).is_err(),
+                "{field} {value:?} {lang:?}"
+            );
+        }
+    }
 }

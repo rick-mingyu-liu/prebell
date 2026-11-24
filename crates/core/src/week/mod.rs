@@ -69,9 +69,15 @@ pub fn slug(friday: NaiveDate) -> String {
     format!("earnings-week-{}", ymd(friday))
 }
 
-/// The bundle's R2 key: `week/2026-12-04.json`.
-pub fn facts_key(friday: NaiveDate) -> String {
-    format!("week/{}.json", ymd(friday))
+/// The bundle's R2 key: `week/2026-12-04.json` for the first build,
+/// `week/2026-12-04-r1.json` for the first correction. One key per revision,
+/// so a correction that fails before its D1 batch leaves the bundle the page
+/// shows in place (`revise_post` switches `facts_r2_key` with the text).
+pub fn facts_key(friday: NaiveDate, revision: u32) -> String {
+    match revision {
+        0 => format!("week/{}.json", ymd(friday)),
+        n => format!("week/{}-r{n}.json", ymd(friday)),
+    }
 }
 
 /// The cover stem of revision `n` (for the card task): the first build's is

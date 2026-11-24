@@ -92,6 +92,19 @@ pub fn this_friday(now: DateTime<Utc>) -> Option<NaiveDate> {
     (d.weekday() == Weekday::Fri).then_some(d)
 }
 
+/// The Friday a `week` message at `now` builds, and whether it is late: the
+/// day itself from 18:00 ET (`digest::due`), or the day before when a Friday
+/// evening's message is processed after midnight ET (a backed-up build
+/// queue). Late, it builds without waiting for a refresh (no poll runs on a
+/// Saturday to queue it again) and alerts if that build does not publish.
+pub fn build_friday(now: DateTime<Utc>) -> Option<(NaiveDate, bool)> {
+    if let Some(f) = this_friday(now).filter(|_| due(now)) {
+        return Some((f, false));
+    }
+    let d = et(now).date_naive();
+    (d.weekday() == Weekday::Sat).then(|| (d - Duration::days(1), true))
+}
+
 /// A correction to build: a live post's run set back to `pending` (not
 /// waiting to retry), or left `building` by a crash (lease expired).
 fn correction(w: &WeekRun, now: DateTime<Utc>) -> bool {
@@ -165,7 +178,9 @@ pub async fn week_tick(
     store: &dyn Store,
     ws: &dyn WeekStore,
 ) -> Result<String, String> {
-    let friday = this_friday(now).filter(|_| due(now));
+    let target = build_friday(now);
+    let friday = target.map(|(f, _)| f);
+    let late = target.is_some_and(|(_, late)| late);
     let key = friday.map(run_key).unwrap_or_default();
     let runs = ws.week_runs(&key).await?;
     let mut out: Vec<String> = Vec::new();
@@ -190,8 +205,9 @@ pub async fn week_tick(
                 Some(give_up(now, f, w.run.clone(), err, store).await?)
             }
             _ => {
-                let ready =
-                    closing(now) || crate::earnings::calendar::refreshed_today(es, now).await?;
+                let ready = late
+                    || closing(now)
+                    || crate::earnings::calendar::refreshed_today(es, now).await?;
                 if ready {
                     built = true;
                     let run = w.map(|w| w.run.clone());
@@ -219,11 +235,11 @@ pub async fn week_tick(
         }
     }
 
-    if let (Some(f), true) = (friday, last_try(now)) {
-        let open = store
-            .get_run(&key)
-            .await?
-            .is_none_or(|r| !matches!(r.status.as_str(), "published" | "skipped"));
+    if let (Some(f), true) = (friday, late || last_try(now)) {
+        // A build in flight alerts through its own failure path instead.
+        let open = store.get_run(&key).await?.is_none_or(|r| {
+            !matches!(r.status.as_str(), "published" | "skipped") && !leased(&r, now)
+        });
         if open {
             let msg = format!("week post for {} not published", super::ymd(f));
             if alert_once_today(now, "week-missed", "error", &msg, store).await? {
@@ -281,16 +297,29 @@ async fn stored(store: &dyn Store, post: &PostRow) -> Result<Bundle, String> {
 }
 
 /// The published week posts before `friday`, with their bundles, newest
-/// first (a missing or unreadable bundle is left out).
+/// first. The newest one's bundle must read: it sets section 1's window and
+/// what is excluded, so an R2 error, a missing object or a bundle that does
+/// not parse fails the build (retried, alerted) rather than falling back to
+/// an older post. The older ones only feed the stale check: one that cannot
+/// be read is left out.
 async fn previous(
     friday: NaiveDate,
     store: &dyn Store,
     ws: &dyn WeekStore,
 ) -> Result<Vec<Bundle>, String> {
     let mut out = Vec::new();
-    for p in ws.week_posts(&super::ymd(friday), PREVIOUS).await? {
-        if let Ok(b) = stored(store, &p).await {
-            out.push(b);
+    for (i, p) in ws
+        .week_posts(&super::ymd(friday), PREVIOUS)
+        .await?
+        .into_iter()
+        .enumerate()
+    {
+        match stored(store, &p).await {
+            Ok(b) => out.push(b),
+            Err(e) if i == 0 => {
+                return Err(format!("the newest week post's bundle cannot be read: {e}"))
+            }
+            Err(_) => {}
         }
     }
     Ok(out)
@@ -318,7 +347,10 @@ async fn stale(prev: &[Bundle], store: &dyn Store, ws: &dyn WeekStore) -> Result
                 w.revised_at
                     .as_deref()
                     .or(w.published_at.as_deref())
-                    // A rebuild re-read its checks at `as_of`.
+                    // A rebuild re-read its checks at `as_of`; a check revised
+                    // and later rebuilt keeps its old `revised_at`, so the
+                    // later of the two counts.
+                    .max(w.published_at.as_deref())
                     .is_some_and(|t| t > b.as_of.as_str())
             })
             .map(|w| w.slug.as_str())
@@ -474,7 +506,10 @@ async fn build(
         },
         _ => None,
     };
-    let prev = previous(friday, store, ws).await?;
+    let prev = match previous(friday, store, ws).await {
+        Ok(p) => p,
+        Err(e) => return not_ready(now, friday, row, e, store).await,
+    };
     let b = bundle_for(now, friday, old.as_ref(), &prev, es, events, ws).await?;
     if old.is_none() {
         stale(&prev, store, ws).await?;
@@ -495,10 +530,12 @@ async fn build(
         Err(e) => return not_ready(now, friday, row, e, store).await,
     };
     let json = serde_json::to_string(&b).map_err(|e| format!("bundle json: {e}"))?;
-    store.put_facts(&facts_key(friday), &json).await?;
+    store
+        .put_facts(&facts_key(friday, b.revision), &json)
+        .await?;
     let (p, revised) = match (post, old.is_some()) {
         (Some(mut p), true) => {
-            p.facts_r2_key = facts_key(friday);
+            p.facts_r2_key = facts_key(friday, b.revision);
             p.revised_at = Some(ts.clone());
             (p, true)
         }
@@ -510,7 +547,7 @@ async fn build(
                 template_id: TEMPLATE_ID.into(),
                 trading_date: super::ymd(friday),
                 slug: slug(friday),
-                facts_r2_key: facts_key(friday),
+                facts_r2_key: facts_key(friday, 0),
                 published_at: Some(ts.clone()),
                 cover_key: None,
                 revised_at: None,

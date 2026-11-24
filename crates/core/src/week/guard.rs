@@ -1,22 +1,33 @@
 //! The week post's page guard (`writeup::verify_page` takes IPO facts and
 //! refuses every rounded amount, which every cover line is, so it cannot be
-//! used). It proves the page is the bundle, copied exactly: every digit on
-//! the page, the cover lines included, must be accounted for, in order:
+//! used). It proves that the page says what the bundle holds, and nothing
+//! else; it does not prove the bundle is right (that rests on the rows'
+//! stored sources: the checks' own number checks, the calendar's `source`,
+//! `proof_url` and `checked_at`, the events' official links). Checked, with
+//! its own tables of weekdays, slot labels and status words, so a template
+//! edit cannot pass by changing both sides:
 //!
 //! 1. **Check lines.** A section 1 line names one listed check by its link,
 //!    and every part after it is that check's period or one of its stored
 //!    cover lines, character for character (as escaped for Markdown). Each
 //!    listed check has exactly one line.
-//! 2. **Links.** Every link goes where the bundle says, and its label is that
-//!    row's name and ticker, an event's title, or the calendar link's text.
-//!    Names with digits (3M) pass here, as whole labels.
-//! 3. **Names in the title.** Check names, as whole words.
-//! 4. **Counts.** Each count stands in its own phrase and must equal that
-//!    count: "8 expected next week" is checked against `counts.expected`,
-//!    not against any number the bundle holds, so an off-by-one cannot hide
-//!    behind another field.
-//! 5. **Dates and times.** Each date is one of the bundle's, each clock time
-//!    the as-of time or an event's.
+//! 2. **Section 2.** Five day headings, Monday to Friday, each with its own
+//!    weekday; slot labels in order; every expected row exactly once, under
+//!    its own date and slot, with its own status word; "no reports" only on
+//!    a day without rows. The legend sentence is the calendar's, once.
+//! 3. **Links.** Every link goes where the bundle says (a safe target), and
+//!    its label is that row's name and ticker, an event's title, or the
+//!    calendar link's text. Names with digits (3M) pass here, as whole
+//!    labels. No bare URL or HTML tag.
+//! 4. **Names in the title.** Check names, as whole words.
+//! 5. **Counts.** Each count stands in its own phrase and must equal that
+//!    count ("8 expected next week" against `counts.expected`), and a zero
+//!    form ("No company is expected", 日期均未确认) only when it is zero.
+//! 6. **Dates and times.** Each date is one of the bundle's, in its place:
+//!    section 1's range in its heading and the summary, the as-of date in
+//!    section 2's heading. Each clock time is the as-of time (or a
+//!    correction's first publication) followed by "ET" / after 美东时间, or
+//!    an event's time with its AM/PM (上午/下午) and "ET" / （美东）.
 //!
 //! Then no digit may be left. This is stricter than `numbers::check_allowed`,
 //! which passes any bare integer from 0 to 10 and never looks at dates,
@@ -25,7 +36,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::OnceLock;
 
-use chrono::{Duration, NaiveDate};
+use chrono::{Datelike, Duration, NaiveDate};
 use regex::Regex;
 
 use super::render::{
@@ -110,21 +121,51 @@ fn dates(b: &Bundle) -> HashSet<NaiveDate> {
     out
 }
 
-/// Every clock time the page may print: the as-of time, and each event's
-/// time as `events::et_time` writes it ("8:30", "14:00" never: 12-hour).
-fn times(b: &Bundle) -> HashSet<String> {
-    let mut out: HashSet<String> = HashSet::new();
-    out.insert(super::render::clock(b));
+/// What a clock time on the page is.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Clock {
+    /// The as-of time or a correction's first publication: 24-hour, "ET".
+    Stamp,
+    /// An event's time: 12-hour with AM/PM (`events::et_time`).
+    Event { pm: bool },
+}
+
+/// Every clock time the page may print, and what it is.
+fn times(b: &Bundle) -> HashMap<String, Clock> {
+    let mut out: HashMap<String, Clock> = HashMap::new();
+    out.insert(super::render::clock(b), Clock::Stamp);
     // A correction's note names when the post first went out.
     if let Ok(t) = b.cutoff.parse() {
-        out.insert(super::render::hhmm(t));
+        out.insert(super::render::hhmm(t), Clock::Stamp);
     }
     for e in &b.events {
-        if let Some(at) = e.starts_at.as_deref().and_then(|t| t.parse().ok()) {
-            out.insert(et(at).format("%-I:%M").to_string());
+        if let Some(at) = e
+            .starts_at
+            .as_deref()
+            .and_then(|t| t.parse::<chrono::DateTime<chrono::Utc>>().ok())
+        {
+            let local = et(at);
+            out.entry(local.format("%-I:%M").to_string())
+                .or_insert(Clock::Event {
+                    pm: local.format("%p").to_string() == "PM",
+                });
         }
     }
     out
+}
+
+/// Whether the text around a clock time names its time zone as the bundle's
+/// time implies.
+fn zone_ok(line: &str, start: usize, end: usize, clock: Clock, lang: Lang) -> bool {
+    let (before, after) = (&line[..start], &line[end..]);
+    match (lang, clock) {
+        (Lang::En, Clock::Stamp) => after.starts_with(" ET") && !after.starts_with(" ETC"),
+        (Lang::En, Clock::Event { pm }) => after.starts_with(if pm { " PM ET" } else { " AM ET" }),
+        (Lang::Zh, Clock::Stamp) => before.contains("美东时间"),
+        (Lang::Zh, Clock::Event { pm }) => {
+            before.ends_with(if pm { "下午" } else { "上午" }) && after.starts_with("（美东）")
+        }
+    }
 }
 
 /// `url -> labels` the page may link, and the check each check URL names.
@@ -180,7 +221,7 @@ fn check_parts(rest: &str, c: &Check, lang: Lang) -> bool {
         Lang::En => &c.en,
         Lang::Zh => &c.zh,
     };
-    allowed.extend(lines.iter().filter(|l| shown(l)).map(|l| escape(l)));
+    allowed.extend(lines.iter().filter(|l| shown(l, c)).map(|l| escape(l)));
     for part in rest.split(SEP) {
         match allowed.iter().position(|a| a == part) {
             Some(i) => {
@@ -190,6 +231,357 @@ fn check_parts(rest: &str, c: &Check, lang: Lang) -> bool {
         }
     }
     true
+}
+
+// ---------------------------------------------------------------------------
+// The guard's own tables: a template edit must change both sides to pass.
+
+const EN_WEEKDAYS: [&str; 7] = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+const ZH_WEEKDAYS: [&str; 7] = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"];
+
+/// Slot labels, in page order.
+fn slot_labels(lang: Lang) -> [(&'static str, &'static str); 3] {
+    match lang {
+        Lang::En => [
+            ("Before open", "bmo"),
+            ("After close", "amc"),
+            ("Time not given", "unknown"),
+        ],
+        Lang::Zh => [("盘前", "bmo"), ("盘后", "amc"), ("时间暂缺", "unknown")],
+    }
+}
+
+/// A write-up company's status words, and a calendar-only group's.
+fn status_of_word(word: &str, lang: Lang, writeup: bool) -> Option<&'static str> {
+    let table: &[(&str, &str)] = match (lang, writeup) {
+        (Lang::En, true) => &[
+            ("confirmed", "confirmed"),
+            ("date not confirmed", "unconfirmed"),
+            ("reported", "reported"),
+        ],
+        (Lang::En, false) => &[
+            ("Confirmed", "confirmed"),
+            ("Not confirmed", "unconfirmed"),
+            ("Reported", "reported"),
+        ],
+        (Lang::Zh, true) => &[
+            ("日期已确认", "confirmed"),
+            ("日期未确认", "unconfirmed"),
+            ("已发布", "reported"),
+        ],
+        (Lang::Zh, false) => &[
+            ("已确认", "confirmed"),
+            ("未确认", "unconfirmed"),
+            ("已发布", "reported"),
+        ],
+    };
+    table.iter().find(|(w, _)| *w == word).map(|(_, s)| *s)
+}
+
+/// A day heading as the guard writes it: "Tue, Dec 8" / "12月8日（周二）".
+fn day_heading(d: NaiveDate, lang: Lang) -> String {
+    let i = d.weekday().num_days_from_monday() as usize;
+    match lang {
+        Lang::En => format!("### {}, {}", EN_WEEKDAYS[i], d.format("%b %-d")),
+        Lang::Zh => format!("### {}月{}日（{}）", d.month(), d.day(), ZH_WEEKDAYS[i]),
+    }
+}
+
+/// The dates on a line, in order, resolved against the bundle's dates (a
+/// date the bundle does not hold is `None`).
+fn dates_on(line: &str, allowed: &HashSet<NaiveDate>) -> Vec<Option<NaiveDate>> {
+    date_re()
+        .captures_iter(line)
+        .map(|c| {
+            allowed
+                .iter()
+                .copied()
+                .find(|d| date_ok(&c, &HashSet::from([*d])))
+        })
+        .collect()
+}
+
+/// A link target PreBell may write: its own pages, or an https page with
+/// no space, quote, bracket or parenthesis.
+fn safe_target(url: &str) -> bool {
+    static SITE: OnceLock<Regex> = OnceLock::new();
+    static WEB: OnceLock<Regex> = OnceLock::new();
+    let site = SITE.get_or_init(|| {
+        re(r"^/(?:en|zh)/(?:p/[a-z0-9]+(?:-[a-z0-9]+)*|t/[A-Z0-9]+(?:[.-][A-Z0-9]+)*|earnings\?week=\d{4}-\d{2}-\d{2})$")
+    });
+    let web = WEB.get_or_init(|| re(r"^https://[A-Za-z0-9.-]+(?:/[A-Za-z0-9._~%/?=&+#-]*)?$"));
+    site.is_match(url) || web.is_match(url)
+}
+
+/// Section 2, line by line (module docs, step 2).
+fn section_two(b: &Bundle, lang: Lang, md: &str, bad: &mut Vec<String>) {
+    let heading = match lang {
+        Lang::En => "## Expected next week",
+        Lang::Zh => "## 下周预计公布",
+    };
+    let lines: Vec<&str> = md.lines().collect();
+    let Some(h) = lines.iter().position(|l| l.starts_with(heading)) else {
+        bad.push("section 2 heading missing".into());
+        return;
+    };
+    let colon = match lang {
+        Lang::En => ": ",
+        Lang::Zh => "：",
+    };
+    let none = match lang {
+        Lang::En => "No reports expected.",
+        Lang::Zh => "暂无。",
+    };
+    let days: Vec<NaiveDate> = (0..5)
+        .map(|i| b.next_monday() + Duration::days(i))
+        .collect();
+    let day_keys: Vec<String> = days.iter().map(|d| super::ymd(*d)).collect();
+    // Each row by (its ticker page, date, slot), and the rows per day and
+    // slot: built once (a peak week has about 200 rows and 300 lines).
+    let mut by_link: HashMap<(String, &str, &str), &super::Expected> = HashMap::new();
+    let mut per: HashMap<(&str, &str), usize> = HashMap::new();
+    for e in &b.expected {
+        let key = (
+            super::render::ticker_url(&e.ticker, lang),
+            e.date.as_str(),
+            e.slot.as_str(),
+        );
+        by_link.insert(key, e);
+        *per.entry((e.date.as_str(), e.slot.as_str())).or_default() += 1;
+    }
+    let mut seen: HashMap<(&str, &str), usize> = HashMap::new();
+    let mut day: Option<usize> = None;
+    let mut slot: Option<usize> = None;
+    let mut note = false;
+    let rows_of = |i: usize, sl: Option<&str>| -> usize {
+        slot_labels(lang)
+            .iter()
+            .filter(|(_, code)| sl.is_none_or(|s| s == *code))
+            .map(|(_, code)| {
+                per.get(&(day_keys[i].as_str(), *code))
+                    .copied()
+                    .unwrap_or(0)
+            })
+            .sum()
+    };
+    for line in &lines[h + 1..] {
+        let l = line.trim_end();
+        if l.is_empty() {
+            continue;
+        }
+        if l.starts_with("**Economy & Fed:**")
+            || l.starts_with("**经济与美联储**")
+            || l == super::render::LEGEND_EN
+            || l == super::render::LEGEND_ZH
+            || l.starts_with("## ")
+        {
+            break;
+        }
+        if l.starts_with("### ") {
+            let i = day.map_or(0, |i| i + 1);
+            match days.get(i) {
+                Some(d) if l == day_heading(*d, lang) => {}
+                _ => bad.push(format!("section 2: day heading not the bundle's: {l}")),
+            }
+            day = Some(i);
+            slot = None;
+            continue;
+        }
+        let Some(i) = day.filter(|i| *i < 5) else {
+            // Only a correction's note may stand between the heading and Monday.
+            let marker = match lang {
+                Lang::En => "This list was read again on ",
+                Lang::Zh => "本列表于美东时间",
+            };
+            if b.revision > 0 && !note && l.starts_with(marker) {
+                note = true;
+            } else {
+                bad.push(format!("section 2 line not as the bundle: {l}"));
+            }
+            continue;
+        };
+        let d = days[i];
+        if l == none {
+            if rows_of(i, None) != 0 || slot.is_some() {
+                bad.push(format!("section 2: \"{none}\" on {d}, which has reports"));
+            }
+            continue;
+        }
+        if let Some(label) = l.strip_prefix("**").and_then(|x| x.strip_suffix("**")) {
+            match slot_labels(lang).iter().position(|(t, _)| *t == label) {
+                Some(k)
+                    if slot.is_none_or(|s| k > s)
+                        && rows_of(i, Some(slot_labels(lang)[k].1)) > 0 =>
+                {
+                    slot = Some(k)
+                }
+                _ => bad.push(format!("section 2: slot label not the bundle's: {l}")),
+            }
+            continue;
+        }
+        let (Some(k), Some(item)) = (slot, l.strip_prefix("- ")) else {
+            bad.push(format!("section 2 line not as the bundle: {l}"));
+            continue;
+        };
+        let slot_code = slot_labels(lang)[k].1;
+        // A write-up company's line: one link, then its status word.
+        let (links, word, writeup): (&str, &str, bool) = if item.starts_with('[') {
+            match item.rsplit_once(colon) {
+                Some((link, w)) if link.ends_with(')') => (link, w, true),
+                _ => {
+                    bad.push(format!("section 2 line not as the bundle: {l}"));
+                    continue;
+                }
+            }
+        } else {
+            match item.split_once(colon) {
+                Some((w, rest)) => (rest, w, false),
+                None => {
+                    bad.push(format!("section 2 line not as the bundle: {l}"));
+                    continue;
+                }
+            }
+        };
+        let Some(status) = status_of_word(word, lang, writeup) else {
+            bad.push(format!("section 2: status word not the bundle's: {l}"));
+            continue;
+        };
+        let join = match lang {
+            Lang::En => ", ",
+            Lang::Zh => "、",
+        };
+        let found: Vec<_> = link_re().captures_iter(links).collect();
+        let rest = link_re().replace_all(links, "");
+        if found.is_empty() || !rest.split(join).all(str::is_empty) || (writeup && found.len() != 1)
+        {
+            bad.push(format!("section 2 line not as the bundle: {l}"));
+            continue;
+        }
+        for c in found {
+            let url = &c[2];
+            let row = by_link
+                .get(&(url.to_string(), day_keys[i].as_str(), slot_code))
+                .copied();
+            match row {
+                Some(e) if e.status == status && (e.tier == "full") == writeup => {
+                    *seen
+                        .entry((e.ticker.as_str(), e.date.as_str()))
+                        .or_default() += 1;
+                }
+                Some(_) => bad.push(format!("section 2: status or tier not the bundle's: {l}")),
+                None => bad.push(format!(
+                    "section 2: {url} is not expected on {d} in that slot"
+                )),
+            }
+        }
+    }
+    if day != Some(4) {
+        bad.push("section 2: not five day headings".into());
+    }
+    for e in &b.expected {
+        let n = seen
+            .get(&(e.ticker.as_str(), e.date.as_str()))
+            .copied()
+            .unwrap_or(0);
+        if n != 1 {
+            bad.push(format!(
+                "section 2: {} on {} listed {n} times",
+                e.ticker, e.date
+            ));
+        }
+    }
+}
+
+/// The dates of the title, the summary and both section headings are the
+/// bundle's dates for those places, in order.
+fn date_places(b: &Bundle, lang: Lang, md: &str, bad: &mut Vec<String>) {
+    let allowed = dates(b);
+    let (from, to) = b.range();
+    let nm = b.next_monday();
+    let nf = nm + Duration::days(4);
+    let as_of = et(b.as_of()).date_naive();
+    let long = as_of != b.friday();
+    let mut lines = md.lines().filter(|l| !l.trim().is_empty());
+    let title = lines.next().unwrap_or_default();
+    let summary = lines.next().unwrap_or_default();
+    let want_title: Vec<NaiveDate> = if b.counts.checks == 0 {
+        vec![nm]
+    } else {
+        vec![]
+    };
+    let mut want_summary = vec![from, to];
+    match lang {
+        Lang::En => {
+            want_summary.extend([nm, nf]);
+            if long {
+                want_summary.push(as_of);
+            }
+        }
+        Lang::Zh => {
+            if long {
+                want_summary.push(as_of);
+            }
+            want_summary.extend([nm, nf]);
+        }
+    }
+    let s1 = md
+        .lines()
+        .find(|l| l.starts_with("## "))
+        .unwrap_or_default();
+    let s2 = md
+        .lines()
+        .find(|l| l.starts_with("## Expected next week") || l.starts_with("## 下周预计公布"))
+        .unwrap_or_default();
+    for (what, line, want) in [
+        ("title", title, want_title),
+        ("summary", summary, want_summary),
+        ("section 1 heading", s1, vec![from, to]),
+        ("section 2 heading", s2, vec![as_of]),
+    ] {
+        let got = dates_on(line, &allowed);
+        if got != want.iter().map(|d| Some(*d)).collect::<Vec<_>>() {
+            bad.push(format!("{what}: dates not the bundle's: {line}"));
+        }
+    }
+}
+
+/// A zero form for a count that is not zero.
+fn zero_forms(b: &Bundle, lang: Lang, text: &str, bad: &mut Vec<String>) {
+    let forms: &[(&str, Count)] = match lang {
+        Lang::En => &[
+            ("No company is expected", Count::Expected),
+            ("no company expected from", Count::Expected),
+            ("None expected next week", Count::Expected),
+            ("no date is confirmed", Count::Confirmed),
+            ("published no earnings checks", Count::Checks),
+            ("No checks this week", Count::Checks),
+            ("No earnings checks were published", Count::Checks),
+        ],
+        Lang::Zh => &[
+            ("暂无公司预计", Count::Expected),
+            ("起暂无公司预计", Count::Expected),
+            ("下周暂无预计", Count::Expected),
+            ("公布财报，日期均未确认", Count::Confirmed),
+            ("公布财报，日期未确认", Count::Confirmed),
+            ("未发布财报速评", Count::Checks),
+            ("本周暂无速评", Count::Checks),
+            ("暂无财报速评", Count::Checks),
+        ],
+    };
+    for (form, which) in forms {
+        let n = match which {
+            Count::Checks => b.counts.checks,
+            Count::Expected => b.counts.expected,
+            Count::Confirmed => b.counts.confirmed,
+        };
+        if n != 0 && text.contains(form) {
+            bad.push(format!("zero form with a count of {n}: {form}"));
+        }
+    }
+    // 均 ("all") only for more than one company.
+    if lang == Lang::Zh && b.counts.expected == 1 && text.contains("日期均未确认") {
+        bad.push("均 with one company".into());
+    }
 }
 
 /// Checks the page `md` and the two cover lines against the bundle (module
@@ -202,6 +594,23 @@ pub fn verify_page(
 ) -> Result<(), Vec<String>> {
     let mut bad: Vec<String> = Vec::new();
     let (allowed_links, check_urls) = links(b, lang);
+    section_two(b, lang, md, &mut bad);
+    date_places(b, lang, md, &mut bad);
+    let legend = match lang {
+        Lang::En => super::render::LEGEND_EN,
+        Lang::Zh => super::render::LEGEND_ZH,
+    };
+    let n = md.lines().filter(|l| *l == legend).count();
+    if n != 1 {
+        bad.push(format!("the calendar's source sentence appears {n} times"));
+    }
+    let all = format!("{md}\n{}", cover.join("\n"));
+    zero_forms(b, lang, &all, &mut bad);
+    for c in link_re().captures_iter(md) {
+        if !safe_target(&c[2]) {
+            bad.push(format!("link target not safe: {}", &c[2]));
+        }
+    }
 
     // 1. Check lines.
     let mut seen: HashMap<&str, usize> = HashMap::new();
@@ -245,6 +654,15 @@ pub fn verify_page(
         }
     }
     text = link_re().replace_all(&text, " ").into_owned();
+    // No bare URL or HTML outside the links (names and lines are escaped).
+    for line in text.lines() {
+        let raw_tag = line
+            .char_indices()
+            .any(|(i, c)| matches!(c, '<' | '>') && !line[..i].ends_with('\\'));
+        if line.contains("://") || line.contains("www.") || raw_tag {
+            bad.push(format!("bare link or tag: {}", line.trim()));
+        }
+    }
 
     // 3. Names in the title (the first line).
     if let Some((head, tail)) = text.split_once('\n') {
@@ -286,9 +704,15 @@ pub fn verify_page(
     }
     text = date_re().replace_all(&text, " ").into_owned();
     let clocks = times(b);
-    for m in time_re().find_iter(&text) {
-        if !clocks.contains(m.as_str()) {
-            bad.push(format!("time not in the bundle: {}", m.as_str()));
+    for line in text.lines() {
+        for m in time_re().find_iter(line) {
+            match clocks.get(m.as_str()) {
+                None => bad.push(format!("time not in the bundle: {}", m.as_str())),
+                Some(c) if !zone_ok(line, m.start(), m.end(), *c, lang) => {
+                    bad.push(format!("time zone not the bundle's: {}", line.trim()))
+                }
+                Some(_) => {}
+            }
         }
     }
     text = time_re().replace_all(&text, " ").into_owned();
