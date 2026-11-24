@@ -1655,7 +1655,7 @@ fn re(p: &str) -> Regex {
 }
 
 /// EN "Nov 10, 2026", "November 10"; ZH "2026年11月10日".
-fn date_re() -> &'static Regex {
+pub(crate) fn date_re() -> &'static Regex {
     static R: OnceLock<Regex> = OnceLock::new();
     R.get_or_init(|| {
         re(&format!(
@@ -1674,7 +1674,7 @@ fn month_number(m: &str) -> Option<u32> {
     .map(|i| i as u32 + 1)
 }
 
-fn date_ok(c: &regex::Captures, allowed: &HashSet<NaiveDate>) -> bool {
+pub(crate) fn date_ok(c: &regex::Captures, allowed: &HashSet<NaiveDate>) -> bool {
     let get = |k: &str| c.name(k).map(|m| m.as_str());
     let (m, d, y) = if let Some(m) = get("m1") {
         (month_number(m), get("d1"), get("y1"))
@@ -1712,7 +1712,7 @@ fn replace_amount(text: &str, a: &str) -> String {
 }
 
 /// `word` replaced where no ASCII letter or digit touches it.
-fn replace_word(text: &str, word: &str, with: &str) -> String {
+pub(crate) fn replace_word(text: &str, word: &str, with: &str) -> String {
     if word.is_empty() {
         return text.to_string();
     }
