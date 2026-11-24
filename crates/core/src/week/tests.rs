@@ -2427,3 +2427,71 @@ async fn a_published_friday_raises_nothing_on_monday() {
     assert_eq!(ws.1.get(), 1);
     assert!(w.alerts().is_empty());
 }
+
+/// E (the review of 45167b3): only the one note `section_two` accepted is
+/// skipped, and only when it is the guard's own text whole; any other line
+/// that starts like it is ordinary text. The reviewer's four cases, in both
+/// languages.
+#[tokio::test]
+async fn only_the_accepted_note_is_skipped_and_only_whole() {
+    let w = dec4();
+    w.tick(DEC4_BUILD).await;
+    w.cal("COST", "2026-12-10", "amc", "confirmed");
+    w.set_run("2026-12-04", |r| {
+        r.status = "pending".into();
+        r.attempts = 0;
+    });
+    w.tick("2026-12-08T15:05:00Z").await;
+    let b = w.bundle("2026-12-04");
+    for lang in [Lang::En, Lang::Zh] {
+        assert_eq!(guarded(&b, lang, str::to_string), Ok(()), "{lang:?}");
+        let (note, marker, legend, s1, weekday) = match lang {
+            Lang::En => (
+                "This list was read again on Tue Dec 8, 10:05 ET, after the post was first published on Fri Dec 4, 18:05 ET. The checks above are the ones listed then.",
+                "This list was read again on ",
+                LEGEND_EN,
+                "## Earnings checks published Nov 30–Dec 4\n",
+                ("read again on Tue Dec 8", "read again on Wed Dec 8"),
+            ),
+            Lang::Zh => (
+                "本列表于美东时间12月8日周二10:05重新读取；本文首发于美东时间12月4日周五18:05。上方的速评仍为首发时所列。",
+                "本列表于美东时间",
+                LEGEND_ZH,
+                "## 11月30日至12月4日发布的财报速评\n",
+                ("12月8日周二10:05重新读取", "12月8日周三10:05重新读取"),
+            ),
+        };
+        let planted = format!("{marker}99 at 12:34 https://evil.example/x");
+        let cases: Vec<(&str, String, String)> = vec![
+            (
+                "digits and a URL appended to the note",
+                note.to_string(),
+                format!("{note} 42 https://evil.example/x"),
+            ),
+            (
+                "a marker line after the legend",
+                legend.to_string(),
+                format!("{legend}\n\n{planted}"),
+            ),
+            (
+                "a marker line in section 1",
+                s1.to_string(),
+                format!("{s1}\n{planted}\n"),
+            ),
+            (
+                "a wrong weekday inside the note",
+                weekday.0.to_string(),
+                weekday.1.to_string(),
+            ),
+        ];
+        for (name, from, to) in cases {
+            let (_, page) = write(&b, lang);
+            assert!(
+                page.contains(&from),
+                "{name} {lang:?}: {from:?} not on the page"
+            );
+            let r = guarded(&b, lang, |md| md.replacen(&from, &to, 1));
+            assert!(r.is_err(), "{name} {lang:?} passed the guard");
+        }
+    }
+}

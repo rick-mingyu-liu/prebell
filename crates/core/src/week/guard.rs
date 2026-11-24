@@ -313,7 +313,45 @@ fn safe_target(url: &str) -> bool {
 }
 
 /// Section 2, line by line (module docs, step 2).
-fn section_two(b: &Bundle, lang: Lang, md: &str, bad: &mut Vec<String>) {
+/// A stamp as the guard writes it: "Tue Dec 8, 10:05 ET" / "12月8日周二10:05".
+fn stamp(t: chrono::DateTime<chrono::Utc>, lang: Lang) -> String {
+    let local = et(t);
+    let d = local.date_naive();
+    let i = d.weekday().num_days_from_monday() as usize;
+    match lang {
+        Lang::En => format!(
+            "{} {}, {} ET",
+            EN_WEEKDAYS[i],
+            d.format("%b %-d"),
+            local.format("%H:%M")
+        ),
+        Lang::Zh => format!(
+            "{}月{}日{}{}",
+            d.month(),
+            d.day(),
+            ZH_WEEKDAYS[i],
+            local.format("%H:%M")
+        ),
+    }
+}
+
+/// A correction's note, whole, as the guard writes it.
+fn note_text(b: &Bundle, lang: Lang) -> Option<String> {
+    let first: chrono::DateTime<chrono::Utc> = b.cutoff.parse().ok()?;
+    let (now, first) = (stamp(b.as_of(), lang), stamp(first, lang));
+    Some(match lang {
+        Lang::En => format!(
+            "This list was read again on {now}, after the post was first published on {first}. The checks above are the ones listed then."
+        ),
+        Lang::Zh => format!(
+            "本列表于美东时间{now}重新读取；本文首发于美东时间{first}。上方的速评仍为首发时所列。"
+        ),
+    })
+}
+
+/// Section 2 (module docs, step 2); returns the index in `md.lines()` of
+/// the one correction note it accepted, which the page-wide checks skip.
+fn section_two(b: &Bundle, lang: Lang, md: &str, bad: &mut Vec<String>) -> Option<usize> {
     let heading = match lang {
         Lang::En => "## Expected next week",
         Lang::Zh => "## 下周预计公布",
@@ -321,7 +359,7 @@ fn section_two(b: &Bundle, lang: Lang, md: &str, bad: &mut Vec<String>) {
     let lines: Vec<&str> = md.lines().collect();
     let Some(h) = lines.iter().position(|l| l.starts_with(heading)) else {
         bad.push("section 2 heading missing".into());
-        return;
+        return None;
     };
     let colon = match lang {
         Lang::En => ": ",
@@ -363,7 +401,8 @@ fn section_two(b: &Bundle, lang: Lang, md: &str, bad: &mut Vec<String>) {
             })
             .sum()
     };
-    for line in &lines[h + 1..] {
+    let mut note_at: Option<usize> = None;
+    for (at, line) in lines.iter().enumerate().skip(h + 1) {
         let l = line.trim_end();
         if l.is_empty() {
             continue;
@@ -394,34 +433,12 @@ fn section_two(b: &Bundle, lang: Lang, md: &str, bad: &mut Vec<String>) {
             };
             if b.revision > 0 && !note && l.starts_with(marker) {
                 note = true;
-                // Its two stamps, in order: the re-read (as_of), then the
-                // first publication (cutoff).
-                let first: Option<chrono::DateTime<chrono::Utc>> = b.cutoff.parse().ok();
-                let mut both = dates(b);
-                both.extend(first.map(|t| et(t).date_naive()));
-                let want_dates = vec![
-                    Some(et(b.as_of()).date_naive()),
-                    first.map(|t| et(t).date_naive()),
-                ];
-                let want_times = vec![
-                    super::render::clock(b),
-                    first.map(super::render::hhmm).unwrap_or_default(),
-                ];
-                let got_times: Vec<String> = time_re()
-                    .find_iter(l)
-                    .map(|m| m.as_str().to_string())
-                    .collect();
-                if dates_on(l, &both) != want_dates || got_times != want_times {
-                    bad.push(format!(
-                        "correction note: stamps not the bundle's, in order: {l}"
-                    ));
-                }
-                let zone = match lang {
-                    Lang::En => l.matches(" ET").count() == 2,
-                    Lang::Zh => l.matches("美东时间").count() == 2,
-                };
-                if !zone {
-                    bad.push(format!("correction note: time zones not the bundle's: {l}"));
+                // The whole line, as the guard writes it: its two stamps in
+                // order (the re-read, then the first publication), nothing more.
+                if note_text(b, lang).as_deref() == Some(l) {
+                    note_at = Some(at);
+                } else {
+                    bad.push(format!("correction note not the bundle's: {l}"));
                 }
             } else {
                 bad.push(format!("section 2 line not as the bundle: {l}"));
@@ -522,6 +539,7 @@ fn section_two(b: &Bundle, lang: Lang, md: &str, bad: &mut Vec<String>) {
             ));
         }
     }
+    note_at
 }
 
 /// The dates of the title, the summary and both section headings are the
@@ -634,7 +652,7 @@ pub fn verify_page(
 ) -> Result<(), Vec<String>> {
     let mut bad: Vec<String> = Vec::new();
     let (allowed_links, check_urls) = links(b, lang);
-    section_two(b, lang, md, &mut bad);
+    let note_at = section_two(b, lang, md, &mut bad);
     date_places(b, lang, md, &mut bad);
     let legend = match lang {
         Lang::En => super::render::LEGEND_EN,
@@ -655,13 +673,11 @@ pub fn verify_page(
     // 1. Check lines.
     let mut seen: HashMap<&str, usize> = HashMap::new();
     let mut lines: Vec<String> = Vec::new();
-    let note_marker = match lang {
-        Lang::En => "This list was read again on ",
-        Lang::Zh => "本列表于美东时间",
-    };
-    for line in md.lines().chain(cover.iter().map(String::as_str)) {
-        // A correction's note is checked in place (`section_two`).
-        if b.revision > 0 && line.starts_with(note_marker) {
+    let page = md.lines().enumerate().map(|(i, l)| (Some(i), l));
+    for (at, line) in page.chain(cover.iter().map(|c| (None, c.as_str()))) {
+        // Only the one note `section_two` accepted, whole, is skipped here;
+        // any other line that starts like it is ordinary text.
+        if at.is_some() && at == note_at {
             lines.push(String::new());
             continue;
         }
