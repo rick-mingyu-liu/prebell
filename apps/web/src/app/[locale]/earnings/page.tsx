@@ -7,15 +7,22 @@ import IpoWatchList from "@/components/IpoWatchList";
 import ShareButton from "@/components/ShareButton";
 import type { Locale } from "@/i18n/routing";
 import { getDb } from "@/lib/db";
-import { addDays, calendarWeeks, INDEXED_WEEKS, isDate, listCalendarWeek, todayEt, weekStart } from "@/lib/earnings";
+import { addDays, calendarWeeks, INDEXED_WEEKS, isDate, isWeekend, listCalendarWeek, readingWeek, todayEt, weekStart } from "@/lib/earnings";
 import { listEvents } from "@/lib/events";
 import { iposByDate, listIposBetween, listIpoWatch } from "@/lib/ipo";
 import { pairedAlternates, shareMetadata } from "@/lib/seo";
 import { formatDate } from "@/lib/time";
 
-function monday(raw: string | string[] | undefined): string {
+/** The `?week=` date, when there is a valid one. */
+const weekParam = (raw: string | string[] | undefined) => {
   const v = Array.isArray(raw) ? raw[0] : raw;
-  return weekStart(isDate(v) ? v : todayEt());
+  return isDate(v) ? v : null;
+};
+
+/** The Monday of the week shown: the `?week=` date's week, else the reading week (the coming week at weekends). */
+function monday(raw: string | string[] | undefined, today: string): string {
+  const v = weekParam(raw);
+  return v ? weekStart(v) : readingWeek(today);
 }
 
 /** A 404 for a week outside the calendar's range, before anything is read. */
@@ -29,11 +36,12 @@ export async function generateMetadata({ params, searchParams }: PageProps<"/[lo
   const { locale } = await params;
   const week = (await searchParams).week;
   const t = await getTranslations({ locale });
-  const start = monday(week);
-  inRange(start, todayEt());
-  const query = isDate(Array.isArray(week) ? week[0] : week) ? `?week=${start}` : "";
-  // Only weeks near today are worth indexing.
-  const distance = Math.abs(Date.parse(start) - Date.parse(weekStart(todayEt()))) / (7 * 86_400_000);
+  const today = todayEt();
+  const start = monday(week, today);
+  inRange(start, today);
+  const query = weekParam(week) ? `?week=${start}` : "";
+  // Only weeks near today are worth indexing (measured from this week, weekends included).
+  const distance = Math.abs(Date.parse(start) - Date.parse(weekStart(today))) / (7 * 86_400_000);
   // A dated week names its week, so the weeks' titles differ; the undated page moves with today.
   const title = query
     ? `${t("earnings.calendarTitle")} · ${t("earnings.boardTitle", { date: formatDate(start, locale as Locale) })}`
@@ -57,11 +65,14 @@ export async function generateMetadata({ params, searchParams }: PageProps<"/[lo
 export default async function EarningsCalendar({ params, searchParams }: PageProps<"/[locale]/earnings">) {
   const locale = (await params).locale as Locale;
   setRequestLocale(locale);
-  const start = monday((await searchParams).week);
+  const week = (await searchParams).week;
+  const today = todayEt();
+  const start = monday(week, today);
   const t = await getTranslations("earnings");
   const te = await getTranslations("events");
   const ti = await getTranslations("ipo");
-  const today = todayEt();
+  // At weekends the undated page is the coming week, and says so; the way back from another week goes there.
+  const weekend = isWeekend(today);
   const range = inRange(start, today);
   const db = getDb();
   const [days, events, weekIpos, watch] = await Promise.all([
@@ -82,7 +93,7 @@ export default async function EarningsCalendar({ params, searchParams }: PagePro
       <header className="cal-head">
         <div className="cal-head-main">
           <h1 className="cal-title">
-            <span className="kicker">{t("calendarTitle")}</span>
+            <span className="kicker">{weekend && !weekParam(week) ? `${t("calendarTitle")} · ${t("comingWeek")}` : t("calendarTitle")}</span>
             {title}
           </h1>
           <p className="cal-count">
@@ -98,9 +109,9 @@ export default async function EarningsCalendar({ params, searchParams }: PagePro
                 <span className="sr-only">{t("prevWeek")}</span>
               </Link>
             )}
-            {start !== weekStart(today) && (
+            {start !== readingWeek(today) && (
               <Link className="cal-btn cal-this-week" href={`/${locale}/earnings`}>
-                {t("thisWeek")}
+                {weekend ? t("comingWeek") : t("thisWeek")}
               </Link>
             )}
             {start < range.last && (

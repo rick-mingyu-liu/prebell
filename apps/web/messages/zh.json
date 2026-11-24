@@ -249,6 +249,7 @@
     "countCompanies": "本周 {count} 家公司",
     "countEvents": "{count} 项经济事件",
     "thisWeek": "回到本周",
+    "comingWeek": "下周",
     "share": "分享",
     "shareCopied": "链接已复制",
     "shareFailed": "请复制此链接：",
