@@ -35,13 +35,13 @@ describe("AuthorBlock", () => {
     expect(en).toContain('href="https://github.com/rick-mingyu-liu"');
     expect(en).toContain('href="https://www.linkedin.com/in/rick-mingyu-liu/"');
     expect(en).toContain('href="/en/archive"');
-    expect(en).toContain("All briefs →");
+    expect(en).toContain("All posts →");
 
     const zh = renderToStaticMarkup(createElement(AuthorBlock, { locale: "zh" }));
     expect(zh).toContain("Rick Liu");
     expect(zh).toContain("滑铁卢大学 AI 与软件工程师");
     expect(zh).toContain('href="/zh/archive"');
-    expect(zh).toContain("全部简报 →");
+    expect(zh).toContain("全部文章 →");
     expect(zh).toContain('href="https://github.com/rick-mingyu-liu"');
   });
 

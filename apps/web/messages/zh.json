@@ -50,7 +50,7 @@
     "newer": "较新",
     "older": "较早",
     "empty": "暂无内容。",
-    "all": "全部简报",
+    "all": "简报与周报",
     "filter": "按类型筛选"
   },
   "about": {
@@ -336,7 +336,7 @@
     "website": "rickmingyuliu.com",
     "github": "GitHub",
     "linkedin": "LinkedIn",
-    "allBriefs": "全部简报 →",
+    "allBriefs": "全部文章 →",
     "heading": "关于作者"
   },
   "signup": {
