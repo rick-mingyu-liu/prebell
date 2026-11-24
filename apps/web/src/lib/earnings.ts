@@ -74,6 +74,22 @@ export function weekStart(date: string): string {
   return addDays(date, day === 0 ? -6 : 1 - day);
 }
 
+/** True on Saturday and Sunday (`date` is an ET calendar date). */
+export function isWeekend(date: string): boolean {
+  const day = new Date(`${date}T00:00:00Z`).getUTCDay();
+  return day === 0 || day === 6;
+}
+
+/**
+ * The Monday of the week the undated calendar shows on `today` (an ET date): this week from Monday to Friday,
+ * and the coming week on Saturday and Sunday, once the week's reports are all in (Rick, 2026-11-24: "the
+ * calendar stays the live view, and switches to the coming week on Saturday").
+ */
+export function readingWeek(today: string): string {
+  const monday = weekStart(today);
+  return isWeekend(today) ? addDays(monday, 7) : monday;
+}
+
 /** Today's date in US Eastern time. */
 export function todayEt(now: Date = new Date()): string {
   return new Intl.DateTimeFormat("en-CA", { timeZone: "America/New_York" }).format(now);
