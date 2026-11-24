@@ -7,7 +7,7 @@ This design replaces the live week page proposed earlier the same day, for three
 - Its "last quarter" figures would be empty through January, and never exist for foreign filers.
 - Its generator state had a race.
 
-Rick then chose "Friday weekly post (Recommended)".
+Rick then chose "Friday weekly post (Recommended)". The design was revised the same day after the critic's second review: the post gets its own guard, a stored window, a correction path that works, its date sources shown, and a minimum size.
 
 ## Why
 
@@ -24,184 +24,337 @@ So the December posts are short, and the January season makes them long.
 
 **Type and keys**
 - `posts.content_type = 'week'`, `template_id = 'week-v1'`.
-- Run key `week:<friday>`.
-- Slug `earnings-week-<friday>`, for example `earnings-week-2026-12-04`.
+- Run key `week:<friday>`; slug `earnings-week-<friday>`, for example `earnings-week-2026-12-04`.
 - `trading_date` is the Friday.
-- The facts bundle is `week/<friday>.json` in R2, holding every row the page states.
-- The cover is `covers/earnings-week-<friday>.svg`.
+- The facts bundle is `week/<friday>.json` in R2. It holds every row and number the page states (below).
 
-**Written by code, no model.** The title, summary, cover lines and body are templates per language, filled from the same rows, as the IPO write-ups are (`crates/core/src/ipo/writeup.rs`). Chinese has its own templates, not a translation.
+**Written by code, no model.** The title, summary, cover lines and body are templates per language, filled from the bundle, as the IPO write-ups are (`crates/core/src/ipo/writeup.rs`). Chinese has its own templates; it is not translated from the English.
 
-**Guard.** Every number and date on the page must be one the bundle holds, checked by the existing page guard that `writeup::verify_page` uses. A page that fails is not published. It is retried and then failed with an alert, as IPO write-ups are.
+### The bundle
 
-**Never half-published.** Both languages are rendered and checked first. Then the run, the post and both translations are written in one D1 batch, as `ipo::article` does.
+| Field | What it holds |
+|---|---|
+| `friday`, `next_monday` | The run's dates. Every date in a build comes from these, never from the build day |
+| `cutoff` | The time of the first successful build; kept on every rebuild |
+| `window` | The first and last report dates of the checks it lists |
+| `listed` | The slugs of the checks it lists |
+| `checks[]` | Slug, ticker, name, trading date, period label, the `en` and `zh` cover lines exactly as stored in `post_translations`, the `zh` status, and the market-cap rank |
+| `expected[]` | Ticker, name, tier, date, slot, status, `source`, `proof_url` and `checked_at`, from `earnings_calendar` |
+| `events[]` | Series, date, time and official link, from the digest's `gather` |
+| `counts` | Checks, expected, confirmed, write-up companies expected, and companies per day |
 
 ### Sections
 
-**1. "Earnings checks this week" / "本周财报速评"**
-- Which checks: every earnings check whose English text was published after the previous week post's `published_at`, up to this build. The first post starts from that week's Monday, 00:00 ET.
-- A check published after a Friday build appears in the next post, under its own date. None is lost and none appears twice.
-- Order: market value, from the dated snapshot (`crates/core/data/marketcap-snapshot.tsv`, which the digest already reads).
-- One line per check, with:
-  - the company's display name and ticker;
-  - the period, by the search-title rule of 2026-11-19 ("Q3 2026" only when that calendar quarter ended within 120 days before the check's date, else "Q3 fiscal 2027");
+**1. "Earnings checks published Nov 30–Dec 4" / "11月30日至12月4日发布的财报速评"**
+- **Which checks:**
+  - the English text is published and `published_at <= cutoff`;
+  - the slug is not in the previous published week bundle's `listed`;
+  - the report date is on or after the previous week post's Monday (for the first post, on or after this week's Monday).
+- **Why this rule.** Rebuilding a check or a week post overwrites `published_at`; this rule does not move when that happens. A check published after the build lands in the next post. A failed or missing week is covered by the next post, and the heading names the dates it spans (`window`).
+- **Order:** market value from the dated snapshot, the digest's rule. A company missing from the snapshot, or at 0 there, comes after the rest, by ticker. ANT is at 0, so it sorts last.
+- **One line per check:**
+  - display name and ticker;
+  - the period, by the search-title rule of 2026-11-19: "Q3 2026" only when that calendar quarter ended within 120 days before the check's date, else "Q3 fiscal 2027";
   - the check's two cover lines in that language;
   - a link to `/{lang}/p/<slug>`.
-- A cover line with no digit (`American International Group results`) is left out.
-- A check whose Chinese translation is `failed` (EMR and COP today) keeps its Chinese cover lines on the Chinese line, but links to `/en/p/<slug>`, marked "（英文）". The Chinese page of a failed translation redirects to the Chinese home page (`posts.ts`).
-- A `pending` Chinese translation links to `/zh/p/<slug>` (its "coming soon" notice).
+- **Cover lines:** a line with no digit (`American International Group results`) is left out.
+- **Chinese translation failed** (EMR and COP today): the line keeps its Chinese cover lines and links to `/en/p/<slug>`, marked "（英文）". The Chinese page of a failed translation redirects to the Chinese home page (`resolvePost`).
+- **Chinese translation pending:** the line links to `/zh/p/<slug>`, which shows the "coming soon" notice.
 
 **2. "Expected next week, as of Fri Dec 4, 18:05 ET" / "下周预计公布（截至美东时间12月4日周五18:05）"**
-- Layout: Monday to Friday, then slots (before open, after close, time not given). A day with no reports reads "No reports expected." / "暂无。"
-- Write-up companies first, each on its own line with its status in words: "confirmed" or "date not confirmed" (`日期已确认` / `日期未确认`).
-- Calendar-only companies follow, one line per slot and status, for example "Not confirmed: Copart (CPRT), NIO (NIO)". No status is ever more than a line from its name.
-- Every name links to its ticker page (every calendar row has one, `tickerKnown`); quarantined rows are left out.
-- No row dated before the coming Monday is listed, so the stale "not yet matched to a filing" rows never appear in a post.
-- One "Economy & Fed" line for next week (FOMC, CPI, jobs), from the source the digest uses.
+- **Layout:** Monday to Friday, then slot: before open, after close, time not given. A day with no reports reads "No reports expected." / "暂无。"
+- **Write-up companies** come first, one line each, with the status in words: "confirmed" or "date not confirmed" (`日期已确认` / `日期未确认`).
+- **Calendar-only companies:** one line per slot and status, for example "Not confirmed: Copart (CPRT), NIO (NIO)", so a name is never more than a line from its status. A `reported` row dated next week (unlikely on a Friday) reads "reported" / "已发布".
+- **Links:** every name links to its ticker page; every calendar row has one (`tickerKnown`).
+- **Left out:** quarantined rows, and any row dated before `next_monday`, so the stale "not yet matched to a filing" rows never appear.
+- **Economy & Fed:** one line for next week, each event linking to its official page.
+- **Where the dates come from:** the section ends with a sentence in the calendar's own words (`earnings.legend`, both languages, without its tier sentence): "Confirmed: the company announced the date. Unconfirmed: the date comes from an aggregator and may change. Reported: the results are filed with the SEC." A test keeps the Rust copy equal to the web message.
 
-**3.** "The calendar, updated live →" / "实时日历 →" to `/{lang}/earnings?week=<next monday>`.
+**3. "The calendar, updated live →" / "实时日历 →"**, linking to `/{lang}/earnings?week=<next_monday>`.
 
 ### Title, summary, cover lines
 
-- **Title**: the three largest checks of the week and a count, for example `Earnings this week: Adobe, Broadcom, Costco; 8 expected next week` / `本周财报：Adobe、Broadcom、Costco；下周预计8家`.
-- **Title with no check**: `Earnings next week: 14 companies expected from Nov 30` / `下周财报：11月30日起预计14家`.
-- **Summary**: `PreBell checked 3 earnings reports this week. 8 companies are expected to report from Dec 7 to Dec 11, as of Friday 18:05 ET; 1 date is confirmed.` The Chinese template states the same facts.
-- **Cover lines**: `3 checks this week` / `本周 3 篇速评`, and `8 expected next week` / `下周预计 8 家`.
+**Titles** (checks named largest first, at most three):
 
-### Empty weeks and holiday Fridays
+| Case | English | Chinese |
+|---|---|---|
+| 3 or more checks, with companies expected | `Earnings this week: Adobe, Broadcom, Costco; 8 expected next week` | `本周财报：Adobe、Broadcom、Costco；下周预计8家` |
+| 2 checks | `Earnings this week: Salesforce and Marvell; …` | `本周财报：Salesforce和Marvell；…` |
+| 1 check | `Earnings this week: Marvell; …` | `本周财报：Marvell；…` |
+| none expected next week | the clause after `;` is dropped | the clause after `；` is dropped |
+| no check | `Earnings next week: 14 companies expected from Nov 30` | `下周财报：11月30日起预计14家` |
 
-- The post publishes when the window holds at least one check, or next week has at least one company expected.
-- Otherwise the week's run is `skipped`, with a log line and no alert.
-- Holiday Fridays (Dec 25, 2026; Jan 1, 2027) follow the same rule. Polls still run on them, because `in_window` checks only the weekday and the hour.
-- `refresh_due` has no trading-day test; the builder confirms whether the calendar job refreshes on a holiday (if not, the post waits for the 21:45 ET fallback). A test pins both Fridays.
+**Summary:** `PreBell checked 3 earnings reports published Nov 30–Dec 4. 8 companies are expected to report Dec 7–11, as of Friday 18:05 ET; 1 date is confirmed.` The confirmed clause has three forms: "no date is confirmed", "1 date is", "2 dates are". Singular and plural also apply to the report and company counts.
+
+**Cover lines:** `3 checks this week` / `本周 3 篇速评`, and `8 expected next week` / `下周预计 8 家`.
+
+Every variant is pinned by a fixture.
+
+### Minimum, empty weeks and holidays
+
+- **Minimum:** publish only with at least 2 checks in section 1, or at least 2 write-up companies expected next week. Otherwise the run is `skipped`, with a log line and no alert, and its checks appear in the next post that publishes. On today's data this keeps Dec 4, 11 and 18, and drops the Christmas and New Year Fridays.
+- **Holiday Fridays** (Dec 25, 2026; Jan 1, 2027) follow the same rule. Polls still run on them, because `in_window` checks only the weekday and the hour.
+- **Holiday calendar refresh:** `refresh_due` has no trading-day test. The builder confirms whether the calendar job refreshes on a holiday; if it does not, the build waits for the 21:45 ET fallback. A test pins both Fridays.
+
+### The guard
+
+`writeup::verify_page` cannot be used:
+- it takes `&IpoArticleFacts` (`writeup.rs:1740`);
+- it rejects every amount written with a unit as "not exact" (`writeup.rs:1765-1775`), which every cover line is.
+
+The week post gets its own `week::verify_page`, built from the same parts: `numbers::extract`, `numbers::check_allowed`, and `writeup`'s date pattern (exported). It works in three steps:
+1. **Cover lines:** each one on the page must equal, character for character, a line stored in the bundle for that slug, and is then removed. The bundle copied it from `post_translations`, where the check's own number check passed it.
+2. **Names:** company names and tickers are removed as whole words. 3M (`MMM`) is a write-up company with a digit in its name.
+3. **Everything else:** each remaining number must be a bundle field: a date, the "as of" time, a count, a fiscal year or a slot time.
+
+This proves the page is the bundle, copied exactly. That a date is true rests on its stored source, which section 2 states. A page that fails is not published. It retries, then fails with an alert, as the IPO write-ups do.
+
+### Publishing, never half
+
+As in `ipo::article` (`article.rs:18-25`):
+1. Both languages are rendered and checked.
+2. The bundle goes to R2.
+3. The post row is upserted without text. It stays invisible, because the site shows a post only through a published translation.
+4. Both translations land in one transaction through `revise_post`.
+
+A failure before step 4 leaves nothing visible, and the next try writes into the same post.
 
 ### Correcting a post
 
-The post is frozen, so a wrong post is rebuilt:
-1. The owner fixes the data (a calendar row, or a check).
-2. The owner sets the run back to `pending`.
-3. The next eligible poll rebuilds it. The posts upsert (`ON CONFLICT(run_key) DO UPDATE`, `crates/generator/src/store.rs`) keeps the slug and sets `revised_at`, so the page shows "Updated" and the cards job renders a new card.
+A post is frozen, so a correction is a rebuild:
+1. The owner fixes the data (a calendar row or a check) and sets `runs.status = 'pending'` for `week:<friday>`. The runbook gives the statement.
+2. Every poll in the window, on any weekday, reads `runs` for a pending `week:*` run that already has a post: one read on the primary-key range `'week:'` to `'week;'`. When it finds one, it queues `week` for that run.
+3. The rebuild takes every date from the run's `friday` and its stored `cutoff`, so it describes the same week.
+4. It does not call `upsert_post`, which overwrites `published_at` (`store.rs:146-155`). It publishes through `revise_post`, which sets `revised_at` and keeps `published_at` (`store.rs:157-159`), so the page shows "Updated".
+5. It writes a new cover stem, `earnings-week-<friday>-r<n>`. `cards_tick` skips a stem whose PNG exists (`card.rs:242`), so only a new stem gets a new card.
 
-To take a post down at once, set both translations to `failed`; the runbook gives the statements.
+**A listed check revised later** is the one case where a post would show a figure that its check no longer states. Each Friday build:
+- reads the last four published week bundles (four R2 reads);
+- runs one D1 query for any of their `listed` checks whose `COALESCE(revised_at, published_at)` is later than that bundle's `cutoff`. A rebuilt check gets a new `published_at`, a revised one `revised_at`, so both are caught;
+- raises a once-only warn alert, `week-stale:<friday>`, naming the slug. The owner decides whether to rebuild that week.
+
+**To take a post down at once**, set both translations to `failed`.
 
 ## What being a post brings (traced in the code)
 
-| Where | What happens | Change needed |
+| Where | In the code | Change needed |
 |---|---|---|
-| Home recent list | `listRecentBriefs` takes every type but `earnings` (`apps/web/src/lib/earnings.ts`); `loadHome` merges it | none |
-| Archive | The default view binds `premarket` and `recap` only (`listPosts`, `posts.ts`); other types appear under their filter | `week` in `CONTENT_TYPES`; `types.week` = "Earnings week" / "财报周报" in both message files; the default view is the lead's call |
-| Post page | `BriefView` shows `earnings.checkedFiling` ("✓ Every figure traced to the filing") for any type that is neither a brief nor `ipo`. That is false here, because next week's dates are aggregator data | A `week` case with its own line: "✓ Figures from PreBell's earnings checks; dates as of the time shown" / "✓ 数字出自盘前铃财报速评；日期以所示时间为准" |
-| Prev/next | Briefs only (`getAdjacentPosts`) | none |
-| Cover and share card | `cards_tick` scans every published post with an SVG cover (`COVER_POSTS`, `store.rs`), so the card renders with no change. The kicker for a post without a ticker is the date alone (`card.rs`) | The build draws `cover::week`; the kicker case is the lead's call |
-| Sitemap | Every published post (`sitemap.ts`) | none |
-| JSON-LD | `NewsArticle` for every post (`seo.ts`) | none |
-| MCP | `latest_brief` binds `premarket`/`recap`; the earnings tools join `earnings_filings` | none; the post stays out |
-| Digest | The picks read `content_type = 'earnings'` | none (see question 3) |
-| Edge cache | Posts are cached 300 s (`next.config.ts`) | none |
+| Home recent list | `listRecentBriefs` takes every type but `earnings` (`earnings.ts:300-312`), and `loadHome` merges it | none |
+| Archive | The default view binds `IN (?, ?)` for premarket and recap (`posts.ts:229`); other types appear only under their filter | `week` in `CONTENT_TYPES`; `types.week` = "Earnings week" / "财报周报"; the default view gets a third bind, with its query-plan test (lead's call) |
+| Post page | `loadBrief` loads no facts for the type, and the body renders as Markdown. `BriefView.tsx:104` shows "✓ Every figure traced to the filing" for any type that is neither a brief nor an IPO, which is false for aggregator dates | a `week` line: "✓ Figures from PreBell's earnings checks. Dates as of the time shown below: confirmed ones announced by the company, the rest from an aggregator." / "✓ 数字出自盘前铃财报速评。日期以下文所示时间为准：已确认的由公司公布，其余来自第三方汇总。" |
+| Prev/next | briefs only (`getAdjacentPosts`, skipped when `briefKind` is null) | none |
+| Cover and card | `COVER_POSTS` (`store.rs:621-628`) has no type filter, so the first card renders with no change. The kicker is the date alone (`card.rs:223-226`) | the card task: `cover::week`, and a kicker case. The kicker needs `CoverPost` to carry `content_type`: the query selects it, but the struct keeps it only for IPOs |
+| Sitemap, JSON-LD | Every published post (`sitemap.ts`); `NewsArticle` (`seo.ts`) | none |
+| MCP | `latest_brief` binds premarket and recap only (`mcptools.ts:966`) | none; it stays out |
+| Digest | The picks read `content_type = 'earnings'`; "Full calendar →" links `/en/earnings?week=<monday>` (`render.rs:199`) | none; the digest is unchanged (lead's call) |
+| Edge cache | Posts are cached for 300 s (`next.config.ts`) | none |
 
-**Cover graphic** (`cover::week`, Latin text only, as the card fonts are):
-- Next week as five day bars: each bar's height is the number of companies expected that day, labelled with the day and the count, with the largest expected ticker above it.
-- Every number drawn is in the bundle.
-- A week with no company expected draws this week's checks as ticker tiles instead.
+**Before the card task ships**, a week post has no SVG cover, so it shows the flat tile and the default card.
 
-## The calendar's weekend turn
+**`cover::week`** uses Latin text only, as the card fonts do. It shows next week as five day bars: each bar's height is the number of companies expected that day, labelled with the day and the count, with the largest expected ticker above it. All of these numbers are in `counts`. When no company is expected next week, it shows this week's checks as ticker tiles instead.
 
-In `apps/web/src/app/[locale]/earnings/page.tsx`:
-- `monday()` uses `weekStart(todayEt())` for the undated page. It changes to a new `readingWeek(today)` in `earnings.ts`: `weekStart(today)` from Monday to Friday, and `weekStart(today) + 7` on Saturday and Sunday (ET).
-- The "back to this week" test (`start !== weekStart(today)`) uses `readingWeek` too.
-- Dated `?week=` pages, the week range and the home strip are unchanged.
+## The calendar's weekend turn (split out)
 
-On Saturday and Sunday:
-- The undated page's kicker reads "Market calendar · Coming week" / "市场日历 · 下周".
-- The week button reads "Coming week" / "下周".
+This ships now as its own small PR, which the lead started separately. The undated `/earnings` uses a new `readingWeek(today)` in `earnings.ts` instead of `weekStart(todayEt())`: the coming week from Saturday 00:00 ET. The "back to this week" test uses it too.
 
+On Saturday and Sunday the kicker reads "Market calendar · Coming week" / "市场日历 · 下周", and the button reads "Coming week" / "下周". Dated `?week=` pages, the range, the noindex distance and the home strip are unchanged. The post depends on it only through the link in section 3.
 
 ## Running it, and costs
 
-**Trigger.** The digest's conditions, on the same poll:
+**Trigger.** It runs on the same poll as the digest, under the digest's conditions:
 - Friday from 18:00 ET (`digest::due`);
 - that day's calendar refresh has finished, or it is 21:45 ET or later (`closing`);
-- the run `week:<friday>` is neither `published` nor `skipped`.
+- the run `week:<friday>` is not `published`, `skipped` or `failed`. A `failed` run is never queued again except through the correction path.
 
-The poll queues a `week` message on `prebell-earnings-build`, serial with the earnings builds as `ipo:article` is, so a late Friday check builds first. The switch is `WEEK_POST_ENABLED`, exactly `"true"`, independent of `DIGEST_ENABLED`. Run state is the `runs` row, with the IPO write-ups' lease and retries (5, 15, 30 and 60 minutes, then `failed` with an alert). A Friday evening on which every poll fails queues nothing, as for the digest. No new cron.
+Corrections are queued on any weekday, as described above.
 
-**Costs.** Zero model calls and zero fetch subrequests. About 8 D1 queries: run state, the previous post's time, the checks in the window, next week's calendar, events and one write batch. Next week's calendar comes through the digest's `gather`, extended to keep the calendar-only names it now only counts; the email is unchanged, pinned by `the_fixture_week_renders_exactly`. Two R2 writes (bundle and cover). One queue message a week, at most four retries. The digest is a separate message, so the two never share one invocation's 10 ms or 50 subrequests. CPU is templating and the guard over at most about 60 checks and 200 names. The builder profiles a 60-check, 200-company fixture with `--cpu-prof` and reads `cpuTime` in `wrangler tail` on the first live run. The card render is the existing cost, in the cards job. Storage is about 20 KB a week plus the card.
+**Running**
+- The message goes on `prebell-earnings-build`, serial with the earnings builds as `ipo:article` is. A check build already in flight finishes first; a test pins a check published at 18:02 appearing in an 18:05 build.
+- The switch is `WEEK_POST_ENABLED`, exactly `"true"`, independent of `DIGEST_ENABLED`.
+- Run state is the `runs` row, with the IPO write-ups' lease and retries (5, 15, 30 and 60 minutes).
+- Retries can run out when polls stop at 22:00 ET. So from 21:55 ET (`digest::LAST_TRY`), a run that is still neither published nor skipped raises a once-only error alert: "week post for <friday> not published".
+- A Friday evening on which every poll fails queues nothing, as for the digest.
+- No new cron.
+
+**Costs**
+- **Model calls:** zero. **Fetch subrequests:** zero.
+- **D1 per Friday build**, about 10 queries:
+  - run state;
+  - the previous bundle's post;
+  - the checks;
+  - next week's calendar, through `digest::gather(now, monday, …)`;
+  - events;
+  - the stale-check query;
+  - the post upsert and the `revise_post` transaction.
+- **The digest's `gather`** is extended to keep each calendar-only name with its status. Today `Slot.others` is a count, and `Company.confirmed` folds `reported` into confirmed. The email's output stays the same, pinned by `the_fixture_week_renders_exactly`.
+- **D1 per poll:** one indexed `runs` read for corrections.
+- **R2:** up to 5 reads (the previous bundles) and 2 writes (the bundle, and the cover once the card task ships).
+- **Queue:** one message a week, plus at most four retries.
+- **CPU:** the digest is a separate message, so the two never share one invocation's 10 ms CPU or 50 subrequests. The week build's CPU is templating and the guard over at most about 60 checks and 200 names. The builder profiles a 60-check, 200-company fixture with `--cpu-prof`, and reads `cpuTime` in `wrangler tail` on the first live run.
+- **Storage:** about 20 KB a week, plus the card.
 
 ## Risks
 
 | Risk | Handling |
 |---|---|
-| A check publishes after the build | The window is "since the previous post", so the next post lists it under its own date |
-| Unconfirmed dates in a frozen post | "as of <Friday time> ET" in the section heading and the summary; a status in words on every line; a link to the live calendar |
-| "Not yet matched to a filing" rows (PFE, NVO, TM, TECH, NBIS, MNSO, ZTO) | Section 2 starts at next Monday, so a post never lists a past date. Their wording on the calendar is a separate fix. Pfizer's Nov 3 row probably predates PreBell's first feed read and needs a one-off correction after a check of EDGAR |
-| A peak week of about 60 checks | One line per check, about 150 characters, ordered by market value: about 9 KB of Markdown. The title names three. No cut-off; a test renders the 60-check fixture |
-| A cover line differs from its check's summary | Walmart: cover line 1888.3亿美元, Chinese summary 1888.4亿美元. The post shows the cover line, as the check's own cover does |
-| SEO | One new dated URL a week with a company-naming title; no duplicate of a calendar page |
+| A check publishes after the build | `cutoff` and `listed`: it goes into the next published post, under its dates |
+| A listed check is revised after the post | The `week-stale` alert, and a rebuild through the correction path |
+| Unconfirmed dates in a frozen post | "as of" in the heading and summary, a status on every line, the source sentence, the reworded ✓ line, and the live calendar link |
+| "Not yet matched to a filing" rows (PFE, NVO, TM, TECH, NBIS, MNSO, ZTO) | Section 2 starts at `next_monday`, so they never appear. Their wording on the calendar is a separate fix. Pfizer's row probably predates PreBell's first feed read; it needs a one-off correction after checking EDGAR |
+| A peak week of about 60 checks and 200 names | About 15 KB of Markdown, no cut-off, ordered by market value, three names in the title. A test renders the fixture once through the site's `PostBody` |
+| A cover line that differs from its check's summary | Walmart's cover line says 1888.3亿美元 and its Chinese summary 1888.4亿美元. The post shows the cover line, as the check's own cover does |
+| DST in "as of" | Fixtures on an EST Friday (2026-12-04) and an EDT Friday (2027-03-19) |
+| SEO | One dated URL a week with a title that names companies; no duplicate of a calendar page |
 
 ## Distribution and the stop rule
 
 **Each Friday evening or Saturday**, Rick:
 - opens the Chinese post and reads it;
 - shares its dated link in the groups he uses, and the English link on X;
-- where links show no preview, posts a screenshot of section 2 instead, with its "as of" heading.
+- where links show no preview, posts a screenshot of section 2 instead, which carries its "as of" heading.
 
-He posts after the log line `job cards: card og/earnings-week-<friday>.png`, so that no platform caches the default card.
+Once the card task ships, he posts after the log line `job cards: card og/earnings-week-<friday>….png`, so that no platform caches the default card.
 
-**Two-minute preview test**, before the card work counts as done:
+**Two-minute preview test**, before the card task is built:
 - Rick pastes an existing check that has a card (for example `https://prebell.site/zh/p/adi-q4-fy2026-earnings`) into a WeChat chat and into X's composer.
 - He notes whether the image, title and description show.
-- If WeChat shows no image, nothing more is spent on cards, and the Chinese route is the screenshot.
+- If WeChat shows no image, the card task waits, and the Chinese route is the screenshot.
 
-**Measure.** Cloudflare Web Analytics uses no cookies, so it cannot count returning visitors. The proxies:
+**Measure.** Cloudflare Web Analytics uses no cookies, so it cannot count returning visitors. The proxies are:
 - weekly page views of `/zh/p/earnings-week-*` and `/en/p/earnings-week-*`;
-- Saturday to Monday visits to `/zh/earnings` and `/en/earnings`;
+- Saturday-to-Monday visits to `/zh/earnings` and `/en/earnings`;
 - referrers.
 
-**Stop rule.** After six weekly posts, compare those numbers with the six weeks before the first post. If neither weekly-post views nor weekend calendar visits rose, switch `WEEK_POST_ENABLED` off and keep the published posts. January's season lifts traffic anyway, so this is a judgement made with the numbers.
+**Stop rule.** December's posts run, but the clock starts at the first January post (Jan 8). After six posts from then, compare views per post, and weekend calendar visits against the average for the same weekdays. If neither rose, switch `WEEK_POST_ENABLED` off and keep the published posts. Comparing December with February would measure the earnings season, not the post.
 
 ## Out of scope
 
-- A live week page.
-- "Changes since Friday".
-- Prior-quarter figures (appendix).
+- A live week page and "Changes since Friday".
+- Prior-quarter figures (see the appendix).
 - Chinese company names.
 - The IPO watch in the post.
 - MCP.
-- Any change to the digest without Rick's yes.
+- Any change to the digest.
 
 ## Open questions for Rick
 
-1. **Where will you post it, and every week?** This decides whether the card work matters.
-   - *Recommended*: the Chinese link in WeChat groups and the English one on X, each Friday or Saturday, after the two-minute preview test.
+1. **Where will you post it, and will you post every week?** This decides whether the card task is built.
+   - *Recommended:* the Chinese link in WeChat groups and the English one on X, each Friday or Saturday, after the two-minute preview test.
 2. **What counts as success, and when to stop.**
-   - *Recommended*: the measure and the six-post stop rule above.
-3. **The digest.** Its "Full calendar →" (`FULL_CALENDAR`, `digest/copy.rs`) links to next week's live calendar, which is still the right target for an email read on Sunday, so re-pointing it is not proposed. A link to the post would need the post built first, and shown only when it was not skipped.
-   - *Recommended*: leave the email unchanged for v1.
-   - Or add one line linking to the post when it is published, in your wording.
+   - *Recommended:* the measure above, and the six-post stop rule counted from Jan 8.
 
-## Calls for the lead
+## Calls the lead made
 
-- Build on Friday from 18:00 ET; the calendar turns at Saturday 00:00 ET. This replaces "each Sunday" in the approved direction.
-- Content type `week`, labels "Earnings week" / "财报周报", slug `earnings-week-<friday>`.
-- Card kicker `EARNINGS WEEK · 2026-12-04`, a new case in `card.rs`; without it, the kicker is the date alone.
-- The cover graphic as described.
-- Holiday Fridays follow the empty-week rule rather than always skipping.
-- `week` in the archive's default view with `premarket` and `recap` (recommended, since Rick's option said "shows on ... archive"), or only under its filter.
-- Queue `prebell-earnings-build` (recommended) or `prebell-jobs`.
+These are recorded here, not open:
+- Friday build and Saturday turn, replacing "each Sunday" in the approved direction.
+- Type `week`, with the labels "Earnings week" / "财报周报".
+- `week` in the archive's default view.
+- `prebell-earnings-build` as the queue.
+- The digest unchanged.
+
+Still the lead's, with the card task: the kicker (`EARNINGS WEEK · 2026-12-04` recommended) and the cover graphic as described.
 
 ## Build plan
 
-Each task is one builder pass, then a separate review.
+Each task is one builder pass, then a separate review. The weekend turn is split out (above).
 
-1. **Generator: the rows.** A Rust port of `calendarAligned` and `periodFromSlug` with the TypeScript tests' cases (Nvidia, Disney, ConocoPhillips, a date-named slug); the checks-in-window query; `digest::gather` keeping calendar-only names. *Accept when* unit tests cover a check published after the previous build (it lands in the next post), failed and pending Chinese translations, a digit-less cover line, two checks on one date, a quarantined row and mixed statuses in one slot, and `the_fixture_week_renders_exactly` passes unchanged.
-2. **Generator: the post.** Templates (EN, ZH), bundle, guard, one-batch publish, `cover::week`, the trigger, `WEEK_POST_ENABLED`. *Accept when* fixture weeks render exactly (normal; no checks; no companies, skipped; 60 checks with 200 companies; Dec 25; Jan 1), the guard rejects a planted number, a failure retries and then fails with an alert, a `published` run is never rebuilt, `schedule.rs` still asserts two crons, a word-boundary test finds no `beat`, `miss`, `estimate`, `consensus` or `预期` in the templates, the 60-check CPU profile is in the PR, and `cargo test -p prebell-core` and the wasm build pass in the shared target dir.
-3. **Site.** `week` in `CONTENT_TYPES`, `types.week`, the `BriefView` checked line, the archive call; `readingWeek` and the weekend kicker and button. *Accept when* render tests show a week post in both languages, in the home recent list and the archive; calendar tests pass at Fri 23:59, Sat 00:00 and Sun 23:59 ET; `tests/queryplan.test.ts` and `tests/sitemap.test.ts` pass; lint and `opennextjs-cloudflare build` pass.
-4. **Docs.** A runbook section "Earnings week post" (what runs, the switch, alerts, the correction statements, posting after the card); Rick's answers in `docs/decisions.md`.
+**1. Generator: the rows.**
 
-**Before the card work is called done**: the preview test.
+Work:
+- A Rust port of `calendarAligned` and `periodFromSlug`, with the TypeScript tests' cases: Nvidia, Disney, ConocoPhillips, and a slug named by date.
+- The bundle type.
+- The section 1 query from `cutoff` and `listed`.
+- `gather` keeping each calendar-only name and its status.
 
-**Deploy order** (owner only, no migration): the site first (it knows `week` and the weekend turn), then the generator with `WEEK_POST_ENABLED = "true"`. On the first Friday, check the `job week` log line, the post in both languages and its card in a WeChat and an X preview.
+*Accept when* unit tests cover:
+- a check published after the build, which appears in the next post only;
+- a check re-run after it was listed, which is not listed twice;
+- a failed previous week, whose range is labelled;
+- a failed and a pending Chinese translation;
+- a cover line with no digit;
+- two checks on one date;
+- ANT's place in the order;
+- a quarantined row;
+- mixed statuses in one slot, and a `reported` row next week;
+- `the_fixture_week_renders_exactly` still passing, unchanged.
+
+**2. Generator: the post.**
+
+Work:
+- The EN and ZH templates.
+- `week::verify_page`.
+- The publish order.
+- The trigger.
+- The correction path and the `week-stale` check.
+- The 21:55 alert.
+- `WEEK_POST_ENABLED`.
+
+*Accept when:*
+- Fixtures render exactly for:
+  - every title and summary variant;
+  - a week with no checks;
+  - a week below the minimum, which is skipped;
+  - 60 checks with 200 companies;
+  - Dec 25 and Jan 1;
+  - an EST and an EDT "as of";
+  - the source sentence, in both languages.
+- The guard accepts exact cover lines, rejects one with a changed digit, rejects a planted number, and passes 3M.
+- A Tuesday correction rebuilds last Friday's post with last Friday's dates, sets `revised_at`, keeps `published_at` and writes a new cover stem.
+- A `failed` run is never queued again.
+- The 21:55 alert fires once.
+- A revised listed check raises `week-stale` once.
+- A failure retries, then fails with an alert.
+- A word-boundary test finds no `beat`, `miss`, `estimate`, `consensus` or `预期` in the templates.
+- `schedule.rs` still asserts two crons.
+- The CPU profile of the 60-check fixture is in the PR.
+- `cargo test -p prebell-core` and the wasm build pass in the shared target dir.
+
+**3. Site.**
+
+Work:
+- `week` in `CONTENT_TYPES`, with `types.week`.
+- The `BriefView` ✓ line.
+- The default view of `listPosts` with three types.
+
+*Accept when:*
+- Render tests show a week post in both languages, in the home recent list and in the archive.
+- The 60-check body renders through `PostBody`.
+- `tests/queryplan.test.ts` covers `listPosts` with three types.
+- `tests/sitemap.test.ts`, lint and `opennextjs-cloudflare build` pass.
+
+**4. The card (after Rick's preview test).**
+
+Work:
+- `cover::week`.
+- The kicker case, with `content_type` in `CoverPost`.
+- The en dash checked in the embedded font, or a hyphen used instead.
+
+*Accept when:*
+- A fixture SVG renders with `card-png`.
+- A correction's new stem gets a new card.
+- The cards tests pass.
+
+**5. Docs.**
+- A runbook section "Earnings week post": what runs, the switch, the alerts, the two correction cases (a calendar row fixed, a listed check revised) with their statements, and posting after the card.
+- Rick's answers in `docs/decisions.md`.
+
+**Deploy order** (owner only, no migration):
+1. The site (task 3), after the weekend-turn PR.
+2. The generator, with `WEEK_POST_ENABLED = "true"`.
+3. On the first Friday, check the `job week` log line and the post in both languages.
+4. Task 4, on its own, after the preview test.
 
 ## Appendix: prior-quarter figures from XBRL, for later
 
-From the critic's estimate: 2 to 4 EDGAR `companyconcept` requests per domestic company, cached per ticker and period in R2 (once a quarter). That is about 50 requests in a quiet week and 340 to 680 in a peak week, each message under 50 subrequests. Prerequisites: `accn` in `FactEntry` so each figure links to its filing; 80 to 100 day 10-Q/10-K facts only; a period end within 120 days before the report; labelled "as filed", with the revenue tag named; formatted by the generator's cover-line formatter. It cannot cover foreign filers (no Chinese ADR) or a preceding fiscal Q4. Build it only after the week post shows readers come back.
+From the critic's estimate:
+- **Requests:** 2 to 4 EDGAR `companyconcept` requests per domestic company, cached per ticker and period in R2, so each company is fetched once a quarter.
+- **Volume:** about 50 requests in a quiet week and 340 to 680 in a peak week, each message under 50 subrequests.
+
+Prerequisites:
+- `accn` in `FactEntry`, so each figure links to its filing.
+- Only 10-Q and 10-K facts of 80 to 100 days.
+- A period end within 120 days before the report.
+- Figures labelled "as filed", with the revenue tag named.
+- Formatting by the generator's cover-line formatter.
+
+It cannot cover foreign filers (so no Chinese ADR), or a preceding fiscal Q4. Build it only after the week post shows that readers come back.
