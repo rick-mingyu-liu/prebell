@@ -105,8 +105,9 @@ fn count_res(lang: Lang) -> &'static [(Regex, Count)] {
 fn dates(b: &Bundle) -> HashSet<NaiveDate> {
     let mut out: HashSet<NaiveDate> = HashSet::new();
     let (from, to) = b.range();
+    // The cutoff's own date is allowed only in a correction's note, which
+    // `section_two` checks in place.
     out.extend([from, to, b.monday(), b.friday(), et(b.as_of()).date_naive()]);
-    out.extend(b.cutoff.parse().ok().map(|t| et(t).date_naive()));
     for i in 0..5 {
         out.insert(b.next_monday() + Duration::days(i));
     }
@@ -124,7 +125,7 @@ fn dates(b: &Bundle) -> HashSet<NaiveDate> {
 /// What a clock time on the page is.
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Clock {
-    /// The as-of time or a correction's first publication: 24-hour, "ET".
+    /// The as-of time: 24-hour, "ET".
     Stamp,
     /// An event's time: 12-hour with AM/PM (`events::et_time`).
     Event { pm: bool },
@@ -133,11 +134,9 @@ enum Clock {
 /// Every clock time the page may print, and what it is.
 fn times(b: &Bundle) -> HashMap<String, Clock> {
     let mut out: HashMap<String, Clock> = HashMap::new();
+    // The cutoff's time is allowed only in a correction's note
+    // (`section_two`, which checks it in place).
     out.insert(super::render::clock(b), Clock::Stamp);
-    // A correction's note names when the post first went out.
-    if let Ok(t) = b.cutoff.parse() {
-        out.insert(super::render::hhmm(t), Clock::Stamp);
-    }
     for e in &b.events {
         if let Some(at) = e
             .starts_at
@@ -395,6 +394,35 @@ fn section_two(b: &Bundle, lang: Lang, md: &str, bad: &mut Vec<String>) {
             };
             if b.revision > 0 && !note && l.starts_with(marker) {
                 note = true;
+                // Its two stamps, in order: the re-read (as_of), then the
+                // first publication (cutoff).
+                let first: Option<chrono::DateTime<chrono::Utc>> = b.cutoff.parse().ok();
+                let mut both = dates(b);
+                both.extend(first.map(|t| et(t).date_naive()));
+                let want_dates = vec![
+                    Some(et(b.as_of()).date_naive()),
+                    first.map(|t| et(t).date_naive()),
+                ];
+                let want_times = vec![
+                    super::render::clock(b),
+                    first.map(super::render::hhmm).unwrap_or_default(),
+                ];
+                let got_times: Vec<String> = time_re()
+                    .find_iter(l)
+                    .map(|m| m.as_str().to_string())
+                    .collect();
+                if dates_on(l, &both) != want_dates || got_times != want_times {
+                    bad.push(format!(
+                        "correction note: stamps not the bundle's, in order: {l}"
+                    ));
+                }
+                let zone = match lang {
+                    Lang::En => l.matches(" ET").count() == 2,
+                    Lang::Zh => l.matches("美东时间").count() == 2,
+                };
+                if !zone {
+                    bad.push(format!("correction note: time zones not the bundle's: {l}"));
+                }
             } else {
                 bad.push(format!("section 2 line not as the bundle: {l}"));
             }
@@ -475,6 +503,10 @@ fn section_two(b: &Bundle, lang: Lang, md: &str, bad: &mut Vec<String>) {
             }
         }
     }
+    // Every correction says it re-read the list; a first build never does.
+    if b.revision > 0 && b.as_of != b.cutoff && !note {
+        bad.push("correction note missing".into());
+    }
     if day != Some(4) {
         bad.push("section 2: not five day headings".into());
     }
@@ -541,6 +573,14 @@ fn date_places(b: &Bundle, lang: Lang, md: &str, bad: &mut Vec<String>) {
         let got = dates_on(line, &allowed);
         if got != want.iter().map(|d| Some(*d)).collect::<Vec<_>>() {
             bad.push(format!("{what}: dates not the bundle's: {line}"));
+        }
+    }
+    // The summary and the next-week heading carry as_of's time, once.
+    let clock = super::render::clock(b);
+    for (what, line) in [("summary", summary), ("section 2 heading", s2)] {
+        let got: Vec<&str> = time_re().find_iter(line).map(|m| m.as_str()).collect();
+        if got != [clock.as_str()] {
+            bad.push(format!("{what}: time not the as-of time: {line}"));
         }
     }
 }
@@ -615,7 +655,16 @@ pub fn verify_page(
     // 1. Check lines.
     let mut seen: HashMap<&str, usize> = HashMap::new();
     let mut lines: Vec<String> = Vec::new();
+    let note_marker = match lang {
+        Lang::En => "This list was read again on ",
+        Lang::Zh => "本列表于美东时间",
+    };
     for line in md.lines().chain(cover.iter().map(String::as_str)) {
+        // A correction's note is checked in place (`section_two`).
+        if b.revision > 0 && line.starts_with(note_marker) {
+            lines.push(String::new());
+            continue;
+        }
         let Some(m) = line.strip_prefix("- ").and_then(|l| {
             link_re()
                 .captures(l)

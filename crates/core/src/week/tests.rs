@@ -2228,3 +2228,57 @@ async fn unsafe_link_targets_fail_the_page() {
         }
     }
 }
+
+/// D1 (the review of fd095f6): on a correction the first build's stamp is
+/// allowed only inside the re-read note, in its place. Each of the
+/// reviewer's four cases is refused.
+#[tokio::test]
+async fn a_correction_carries_as_of_where_it_belongs() {
+    let w = dec4();
+    w.tick(DEC4_BUILD).await;
+    w.cal("COST", "2026-12-10", "amc", "confirmed");
+    w.set_run("2026-12-04", |r| {
+        r.status = "pending".into();
+        r.attempts = 0;
+    });
+    w.tick("2026-12-08T15:05:00Z").await;
+    let b = w.bundle("2026-12-04");
+    assert_eq!(b.revision, 1);
+    for lang in [Lang::En, Lang::Zh] {
+        assert_eq!(guarded(&b, lang, str::to_string), Ok(()), "{lang:?}");
+    }
+    let note_en = "This list was read again on Tue Dec 8, 10:05 ET, after the post was first published on Fri Dec 4, 18:05 ET. The checks above are the ones listed then.";
+    let note_zh = "本列表于美东时间12月8日周二10:05重新读取；本文首发于美东时间12月4日周五18:05。上方的速评仍为首发时所列。";
+    let cases: &[(Lang, &str, &str, &str)] = &[
+        (Lang::En, "heading shows the first build's stamp", "## Expected next week, as of Tue Dec 8, 10:05 ET", "## Expected next week, as of Fri Dec 4, 18:05 ET"),
+        (Lang::Zh, "zh heading shows the first build's stamp", "## 下周预计公布（截至美东时间12月8日周二10:05）", "## 下周预计公布（截至美东时间12月4日周五18:05）"),
+        (Lang::En, "as-of time replaced by the cutoff's", "as of Tue Dec 8, 10:05 ET;", "as of Tue Dec 8, 18:05 ET;"),
+        (Lang::En, "heading time replaced by the cutoff's", "## Expected next week, as of Tue Dec 8, 10:05 ET", "## Expected next week, as of Tue Dec 8, 18:05 ET"),
+        (Lang::En, "note stamps swapped", note_en, "This list was read again on Fri Dec 4, 18:05 ET, after the post was first published on Tue Dec 8, 10:05 ET. The checks above are the ones listed then."),
+        (Lang::Zh, "zh note stamps swapped", note_zh, "本列表于美东时间12月4日周五18:05重新读取；本文首发于美东时间12月8日周二10:05。上方的速评仍为首发时所列。"),
+        (Lang::En, "note deleted", &format!("{note_en}\n"), ""),
+        (Lang::Zh, "zh note deleted", &format!("{note_zh}\n"), ""),
+        (Lang::En, "cutoff stamp outside the note", "No reports expected.", "No reports expected. Fri Dec 4, 18:05 ET."),
+    ];
+    for (lang, name, from, to) in cases {
+        let (_, page) = write(&b, *lang);
+        assert!(
+            page.contains(from),
+            "{name}: {from:?} not on the page:\n{page}"
+        );
+        assert!(
+            guarded(&b, *lang, |md| md.replacen(from, to, 1)).is_err(),
+            "{name} passed the guard"
+        );
+    }
+    // A first build may not carry a note.
+    let first = dec4_bundle().await;
+    let r = guarded(&first, Lang::En, |md| {
+        md.replacen(
+            "No reports expected.",
+            &format!("{note_en}\n\nNo reports expected."),
+            1,
+        )
+    });
+    assert!(r.is_err());
+}
