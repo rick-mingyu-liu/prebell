@@ -314,7 +314,7 @@ describe("CalendarWeek", () => {
     expect(out).toContain('<time dateTime="2026-11-02">周一 · 11/2</time>');
     expect(out).toContain('<span class="cal-today">今天</span>');
     expect(out).toContain('<span class="sr-only">已过</span>');
-    expect(out).toContain('aria-label="本周各日"');
+    expect(out).toContain('aria-label="当周各日"');
     expect(out).toContain("<span>周三</span>");
     expect(out).toMatch(/<\/svg>盘前 <span class="num">4<\/span>/);
     expect(out).toMatch(/<\/svg>盘后 <span class="num">1<\/span>/);
