@@ -408,6 +408,28 @@ async fn the_first_post_lists_this_weeks_checks_and_next_weeks_calendar() {
     let urls: Vec<&str> = sources.iter().map(|s| s.url.as_str()).collect();
     assert_eq!(urls, ["https://www.bls.gov/schedule/news_release/cpi.htm"]);
     fixture("2026-12-04.md", &rendered(&w, "2026-12-04"));
+    // The site renders these two pages in its own tests: keep them equal
+    // (checked once the site's fixtures are in the tree).
+    for lang in ["en", "zh"] {
+        site_fixture(
+            &format!("week-2026-12-04-{lang}.md"),
+            &w.page("2026-12-04", lang).unwrap().body_md,
+        );
+    }
+}
+
+/// A page the site's tests render (`apps/web/tests/fixtures/<name>`): equal
+/// to the generator's output, or rewritten with `UPDATE_WEEK_FIXTURES=1`.
+fn site_fixture(name: &str, got: &str) {
+    let path = format!(
+        "{}/../../apps/web/tests/fixtures/{name}",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    if std::env::var("UPDATE_WEEK_FIXTURES").as_deref() == Ok("1") {
+        std::fs::write(&path, got).unwrap();
+    } else if let Ok(s) = std::fs::read_to_string(&path) {
+        assert_eq!(s, got, "{path} is stale");
+    }
 }
 
 #[tokio::test]
@@ -1262,7 +1284,19 @@ async fn a_tuesday_correction_rebuilds_last_fridays_post() {
     let first = w.post("2026-12-04").unwrap();
     let before = w.bundle("2026-12-04");
     assert!(!w.queued("2026-12-08T15:00:00Z").await);
-    // The owner fixes a calendar row (Costco confirmed) and sets the run back.
+    // CRM's check is revised (a new figure), the owner fixes a calendar row
+    // (Costco confirmed) and sets the run back.
+    {
+        let mut posts = w.base.posts.borrow_mut();
+        let crm = posts
+            .iter_mut()
+            .find(|p| p.slug == "crm-q3-fy2027-earnings")
+            .unwrap();
+        crm.revised_at = Some("2026-12-07T12:00:00Z".into());
+        let id = crm.id.unwrap();
+        let mut t = w.base.translations.borrow_mut();
+        t.get_mut(&(id, "en".into())).unwrap().cover_line1 = Some("Revenue $10.5B".into());
+    }
     w.cal("COST", "2026-12-10", "amc", "confirmed");
     w.set_run("2026-12-04", |r| {
         r.status = "pending".into();
@@ -1311,8 +1345,107 @@ async fn a_tuesday_correction_rebuilds_last_fridays_post() {
     let en = w.page("2026-12-04", "en").unwrap().body_md;
     assert!(en.contains("as of Tue Dec 8, 10:05 ET"), "{en}");
     assert!(!en.contains("adbe-q4"));
+    assert!(en.contains("Revenue $10.5B"), "{en}");
     assert_eq!(w.run("2026-12-04").unwrap().status, "published");
     assert!(!w.queued("2026-12-08T15:10:00Z").await);
+    // The corrected post shows the revised figure, so the next Friday raises
+    // no week-stale for it (the check changed before the rebuild read it).
+    w.cal("ORCL", "2026-12-15", "amc", "confirmed");
+    w.cal("MU", "2026-12-17", "amc", "unconfirmed");
+    w.refreshed("2026-12-11");
+    w.tick("2026-12-11T23:05:00Z").await;
+    assert_eq!(w.run("2026-12-11").unwrap().status, "published");
+    assert!(
+        !w.alerts().iter().any(|a| a.0.starts_with("week-stale")),
+        "{:?}",
+        w.alerts()
+    );
+}
+
+/// A store failure at the batch leaves nothing visible: the post row
+/// without text. The message fails, the run waits out its 15-minute lease
+/// and is built again into the same post; the fifth failure fails the run
+/// with one error alert.
+#[tokio::test]
+async fn a_store_failure_at_the_batch_leaves_nothing_visible_and_retries_on_the_lease() {
+    let w = dec4();
+    w.base.fail_revise_post.set(true);
+    let mut now = utc(DEC4_BUILD);
+    let mut id = None;
+    for i in 0..MAX_BUILDS {
+        assert!(w.try_tick(&iso(now)).await.is_err(), "build {i}");
+        let post = w.post("2026-12-04").unwrap();
+        assert!(w.page("2026-12-04", "en").is_none() && w.page("2026-12-04", "zh").is_none());
+        assert!(id.is_none() || id == post.id, "one post");
+        id = post.id;
+        let run = w.run("2026-12-04").unwrap();
+        assert_eq!((run.status.as_str(), run.attempts), ("building", i + 1));
+        assert!(
+            !w.queued(&iso(now + Duration::minutes(10))).await,
+            "in its lease"
+        );
+        now += Duration::minutes(16);
+        assert!(w.queued(&iso(now)).await, "after its lease");
+    }
+    let line = w.tick(&iso(now)).await;
+    assert!(line.contains("failed: "), "{line}");
+    assert_eq!(w.run("2026-12-04").unwrap().status, "failed");
+    let errors: Vec<_> = w.alerts().into_iter().filter(|a| a.1 == "error").collect();
+    assert_eq!(errors.len(), 1, "{errors:?}");
+    assert_eq!(
+        w.base
+            .posts
+            .borrow()
+            .iter()
+            .filter(|p| p.content_type == "week")
+            .count(),
+        1
+    );
+}
+
+/// A correction that keeps hitting a store error is bounded the same way,
+/// and the post stays as it was published.
+#[tokio::test]
+async fn a_correction_that_keeps_failing_gives_up_and_leaves_the_post() {
+    let w = dec4();
+    w.tick(DEC4_BUILD).await;
+    let before = (
+        w.post("2026-12-04").unwrap(),
+        w.page("2026-12-04", "en").unwrap(),
+    );
+    w.set_run("2026-12-04", |r| {
+        r.status = "pending".into();
+        r.attempts = 0;
+    });
+    w.base.fail_revise_post.set(true);
+    let mut now = utc("2026-12-08T15:05:00Z");
+    for i in 0..MAX_BUILDS {
+        assert!(w.queued(&iso(now)).await, "build {i}");
+        assert!(w.try_tick(&iso(now)).await.is_err(), "build {i}");
+        let run = w.run("2026-12-04").unwrap();
+        assert_eq!((run.status.as_str(), run.attempts), ("building", i + 1));
+        assert!(
+            !w.queued(&iso(now + Duration::minutes(10))).await,
+            "in its lease"
+        );
+        now += Duration::minutes(16);
+    }
+    assert!(w.queued(&iso(now)).await);
+    let line = w.tick(&iso(now)).await;
+    assert!(
+        line.contains("failed: the correction did not finish in 5 builds"),
+        "{line}"
+    );
+    assert_eq!(w.run("2026-12-04").unwrap().status, "failed");
+    assert!(!w.queued(&iso(now + Duration::minutes(5))).await);
+    assert_eq!(
+        (
+            w.post("2026-12-04").unwrap(),
+            w.page("2026-12-04", "en").unwrap()
+        ),
+        before
+    );
+    assert_eq!(w.alerts().iter().filter(|a| a.1 == "error").count(), 1);
 }
 
 /// A first build that died after its batch is closed, not rebuilt.
@@ -1474,17 +1607,8 @@ async fn a_peak_week_of_60_checks_and_200_companies_renders_whole() {
         "2027-01-08.bundle.json",
         &serde_json::to_string(&w.bundle("2027-01-08")).unwrap(),
     );
-    // The site renders this page in its own tests
-    // (apps/web/tests/fixtures/week-2027-01-08-en.md): keep the two equal.
-    let site = format!(
-        "{}/../../apps/web/tests/fixtures/week-2027-01-08-en.md",
-        env!("CARGO_MANIFEST_DIR")
-    );
-    if std::env::var("UPDATE_WEEK_FIXTURES").as_deref() == Ok("1") {
-        std::fs::write(&site, &en.body_md).unwrap();
-    } else if let Ok(s) = std::fs::read_to_string(&site) {
-        assert_eq!(s, en.body_md, "{site} is stale");
-    }
+    // The site renders this page in its own tests too.
+    site_fixture("week-2027-01-08-en.md", &en.body_md);
 }
 
 /// The peak week's render and guard, timed natively to catch regressions

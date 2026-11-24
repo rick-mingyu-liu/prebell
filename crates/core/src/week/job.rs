@@ -177,7 +177,7 @@ pub async fn week_tick(
             Some(w) if done(&w.run) => None,
             Some(w) if w.live && correction(w, now) => {
                 built = true;
-                Some(build(now, f, Some(w.run.clone()), true, es, events, store, ws).await?)
+                Some(correct(now, f, w, es, events, store, ws).await?)
             }
             Some(w) if leased(&w.run, now) => Some("in flight".to_string()),
             Some(w) if waiting(&w.run, now) => Some("waiting to retry".to_string()),
@@ -214,7 +214,7 @@ pub async fn week_tick(
             .find(|w| correction(w, now))
         {
             let f = friday_of(&w.run.run_key).expect("checked by correction");
-            let what = build(now, f, Some(w.run.clone()), true, es, events, store, ws).await?;
+            let what = correct(now, f, w, es, events, store, ws).await?;
             out.push(format!("{}: {what}", w.run.run_key));
         }
     }
@@ -235,6 +235,40 @@ pub async fn week_tick(
         out.push("nothing to build".into());
     }
     Ok(out.join("; "))
+}
+
+/// A live post's run to build: a first build that died after its batch is
+/// closed; a correction whose builds are spent (store errors leave it
+/// `building`, picked up again after each lease) fails with an alert;
+/// otherwise it is rebuilt.
+#[allow(clippy::too_many_arguments)]
+async fn correct(
+    now: DateTime<Utc>,
+    friday: NaiveDate,
+    w: &WeekRun,
+    es: &dyn EarningsStore,
+    events: &dyn EventStore,
+    store: &dyn Store,
+    ws: &dyn WeekStore,
+) -> Result<String, String> {
+    let crashed = w.run.status == "building" && w.run.last_error.as_deref() != Some(REBUILDING);
+    if !crashed && w.run.attempts >= MAX_BUILDS {
+        let err = format!(
+            "the correction did not finish in {MAX_BUILDS} builds; the post stays as it was"
+        );
+        return give_up(now, friday, w.run.clone(), err, store).await;
+    }
+    build(
+        now,
+        friday,
+        Some(w.run.clone()),
+        true,
+        es,
+        events,
+        store,
+        ws,
+    )
+    .await
 }
 
 /// The stored bundle of a live post.
@@ -263,7 +297,8 @@ async fn previous(
 }
 
 /// One warn alert per earlier post whose listed checks were rebuilt or
-/// revised after its cutoff (`week-stale:<friday>`, once only).
+/// revised after it read them (`as_of`: the first build's cutoff, or a
+/// correction's time) (`week-stale:<friday>`, once only).
 async fn stale(prev: &[Bundle], store: &dyn Store, ws: &dyn WeekStore) -> Result<(), String> {
     let slugs: Vec<String> = prev
         .iter()
@@ -283,7 +318,8 @@ async fn stale(prev: &[Bundle], store: &dyn Store, ws: &dyn WeekStore) -> Result
                 w.revised_at
                     .as_deref()
                     .or(w.published_at.as_deref())
-                    .is_some_and(|t| t > b.cutoff.as_str())
+                    // A rebuild re-read its checks at `as_of`.
+                    .is_some_and(|t| t > b.as_of.as_str())
             })
             .map(|w| w.slug.as_str())
             .collect();
