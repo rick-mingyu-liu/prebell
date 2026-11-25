@@ -113,11 +113,12 @@ IPO_WATCH_ENABLED = "true"
 # Off means no ipo:article messages (the write-ups are written by code); published
 # write-ups stay. To turn it off, delete this line and deploy.
 IPO_ARTICLES_ENABLED = "true"
-# The Friday earnings week post (docs/runbook.md "Earnings week post"): off.
+# The Friday earnings week post (docs/runbook.md "Earnings week post"): on
+# since Friday 2026-11-27, Rick's decision of 2026-11-24 (docs/decisions.md).
 # Only exactly "true" is on; unset or anything else is off, and off means no
-# read and no week message. Turning it on is Rick's decision: change this line
-# to WEEK_POST_ENABLED = "true" and deploy.
-WEEK_POST_ENABLED = "false"
+# read and no week message. To turn it off, change this line to "false" (or
+# delete it) and deploy; published posts stay.
+WEEK_POST_ENABLED = "true"
 # Mover insights (docs/runbook.md "Mover insights"): shadow since 2026-11-17, on
 # Rick's go. The first run was capped at 10 model calls to measure CPU time on
 # Workers; on 2026-11-18, with that measurement read, Rick raised the cap to

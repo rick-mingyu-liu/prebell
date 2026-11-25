@@ -2495,3 +2495,88 @@ async fn only_the_accepted_note_is_skipped_and_only_whole() {
         }
     }
 }
+
+/// R2 (follow-up of the final review): an owner's redo of a week that never
+/// published gets the usual retries, not closed as failed after one try.
+#[tokio::test]
+async fn a_redo_of_an_unpublished_week_gets_the_usual_retries() {
+    let w = dec4();
+    broken_check(&w);
+    w.set_run("2026-12-04", |r| {
+        r.status = "pending".into();
+        r.attempts = 0;
+    });
+    let mut now = utc("2026-12-08T15:00:00Z");
+    for i in 0..MAX_BUILDS - 1 {
+        assert!(w.queued(&iso(now)).await, "try {i}");
+        let line = w.tick(&iso(now)).await;
+        assert!(line.contains("retrying: en: check line"), "{line}");
+        let run = w.run("2026-12-04").unwrap();
+        assert_eq!((run.status.as_str(), run.attempts), ("pending", i + 1));
+        // Waiting out its pause: not queued, and not closed as never published.
+        assert!(!w.queued(&iso(now + Duration::minutes(1))).await);
+        assert_eq!(w.run("2026-12-04").unwrap().status, "pending");
+        now += Duration::minutes(BACKOFF_MINUTES[(i as usize).min(3)]);
+    }
+    // The fifth try fails the run, with one error alert.
+    assert!(w.queued(&iso(now)).await);
+    let line = w.tick(&iso(now)).await;
+    assert!(line.contains("failed: "), "{line}");
+    assert_eq!(w.run("2026-12-04").unwrap().status, "failed");
+    let errors: Vec<_> = w.alerts().into_iter().filter(|a| a.1 == "error").collect();
+    assert_eq!(errors.len(), 1, "{:?}", w.alerts());
+    assert!(
+        errors[0]
+            .2
+            .starts_with("week post for 2026-12-04 not published: "),
+        "{errors:?}"
+    );
+    assert!(!w
+        .alerts()
+        .iter()
+        .any(|a| a.0.starts_with("week-unpublished")));
+}
+
+/// R1: the never-published alert is written before the run is closed, so a
+/// failed alert write leaves the run open and the next poll alerts.
+#[tokio::test]
+async fn the_never_published_alert_is_never_lost() {
+    let w = dec4();
+    w.set_run("2026-12-04", |r| {
+        r.status = "building".into();
+        r.attempts = 1;
+        r.updated_at = "2026-12-05T02:56:00Z".into();
+    });
+    w.base.fail_alerts.set(true);
+    let r = follow_up(
+        Some("true"),
+        utc("2026-12-07T11:00:00Z"),
+        &w.es,
+        w.base.as_ref(),
+        w.base.as_ref(),
+    )
+    .await;
+    assert!(r.is_err(), "{r:?}");
+    assert_eq!(
+        w.run("2026-12-04").unwrap().status,
+        "building",
+        "still open"
+    );
+    w.base.fail_alerts.set(false);
+    follow_up(
+        Some("true"),
+        utc("2026-12-07T11:05:00Z"),
+        &w.es,
+        w.base.as_ref(),
+        w.base.as_ref(),
+    )
+    .await
+    .unwrap();
+    let a: Vec<_> = w
+        .alerts()
+        .into_iter()
+        .filter(|a| a.0 == "week-unpublished:2026-12-04")
+        .collect();
+    assert_eq!(a.len(), 1, "{:?}", w.alerts());
+    assert_eq!(w.run("2026-12-04").unwrap().status, "failed");
+}
