@@ -1269,3 +1269,71 @@ fn picks_drop_empty_titles_take_a_ticker_once_and_put_unknown_caps_last() {
     assert_eq!(slugs(pick(unknown)), ["bfb", "zzzb", "none"]);
     assert_eq!(slugs(pick(reversed)), ["bfb", "zzzb", "none"]);
 }
+
+/// Scheduled mode: a week built from an unfinished calendar refresh (from
+/// 21:45 ET) is saved as a draft and NOT scheduled, with an error alert,
+/// since nobody reads a scheduled email before it goes out.
+#[tokio::test]
+async fn in_scheduled_mode_a_stale_week_is_held_as_a_draft() {
+    let w = world();
+    w.es.kv
+        .borrow_mut()
+        .insert("calendar_refreshed_on".into(), "2026-11-05".into());
+    let http = fake();
+    let line = tick(&w, &http, CLOSING_AT, Mode::Scheduled).await;
+    assert_eq!(
+        line,
+        "2026-11-09 (scheduled, held as a draft, calendar refresh unfinished): draft em_01"
+    );
+    assert_eq!(http.methods(), ["POST"], "no schedule call");
+    assert_eq!(w.es.kv.borrow()[KV_BUILT], "2026-11-09");
+    let alerts = w.base.alerts.borrow();
+    assert_eq!(alerts.len(), 1, "{alerts:?}");
+    assert_eq!(
+        (alerts[0].0.as_str(), alerts[0].1.as_str()),
+        ("digest-stale:2026-11-06", "error")
+    );
+    assert!(
+        alerts[0].2.contains("saved as a draft and NOT scheduled"),
+        "{}",
+        alerts[0].2
+    );
+    assert!(
+        alerts[0]
+            .2
+            .contains("send or schedule it in Buttondown by Sunday 18:00 ET"),
+        "{}",
+        alerts[0].2
+    );
+    // A fresh week is scheduled as before.
+    let w = world();
+    let http = fake();
+    let line = tick(&w, &http, FRI_EVENING, Mode::Scheduled).await;
+    assert!(line.ends_with("scheduled em_01"), "{line}");
+    assert_eq!(http.methods(), ["POST", "PATCH"]);
+    assert!(w.base.alerts.borrow().is_empty());
+}
+
+/// Scheduled mode: when the schedule call still fails on the last try, the
+/// missed alert says a draft may be waiting unscheduled.
+#[tokio::test]
+async fn a_schedule_that_fails_on_the_last_try_says_a_draft_may_be_waiting() {
+    let w = world();
+    let mut http = fake();
+    http.patch_status = 502;
+    let line = tick(&w, &http, LAST_AT, Mode::Scheduled).await;
+    assert!(line.ends_with("failed: http 502"), "{line}");
+    let alerts = w.base.alerts.borrow();
+    let missed: Vec<_> = alerts
+        .iter()
+        .filter(|a| a.0.starts_with("digest-missed"))
+        .collect();
+    assert_eq!(missed.len(), 1, "{alerts:?}");
+    assert!(
+        missed[0]
+            .2
+            .contains("a draft may be saved in Buttondown but not scheduled"),
+        "{}",
+        missed[0].2
+    );
+}

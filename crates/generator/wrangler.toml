@@ -97,12 +97,15 @@ EARNINGS_CALENDAR_SEED = "yahoo"
 # Weekly digest (docs/runbook.md "Weekly digest"): on. Unset or anything but
 # exactly "true" means no digest message is queued. "true" queues one on Friday
 # evenings: with the BUTTONDOWN_API_KEY secret it saves next week's English email
-# as a Buttondown draft for every subscriber; without the secret it is a dry run
-# that gathers and renders and sends nothing. To turn it off, delete this line.
+# in Buttondown for every subscriber (see DIGEST_MODE); without the secret it is a
+# dry run that gathers and renders and sends nothing. To turn it off, delete this line.
 DIGEST_ENABLED = "true"
-# DIGEST_MODE: "draft" (the default; the owner sends it) or "scheduled" (Sunday
-# 18:00 ET).
-DIGEST_MODE = "draft"
+# DIGEST_MODE: "scheduled" (Rick, 2026-11-24: "Automatic, after alerts work"): the
+# email is scheduled for Sunday 18:00 ET and goes out with nobody reading it first;
+# a week built from an unfinished calendar refresh is held as a draft and alerted.
+# Needs the ALERT_WEBHOOK_URL secret so failures reach Rick. "draft" (unset is the
+# same) saves a draft that Rick sends himself. docs/runbook.md "Weekly digest".
+DIGEST_MODE = "scheduled"
 # IPO watch (docs/runbook.md "IPO watch"): on. Only exactly "true" is on; unset,
 # " true" or "TRUE" is off. Off means no hourly EDGAR filing check, no news
 # sweeps (Tavily and the LLM) and no extra symbols in the recap; the site keeps

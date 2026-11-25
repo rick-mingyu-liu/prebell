@@ -482,10 +482,11 @@ pub fn email(week: &Week, send_at: Option<DateTime<Utc>>) -> Email {
 /// One `digest` queue message, Fridays from 18:00 ET only (`due`; a stray
 /// message on another day does nothing). Unless next week's email is saved,
 /// it waits for the day's calendar refresh to finish, or from `CLOSING`
-/// goes ahead without it (with a `digest-stale` warning once the draft is
-/// saved), gathers the week and renders the email. Without a `sender` that
-/// is all (a dry run: nothing is sent or marked). With one, the email is
-/// sent (for `send_at`, Sunday 18:00 ET, in `Scheduled` mode) and marked
+/// goes ahead without it (`digest-stale` once the draft is saved: a warning
+/// in `Draft` mode; in `Scheduled` mode an error, and the email is held as a
+/// draft, not scheduled), gathers the week and renders the email. Without a
+/// `sender` that is all (a dry run: nothing is sent or marked). With one, the
+/// email is sent (for `send_at`, Sunday 18:00 ET, in `Scheduled` mode) and marked
 /// done in kv at once; a failure leaves it for the next poll and alerts once
 /// per ET day (`digest`). A run from `LAST_TRY` that saves no draft alerts
 /// `digest-missed`; an answer that is not a draft alerts `digest-not-draft`
@@ -567,16 +568,20 @@ async fn run(
         ));
     }
     let data = gather(now, monday, es, events, posts).await?;
-    // Past Sunday 18:00 ET (a late run), a schedule would send at once.
+    // Past Sunday 18:00 ET (a late run), a schedule would send at once. A
+    // week built from an unfinished calendar refresh is never scheduled:
+    // nobody reads a scheduled email first, so it is held as a draft and
+    // alerted (below) for the owner to check and send.
     let send = match mode {
-        Mode::Scheduled => send_at(monday).filter(|t| *t > now),
-        Mode::Draft => None,
+        Mode::Scheduled if !stale => send_at(monday).filter(|t| *t > now),
+        _ => None,
     };
     let mut how = match (mode, send) {
         (Mode::Draft, _) => "draft".to_string(),
         (Mode::Scheduled, Some(t)) => {
             format!("scheduled {}", t.to_rfc3339_opts(SecondsFormat::Secs, true))
         }
+        (Mode::Scheduled, None) if stale => "scheduled, held as a draft".to_string(),
         (Mode::Scheduled, None) => "scheduled, send time passed: draft".to_string(),
     };
     if stale {
@@ -607,7 +612,12 @@ async fn run(
         Ok(Sent::NeedsOwner { note, alert }) => (note, Some(alert)),
         Err(err) => {
             if last_try(now) {
-                let why = format!("the last try before 22:00 ET failed ({err})");
+                // Scheduling is a second call: a draft may be saved but not
+                // scheduled, and nothing retries it.
+                let why = match send {
+                    Some(_) => format!("the last try before 22:00 ET failed ({err}); a draft may be saved in Buttondown but not scheduled: schedule or send it by hand"),
+                    None => format!("the last try before 22:00 ET failed ({err})"),
+                };
                 missed(now, &week, &why, store).await?;
             } else {
                 let msg = format!(
@@ -626,10 +636,22 @@ async fn run(
     let at = now.to_rfc3339_opts(SecondsFormat::Secs, true);
     es.kv_set(KV_BUILT, &week, &at).await?;
     if stale {
-        let msg = format!(
-            "digest: the draft for the week of {week} was built from the calendar as it stood: today's calendar refresh had not finished by 21:45 ET (a failed read was waiting for its retry), so some dates may be out of date; check them before sending"
-        );
-        alert_once_today(now, "digest-stale", "warn", &msg, store).await?;
+        let (level, msg) = match mode {
+            // Held: it goes out only if the owner sends it.
+            Mode::Scheduled => (
+                "error",
+                format!(
+                    "digest: the email for the week of {week} was saved as a draft and NOT scheduled: today's calendar refresh had not finished by 21:45 ET (a failed read was waiting for its retry), so some dates may be out of date; check them, then send or schedule it in Buttondown by Sunday 18:00 ET"
+                ),
+            ),
+            Mode::Draft => (
+                "warn",
+                format!(
+                    "digest: the draft for the week of {week} was built from the calendar as it stood: today's calendar refresh had not finished by 21:45 ET (a failed read was waiting for its retry), so some dates may be out of date; check them before sending"
+                ),
+            ),
+        };
+        alert_once_today(now, "digest-stale", level, &msg, store).await?;
     }
     Ok(format!("{week} ({how}): {note}"))
 }
