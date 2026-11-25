@@ -165,15 +165,29 @@ pub async fn follow_up(
     Ok(ready.then_some(EarningsStep::Week))
 }
 
+/// Whether `w` is a past Friday's run whose post never went live.
+fn past_unpublished(w: &WeekRun, now: DateTime<Utc>) -> bool {
+    !w.live && friday_of(&w.run.run_key).is_some_and(|f| f < et(now).date_naive())
+}
+
+/// Whether the run was last written after its Friday's evening (and the
+/// night after it): an owner's redo in progress, not a Friday build left open.
+fn redo_in_progress(w: &WeekRun) -> bool {
+    let (Some(f), Some(at)) = (friday_of(&w.run.run_key), parse_iso(&w.run.updated_at)) else {
+        return false;
+    };
+    et(at).date_naive() > f + Duration::days(1)
+}
+
 /// A past Friday's run whose post never went live and whose last build is
-/// over (`pending` after a failure, or `building` past its lease): polls
-/// stop at 22:00 ET and none runs on a Saturday, so nothing would build or
-/// alert it again. Not the owner's `pending` with `attempts = 0`, which asks
-/// for it to be built (`unpublished_redo`).
+/// over (`pending` after a failure, or `building` past its lease) and was
+/// that Friday's (or the night after's): polls stop at 22:00 ET and none
+/// runs on a Saturday, so nothing would build or alert it again. Not the
+/// owner's redo (`unpublished_redo`).
 fn stuck(w: &WeekRun, now: DateTime<Utc>) -> bool {
-    let past = friday_of(&w.run.run_key).is_some_and(|f| f < et(now).date_naive());
-    past && !w.live
+    past_unpublished(w, now)
         && w.run.attempts > 0
+        && !redo_in_progress(w)
         && match w.run.status.as_str() {
             "pending" => true,
             "building" => !leased(&w.run, now),
@@ -182,10 +196,17 @@ fn stuck(w: &WeekRun, now: DateTime<Utc>) -> bool {
 }
 
 /// The owner's correction statement on a past Friday whose post never went
-/// live: `pending` with `attempts = 0`. Built as that Friday's first build.
+/// live (`pending` with `attempts = 0`), and its later tries: built as that
+/// Friday's first build, with the usual retries (5, 15, 30 and 60 minutes,
+/// `failed` with an alert after the fifth).
 fn unpublished_redo(w: &WeekRun, now: DateTime<Utc>) -> bool {
-    let past = friday_of(&w.run.run_key).is_some_and(|f| f < et(now).date_naive());
-    past && !w.live && w.run.status == "pending" && w.run.attempts == 0
+    past_unpublished(w, now)
+        && (w.run.attempts == 0 || redo_in_progress(w))
+        && match w.run.status.as_str() {
+            "pending" => !waiting(&w.run, now),
+            "building" => !leased(&w.run, now),
+            _ => false,
+        }
 }
 
 /// One error alert, `week-unpublished:<friday>`, and the run closed as
@@ -200,14 +221,16 @@ async fn never_published(now: DateTime<Utc>, w: &WeekRun, store: &dyn Store) -> 
     let msg = format!(
         "week post for {friday} was never published: its last build did not finish before polls stopped ({why}). To publish it now, run the correction statement for week:{friday} (runbook, \"Earnings week post\"); otherwise nothing more happens"
     );
+    // The alert first: if closing the run then fails, the next poll alerts
+    // again (a duplicate), but an alert is never lost.
+    store
+        .add_alert(&format!("week-unpublished:{friday}"), "error", &msg)
+        .await?;
     let mut row = w.run.clone();
     row.status = "failed".into();
     row.last_error = Some(format!("never published: {why}"));
     row.updated_at = iso(now);
-    store.upsert_run(&row).await?;
-    store
-        .add_alert(&format!("week-unpublished:{friday}"), "error", &msg)
-        .await
+    store.upsert_run(&row).await
 }
 
 fn new_run(friday: NaiveDate, now: DateTime<Utc>) -> RunRow {
@@ -290,9 +313,19 @@ pub async fn week_tick(
             .filter(|w| w.run.run_key != key)
             .find(|w| unpublished_redo(w, now))
         {
-            // The owner asked for a past week that never went out: its first build.
+            // The owner asked for a past week that never went out: its first
+            // build, retried like any other.
             let f = friday_of(&w.run.run_key).expect("checked by unpublished_redo");
-            let what = build(now, f, Some(w.run.clone()), false, es, events, store, ws).await?;
+            let what = if w.run.attempts >= MAX_BUILDS {
+                let err = w
+                    .run
+                    .last_error
+                    .clone()
+                    .unwrap_or_else(|| "the build never finished".into());
+                give_up(now, f, w.run.clone(), err, store).await?
+            } else {
+                build(now, f, Some(w.run.clone()), false, es, events, store, ws).await?
+            };
             out.push(format!("{}: {what}", w.run.run_key));
         }
     }
