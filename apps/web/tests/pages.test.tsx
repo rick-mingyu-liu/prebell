@@ -81,6 +81,10 @@ describe("list pages are one paper column", () => {
     expect(out).toContain('class="post-row"');
     expect(out).toContain('class="cover cover-small cover-flat"');
     expect(out).toContain('<nav class="filters"');
+    // The default view lists briefs and weekly posts, and its chip says so, in both languages.
+    expect(out).toContain('<a href="/en/archive">Briefs &amp; weekly</a>');
+    const zh = renderToStaticMarkup(await Archive(props({ locale: "zh" })));
+    expect(zh).toContain('<a aria-current="page" href="/zh/archive">简报与周报</a>');
     // The outline is h1 then h2 row titles, with no skipped level.
     expect(out).toContain('<h2 class="story-title">');
     expect(out).not.toContain("<h3");

@@ -50,7 +50,7 @@
     "newer": "Newer",
     "older": "Older",
     "empty": "Nothing here.",
-    "all": "All briefs",
+    "all": "Briefs & weekly",
     "filter": "Filter by type"
   },
   "about": {
@@ -336,7 +336,7 @@
     "website": "rickmingyuliu.com",
     "github": "GitHub",
     "linkedin": "LinkedIn",
-    "allBriefs": "All briefs →",
+    "allBriefs": "All posts →",
     "heading": "Who is behind it"
   },
   "signup": {
