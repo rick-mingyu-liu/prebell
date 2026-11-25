@@ -1,0 +1,52 @@
+Excerpt of Deere & Company's fourth-quarter 2026 earnings release (EX-99.1, accession 0001104659-26-131741, de-ex99d1.htm on SEC EDGAR), as edgar::html_to_text gives it: the opening paragraphs, the summary table, the segment table's net sales and revenues, and the statement of consolidated income, whose per-share rows are bare under "Per Share Data".
+MOLINE, Illinois (November 25, 2026) — Deere & Company reported net income of $1.051 billion for the fourth quarter ended November 1, 2026, or $3.89 per share, compared with net income of $1.065 billion, or $3.93 per share, for the quarter ended November 2, 2025. For fiscal year 2026, net income attributable to Deere & Company was $4.860 billion, or $17.95 per share, compared with $5.027 billion, or $18.50 per share, in fiscal 2025.
+Worldwide net sales and revenues decreased 2%, to $12.115 billion, for the fourth quarter of 2026 and increased 4%, to $47.704 billion, for the full year. Net sales were $10.514 billion for the quarter and $41.292 billion for the year, compared with $10.579 billion and $38.917 billion in fiscal 2025, respectively.
+Deere & Company Fourth Quarter Full Year
+$ in millions, except per share amounts 2026 2025% Change 2026 2025% Change
+Net sales and revenues $12,115 $12,394 -2% $47,704 $45,684 4%
+Net income $1,051 $1,065 -1% $4,860 $5,027 -3%
+Fully diluted EPS $3.89 $3.93 $17.95 $18.50
+November 1 November 2% November 1 November 2%
+2026 2025 Change 2026 2025 Change
+Net sales and revenues:
+Production & Precision Ag net sales $4,018 $4,740 -15 $15,682 $17,311 -9
+Small Ag & Turf net sales 2,703 2,457 +10 11,739 10,224 +15
+Construction & Forestry net sales 3,793 3,382 +12 13,871 11,382 +22
+Financial Services revenues 1,380 1,548 -11 5,502 5,821 -5
+Other revenues 221 267 -17 910 946 -4
+Total net sales and revenues $12,115 $12,394 -2 $47,704 $45,684 +4
+DEERE & COMPANY
+STATEMENTS OF CONSOLIDATED INCOME
+For the Three Months and Years Ended November 1, 2026 and November 2, 2025
+(In millions of dollars and shares except per share amounts) Unaudited
+Three Months Ended Years Ended
+2026 2025 2026 2025
+Net Sales and Revenues
+Net sales $10,514 $10,579 $41,292 $38,917
+Finance and interest income 1,368 1,515 5,378 5,748
+Other income 233 300 1,034 1,019
+Total 12,115 12,394 47,704 45,684
+Costs and Expenses
+Cost of sales 7,842 7,944 30,328 28,159
+Research and development expenses 656 681 2,360 2,311
+Selling, administrative and general expenses 1,219 1,276 4,620 4,663
+Interest expense 708 762 2,849 3,170
+Other operating expenses 304 307 1,150 1,124
+Total 10,729 10,970 41,307 39,427
+Income of Consolidated Group before Income Taxes 1,386 1,424 6,397 6,257
+Provision for income taxes 341 354 1,584 1,259
+Income of Consolidated Group 1,045 1,070 4,813 4,998
+Equity in income (loss) of unconsolidated affiliates 5 (10) 40
+Net Income 1,050 1,060 4,853 4,998
+Less: Net loss attributable to noncontrolling interests (1) (5) (7) (29)
+Net Income Attributable to Deere & Company $1,051 $1,065 $4,860 $5,027
+Per Share Data
+Basic $3.90 $3.94 $18.00 $18.55
+Diluted 3.89 3.93 17.95 18.50
+Dividends declared 1.62 1.62 6.48 6.48
+Dividends paid 1.62 1.62 6.48 6.33
+Average Shares Outstanding
+Basic 269.6 270.3 270.0 270.9
+Diluted 270.6 271.1 270.8 271.7
+See Condensed Notes to Consolidated Financial Statements.
+12
