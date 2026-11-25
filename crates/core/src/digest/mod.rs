@@ -35,6 +35,11 @@ use crate::store::Store;
 
 /// kv key: next week's Monday (`YYYY-MM-DD`) once its email is saved.
 pub const KV_BUILT: &str = "digest_built_for";
+/// kv key, `Scheduled` mode: `<Monday> <email id>` once that week's draft is
+/// created and before it is scheduled, so a retry schedules the same email
+/// and never creates a second one, whatever the provider does with the
+/// idempotency key.
+pub const KV_EMAIL: &str = "digest_email";
 /// Fridays from this ET hour: after the recap and the day's earnings
 /// checks, with polls (and so retries) every 5 minutes until 22:00 ET.
 pub const FROM_HOUR: u32 = 18;
@@ -452,21 +457,34 @@ pub struct Email {
 
 /// What a `Sender` did with the email.
 #[derive(Debug, Clone, PartialEq)]
-pub enum Sent {
-    /// Saved (and scheduled, when asked): a short note for the log line,
-    /// e.g. `draft em_01`.
-    Done(String),
-    /// Saved, but it must not go out until the owner looks: the log note
-    /// and the alert text.
+pub enum Saved {
+    /// Saved as a draft: the provider's email id.
+    Draft(String),
+    /// Saved, but not as a draft: it must not be scheduled, and the owner
+    /// must look. The log note and the alert text.
     NeedsOwner { note: String, alert: String },
 }
 
-/// Where the email goes; the rest does not depend on the provider.
+/// Where the email goes; the rest does not depend on the provider. `Err` is
+/// a failure to retry on the next poll, as text free of keys and response
+/// bodies.
 #[async_trait(?Send)]
 pub trait Sender {
-    /// Saves `email` for every subscriber. `Err` is a failure to retry on
-    /// the next poll, as text free of keys and response bodies.
-    async fn send(&self, email: &Email) -> Result<Sent, String>;
+    /// Saves `email` as a draft for every subscriber.
+    async fn create(&self, email: &Email) -> Result<Saved, String>;
+    /// Schedules the saved draft `id` to send at `at`. `Ok` too when the
+    /// provider shows it already scheduled for `at` (a repeat after an
+    /// answer that was lost).
+    async fn schedule(&self, id: &str, at: DateTime<Utc>) -> Result<(), String>;
+}
+
+/// The id saved under `KV_EMAIL` for `week`, if any.
+async fn saved_email(es: &dyn EarningsStore, week: &str) -> Result<Option<String>, String> {
+    Ok(es
+        .kv_get(KV_EMAIL)
+        .await?
+        .and_then(|v| v.strip_prefix(&format!("{week} ")).map(String::from))
+        .filter(|id| !id.is_empty()))
 }
 
 /// The week's email.
@@ -482,10 +500,13 @@ pub fn email(week: &Week, send_at: Option<DateTime<Utc>>) -> Email {
 /// One `digest` queue message, Fridays from 18:00 ET only (`due`; a stray
 /// message on another day does nothing). Unless next week's email is saved,
 /// it waits for the day's calendar refresh to finish, or from `CLOSING`
-/// goes ahead without it (with a `digest-stale` warning once the draft is
-/// saved), gathers the week and renders the email. Without a `sender` that
-/// is all (a dry run: nothing is sent or marked). With one, the email is
-/// sent (for `send_at`, Sunday 18:00 ET, in `Scheduled` mode) and marked
+/// goes ahead without it (`digest-stale` once the draft is saved: a warning
+/// in `Draft` mode; in `Scheduled` mode an error, and the email is held as a
+/// draft, not scheduled), gathers the week and renders the email. Without a
+/// `sender` that is all (a dry run: nothing is sent or marked). With one, the
+/// email is saved (and, in `Scheduled` mode, its id kept in kv `KV_EMAIL`
+/// and the email scheduled for `send_at`, Sunday 18:00 ET; a later run that
+/// week schedules that id and never creates another) and marked
 /// done in kv at once; a failure leaves it for the next poll and alerts once
 /// per ET day (`digest`). A run from `LAST_TRY` that saves no draft alerts
 /// `digest-missed`; an answer that is not a draft alerts `digest-not-draft`
@@ -567,16 +588,20 @@ async fn run(
         ));
     }
     let data = gather(now, monday, es, events, posts).await?;
-    // Past Sunday 18:00 ET (a late run), a schedule would send at once.
+    // Past Sunday 18:00 ET (a late run), a schedule would send at once. A
+    // week built from an unfinished calendar refresh is never scheduled:
+    // nobody reads a scheduled email first, so it is held as a draft and
+    // alerted (below) for the owner to check and send.
     let send = match mode {
-        Mode::Scheduled => send_at(monday).filter(|t| *t > now),
-        Mode::Draft => None,
+        Mode::Scheduled if !stale => send_at(monday).filter(|t| *t > now),
+        _ => None,
     };
     let mut how = match (mode, send) {
         (Mode::Draft, _) => "draft".to_string(),
         (Mode::Scheduled, Some(t)) => {
             format!("scheduled {}", t.to_rfc3339_opts(SecondsFormat::Secs, true))
         }
+        (Mode::Scheduled, None) if stale => "scheduled, held as a draft".to_string(),
         (Mode::Scheduled, None) => "scheduled, send time passed: draft".to_string(),
     };
     if stale {
@@ -602,12 +627,48 @@ async fn run(
         ));
     };
 
-    let (note, alert) = match sender.send(&e).await {
-        Ok(Sent::Done(note)) => (note, None),
-        Ok(Sent::NeedsOwner { note, alert }) => (note, Some(alert)),
+    let at = now.to_rfc3339_opts(SecondsFormat::Secs, true);
+    // Scheduled mode: once a draft is created its id is in kv before the
+    // schedule call, and a later run for the week schedules that id rather
+    // than create another (a lost answer or a failed kv write must never
+    // make two emails). Draft mode creates and stops.
+    let stored = match mode {
+        Mode::Scheduled => saved_email(es, &week).await?,
+        Mode::Draft => None,
+    };
+    let mut known = stored.clone();
+    let sent: Result<(String, Option<String>), String> = async {
+        let id = match stored {
+            Some(id) => id,
+            None => match sender.create(&e).await? {
+                Saved::Draft(id) => id,
+                Saved::NeedsOwner { note, alert } => return Ok((note, Some(alert))),
+            },
+        };
+        let Some(t) = e.send_at else {
+            return Ok((format!("draft {id}"), None));
+        };
+        if known.is_none() {
+            es.kv_set(KV_EMAIL, &format!("{week} {id}"), &at)
+                .await
+                .map_err(|err| format!("email {id} was created but its id was not saved ({err}), so it was not scheduled"))?;
+            known = Some(id.clone());
+        }
+        sender.schedule(&id, t).await?;
+        Ok((format!("scheduled {id}"), None))
+    }
+    .await;
+    let (note, alert) = match sent {
+        Ok(v) => v,
         Err(err) => {
             if last_try(now) {
-                let why = format!("the last try before 22:00 ET failed ({err})");
+                // Scheduling is a second call: a draft may be saved but not
+                // scheduled, and nothing retries it.
+                let why = match (send, &known) {
+                    (Some(_), Some(id)) => format!("the last try before 22:00 ET failed ({err}); email {id} is saved in Buttondown but could not be confirmed as scheduled (it may be scheduled already): check it, and schedule or send it by hand if it is not"),
+                    (Some(_), None) => format!("the last try before 22:00 ET failed ({err}); a draft may be saved in Buttondown but not scheduled: schedule or send it by hand"),
+                    (None, _) => format!("the last try before 22:00 ET failed ({err})"),
+                };
                 missed(now, &week, &why, store).await?;
             } else {
                 let msg = format!(
@@ -623,14 +684,26 @@ async fn run(
     if let Some(msg) = alert {
         alert_once_today(now, "digest-not-draft", "error", &msg, store).await?;
     }
-    let at = now.to_rfc3339_opts(SecondsFormat::Secs, true);
-    es.kv_set(KV_BUILT, &week, &at).await?;
+    // Before the week is marked, so a held draft is never left unalerted.
     if stale {
-        let msg = format!(
-            "digest: the draft for the week of {week} was built from the calendar as it stood: today's calendar refresh had not finished by 21:45 ET (a failed read was waiting for its retry), so some dates may be out of date; check them before sending"
-        );
-        alert_once_today(now, "digest-stale", "warn", &msg, store).await?;
+        let (level, msg) = match mode {
+            // Held: it goes out only if the owner sends it.
+            Mode::Scheduled => (
+                "error",
+                format!(
+                    "digest: the email for the week of {week} was saved as a draft and NOT scheduled: today's calendar refresh had not finished by 21:45 ET (a failed read was waiting for its retry), so some dates may be out of date; check them, then send or schedule it in Buttondown by Sunday 18:00 ET"
+                ),
+            ),
+            Mode::Draft => (
+                "warn",
+                format!(
+                    "digest: the draft for the week of {week} was built from the calendar as it stood: today's calendar refresh had not finished by 21:45 ET (a failed read was waiting for its retry), so some dates may be out of date; check them before sending"
+                ),
+            ),
+        };
+        alert_once_today(now, "digest-stale", level, &msg, store).await?;
     }
+    es.kv_set(KV_BUILT, &week, &at).await?;
     Ok(format!("{week} ({how}): {note}"))
 }
 

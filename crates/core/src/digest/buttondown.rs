@@ -5,7 +5,9 @@
 //! the email goes to every subscriber), and in scheduled mode `PATCH /v1/emails/{id}` with
 //! `status: "scheduled"` and `publish_date`. The status is always sent: the
 //! API's own default is `about_to_send`, which sends at once. A draft is
-//! scheduled only when Buttondown's answer says it saved a draft.
+//! scheduled only when Buttondown's answer says it saved a draft; a failed
+//! schedule call is checked with `GET /v1/emails/{id}` before it counts as
+//! failed.
 //! `X-Buttondown-Live-Dangerously` is never sent. Only status codes are
 //! logged, never a body or the key. The sender's display name is the
 //! newsletter's "from name" setting, not part of an email
@@ -16,7 +18,7 @@ use async_trait::async_trait;
 use chrono::{DateTime, SecondsFormat, Utc};
 use serde_json::{json, Value};
 
-use super::{Email, Sender, Sent};
+use super::{Email, Saved, Sender};
 use crate::providers::{Http, HttpResp, ProviderError};
 
 pub const API: &str = "https://api.buttondown.com/v1";
@@ -169,18 +171,51 @@ impl<'a> Buttondown<'a> {
     }
 }
 
+/// Whether email `id` is already scheduled for `at`: `GET /v1/emails/{id}`
+/// answers `status: "scheduled"` and that `publish_date`. Anything else,
+/// including a failed read, is `false`.
+pub async fn scheduled_for(
+    http: &dyn Http,
+    key: &str,
+    id: &str,
+    at: DateTime<Utc>,
+    log: &dyn Fn(&str),
+) -> bool {
+    let auth = auth(key);
+    let headers = [
+        ("Authorization", auth.as_str()),
+        ("X-API-Version", API_VERSION),
+    ];
+    let Ok(resp) = checked(
+        http.get(&format!("{API}/emails/{id}"), &headers).await,
+        "check",
+        &[200],
+        log,
+    ) else {
+        return false;
+    };
+    let Ok(v) = serde_json::from_str::<Value>(&resp.body) else {
+        return false;
+    };
+    v["status"].as_str() == Some("scheduled")
+        && v["publish_date"]
+            .as_str()
+            .and_then(|d| DateTime::parse_from_rfc3339(d).ok())
+            .is_some_and(|d| d.with_timezone(&Utc) == at)
+}
+
 #[async_trait(?Send)]
 impl Sender for Buttondown<'_> {
-    /// A draft for every subscriber, scheduled for `send_at` only once
-    /// Buttondown's answer shows it saved a draft.
-    async fn send(&self, email: &Email) -> Result<Sent, String> {
+    /// A draft for every subscriber; `NeedsOwner` unless Buttondown's
+    /// answer shows it saved a draft.
+    async fn create(&self, email: &Email) -> Result<Saved, String> {
         let body = draft(&email.subject, &email.body);
         let created = create(self.http, self.key, &email.idempotency_key, &body, self.log)
             .await
             .map_err(|f| f.to_string())?;
         if created.status.as_deref() != Some("draft") {
             let status = created.status.as_deref().unwrap_or("no status");
-            return Ok(Sent::NeedsOwner {
+            return Ok(Saved::NeedsOwner {
                 note: format!("email {} saved as {status}, not a draft", created.id),
                 alert: format!(
                     "digest: Buttondown answered with {status}, not draft, for email {}; check it in Buttondown now",
@@ -188,13 +223,21 @@ impl Sender for Buttondown<'_> {
                 ),
             });
         }
-        match email.send_at {
-            None => Ok(Sent::Done(format!("draft {}", created.id))),
-            Some(t) => {
-                schedule(self.http, self.key, &created.id, t, self.log)
-                    .await
-                    .map_err(|f| f.to_string())?;
-                Ok(Sent::Done(format!("scheduled {}", created.id)))
+        Ok(Saved::Draft(created.id))
+    }
+
+    /// The PATCH; when it fails, a read of the email decides whether an
+    /// earlier PATCH already scheduled it for `at` (its answer lost, or a
+    /// repeat Buttondown refuses).
+    async fn schedule(&self, id: &str, at: DateTime<Utc>) -> Result<(), String> {
+        match schedule(self.http, self.key, id, at, self.log).await {
+            Ok(()) => Ok(()),
+            Err(f) => {
+                if scheduled_for(self.http, self.key, id, at, self.log).await {
+                    Ok(())
+                } else {
+                    Err(f.to_string())
+                }
             }
         }
     }
