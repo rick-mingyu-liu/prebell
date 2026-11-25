@@ -78,7 +78,8 @@ impl DigestStore for Posts {
 type Req = (String, String, Vec<(String, String)>, Option<Value>);
 
 /// Buttondown: one answer per email POST (201 echoing the request's status,
-/// or `answer_status` instead) and per PATCH. GETs are not expected.
+/// or `answer_status` instead) and per PATCH; a GET answers `email_state`
+/// (404 when `None`).
 struct Fake {
     seen: RefCell<Vec<Req>>,
     /// Statuses for the next POSTs; 201 once empty.
@@ -87,6 +88,7 @@ struct Fake {
     answer_status: Option<Value>,
     patch_status: u16,
     network: bool,
+    email_state: Option<Value>,
 }
 
 fn fake() -> Fake {
@@ -96,6 +98,7 @@ fn fake() -> Fake {
         answer_status: None,
         patch_status: 200,
         network: false,
+        email_state: None,
     }
 }
 
@@ -137,7 +140,10 @@ fn resp(status: u16, body: String) -> Result<HttpResp, ProviderError> {
 impl Http for Fake {
     async fn get(&self, url: &str, headers: &[(&str, &str)]) -> Result<HttpResp, ProviderError> {
         self.record("GET", url, headers, None);
-        resp(404, "{}".into())
+        match &self.email_state {
+            Some(v) => resp(200, v.to_string()),
+            None => resp(404, "{}".into()),
+        }
     }
     async fn post_json(
         &self,
@@ -833,15 +839,18 @@ async fn the_flag_on_without_a_key_sends_nothing() {
 
 /// A sender that answers from a script, for the core loop alone.
 struct Scripted {
-    answers: RefCell<VecDeque<Result<Sent, String>>>,
+    answers: RefCell<VecDeque<Result<Saved, String>>>,
     emails: RefCell<Vec<Email>>,
 }
 
 #[async_trait(?Send)]
 impl Sender for Scripted {
-    async fn send(&self, email: &Email) -> Result<Sent, String> {
+    async fn create(&self, email: &Email) -> Result<Saved, String> {
         self.emails.borrow_mut().push(email.clone());
         self.answers.borrow_mut().pop_front().unwrap()
+    }
+    async fn schedule(&self, _id: &str, _at: DateTime<Utc>) -> Result<(), String> {
+        unreachable!("draft mode never schedules")
     }
 }
 
@@ -851,7 +860,7 @@ async fn any_sender_gets_one_email_with_a_stable_idempotency_key() {
     let s = Scripted {
         answers: RefCell::new(VecDeque::from([
             Err("http 503".into()),
-            Ok(Sent::Done("saved".into())),
+            Ok(Saved::Draft("em_9".into())),
         ])),
         emails: RefCell::new(vec![]),
     };
@@ -870,7 +879,7 @@ async fn any_sender_gets_one_email_with_a_stable_idempotency_key() {
     assert_eq!(line, "2026-11-09 (draft): failed: http 503");
     assert!(w.es.kv.borrow().get(KV_BUILT).is_none());
     let line = run("2026-11-06T23:35:00Z").await.unwrap();
-    assert_eq!(line, "2026-11-09 (draft): saved");
+    assert_eq!(line, "2026-11-09 (draft): draft em_9");
     let line = run("2026-11-06T23:40:00Z").await.unwrap();
     assert_eq!(line, "2026-11-09: already built");
     let emails = s.emails.borrow();
@@ -929,9 +938,9 @@ async fn buttondown_errors_alert_and_leave_the_email_for_the_next_poll() {
         assert_eq!(w.base.alerts.borrow().len(), 1);
     }
 
-    // Scheduling fails: the draft exists but stays pending, and the retry
-    // (same idempotency key, so Buttondown answers with the same draft)
-    // schedules it.
+    // Scheduling fails (and a read does not show it scheduled): the draft
+    // exists but stays pending, its id is in kv, and the retry schedules
+    // that same draft without creating another.
     let w = world();
     let mut http = fake();
     http.patch_status = 502;
@@ -941,10 +950,11 @@ async fn buttondown_errors_alert_and_leave_the_email_for_the_next_poll() {
         "2026-11-09 (scheduled 2026-11-08T23:00:00Z): failed: http 502"
     );
     assert!(w.es.kv.borrow().get(KV_BUILT).is_none());
+    assert_eq!(w.es.kv.borrow()[KV_EMAIL], "2026-11-09 em_01");
     http.patch_status = 200;
     let line = tick(&w, &http, "2026-11-06T23:35:00Z", Mode::Scheduled).await;
-    assert!(line.ends_with("scheduled em_02"), "{line}");
-    assert_eq!(http.methods(), ["POST", "PATCH", "POST", "PATCH"]);
+    assert!(line.ends_with("scheduled em_01"), "{line}");
+    assert_eq!(http.methods(), ["POST", "PATCH", "GET", "PATCH"]);
     assert_eq!(w.es.kv.borrow()[KV_BUILT], "2026-11-09");
 }
 
@@ -1018,9 +1028,10 @@ async fn the_job_stays_within_the_free_plan_budget() {
     .unwrap();
     // 1 create + 1 schedule.
     assert_eq!(http.count(), 2);
-    // kv reads (built, calendar refreshed), calendar, loaded marker, kv
-    // write (EarningsStore), one events read, one posts read.
-    assert_eq!(w.es.calls.get(), 5);
+    // kv reads (built, calendar refreshed, saved email id), calendar, loaded
+    // marker, kv writes (email id, built) (EarningsStore), one events read,
+    // one posts read.
+    assert_eq!(w.es.calls.get(), 7);
     assert_eq!(w.ev.calls.get() + w.posts.calls.get(), 2);
 }
 
@@ -1332,8 +1343,175 @@ async fn a_schedule_that_fails_on_the_last_try_says_a_draft_may_be_waiting() {
     assert!(
         missed[0]
             .2
-            .contains("a draft may be saved in Buttondown but not scheduled"),
+            .contains("email em_01 is saved in Buttondown but could not be confirmed as scheduled (it may be scheduled already)"),
         "{}",
         missed[0].2
+    );
+}
+
+fn patched_ids(http: &Fake) -> Vec<String> {
+    http.seen
+        .borrow()
+        .iter()
+        .filter(|r| r.0 == "PATCH")
+        .map(|r| r.1.rsplit('/').next().unwrap().to_string())
+        .collect()
+}
+
+/// A PATCH that applied but answered an error (its answer lost), then a
+/// retry: one POST only, and the same id PATCHed again.
+#[tokio::test]
+async fn a_retry_after_a_lost_schedule_answer_never_creates_a_second_email() {
+    let w = world();
+    let mut http = fake();
+    http.patch_status = 504;
+    let line = tick(&w, &http, FRI_EVENING, Mode::Scheduled).await;
+    assert!(line.ends_with("failed: http 504"), "{line}");
+    http.patch_status = 200;
+    let line = tick(&w, &http, "2026-11-06T23:35:00Z", Mode::Scheduled).await;
+    assert!(line.ends_with("scheduled em_01"), "{line}");
+    assert_eq!(http.posts().len(), 1);
+    assert_eq!(patched_ids(&http), ["em_01", "em_01"]);
+}
+
+/// Both calls succeeded but marking the week failed: the next poll
+/// schedules the stored id again and creates nothing.
+#[tokio::test]
+async fn a_failed_built_mark_after_scheduling_never_creates_a_second_email() {
+    let w = world();
+    let http = fake();
+    *w.es.fail_kv_set.borrow_mut() = Some(KV_BUILT.into());
+    let line = tick(&w, &http, FRI_EVENING, Mode::Scheduled).await;
+    assert!(line.contains("store error"), "{line}");
+    assert_eq!(http.methods(), ["POST", "PATCH"]);
+    *w.es.fail_kv_set.borrow_mut() = None;
+    let line = tick(&w, &http, "2026-11-06T23:35:00Z", Mode::Scheduled).await;
+    assert!(line.ends_with("scheduled em_01"), "{line}");
+    assert_eq!(http.methods(), ["POST", "PATCH", "PATCH"]);
+    assert_eq!(patched_ids(&http), ["em_01", "em_01"]);
+    assert_eq!(w.es.kv.borrow()[KV_BUILT], "2026-11-09");
+}
+
+/// The id could not be saved: the draft is left unscheduled (safe), and
+/// the failure takes the retry and alert path.
+#[tokio::test]
+async fn an_unsaved_email_id_means_no_schedule_call() {
+    let w = world();
+    let http = fake();
+    *w.es.fail_kv_set.borrow_mut() = Some(KV_EMAIL.into());
+    let line = tick(&w, &http, FRI_EVENING, Mode::Scheduled).await;
+    assert!(
+        line.ends_with("failed: email em_01 was created but its id was not saved (d1: kv digest_email failed), so it was not scheduled"),
+        "{line}"
+    );
+    assert_eq!(http.methods(), ["POST"]);
+    assert!(w.es.kv.borrow().get(KV_BUILT).is_none());
+    let alerts = w.base.alerts.borrow();
+    assert_eq!(alerts.len(), 1, "{alerts:?}");
+    assert_eq!(alerts[0].0, "digest:2026-11-06");
+}
+
+/// A schedule call that errors is checked with a read: shown scheduled for
+/// Sunday 18:00 ET it counts as done (no false digest-missed); scheduled
+/// for another time, still a draft, or unreadable, it stays a failure.
+#[tokio::test]
+async fn a_refused_repeat_schedule_counts_only_when_the_email_shows_scheduled_for_sunday() {
+    let sunday = "2026-11-08T23:00:00Z";
+    for (state, done) in [
+        (
+            Some(json!({"id": "em_01", "status": "scheduled", "publish_date": sunday})),
+            true,
+        ),
+        (
+            Some(
+                json!({"id": "em_01", "status": "scheduled", "publish_date": "2026-11-08T23:00:00+00:00"}),
+            ),
+            true,
+        ),
+        (
+            Some(
+                json!({"id": "em_01", "status": "scheduled", "publish_date": "2026-11-09T23:00:00Z"}),
+            ),
+            false,
+        ),
+        (
+            Some(json!({"id": "em_01", "status": "draft", "publish_date": sunday})),
+            false,
+        ),
+        (Some(json!({"id": "em_01", "status": "scheduled"})), false),
+        (None, false),
+    ] {
+        let w = world();
+        let mut http = fake();
+        http.patch_status = 409;
+        http.email_state = state.clone();
+        let line = tick(&w, &http, LAST_AT, Mode::Scheduled).await;
+        assert_eq!(http.methods(), ["POST", "PATCH", "GET"], "{state:?}");
+        let alerts = w.base.alerts.borrow();
+        if done {
+            assert!(line.ends_with("scheduled em_01"), "{state:?}: {line}");
+            assert_eq!(w.es.kv.borrow()[KV_BUILT], "2026-11-09");
+            assert!(alerts.is_empty(), "{alerts:?}");
+        } else {
+            assert!(line.ends_with("failed: http 409"), "{state:?}: {line}");
+            assert!(w.es.kv.borrow().get(KV_BUILT).is_none());
+            assert!(alerts[0].0.starts_with("digest-missed"), "{alerts:?}");
+        }
+    }
+}
+
+/// Draft mode reads and writes no email id and makes one call.
+#[tokio::test]
+async fn draft_mode_keeps_no_email_id() {
+    let w = world();
+    let http = fake();
+    let line = tick(&w, &http, FRI_EVENING, Mode::Draft).await;
+    assert_eq!(line, "2026-11-09 (draft): draft em_01");
+    assert_eq!(http.methods(), ["POST"]);
+    assert!(w.es.kv.borrow().get(KV_EMAIL).is_none());
+}
+
+/// An email id saved for another week is not reused.
+#[tokio::test]
+async fn an_email_id_from_another_week_is_ignored() {
+    let w = world();
+    w.es.kv
+        .borrow_mut()
+        .insert(KV_EMAIL.into(), "2026-11-02 em_77".into());
+    let http = fake();
+    let line = tick(&w, &http, FRI_EVENING, Mode::Scheduled).await;
+    assert!(line.ends_with("scheduled em_01"), "{line}");
+    assert_eq!(http.methods(), ["POST", "PATCH"]);
+    assert_eq!(w.es.kv.borrow()[KV_EMAIL], "2026-11-09 em_01");
+}
+
+#[test]
+fn the_generator_config_schedules_the_digest() {
+    const WRANGLER: &str = include_str!("../../../generator/wrangler.toml");
+    let line = WRANGLER
+        .lines()
+        .find(|l| l.starts_with("DIGEST_MODE"))
+        .expect("DIGEST_MODE in wrangler.toml");
+    assert_eq!(line, "DIGEST_MODE = \"scheduled\"");
+}
+
+/// The stale alert is written before the week is marked: when marking
+/// fails, the held draft is still alerted.
+#[tokio::test]
+async fn a_held_week_is_alerted_even_when_marking_it_fails() {
+    let w = world();
+    w.es.kv
+        .borrow_mut()
+        .insert("calendar_refreshed_on".into(), "2026-11-05".into());
+    *w.es.fail_kv_set.borrow_mut() = Some(KV_BUILT.into());
+    let http = fake();
+    let line = tick(&w, &http, CLOSING_AT, Mode::Scheduled).await;
+    assert!(line.contains("store error"), "{line}");
+    let alerts = w.base.alerts.borrow();
+    assert!(
+        alerts
+            .iter()
+            .any(|a| a.0 == "digest-stale:2026-11-06" && a.1 == "error"),
+        "{alerts:?}"
     );
 }
