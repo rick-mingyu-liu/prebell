@@ -644,6 +644,7 @@ pub fn verify_figure(text: &str, metric: Metric, raw: &RawFigure) -> Result<Figu
                 || lower.contains("per share")
                 || lower.contains("per diluted share")
                 || lower.contains("eps"))
+                && !under_per_share_stub(text, &quote)
             {
                 return Err("per-share quote names neither $ nor per share".into());
             }
@@ -712,6 +713,68 @@ pub fn verify_figure(text: &str, metric: Metric, raw: &RawFigure) -> Result<Figu
         quote,
         table_scale,
     })
+}
+
+/// Whether `quote`, a row of bare per-share figures ("Diluted 3.89 3.93
+/// 17.95 18.50"), is governed by a per-share stub in its table (Deere's
+/// "Per Share Data" over "Basic $3.90 ..." and then it): see
+/// `Table::per_share_stub`.
+fn under_per_share_stub(text: &str, quote: &str) -> bool {
+    let lines = Lines::new(text);
+    Table::find(&lines, quote).is_some_and(|t| t.per_share_stub().is_some())
+}
+
+/// Rows of the same per-share block a stub may stand above the quoted row
+/// by: Deere's "Basic" row sits between "Per Share Data" and "Diluted".
+const PER_SHARE_ROWS: usize = 4;
+
+/// A row of per-share figures: a label of words, then only per-share cells
+/// (amounts with two decimals under 1,000, "$" or parentheses allowed, or
+/// a dash). A label naming shares, an average or an outstanding count is a
+/// share-count row ("Diluted shares 270.62"), and one with a digit (a
+/// footnote, a year) is not read.
+fn per_share_row(s: &str) -> bool {
+    static CELL: OnceLock<Regex> = OnceLock::new();
+    let cell = CELL.get_or_init(|| {
+        Regex::new(r"^(?:\$?\(?\$?-?\d{1,3}\.\d{2}\)?|[—–-]|\$)$").expect("valid built-in regex")
+    });
+    let tokens: Vec<&str> = s.split_whitespace().collect();
+    let Some(first) = tokens.iter().position(|t| cell.is_match(t)) else {
+        return false;
+    };
+    let (label, cells) = (tokens[..first].join(" "), &tokens[first..]);
+    !label.is_empty()
+        && !label.contains(|c: char| c.is_ascii_digit())
+        && !["share", "shares", "average", "weighted", "outstanding"]
+            .iter()
+            .any(|w| has_word(&label, w))
+        && cells.iter().all(|t| cell.is_match(t))
+        && cells.iter().any(|t| t.contains('.'))
+}
+
+/// A stub line naming earnings per share ("Per Share Data", "Net income
+/// per share:", "Earnings per common share"), not another per-share
+/// measure (dividends, book value, cash flow, FFO, distributions).
+fn names_per_share(s: &str) -> bool {
+    let any = |ws: &[&str]| ws.iter().any(|w| has_word(s, w));
+    label_only(s)
+        && any(&[
+            "per share",
+            "per common share",
+            "per diluted share",
+            "earnings per",
+            "eps",
+        ])
+        && !any(&[
+            "dividend",
+            "dividends",
+            "book value",
+            "cash",
+            "ffo",
+            "funds",
+            "distribution",
+            "distributions",
+        ])
 }
 
 /// The nearest scale heading in `before`: where it starts and its scale.
@@ -1051,6 +1114,37 @@ impl<'a> Table<'a> {
 }
 
 impl<'a> Table<'a> {
+    /// For a quote that starts its line, whose whole line is a row of
+    /// per-share figures (`per_share_row`) and whose label says "diluted"
+    /// (so a "Net income 412.50" row of dollars is never read as EPS by
+    /// its place under the stub): the stub heading its block,
+    /// when it names earnings per share (`names_per_share`). Walking up,
+    /// only rows of the same kind may stand between (at most
+    /// `PER_SHARE_ROWS`); the first other line ends the walk, so a row
+    /// under a stub that has ended ("Average Shares Outstanding" after
+    /// "Per Share Data") is not under it, and the stub must be below the
+    /// table's scale heading.
+    fn per_share_stub(&self) -> Option<&'a str> {
+        let l = self.lines;
+        let (top, at) = (l.line_of(self.heading_at), l.line_of(self.quote_at));
+        let row = l.line(at, l.doc.len());
+        let label = &row[..row
+            .find(|c: char| c.is_ascii_digit() || c == '$')
+            .unwrap_or(0)];
+        if l.starts[at] != self.quote_at || !per_share_row(row) || !has_word(label, "diluted") {
+            return None;
+        }
+        let mut i = at;
+        for _ in 0..=PER_SHARE_ROWS {
+            i = i.checked_sub(1).filter(|&i| i > top)?;
+            let line = l.line(i, self.quote_at);
+            if !per_share_row(line) {
+                return names_per_share(line).then_some(line);
+            }
+        }
+        None
+    }
+
     /// The label line right above a quote that starts its line, below the
     /// scale heading: the row's group ("BASIC AND DILUTED EARNINGS PER
     /// COMMON SHARE:", "Revenues:").
@@ -4498,6 +4592,146 @@ mod tests {
             (2.65, Unit::UsdPerShare, 1.0)
         );
         assert_eq!(eps.table_scale, Some(1e6));
+    }
+
+    /// Deere's per-share rows are bare ("Diluted 3.89 3.93 17.95 18.50")
+    /// under its statement's "Per Share Data" stub, with "Basic $3.90 ..."
+    /// between: the diluted row verifies, and the whole check reads
+    /// revenue 12.115e9, net income 1.051e9 and diluted EPS 3.89.
+    #[test]
+    fn deeres_bare_per_share_rows_verify_under_their_stub() {
+        let text = include_str!("testdata/de_2026q4_ex99_excerpt.txt");
+        let q = "Diluted 3.89 3.93 17.95 18.50";
+        let f = verify_figure(text, Metric::EpsGaap, &raw("3.89", "units", false, q)).unwrap();
+        assert_eq!((f.value, f.unit, f.scale), (3.89, Unit::UsdPerShare, 1.0));
+        assert_eq!(f.table_scale, Some(1e6));
+        // The prior year's column is not the current figure.
+        assert!(verify_figure(text, Metric::EpsGaap, &raw("3.93", "units", false, q)).is_err());
+        let v = json!({"metrics": {
+            "revenue": {"amount": "$12.115 billion", "scale": "units", "negative": false, "quote": "Worldwide net sales and revenues decreased 2%, to $12.115 billion, for the fourth quarter of 2026"},
+            "net_income": {"amount": "$1,051", "scale": "millions", "negative": false, "quote": "Net Income Attributable to Deere & Company $1,051 $1,065 $4,860 $5,027"},
+            "eps_gaap_diluted": {"amount": "3.89", "scale": "units", "negative": false, "quote": q}
+        }});
+        let e = from_reply(text, &v);
+        assert_eq!(e.metrics.value(Metric::Revenue).unwrap().value, 12.115e9);
+        assert_eq!(e.metrics.value(Metric::NetIncome).unwrap().value, 1.051e9);
+        let eps = e.metrics.value(Metric::EpsGaap).unwrap();
+        assert_eq!((eps.value, eps.unit), (3.89, Unit::UsdPerShare));
+    }
+
+    /// The stub rule keeps refusing what the "$ nor per share" check is
+    /// for: a share-count row, a row under a stub that has ended, a stub
+    /// in another table, one too far up, a stub naming dividends, and a
+    /// row that is not all per-share cells.
+    #[test]
+    fn bare_per_share_rows_need_a_governing_per_share_stub() {
+        const NEITHER: &str = "per-share quote names neither $ nor per share";
+        let deere = include_str!("testdata/de_2026q4_ex99_excerpt.txt");
+        let err = |text: &str, amount: &str, q: &str| {
+            verify_figure(text, Metric::EpsGaap, &raw(amount, "units", false, q)).unwrap_err()
+        };
+        // Deere's own share counts, under "Average Shares Outstanding".
+        assert_eq!(
+            err(deere, "270.6", "Diluted 270.6 271.1 270.8 271.7"),
+            NEITHER
+        );
+        let head = "(In millions, except per share amounts)\nThree Months Ended Years Ended\n2026 2025 2026 2025\n";
+        let t = |body: &str| format!("{head}{body}");
+        // Share counts written with two decimals: the stub has ended.
+        let counts = t("Per Share Data\nBasic $3.90 $3.94 $18.00 $18.55\nAverage Shares Outstanding\nBasic 269.60 270.30 270.00 270.90\nDiluted 270.62 271.10 270.80 271.70");
+        assert_eq!(
+            err(&counts, "270.62", "Diluted 270.62 271.10 270.80 271.70"),
+            NEITHER
+        );
+        // Another label line ends the stub's block.
+        let ended = t("Per Share Data\nBasic $3.90 $3.94 $18.00 $18.55\nOther data\nDiluted 3.89 3.93 17.95 18.50");
+        assert_eq!(
+            err(&ended, "3.89", "Diluted 3.89 3.93 17.95 18.50"),
+            NEITHER
+        );
+        // A stub above the table's own scale heading is another table's.
+        let other = format!("Per Share Data\n{head}Diluted 3.89 3.93 17.95 18.50");
+        assert_eq!(
+            err(&other, "3.89", "Diluted 3.89 3.93 17.95 18.50"),
+            NEITHER
+        );
+        // More than four per-share rows between.
+        let far = t("Per Share Data\nBasic $3.90 $3.94 $18.00 $18.55\nBasic, continuing $3.80 $3.84 $17.00 $17.10\nBasic, discontinued $0.10 $0.10 $1.00 $1.45\nOther basic $0.01 $0.01 $0.01 $0.01\nOther $0.02 $0.02 $0.02 $0.02\nDiluted 3.89 3.93 17.95 18.50");
+        assert_eq!(err(&far, "3.89", "Diluted 3.89 3.93 17.95 18.50"), NEITHER);
+        let near = t("Per Share Data\nBasic $3.90 $3.94 $18.00 $18.55\nBasic, continuing $3.80 $3.84 $17.00 $17.10\nBasic, discontinued $0.10 $0.10 $1.00 $1.45\nOther basic $0.01 $0.01 $0.01 $0.01\nDiluted 3.89 3.93 17.95 18.50");
+        let f = verify_figure(
+            &near,
+            Metric::EpsGaap,
+            &raw("3.89", "units", false, "Diluted 3.89 3.93 17.95 18.50"),
+        );
+        assert_eq!(f.unwrap().value, 3.89);
+        // A stub naming another per-share measure.
+        for stub in [
+            "Dividends per share",
+            "Book value per share",
+            "Cash flow per share",
+            "FFO per share",
+        ] {
+            // Refused right above the row (as its group or as the stub)
+            // and with a row between (as the stub).
+            let d = t(&format!("{stub}\nDiluted 1.62 1.62 6.48 6.48"));
+            let e = err(&d, "1.62", "Diluted 1.62 1.62 6.48 6.48");
+            assert!(
+                e == NEITHER || e.contains("another basis or measure"),
+                "{stub}: {e}"
+            );
+            let d = t(&format!(
+                "{stub}\nBasic $1.63 $1.63 $6.49 $6.49\nDiluted 1.62 1.62 6.48 6.48"
+            ));
+            assert_eq!(
+                err(&d, "1.62", "Diluted 1.62 1.62 6.48 6.48"),
+                NEITHER,
+                "{stub}"
+            );
+        }
+        // A row with a figure that is no per-share cell (a dollar amount in
+        // millions, a one-decimal count) is not a per-share row.
+        let mixed = t("Per Share Data\nDiluted 3.89 1,051 17.95 18.50");
+        assert_eq!(
+            err(&mixed, "3.89", "Diluted 3.89 1,051 17.95 18.50"),
+            NEITHER
+        );
+        let label = t("Per Share Data\nDiluted shares 3.89 3.93 17.95 18.50");
+        assert!(verify_figure(
+            &label,
+            Metric::EpsGaap,
+            &raw(
+                "3.89",
+                "units",
+                false,
+                "Diluted shares 3.89 3.93 17.95 18.50"
+            )
+        )
+        .is_err());
+        // A dollar row under the stub is not EPS by its place: the row must
+        // say "diluted".
+        let dollars = t("Per Share Data\nNet income 412.50 380.10 900.25 850.40");
+        assert!(verify_figure(
+            &dollars,
+            Metric::EpsGaap,
+            &raw(
+                "412.50",
+                "units",
+                false,
+                "Net income 412.50 380.10 900.25 850.40"
+            )
+        )
+        .is_err());
+        // Other stubs that name earnings per share do govern.
+        for stub in ["Net income per share:", "Earnings per common share", "EPS"] {
+            let d = t(&format!("{stub}\nDiluted 3.89 3.93 17.95 18.50"));
+            let f = verify_figure(
+                &d,
+                Metric::EpsGaap,
+                &raw("3.89", "units", false, "Diluted 3.89 3.93 17.95 18.50"),
+            );
+            assert_eq!(f.unwrap().value, 3.89, "{stub}");
+        }
     }
 
     /// A share-count or other non-dollar heading never gives a dollar row
